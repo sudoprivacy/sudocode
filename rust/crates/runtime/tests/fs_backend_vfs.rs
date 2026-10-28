@@ -436,18 +436,16 @@ fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     fs.write("secret.txt", b"private").unwrap();
     policy.deny("/ws/secret.txt");
-    let mounts = vec![mount.to_string_lossy().into_owned()];
+    let native_mount = mount.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let mounts = [native_mount];
     #[cfg(windows)]
     let mounts = {
-        let ordinary = mounts[0]
+        let ordinary = native_mount
             .strip_prefix(r"\\?\")
             .expect("canonicalized Windows workspace")
             .to_string();
-        vec![
-            mounts[0].clone(),
-            ordinary.clone(),
-            ordinary.replace('\\', "/"),
-        ]
+        [native_mount, ordinary.clone(), ordinary.replace('\\', "/")]
     };
     for native_mount in mounts {
         let secret = format!("{native_mount}/secret.txt");
@@ -1745,7 +1743,7 @@ fn remote_backend(
         match fs.stat("/ws/ready.txt") {
             Ok(_) => break,
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("VFS host did not become ready: {error}"),
         }
@@ -1772,9 +1770,8 @@ fn remote_existence_preserves_admission_and_policy_errors() {
     // remote_append and remote_stat below through the same transport.
     for key in ["invalid-key", "denied-key", "unavailable-key"] {
         let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
-        assert_eq!(
-            fs.exists("/ws/ready.txt").unwrap(),
-            false,
+        assert!(
+            !fs.exists("/ws/ready.txt").unwrap(),
             "{key}: an authentication refusal must read as absence, not leak existence"
         );
     }

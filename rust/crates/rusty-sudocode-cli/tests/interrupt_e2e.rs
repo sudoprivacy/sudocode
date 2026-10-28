@@ -263,8 +263,8 @@ impl ArmedInterrupt {
 /// Windows has no `kill -INT`; the equivalent is a *console control event*,
 /// with two constraints. It can only be raised by a process attached to the
 /// target's console, and when addressed to one process group it must be
-/// CTRL_BREAK — Windows disables Ctrl-C for a group created with
-/// CREATE_NEW_PROCESS_GROUP, which is exactly how the child above is spawned so
+/// `CTRL_BREAK` — Windows disables Ctrl-C for a group created with
+/// `CREATE_NEW_PROCESS_GROUP`, which is exactly how the child above is spawned so
 /// the event reaches it alone and not the test runner. `scode` maps Ctrl-Break
 /// to the same `EngineCommand::Cancel` as Ctrl-C (see `SignalCancelGuard`).
 ///

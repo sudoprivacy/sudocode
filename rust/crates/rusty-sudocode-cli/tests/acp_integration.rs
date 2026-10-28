@@ -7495,6 +7495,29 @@ fn powershell_process_identities(identities: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Prepare three native generations while the caller retains their release guard.
+#[cfg(windows)]
+fn write_powershell_process_tree(root: &Path) {
+    for (name, next) in [
+        ("parent", Some("child")),
+        ("child", Some("grandchild")),
+        ("grandchild", None),
+    ] {
+        let stamp = format!(
+            r"$ErrorActionPreference = 'Stop'
+$stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot '{name}.pid.tmp'), $stamp, [System.Text.Encoding]::ASCII)
+[System.IO.File]::Move((Join-Path $PSScriptRoot '{name}.pid.tmp'), (Join-Path $PSScriptRoot '{name}.pid'))
+"
+        );
+        let body = next.map_or_else(
+            || "while (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'release-native'))) { Start-Sleep -Milliseconds 50 }\n".to_owned(),
+            |next| format!("$shell = (Get-Process -Id $PID).Path\n& $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '{next}.ps1')\n"),
+        );
+        fs::write(root.join(format!("{name}.ps1")), stamp + &body).unwrap();
+    }
+}
+
 /// Native Windows Job accounting must confirm all generations before publishing cancellation.
 #[cfg(windows)]
 #[tokio::test]
@@ -7504,24 +7527,7 @@ async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
     let _release = CompletionFixtureRelease(workspace.root.join("release-native"));
-    for (name, next) in [
-        ("parent", Some("child")),
-        ("child", Some("grandchild")),
-        ("grandchild", None),
-    ] {
-        let stamp = format!(
-            r#"$ErrorActionPreference = 'Stop'
-$stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
-[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot '{name}.pid.tmp'), $stamp, [System.Text.Encoding]::ASCII)
-[System.IO.File]::Move((Join-Path $PSScriptRoot '{name}.pid.tmp'), (Join-Path $PSScriptRoot '{name}.pid'))
-"#
-        );
-        let body = next.map_or_else(
-            || "while (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'release-native'))) { Start-Sleep -Milliseconds 50 }\n".to_owned(),
-            |next| format!("$shell = (Get-Process -Id $PID).Path\n& $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '{next}.ps1')\n"),
-        );
-        fs::write(workspace.root.join(format!("{name}.ps1")), stamp + &body).unwrap();
-    }
+    write_powershell_process_tree(&workspace.root);
     let mut client = spawn_stdio_client_danger(&workspace);
     initialize_task_completions(&mut client).await;
     let sid = scenario_session_new(&mut client, &workspace.root).await;
@@ -8298,12 +8304,12 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
         text.find(MARKER)
             .is_some_and(|at| text[at..].contains('\n'))
     };
+    let mut buf = vec![0u8; 65_536].into_boxed_slice();
     while !line_end(&drained) {
         assert!(
             std::time::Instant::now() < deadline,
             "the send never finished its write"
         );
-        let mut buf = [0u8; 65_536];
         match pipe.read(&mut buf) {
             Ok(n) => drained.extend_from_slice(&buf[..n]),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -8335,7 +8341,6 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
     assert_unknown(&sent, "a send the pause stopped after admission");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut buf = [0u8; 65_536];
     if let Ok(n) = pipe.read(&mut buf) {
         drained.extend_from_slice(&buf[..n]);
     }
@@ -8762,6 +8767,7 @@ async fn assert_failed_prompt_reload(
     );
 }
 
+#[cfg(unix)]
 fn assert_managed_result_chunks(updates: &[Value]) {
     let chunks: Vec<_> = updates
         .iter()

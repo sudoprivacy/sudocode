@@ -22,6 +22,60 @@
     "openai": {"read_field": "prompt_tokens_details.cached_tokens", "write_field": null},
     "gemini": {"read_field": "cachedContentTokenCount", "write_field": null}
   },
+  "input_accounting": {
+    "counter_rule": "Reported counters are nonnegative integers; absent or null counters remain unknown",
+    "anthropic": {
+      "usage_object": "usage",
+      "input_paths": ["input_tokens"],
+      "read_paths": ["cache_read_input_tokens"],
+      "write_paths": ["cache_creation_input_tokens"],
+      "total_mode": "sum_input_read_write"
+    },
+    "openai": {
+      "usage_object": "usage",
+      "input_paths": ["prompt_tokens"],
+      "read_paths": ["prompt_tokens_details.cached_tokens", "prompt_cache_hit_tokens"],
+      "write_paths": ["prompt_tokens_details.cache_write_tokens"],
+      "total_mode": "input_includes_cache"
+    },
+    "gemini": {
+      "usage_object": "usageMetadata",
+      "input_paths": ["promptTokenCount"],
+      "read_paths": ["cachedContentTokenCount"],
+      "write_paths": [],
+      "total_mode": "input_includes_cache"
+    },
+    "pair_comparison": {
+      "absolute_tolerance_tokens": 16,
+      "relative_tolerance": 0.05,
+      "scope": "Heuristic comparison of near-identical client inputs; a mismatch is an observation requiring investigation"
+    },
+    "probe_scope": "A two-request stable-system-prefix probe with a changed user suffix; cache misses depend on provider minimum length, cache construction, routing and retention"
+  },
+  "accounting_scenarios": [
+    {"id": "anthropic_write", "protocol": "anthropic", "response": {"usage": {"input_tokens": 12, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 4096}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "anthropic_read", "protocol": "anthropic", "response": {"usage": {"input_tokens": 12, "cache_read_input_tokens": 4096, "cache_creation_input_tokens": 0}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "anthropic_read_can_exceed_uncached", "protocol": "anthropic", "response": {"usage": {"input_tokens": 0, "cache_read_input_tokens": 4096, "cache_creation_input_tokens": 256}}, "expected_state": "CONSISTENT", "expected_total": 4352},
+    {"id": "anthropic_missing_write", "protocol": "anthropic", "response": {"usage": {"input_tokens": 12, "cache_read_input_tokens": 4096}}, "expected_state": "UNMEASURED", "expected_total": null},
+    {"id": "missing_usage", "protocol": "anthropic", "response": {}, "expected_state": "UNMEASURED", "expected_total": null},
+    {"id": "null_input", "protocol": "anthropic", "response": {"usage": {"input_tokens": null, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}, "expected_state": "UNMEASURED", "expected_total": null},
+    {"id": "negative_counter", "protocol": "anthropic", "response": {"usage": {"input_tokens": -1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "fractional_counter", "protocol": "openai", "response": {"usage": {"prompt_tokens": 1.5}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "string_counter", "protocol": "gemini", "response": {"usageMetadata": {"promptTokenCount": "4096"}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "openai_inclusive", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108, "prompt_tokens_details": {"cached_tokens": 4096}}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "openai_without_cache_details", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "openai_read_exceeds_input", "protocol": "openai", "response": {"usage": {"prompt_tokens": 12, "prompt_tokens_details": {"cached_tokens": 4096}}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "openai_read_write_inclusive", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108, "prompt_tokens_details": {"cached_tokens": 2048, "cache_write_tokens": 2048}}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "openai_read_write_exceed_input", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108, "prompt_tokens_details": {"cached_tokens": 4096, "cache_write_tokens": 256}}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "deepseek_native_hit_field", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108, "prompt_cache_hit_tokens": 4096}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "gemini_inclusive", "protocol": "gemini", "response": {"usageMetadata": {"promptTokenCount": 4108, "cachedContentTokenCount": 4096}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "gemini_zero_is_reported", "protocol": "gemini", "response": {"usageMetadata": {"promptTokenCount": 4108, "cachedContentTokenCount": 0}}, "expected_state": "CONSISTENT", "expected_total": 4108},
+    {"id": "gemini_read_exceeds_input", "protocol": "gemini", "response": {"usageMetadata": {"promptTokenCount": 12, "cachedContentTokenCount": 4096}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "conflicting_read_aliases", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108, "prompt_tokens_details": {"cached_tokens": 4096}, "prompt_cache_hit_tokens": 2048}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "anthropic_sum_overflow", "protocol": "anthropic", "response": {"usage": {"input_tokens": 9223372036854775807, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0}}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "malformed_usage", "protocol": "openai", "response": {"usage": []}, "expected_state": "INVALID", "expected_total": null},
+    {"id": "nested_counter_is_missing", "protocol": "openai", "response": {"usage": {"prompt_tokens": 4108, "cached_tokens": 8192, "prompt_tokens_details": {}}}, "expected_state": "CONSISTENT", "expected_total": 4108}
+  ],
   "evidence_scope": "Reported cache usage and request continuity; credential origin requires separate evidence",
   "pair_scenarios": [
     {"id": "write_then_read", "first_write": 4096, "second_write": 0, "second_read": 4096, "expected": "PASS"},
@@ -50,5 +104,10 @@
       {"type": "tool_use", "id": "toolu_fixture", "name": "read_file", "input": {"path": "fixture.txt"}}
     ]}
   ],
-  "sources": ["https://platform.claude.com/docs/en/build-with-claude/prompt-caching"]
+  "sources": [
+    "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+    "https://developers.openai.com/api/docs/guides/prompt-caching",
+    "https://ai.google.dev/api/generate-content#UsageMetadata",
+    "https://api-docs.deepseek.com/guides/kv_cache/"
+  ]
 }

@@ -323,6 +323,11 @@ in [`spec/prompt_cache_observations.json`](./spec/prompt_cache_observations.json
 The native ledger reads that specification directly. Endpoint probes can pin
 the same public file by commit and SHA-256. Cache efficiency formulas remain
 in [`spec/cache_metrics.json`](./spec/cache_metrics.json).
+The contract also defines endpoint input-accounting paths and synthetic usage
+vectors: Anthropic input excludes cache reads/writes; OpenAI and Gemini input
+includes cache tokens. Missing counters remain unknown. Pair-total comparisons
+are scoped heuristics; their results describe reported usage and require
+separate evidence for billing or credential identity.
 
 ### Startup latency
 

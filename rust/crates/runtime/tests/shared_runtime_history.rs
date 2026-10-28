@@ -1,6 +1,7 @@
 //! Actual runtime turns, a native child tool, concurrent resume and cold replay.
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};

@@ -161,6 +161,7 @@ impl SessionMode {
 #[derive(Clone)]
 struct SessionPersistence {
     path: PathBuf,
+    store_root: Option<PathBuf>,
     fs: Arc<dyn FsBackend>,
     writer: Arc<std::sync::Mutex<SessionWriterState>>,
     committed_messages: Arc<std::sync::Mutex<BTreeSet<String>>>,
@@ -583,6 +584,7 @@ impl Session {
         }
         self.persistence = Some(SessionPersistence {
             path,
+            store_root: None,
             fs: Arc::new(StdFsBackend),
             writer: Arc::default(),
             committed_messages: Arc::default(),
@@ -605,6 +607,22 @@ impl Session {
             persistence.fs = fs;
         }
         self
+    }
+
+    /// Keep the resolving store's namespace when a host reattaches persistence.
+    #[must_use]
+    pub fn with_session_store_root(mut self, root: &Path) -> Self {
+        if let Some(persistence) = self.persistence.as_mut() {
+            persistence.store_root = Some(root.to_path_buf());
+        }
+        self
+    }
+
+    /// The store that resolved this transcript, including an explicit data dir.
+    /// An independently opened transcript has no associated store namespace.
+    #[must_use]
+    pub fn session_store_root(&self) -> Option<&Path> {
+        self.persistence.as_ref()?.store_root.as_deref()
     }
 
     /// Bind this session to the workspace root it was created in.
@@ -1285,6 +1303,9 @@ impl Session {
         path: impl AsRef<Path>,
     ) -> Result<Self, SessionError> {
         let path = path.as_ref();
+        if crate::subagent_completion::deleted_storage(fs, path).map_err(SessionError::Format)? {
+            return Err(SessionError::Format("session_deleted".into()));
+        }
         let bytes = fs.read_snapshot(&path.to_string_lossy())?;
         let contents = crate::session_history::decode(&bytes)?;
         let session =

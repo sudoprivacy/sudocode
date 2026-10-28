@@ -642,11 +642,10 @@ fn assert_completed_tool_restore_requests(dump: &std::path::Path) {
 }
 
 #[test]
-fn idle_runtime_preserves_continuation_and_prevents_session_deletion() {
+fn deleted_session_is_hidden_and_reclaimed_after_its_last_runtime_retires() {
     let env = shared_mock("shared-sid-idle-close");
     let session = Session::new().with_workspace_root(env.workspace_root());
-    let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
-    let transcript = store.create_handle(&session.session_id).path;
+    let transcript = managed_session_path(&env, &session.session_id);
     save_seed(&session, &transcript);
     let mut idle = env.spawn_with_env(
         &[
@@ -663,40 +662,278 @@ fn idle_runtime_preserves_continuation_and_prevents_session_deletion() {
         std::path::Path::new(&session.session_id),
         "LATEST_ACTIVE_CONTEXT",
     );
-    let controller = env.workspace_root().join("delete-controller.jsonl");
-    Session::new()
-        .with_workspace_root(env.workspace_root())
-        .save_to_path(&controller)
-        .unwrap();
+    let survivor = Session::new().with_workspace_root(env.workspace_root());
+    let controller = managed_session_path(&env, &survivor.session_id);
+    save_seed(&survivor, &controller);
     let delete = || {
-        let mut cli = env.spawn_with_env(&["--resume", controller.to_str().unwrap()], &[]);
+        let mut cli = env.spawn_with_env(
+            &["--resume", &survivor.session_id],
+            &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+        );
         common::expect_input_line_cleared(&cli, env.timeout(), "deletion controller ready");
         cli.send(&format!("/session delete {} --force\r", session.session_id))
             .unwrap();
         cli
     };
-    let mut rejected = delete();
-    rejected
-        .expect("session_writer_busy")
-        .unwrap_or_else(|error| {
-            panic!(
-                "live runtime deletion: {error}\n{}",
-                rejected.render(|s| s.contents())
-            )
-        });
-    exit_cli(&env, &mut rejected);
-    assert!(transcript.exists());
-    exit_cli(&env, &mut idle);
     let selected = Session::load_from_path(&transcript).unwrap();
     assert!(selected.messages().iter().flat_map(|message| &message.blocks).any(|block| {
         matches!(block, ContentBlock::Text { text } if text.contains("LATEST_ACTIVE_CONTEXT"))
     }), "idle metadata changed the latest resume context");
-    let mut accepted = delete();
-    accepted
+    let output_dir = Session::tool_results_dir_for(&transcript, &session.session_id).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+    fs::write(output_dir.join("owned-payload"), "Session-owned payload").unwrap();
+    let external = env.workspace_root().join("independent-workspace");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("keep.txt"), "independent object survives").unwrap();
+    StdFsBackend
+        .link(
+            &output_dir.join("workspace-link").to_string_lossy(),
+            &external.to_string_lossy(),
+        )
+        .unwrap();
+    let mut deleter = delete();
+    deleter
         .expect("Session deleted")
-        .expect("deletion succeeds after the runtime exits");
-    exit_cli(&env, &mut accepted);
-    assert!(!transcript.exists());
+        .expect("logical deletion succeeds while the other runtime is alive");
+    common::expect_input_line_cleared(&deleter, env.timeout(), "deletion completed");
+    assert!(
+        transcript.exists(),
+        "an admitted client still holds its log"
+    );
+    assert!(output_dir.join("owned-payload").exists());
+    assert!(Session::load_from_path(&transcript)
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    deleter.send("/session list\r").unwrap();
+    common::expect_screen_settled(
+        &deleter,
+        |screen| {
+            screen
+                .rsplit_once("Select a session")
+                .is_some_and(|(_, picker)| {
+                    !picker.contains(&session.session_id)
+                        && picker.contains(&survivor.session_id)
+                        && picker.contains("msgs=")
+                })
+        },
+        env.timeout(),
+        "the actual Session list excludes the deleted SID",
+    );
+    deleter.send("\x1b").unwrap();
+    common::expect_input_line_cleared(&deleter, env.timeout(), "Session picker cancelled");
+    let before = fs::read(&transcript).unwrap();
+    idle.send("STALE_WRITE_MUST_NOT_COMMIT\r").unwrap();
+    idle.expect("session_deleted")
+        .expect("the old context cannot write after deletion");
+    assert_eq!(fs::read(&transcript).unwrap(), before);
+    let mut refused = env.spawn_with_env(&["--resume", &session.session_id], &[]);
+    refused
+        .expect("session_deleted")
+        .expect("a new runtime cannot reopen the deleted SID");
+    assert_ne!(refused.expect_eof().unwrap(), 0);
+    exit_cli(&env, &mut idle);
+    wait_for_reclamation(&transcript, env.timeout());
+    assert!(!output_dir.exists());
+    assert_eq!(
+        fs::read_to_string(external.join("keep.txt")).unwrap(),
+        "independent object survives"
+    );
+    assert!(
+        transcript.with_extension("completions.json").exists(),
+        "retain the deletion identity"
+    );
+    let damaged = Session::new().with_workspace_root(env.workspace_root());
+    let damaged_path = managed_session_path(&env, &damaged.session_id);
+    save_seed(&damaged, &damaged_path);
+    fs::write(
+        damaged_path.with_extension("completions.json"),
+        b"{invalid binding",
+    )
+    .unwrap();
+    deleter.send("/session list\r").unwrap();
+    common::expect_screen_settled(
+        &deleter,
+        |screen| {
+            screen
+                .rsplit_once("Select a session")
+                .is_some_and(|(_, picker)| {
+                    picker.contains(&survivor.session_id)
+                        && picker.contains(&damaged.session_id)
+                        && !picker.contains(&session.session_id)
+                })
+        },
+        env.timeout(),
+        "one damaged binding must not block the healthy Session picker",
+    );
+    deleter.send("\x1b").unwrap();
+    common::expect_input_line_cleared(&deleter, env.timeout(), "damaged Session picker cancelled");
+    exit_cli(&env, &mut deleter);
+}
+
+fn wait_for_reclamation(transcript: &std::path::Path, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    while transcript.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "automatic Session cleanup did not finish: {}",
+            transcript.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn managed_session_path(env: &TestEnv, session_id: &str) -> std::path::PathBuf {
+    // Only the actual CLI processes may discover and perform cleanup.
+    let workspace = fs::canonicalize(env.workspace_root()).unwrap();
+    let root = workspace
+        .join(".scode/sessions")
+        .join(runtime::session_control::workspace_fingerprint(&workspace));
+    runtime::session_control::session_transcript_path(&root, session_id)
+}
+
+#[test]
+fn deleted_session_reclaims_clear_backup_after_its_runtime_retires() {
+    let env = shared_mock("shared-sid-backup-retirement");
+    let session = Session::new().with_workspace_root(env.workspace_root());
+    let transcript = managed_session_path(&env, &session.session_id);
+    save_seed(&session, &transcript);
+    let mut primary = env.spawn_with_env(&["--resume", &session.session_id], &[]);
+    common::expect_input_line_cleared(&primary, env.timeout(), "source runtime ready");
+    let mut clear = env.spawn_with_env(
+        &["--resume", &session.session_id, "/clear", "--confirm"],
+        &[],
+    );
+    clear.expect("Session cleared").unwrap();
+    assert_eq!(clear.expect_eof().unwrap(), 0);
+    let backup = fs::read_dir(transcript.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("transcript.jsonl.before-clear-")
+                && path.extension().is_some_and(|extension| extension == "bak")
+        })
+        .expect("the real /clear command published its owned backup");
+    let workspace = fs::canonicalize(env.workspace_root()).unwrap();
+    let reference = backup
+        .strip_prefix(&workspace)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut restored = env.spawn_with_env(&["--resume", &reference], &[]);
+    common::expect_input_line_cleared(&restored, env.timeout(), "backup runtime ready");
+    let independent = transcript
+        .parent()
+        .unwrap()
+        .join("transcript.jsonl.before-clear-user.bak");
+    fs::write(&independent, b"independently owned file").unwrap();
+    let controller = Session::new().with_workspace_root(env.workspace_root());
+    save_seed(
+        &controller,
+        &managed_session_path(&env, &controller.session_id),
+    );
+    let mut deleter = env.spawn_with_env(&["--resume", &controller.session_id], &[]);
+    common::expect_input_line_cleared(&deleter, env.timeout(), "delete controller ready");
+    deleter
+        .send(&format!("/session delete {} --force\r", session.session_id))
+        .unwrap();
+    deleter.expect("Session deleted").unwrap();
+    let before = fs::read(&backup).unwrap();
+    restored.send("BACKUP_WRITE_MUST_BE_REJECTED\r").unwrap();
+    restored.expect("session_deleted").unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), before);
+    exit_cli(&env, &mut primary);
+    assert!(
+        transcript.exists(),
+        "the backup runtime still owns this Session"
+    );
+    assert!(backup.exists());
+    let mut refused = env.spawn_with_env(&["--resume", &reference], &[]);
+    refused.expect("session_deleted").unwrap();
+    assert_ne!(refused.expect_eof().unwrap(), 0);
+    exit_cli(&env, &mut restored);
+    wait_for_reclamation(&transcript, env.timeout());
+    assert!(!backup.exists());
+    assert_eq!(fs::read(&independent).unwrap(), b"independently owned file");
+    assert!(Session::load_from_path(&backup)
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    exit_cli(&env, &mut deleter);
+}
+
+#[test]
+fn deleted_session_cleanup_resumes_after_the_deleter_and_old_runtime_stop() {
+    cleanup_after_restart("directory");
+}
+
+#[test]
+fn deleted_session_at_an_external_path_is_reclaimed_on_ordinary_restart() {
+    cleanup_after_restart("external");
+}
+
+#[test]
+fn deleted_session_in_the_legacy_json_layout_is_reclaimed_on_ordinary_restart() {
+    cleanup_after_restart("legacy-json");
+}
+
+fn cleanup_after_restart(layout: &str) {
+    let env = shared_mock(&format!("shared-sid-cleanup-restart-{layout}"));
+    let session = Session::new().with_workspace_root(env.workspace_root());
+    let managed = managed_session_path(&env, &session.session_id);
+    let transcript = match layout {
+        "directory" => managed.clone(),
+        "legacy-json" => managed.parent().unwrap().with_extension("json"),
+        "external" => env.workspace_root().join("exported/independent-name.jsonl"),
+        _ => unreachable!(),
+    };
+    save_seed(&session, &transcript);
+    // Managed layouts use the public SID reference. Keep canonical Windows
+    // verbatim paths for filesystem I/O rather than passing them through Bash.
+    let reference = if layout == "external" {
+        transcript.to_string_lossy().into_owned()
+    } else {
+        session.session_id.clone()
+    };
+    let idle = env.spawn_with_env(&["--resume", &reference], &[]);
+    common::expect_input_line_cleared(&idle, env.timeout(), "old runtime ready");
+    let controller = env.workspace_root().join("delete-controller.jsonl");
+    Session::new()
+        .with_workspace_root(env.workspace_root())
+        .save_to_path(&controller)
+        .unwrap();
+    let mut deleter = env.spawn_with_env(&["--resume", controller.to_str().unwrap()], &[]);
+    common::expect_input_line_cleared(&deleter, env.timeout(), "deletion controller ready");
+    deleter
+        .send(&format!("/session delete {reference} --force\r"))
+        .unwrap();
+    deleter.expect("Session deleted").unwrap();
+    assert!(transcript.exists(), "the old runtime has not retired");
+    exit_cli(&env, &mut deleter);
+    // Dropping the PTY terminates and reaps its real child; it does not run the
+    // CLI's normal /exit final save or a manual cleanup operation.
+    drop(idle);
+    assert!(
+        transcript.exists(),
+        "the old cleanup worker exited with its process"
+    );
+    let mut restarted = env.spawn_with_env(&["--permission-mode", "read-only"], &[]);
+    common::expect_input_line_cleared(&restarted, env.timeout(), "ordinary CLI restart");
+    let deadline = Instant::now() + env.timeout();
+    wait_for_reclamation(&transcript, env.timeout());
+    assert!(transcript.with_extension("completions.json").exists());
+    let references = managed.parent().unwrap().parent().unwrap().join(".cleanup");
+    while fs::read_dir(&references).unwrap().next().is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "finished discovery references are removed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    exit_cli(&env, &mut restarted);
 }
 
 fn assert_gate_outputs(transcript: &std::path::Path, sid: &str, expected_call_id: Option<&str>) {

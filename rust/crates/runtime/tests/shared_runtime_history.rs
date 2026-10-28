@@ -126,6 +126,130 @@ struct RunningTurn {
     thread: Option<thread::JoinHandle<Session>>,
 }
 
+const DATA_DIR_CASE: &str = "explicit_data_dir_reclaims_external_session_without_workspace_writes";
+const DATA_DIR_CHILD: &str = "SCODE_DATA_DIR_CLEANUP_CHILD";
+const DATA_DIR_ROOT: &str = "SCODE_DATA_DIR_CLEANUP_ROOT";
+
+struct CleanupClient(std::process::Child);
+
+impl Drop for CleanupClient {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn cleanup_client(root: &Path, role: &str) -> CleanupClient {
+    CleanupClient(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", DATA_DIR_CASE, "--nocapture", "--test-threads=1"])
+            .env(DATA_DIR_CHILD, role)
+            .env(DATA_DIR_ROOT, root)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn explicit_data_dir_reclaims_external_session_without_workspace_writes() {
+    std::env::set_var("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1");
+    if let Ok(role) = std::env::var(DATA_DIR_CHILD) {
+        data_dir_client(
+            &PathBuf::from(std::env::var_os(DATA_DIR_ROOT).unwrap()),
+            &role,
+        );
+        return;
+    }
+    for deletion in ["delete-journal", "delete-store"] {
+        let root = std::env::temp_dir().join(format!("scode-data-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir(root.join("external")).unwrap();
+        let _fixture = Fixture(root.clone());
+        let workspace = root.join("workspace");
+        let path = root.join("external/transcript.jsonl");
+        let seed = Session::new().with_workspace_root(&workspace);
+        std::fs::write(&path, seed.to_json().unwrap().render()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let mut owner = cleanup_client(&root, "owner");
+        wait_for(&root.join("ready"));
+        let mut deleter = cleanup_client(&root, deletion);
+        assert!(deleter.0.wait().unwrap().success());
+        assert!(root.join("deleted").exists());
+        assert!(path.exists(), "a live writer still owns the transcript");
+        assert!(!workspace.join(".scode").exists());
+        let references: Vec<_> = std::fs::read_dir(root.join("data/sessions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join(".cleanup"))
+            .collect();
+        assert_eq!(references.len(), 1);
+        assert_eq!(std::fs::read_dir(&references[0]).unwrap().count(), 1);
+        // Abrupt process death releases its native locks. No process remains
+        // that could run the deleter's in-memory scheduler.
+        owner.0.kill().unwrap();
+        owner.0.wait().unwrap();
+        assert!(path.exists());
+        let mut restarted = cleanup_client(&root, "restart");
+        assert!(restarted.0.wait().unwrap().success());
+        assert!(!path.exists());
+        assert!(path.with_extension("completions.json").exists());
+        assert_eq!(std::fs::read_dir(&references[0]).unwrap().count(), 0);
+        assert!(!workspace.join(".scode").exists());
+    }
+}
+
+fn data_dir_client(root: &Path, role: &str) {
+    let workspace = root.join("workspace");
+    #[cfg(unix)]
+    assert!(
+        std::fs::write(workspace.join("must-stay-read-only"), b"probe").is_err(),
+        "the actual test process must respect workspace write permissions"
+    );
+    let store = runtime::SessionStore::from_data_dir(root.join("data"), &workspace).unwrap();
+    let path = root.join("external/transcript.jsonl");
+    if role == "restart" {
+        let deadline = Instant::now() + WAIT;
+        while path.exists()
+            || std::fs::read_dir(store.sessions_dir().join(".cleanup"))
+                .unwrap()
+                .next()
+                .is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "ordinary startup did not reclaim the external Session"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    }
+    if role == "delete-store" {
+        store.delete_session(&path).unwrap();
+    } else {
+        let mut session = store.load_session(path.to_str().unwrap()).unwrap().session;
+        session.activate_persistence().unwrap();
+        let journal =
+            runtime::subagent_completion::CompletionJournal::open(&session, &workspace, true)
+                .unwrap();
+        if role == "owner" {
+            std::fs::write(root.join("ready"), b"ready").unwrap();
+            wait_for(&root.join("stop"));
+            drop(journal);
+            return;
+        }
+        assert_eq!(role, "delete-journal");
+        journal
+            .purge(&journal.storage_ref(), "data-dir-delete")
+            .unwrap();
+    }
+    std::fs::write(root.join("deleted"), b"deleted").unwrap();
+}
+
 #[test]
 fn legacy_migration_excludes_old_writers_preserves_archives_and_keeps_one_session() {
     std::env::set_var("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1");
@@ -217,22 +341,24 @@ fn assert_rejected_migrations_preserve_source(
     )
     .unwrap();
     runtime::subagent_completion::CompletionJournal::purge_stored(
-        &StdFsBackend,
+        std::sync::Arc::new(StdFsBackend),
         path,
         &deleted.session_id,
         cwd,
         binding["storageRef"].as_str().unwrap(),
         "legacy-migration-deleted",
+        None,
     )
     .unwrap();
-    let mut rejected = Session::load_from_path(path).unwrap();
-    assert!(rejected
-        .activate_persistence()
+    assert!(Session::load_from_path(path)
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
-    assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
-    assert_eq!(legacy_archives(directory).as_slice(), archives);
+    assert!(!path.exists());
+    assert!(
+        legacy_archives(directory).is_empty(),
+        "owned migration backups retire with their Session"
+    );
 }
 
 fn legacy_archives(directory: &Path) -> Vec<PathBuf> {

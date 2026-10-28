@@ -14,8 +14,8 @@ mod control;
 mod storage;
 mod terminal;
 pub(crate) use storage::{
-    check_response_storage, check_shared_storage, is_binding_file as is_completion_binding_file,
-    prepare_shared_storage,
+    check_response_storage, check_shared_storage, deleted_storage,
+    is_binding_file as is_completion_binding_file, prepare_shared_storage, reclaim_deleted,
 };
 use terminal::TerminalSource;
 pub use terminal::{ShellKind, TaskCompletion, TerminalCompletion, TerminalSnapshot};
@@ -213,6 +213,7 @@ pub struct CompletionJournal {
     fs: Arc<dyn FsBackend>,
     path: String,
     transcript: PathBuf,
+    store_root: Option<PathBuf>,
     state: Mutex<Journal>,
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clear_cache: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -229,11 +230,13 @@ impl CompletionJournal {
     }
 
     pub fn deleted(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deleted
-            .is_some()
+        self.writer.deleted()
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deleted
+                .is_some()
     }
 
     pub fn tasks_enabled(&self) -> bool {
@@ -293,6 +296,7 @@ impl CompletionJournal {
             fs,
             path,
             transcript,
+            store_root: session.session_store_root().map(Path::to_path_buf),
             state: Mutex::new(state),
             wake: Mutex::new(None),
             clear_cache: Mutex::new(None),

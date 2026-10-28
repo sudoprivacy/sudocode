@@ -214,7 +214,9 @@ fn exit_cli(env: &TestEnv, cli: &mut PtySession) {
     cli.send("/exit").unwrap();
     common::expect_input_line(cli, "/exit", env.timeout(), "exit entered");
     cli.send("\r").unwrap();
-    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let status = cli.expect_eof().unwrap();
+    let screen = common::expect_screen(cli, |_| true, env.timeout(), "runtime exit diagnostic");
+    assert_eq!(status, 0, "runtime exit failed: {screen}");
 }
 
 fn run_print_turn(env: &TestEnv, transcript: &std::path::Path, marker: &str) {

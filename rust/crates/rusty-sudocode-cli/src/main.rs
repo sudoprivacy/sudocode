@@ -2493,7 +2493,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     if matches!(trimmed.as_str(), "/exit" | "/quit") {
-                        cli.persist_session()?;
+                        cli.persist_before_shutdown()?;
                         break;
                     }
                     // `!<cmd>` bash mode: run it here, no model turn.
@@ -2545,7 +2545,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 input::ReadOutcome::Exit => {
-                    cli.persist_session()?;
+                    cli.persist_before_shutdown()?;
                     break;
                 }
             }
@@ -2558,7 +2558,6 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     peer_abort.abort();
     drop(pending_peer_turns);
     let _ = peer_receiver.join();
-    loop_result?;
 
     // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
@@ -2582,7 +2581,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     cli.shutdown();
-    Ok(())
+    loop_result
 }
 
 /// Resolves when the OS delivers Ctrl-Break; on non-Windows it never resolves.
@@ -4339,7 +4338,7 @@ fn run_repl_iocraft_dispatch(
     // still be alive and the shared CLI mutex must remain accessible.
     {
         let cli_lock = cli_shared.lock().expect("LiveCli mutex");
-        let _ = cli_lock.persist_session();
+        let _ = cli_lock.persist_before_shutdown();
     }
     // Drop coordinator sender so bridge/poller threads see Disconnected,
     // which drops input_rx and lets the iocraft render loop exit.
@@ -5916,6 +5915,14 @@ impl LiveCli {
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.lifecycle.persist().map_err(Into::into)
+    }
+
+    /// A deleted Session is already retired; closing it must not save it again.
+    fn persist_before_shutdown(&self) -> Result<(), Box<dyn std::error::Error>> {
+        match self.lifecycle.persist() {
+            Err(error) if error == "session_deleted" => Ok(()),
+            result => result.map_err(Into::into),
+        }
     }
 
     /// `!<command>` bash mode. Runs the command in the user's shell, prints

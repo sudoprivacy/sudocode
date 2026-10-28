@@ -412,6 +412,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     std::fs::create_dir(&root).unwrap();
     let fixture = Fixture(root.clone());
     let path = root.join("history.jsonl");
+    let store_root = root.join("configured-session-store");
     let seed = Session::new()
         .with_workspace_root(&root)
         .with_persistence_path(&path);
@@ -421,7 +422,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .build()
         .unwrap();
     let (mut a, requests) = runtime(
-        load(&path, false),
+        load(&path, false).with_session_store_root(&store_root),
         vec![answer("A_BEFORE_REFRESH"), answer("A_AFTER_REFRESH")],
         StaticToolExecutor::new(),
     );
@@ -441,6 +442,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .unwrap();
     assert!(transcript(load(&path, false).messages()).contains("B_PRIVATE_AFTER_A"));
     a.refresh_compaction_source().unwrap();
+    assert_eq!(a.session().session_store_root(), Some(store_root.as_path()));
     assert!(Arc::ptr_eq(
         &writer,
         &a.session().completion_writer().unwrap()
@@ -455,6 +457,23 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     let restored = load(&path, false);
     assert!(transcript(restored.messages()).contains("A_AFTER_REFRESH"));
     assert!(!transcript(restored.messages()).contains("B_PRIVATE_AFTER_A"));
+    let journal =
+        runtime::subagent_completion::CompletionJournal::open(a.session(), &root, true).unwrap();
+    journal
+        .purge(&journal.storage_ref(), "delete-after-refresh")
+        .unwrap();
+    assert!(store_root.join(".cleanup").is_dir());
+    assert_eq!(
+        a.refresh_compaction_source().unwrap_err().to_string(),
+        "session_deleted"
+    );
+    assert_eq!(
+        a.ensure_session_persistence_allowed()
+            .unwrap_err()
+            .to_string(),
+        "session_deleted"
+    );
+    drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
     drop(fixture);

@@ -625,6 +625,14 @@ impl Session {
         self.persistence.as_ref()?.store_root.as_deref()
     }
 
+    /// Read the deletion authority when a failed refresh disables persistence.
+    pub(crate) fn persistence_deleted(&self) -> Result<bool, SessionError> {
+        self.persistence.as_ref().map_or(Ok(false), |persistence| {
+            crate::subagent_completion::deleted_storage(persistence.fs.as_ref(), &persistence.path)
+                .map_err(SessionError::Format)
+        })
+    }
+
     /// Bind this session to the workspace root it was created in.
     ///
     /// This is the per-worktree counterpart to the global session store and
@@ -1348,21 +1356,22 @@ impl Session {
             .transpose()?
             .flatten();
         let mut restored = match history {
-            Some(session) => session.with_persistence_path(&persistence.path),
+            Some(session) => session,
             None => Self::load_from_path_with(persistence.fs.as_ref(), &persistence.path)?,
-        }
-        .with_fs_backend(Arc::clone(&persistence.fs));
+        };
         if restored.session_id != self.session_id
             || restored.workspace_root != self.workspace_root
             || restored.identity != self.identity
         {
             return Err(SessionError::SourceChanged);
         }
-        let restored_persistence = restored
-            .persistence
-            .as_mut()
-            .expect("restored path attached");
-        restored_persistence.writer = Arc::clone(&persistence.writer);
+        // Keep the entire storage binding and admitted writer together. Only
+        // the replayed view's commit/checkpoint caches start fresh.
+        restored.persistence = Some(SessionPersistence {
+            committed_messages: Arc::default(),
+            checkpoint: Arc::default(),
+            ..persistence.clone()
+        });
         Ok(restored)
     }
 

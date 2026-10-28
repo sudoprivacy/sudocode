@@ -179,21 +179,7 @@ async fn live_pending_node_recovers_send_and_the_original_receiver() {
         Transport::Stdio { child, .. } => child.id(),
         Transport::WebSocket { .. } => unreachable!("stdio fixture"),
     };
-    client
-        .send_request("initialize", json!({"protocolVersion": 1}))
-        .await;
-    let (_, created) = client
-        .send_request(
-            "session/new",
-            json!({"cwd": workspace.root, "mcpServers": []}),
-        )
-        .await;
-    assert!(created.get("error").is_none(), "{created}");
-    assert_eq!(
-        created["result"]["_meta"]["sudocode"]["peer"]["namespace"],
-        "node"
-    );
-    let sid = created["result"]["sessionId"].as_str().unwrap().to_string();
+    let sid = open_pending_node_session(&mut client, &workspace).await;
     set_session_mode(&mut client, &sid, "workspace-write").await;
     expect_tool_error(
         &mut client,
@@ -205,19 +191,7 @@ async fn live_pending_node_recovers_send_and_the_original_receiver() {
 
     // The fixture owner publishes complete PEMs before the manifest. No mint,
     // new scode process, session/load, prompt or receiver restart occurs here.
-    let destination = agents.join(&actor);
-    fs::create_dir_all(&destination).unwrap();
-    for entry in fs::read_dir(&bundle).unwrap() {
-        let entry = entry.unwrap();
-        if entry.file_type().unwrap().is_file() && entry.file_name() != "credential.json" {
-            fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
-        }
-    }
-    fs::copy(
-        Path::new(&bundle).join("credential.json"),
-        destination.join("credential.json"),
-    )
-    .unwrap();
+    publish_pending_node_bundle(&agents, &actor, Path::new(&bundle));
 
     // The newly created native SID already distinguishes this fixture run.
     let outgoing = format!("PENDING_NODE_SEND_{sid}");
@@ -251,12 +225,68 @@ async fn live_pending_node_recovers_send_and_the_original_receiver() {
         "session startup, configuration recovery and direct send must not infer"
     );
 
+    assert_original_pending_receiver(&mut client, &observer, &observer_name, &actor, &sid).await;
+    if let Transport::Stdio { child, .. } = &client.transport {
+        assert_eq!(child.id(), original_pid, "same process and native SID");
+    }
+    // Receiving a nonempty peer message may now run the normal mock-backed
+    // autonomous turn. The zero-inference promise above concerns direct calls.
+    client.shutdown().await;
+    node_home::assert_no_disk_mailboxes_below(&workspace.root);
+    workspace.cleanup();
+}
+
+fn publish_pending_node_bundle(agents: &Path, actor: &str, bundle: &Path) {
+    let destination = agents.join(actor);
+    fs::create_dir_all(&destination).unwrap();
+    for entry in fs::read_dir(bundle).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() && entry.file_name() != "credential.json" {
+            fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+        }
+    }
+    fs::copy(
+        bundle.join("credential.json"),
+        destination.join("credential.json"),
+    )
+    .unwrap();
+}
+
+async fn open_pending_node_session(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+) -> String {
+    client
+        .send_request("initialize", json!({"protocolVersion": 1}))
+        .await;
+    let (_, created) = client
+        .send_request(
+            "session/new",
+            json!({"cwd": workspace.root, "mcpServers": []}),
+        )
+        .await;
+    assert!(created.get("error").is_none(), "{created}");
+    assert_eq!(
+        created["result"]["_meta"]["sudocode"]["peer"]["namespace"],
+        "node"
+    );
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_string();
+    sid
+}
+
+async fn assert_original_pending_receiver(
+    client: &mut AcpTestClient,
+    observer: &runtime::mailbox::Mailbox,
+    observer_name: &str,
+    actor: &str,
+    sid: &str,
+) {
     let incoming = format!("PENDING_NODE_RECEIVE_{sid}");
     observer
         .send(runtime::agent_mailbox::MailboxEnvelope {
             delivery: runtime::turn_input::InputDelivery::Steer,
-            from: observer_name.clone(),
-            to: actor,
+            from: observer_name.to_owned(),
+            to: actor.to_owned(),
             body: incoming.clone(),
             summary: Some("exercise the original pending receiver".into()),
             timestamp: 0,
@@ -282,12 +312,4 @@ async fn live_pending_node_recovers_send_and_the_original_receiver() {
         notification["params"]["_meta"]["sudocode"]["a2a"]["from"],
         observer_name
     );
-    if let Transport::Stdio { child, .. } = &client.transport {
-        assert_eq!(child.id(), original_pid, "same process and native SID");
-    }
-    // Receiving a nonempty peer message may now run the normal mock-backed
-    // autonomous turn. The zero-inference promise above concerns direct calls.
-    client.shutdown().await;
-    node_home::assert_no_disk_mailboxes_below(&workspace.root);
-    workspace.cleanup();
 }

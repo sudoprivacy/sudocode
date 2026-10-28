@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use super::live_nexus::backend as live_backend;
 use super::{
-    append, assistant, commit, complete_compacted_branch, finish_turn, payloads,
-    start_native_tool, text, wait_for, Fixture,
+    append, assistant, commit, complete_compacted_branch, finish_turn, payloads, start_native_tool,
+    text, wait_for, Fixture,
 };
 
 fn seed(log: &mut HistoryLog) -> Session {

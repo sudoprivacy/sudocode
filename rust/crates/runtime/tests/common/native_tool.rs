@@ -83,11 +83,11 @@ fn command() -> Command {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        r#"$ErrorActionPreference = 'Stop'
+        r"$ErrorActionPreference = 'Stop'
 $encoding = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($env:SCODE_NATIVE_TOOL_STARTED, [string]$PID, $encoding)
 while (-not [System.IO.File]::Exists($env:SCODE_NATIVE_TOOL_RELEASE)) { Start-Sleep -Milliseconds 10 }
-[System.IO.File]::WriteAllText($env:SCODE_NATIVE_TOOL_RESULT, $env:SCODE_NATIVE_TOOL_CONTENT, $encoding)"#,
+[System.IO.File]::WriteAllText($env:SCODE_NATIVE_TOOL_RESULT, $env:SCODE_NATIVE_TOOL_CONTENT, $encoding)",
     ]);
     command
 }

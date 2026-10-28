@@ -109,12 +109,20 @@ struct StreamProvider {
     requests: Arc<AtomicUsize>,
     terminal_connection_state: Arc<AtomicUsize>,
     bodies: Arc<Mutex<Vec<Value>>>,
-    reset: Option<Arc<ConnectionReset>>,
+    disconnect: Option<Arc<BodyDisconnect>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+enum BodyFailure {
+    #[default]
+    Reset,
+    PrematureEof,
+}
+
 #[derive(Default)]
-struct ConnectionReset {
+struct BodyDisconnect {
+    failure: BodyFailure,
     ready: AtomicBool,
     fired: AtomicBool,
 }
@@ -132,14 +140,20 @@ fn peer_closed(socket: &TcpStream) -> bool {
 
 impl StreamProvider {
     fn new(kind: ResponseKind) -> Self {
-        Self::with_reset(kind, None)
+        Self::with_disconnect(kind, None)
     }
 
-    fn resetting(kind: ResponseKind) -> Self {
-        Self::with_reset(kind, Some(Arc::default()))
+    fn disconnecting(kind: ResponseKind, failure: BodyFailure) -> Self {
+        Self::with_disconnect(
+            kind,
+            Some(Arc::new(BodyDisconnect {
+                failure,
+                ..BodyDisconnect::default()
+            })),
+        )
     }
 
-    fn with_reset(kind: ResponseKind, reset: Option<Arc<ConnectionReset>>) -> Self {
+    fn with_disconnect(kind: ResponseKind, disconnect: Option<Arc<BodyDisconnect>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -152,7 +166,7 @@ impl StreamProvider {
         let count = requests.clone();
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let captured = bodies.clone();
-        let wire_reset = reset.clone();
+        let wire_disconnect = disconnect.clone();
         let worker = thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
@@ -172,7 +186,7 @@ impl StreamProvider {
                     assert_eq!(request["stream"], true);
                 }
                 captured.lock().unwrap().push(request.clone());
-                if liveness_response(&mut socket, kind, index, &stop, wire_reset.as_deref()) {
+                if liveness_response(&mut socket, kind, index, &stop, wire_disconnect.as_deref()) {
                     continue;
                 }
                 if let Some(response) = error_response(kind, index) {
@@ -205,7 +219,7 @@ impl StreamProvider {
             requests,
             terminal_connection_state,
             bodies,
-            reset,
+            disconnect,
             worker: Some(worker),
         }
     }
@@ -1106,7 +1120,7 @@ fn liveness_response(
     kind: ResponseKind,
     index: usize,
     stop: &AtomicBool,
-    reset: Option<&ConnectionReset>,
+    disconnect: Option<&BodyDisconnect>,
 ) -> bool {
     let is_live = kind.is_liveness_fixture();
     if !is_live {
@@ -1136,6 +1150,9 @@ fn liveness_response(
     ) || (drops_once && index == 0);
     let texts = if drops_once && index > 0 {
         ["CONTINUED_", "AFTER_", "DROP"]
+    } else if disconnect.is_some() && index == 0 {
+        // A paragraph boundary makes admission observable while the stream stays open.
+        ["STREAM_", "BODY_", "VERIFIED\n\n"]
     } else {
         ["STREAM_", "BODY_", "VERIFIED"]
     };
@@ -1180,7 +1197,7 @@ fn liveness_response(
         }
     }
     if heartbeat || partial {
-        hold_stream_open(socket, kind, &body, stop, reset);
+        hold_stream_open(socket, kind, &body, stop, disconnect);
     }
     true
 }
@@ -1190,18 +1207,22 @@ fn hold_stream_open(
     kind: ResponseKind,
     body: &str,
     stop: &AtomicBool,
-    reset: Option<&ConnectionReset>,
+    disconnect: Option<&BodyDisconnect>,
 ) {
     socket
         .set_read_timeout(Some(Duration::from_millis(50)))
         .unwrap();
     let started = std::time::Instant::now();
     while !stop.load(Ordering::SeqCst) && !peer_closed(socket) {
-        if let Some(reset) = reset.filter(|reset| reset.ready.load(Ordering::SeqCst)) {
-            socket2::SockRef::from(&*socket)
-                .set_linger(Some(Duration::ZERO))
-                .unwrap();
-            reset.fired.store(true, Ordering::SeqCst);
+        if let Some(disconnect) =
+            disconnect.filter(|disconnect| disconnect.ready.load(Ordering::SeqCst))
+        {
+            if matches!(disconnect.failure, BodyFailure::Reset) {
+                socket2::SockRef::from(&*socket)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+            }
+            disconnect.fired.store(true, Ordering::SeqCst);
             break;
         }
         if matches!(kind, ResponseKind::FiniteHeartbeat)
@@ -1295,7 +1316,7 @@ fn check_liveness_with_provider(
         ],
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(30)));
-    release_connection_reset(&mut cli, env, provider, is_tool);
+    release_body_disconnect(&mut cli, env, provider, is_tool);
     let code = cli.expect_eof().unwrap_or_else(|error| {
         panic!(
             "stream liveness: {error}; requests={}\n{}",
@@ -1303,10 +1324,10 @@ fn check_liveness_with_provider(
             common::screen_tail(&cli, 6000)
         )
     });
-    if let Some(reset) = &provider.reset {
+    if let Some(disconnect) = &provider.disconnect {
         assert!(
-            reset.fired.load(Ordering::SeqCst),
-            "the real socket must reset"
+            disconnect.fired.load(Ordering::SeqCst),
+            "the real socket must disconnect"
         );
     }
     assert_eq!(code == 0, is_success, "{}", common::screen_tail(&cli, 6000));
@@ -1350,13 +1371,15 @@ fn check_liveness_with_provider(
 }
 
 /// Reset only after real visible output and, when present, durable tool completion.
-fn release_connection_reset(
+fn release_body_disconnect(
     cli: &mut pty_expect::PtySession,
     env: &TestEnv,
     provider: &StreamProvider,
     is_tool: bool,
 ) {
-    let Some(reset) = &provider.reset else { return };
+    let Some(disconnect) = &provider.disconnect else {
+        return;
+    };
     let budget = Duration::from_secs(30);
     let deadline = Instant::now() + common::at_least(budget);
     common::expect_screen(
@@ -1366,12 +1389,12 @@ fn release_connection_reset(
                 && (!is_tool || has_completed_liveness_tool(env))
         },
         budget,
-        "real response admitted before connection reset",
+        "real response admitted before connection disconnect",
     );
-    reset.ready.store(true, Ordering::SeqCst);
+    disconnect.ready.store(true, Ordering::SeqCst);
     let remaining = deadline
         .checked_duration_since(Instant::now())
-        .expect("reset admission fits the original receive budget");
+        .expect("disconnect admission fits the original receive budget");
     assert!(!remaining.is_zero());
     cli.set_default_timeout(remaining);
 }
@@ -1401,16 +1424,18 @@ fn has_completed_liveness_tool(env: &TestEnv) -> bool {
 }
 
 #[test]
-fn connection_resets_continue_saved_output_without_reexecuting_completed_tools() {
-    for kind in [
-        ResponseKind::ChatDropThenContinue,
-        ResponseKind::NativeDropThenContinue,
-        ResponseKind::ResponsesDropThenContinue,
-        ResponseKind::ToolThenDrop,
-    ] {
-        let env = TestEnv::new_mock("stream-reset");
-        let provider = StreamProvider::resetting(kind);
-        check_liveness_with_provider(kind, "8", 2, true, &env, &provider);
+fn http_body_disconnects_continue_saved_output_without_reexecuting_completed_tools() {
+    for failure in [BodyFailure::Reset, BodyFailure::PrematureEof] {
+        for kind in [
+            ResponseKind::ChatDropThenContinue,
+            ResponseKind::NativeDropThenContinue,
+            ResponseKind::ResponsesDropThenContinue,
+            ResponseKind::ToolThenDrop,
+        ] {
+            let env = TestEnv::new_mock("stream-disconnect");
+            let provider = StreamProvider::disconnecting(kind, failure);
+            check_liveness_with_provider(kind, "8", 2, true, &env, &provider);
+        }
     }
 }
 

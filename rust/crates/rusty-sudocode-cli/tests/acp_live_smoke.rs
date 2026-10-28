@@ -845,9 +845,6 @@ async fn live_anthropic_smoke_stdio() {
 /// A real model must read the summary, send it back, and preserve its record.
 #[tokio::test]
 async fn live_peer_summary_reaches_model_client_and_saved_session() {
-    let Some(token) = proxy_token() else {
-        return;
-    };
     const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
     const PEER: &str = "acp-summary-peer";
     // Keep the sentinel only in envelope metadata, while naming exactly which
@@ -859,6 +856,9 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         "extra whitespace, or any other text. Then say ACP-SUMMARY-COMPLETE. ",
         "Do not write files or run shell commands."
     );
+    let Some(token) = proxy_token() else {
+        return;
+    };
     let workspace = TestWorkspace::new("live-peer-summary");
     workspace.create();
     workspace.write_sudocode_json();

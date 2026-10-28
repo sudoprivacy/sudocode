@@ -500,6 +500,26 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
+    // Deleted while writer `a` was alive, so reclaiming the Session was left to
+    // the process-wide session-cleanup worker, which retries every second and
+    // takes file locks (creating lock files) inside this fixture. Now that the
+    // last writer has retired, the reclaim must finish: it removes the durable
+    // reference and the transcript. Removing the fixture before then raced the
+    // worker's retry (ENOTEMPTY on Linux).
+    let references = store_root.join(".cleanup");
+    let deadline = Instant::now() + WAIT;
+    while std::fs::read_dir(&references)
+        .map(|entries| entries.flatten().next().is_some())
+        .unwrap_or(false)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the deleted Session was never reclaimed after its last writer retired: {}",
+            references.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!path.exists(), "reclaim removes the deleted transcript");
     drop(fixture);
 }
 

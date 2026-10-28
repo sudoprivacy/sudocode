@@ -47,6 +47,8 @@ pub enum Experiment {
     CacheTtlAdvisor,
     /// Publish short persistent peer descriptions with existing compaction calls.
     PeerDescriptions,
+    /// Bounded transcript viewport with a pinned composer and prompt context.
+    PromptViewport,
 }
 
 impl Experiment {
@@ -56,6 +58,7 @@ impl Experiment {
         Experiment::SharedSessionHistory,
         Experiment::CacheTtlAdvisor,
         Experiment::PeerDescriptions,
+        Experiment::PromptViewport,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -68,6 +71,7 @@ impl Experiment {
             Experiment::SharedSessionHistory => "sharedSessionHistory",
             Experiment::CacheTtlAdvisor => "cacheTtlAdvisor",
             Experiment::PeerDescriptions => "peerDescriptions",
+            Experiment::PromptViewport => "promptViewport",
         }
     }
 
@@ -80,6 +84,7 @@ impl Experiment {
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
             Experiment::CacheTtlAdvisor => "CACHE_TTL_ADVISOR",
             Experiment::PeerDescriptions => "PEER_DESCRIPTIONS",
+            Experiment::PromptViewport => "PROMPT_VIEWPORT",
         }
     }
 
@@ -94,6 +99,7 @@ impl Experiment {
             Experiment::SharedSessionHistory => None,
             Experiment::CacheTtlAdvisor => None,
             Experiment::PeerDescriptions => None,
+            Experiment::PromptViewport => None,
         }
     }
 }

@@ -621,6 +621,54 @@ jobs:
         env:
           SCODE_TEST_BACKEND: mock
         run: cargo test --release -p rusty-sudocode-cli --test pty_model_stream_close raw_stream_capture_keeps_streaming_and_resume_responsive -- --exact --nocapture
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: '22'
+      - name: Install the shared terminal observer for the viewport experiment
+        if: runner.os == 'Linux'
+        run: npm ci --prefix ../e2e/terminal-resize
+      - name: Compile the explicit viewport measurement driver
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport --no-run --message-format=json-render-diagnostics > target/prompt-viewport-driver.jsonl
+      - name: Install the browser for viewport painting and native selection
+        if: runner.os == 'Linux'
+        run: ../e2e/terminal-resize/node_modules/.bin/playwright install --with-deps chromium
+      - name: Verify viewport painting, wheel input and native selection
+        if: runner.os == 'Linux'
+        env:
+          SCODE_VIEWPORT_MEASURE_DIR: ${{ runner.temp }}/prompt-viewport-browser
+        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_interaction -- --ignored --exact --nocapture
+      - name: Compare the opt-in viewport against normal input with unchanged budgets
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver=$(python -c 'import json; from pathlib import Path; records=[json.loads(line) for line in Path("target/prompt-viewport-driver.jsonl").read_text().splitlines()]; paths=[row["executable"] for row in records if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="pty_prompt_viewport" and row.get("executable")]; assert len(paths)==1, paths; print(paths[0])')
+          python ../scripts/benchmark_prompt_viewport.py --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-measurements"
+          python ../scripts/benchmark_prompt_viewport.py --observer browser --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-browser-comparison"
+      - name: Retain viewport samples and failed terminal traces
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-measurements
+          path: ${{ runner.temp }}/prompt-viewport-measurements/
+          # Both successful screenshots and original failures are reviewable.
+          if-no-files-found: warn
+      - name: Retain viewport browser screenshots and selection evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-browser
+          path: ${{ runner.temp }}/prompt-viewport-browser/
+          if-no-files-found: warn
+      - name: Retain paired browser CPU, memory and painted-key measurements
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-browser-comparison
+          path: ${{ runner.temp }}/prompt-viewport-browser-comparison/
+          if-no-files-found: warn
       - name: Check complete process startup budget
         shell: bash
         run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100 --report target/startup.json

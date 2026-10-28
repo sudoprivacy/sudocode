@@ -141,12 +141,13 @@ impl From<OAuthTokenSet> for AuthSource {
     }
 }
 
-/// The prompt-cache TTL a client asks for, shared by every clone of it, and
-/// the auth mode's default it started from.
+/// The prompt-cache TTL a client asks for, shared by every clone of it, the
+/// auth mode's default it started from, and whether a setting pinned it.
 #[derive(Debug, Clone)]
 pub struct CacheTtl {
     current: Arc<AtomicBool>,
     default_one_hour: bool,
+    pinned: bool,
 }
 
 impl CacheTtl {
@@ -155,6 +156,7 @@ impl CacheTtl {
         Self {
             current: Arc::new(AtomicBool::new(one_hour)),
             default_one_hour: one_hour,
+            pinned: false,
         }
     }
 
@@ -171,6 +173,13 @@ impl CacheTtl {
     #[must_use]
     pub fn default_one_hour(&self) -> bool {
         self.default_one_hour
+    }
+
+    /// Whether `cache_ttl_1h` set the starting value. Unpinned, the engine may
+    /// choose the TTL from this session's own cache history.
+    #[must_use]
+    pub fn pinned(&self) -> bool {
+        self.pinned
     }
 
     #[must_use]
@@ -261,6 +270,7 @@ impl AnthropicClient {
         self.cache_ttl = CacheTtl {
             current: Arc::new(AtomicBool::new(enabled)),
             default_one_hour: self.cache_ttl.default_one_hour,
+            pinned: true,
         };
         self
     }

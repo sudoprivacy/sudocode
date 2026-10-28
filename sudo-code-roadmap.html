@@ -2030,6 +2030,37 @@ namespace for the new TUI work.</p>
 
 <h4>No alternate-screen / full-screen TUI mode — by rule</h4>
 
+<section id="prompt-viewport-experiment">
+<h5>Bounded inline prompt viewport experiment — 2026-10-27</h5>
+<p><strong>Experimental; not validated or enabled by default.</strong> Reviewing an
+earlier answer while composing a queued follow-up currently moves the editor out
+of view in native terminal scrollback. Evaluate an opt-in inline conversation
+viewport with a fixed composer, a
+contextual prompt header and shaded user messages. The normal REPL, pipes, ACP,
+classic input and worker attach/detach retain their existing behavior. This is
+not approval for dashboards, split panes, a new renderer dependency or a
+<code>--tui</code> command.</p>
+<ul>
+  <li>Use the existing iocraft renderer and engine boundary. Register the
+  temporary <code>promptViewport</code> experiment in the existing registry.
+  Stay in the main terminal buffer and reuse its cell-range damage writer;
+  do not enter alternate-screen mode.</li>
+  <li>Keep immutable rendered history in a disposable disk spool, with bounded
+  visible-row caches. Typing must not scan or rewrap accumulated history.</li>
+  <li>Anchor reading to content while new output arrives. Keep prompt headers
+  presentation-only and preserve the draft through scroll and resize.</li>
+  <li>Reuse semantic prompt styling and the existing Unicode/ANSI layout code;
+  do not introduce another conversation formatter or model request.</li>
+  <li>Verify wheel/keyboard navigation, selection/copy, Unicode, streaming,
+  terminal handoff, resume and shutdown through real PTYs. Preserve failed
+  measurements. Existing default-mode performance CI does not establish the
+  experiment's performance: compare explicit enabled/disabled workloads too.</li>
+  <li>Do not graduate or enable this viewport by default until terminal behavior,
+  memory and responsiveness meet the existing budgets. Back-to-bottom is a
+  secondary reading-state control.</li>
+</ul>
+</section>
+
 <p>Earlier drafts of this plan included a "Phase 6 — full-screen TUI"
 sub-goal: a <code>--tui</code> flag wired to <code>ratatui</code>
 behind a <code>full-tui</code> cargo feature, with split-pane layout,

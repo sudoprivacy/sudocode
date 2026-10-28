@@ -1701,6 +1701,15 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
     path
 }
 
+/// Pin the prompt-cache TTL in the fixture's config. Unpinned, with the
+/// advisor experiment on, the session picks its TTL from its own history.
+fn pin_ttl(env: &TestEnv, one_hour: bool) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["cache_ttl_1h"] = json!(one_hour);
+    std::fs::write(path, config.to_string()).unwrap();
+}
+
 fn spawn(env: &TestEnv, path: &std::path::Path) -> PtySession {
     spawn_with_env(env, path, &[])
 }
@@ -1885,6 +1894,9 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
     let env = TestEnv::new_mock("ttl-advisor-boundary");
     let capture = Capture::new();
     let path = fixture(&env, &capture);
+    // Pinned: advice alone must not move the wire. Unpinned sessions follow
+    // it automatically; the auto tests below cover that.
+    pin_ttl(&env, false);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
     let enabled = [
@@ -1965,6 +1977,10 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
     assert_eq!(after["decisions"][1]["suggested_ttl_seconds"], 3600);
     assert_eq!(after["decisions"][1]["configured_ttl_seconds"], 300);
     assert_eq!(after["decisions"][1]["reason"], "hypothetical_1h_saving");
+    assert_eq!(
+        after["decisions"][1]["applied"], false,
+        "a pinned session only advises"
+    );
     assert_eq!(after["decisions"][1]["training"]["eligible_intervals"], 8);
     let rows = cache_rows(&directory);
     assert!(rows
@@ -2101,10 +2117,30 @@ fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
     }
 }
 
-/// Ten old rows ten minutes apart, which make the advisor's next boundary
-/// decision suggest 1h. Written before the boundary, so it sees no future.
+/// Ten old rows ten minutes apart, which make the advisor's next decision
+/// suggest 1h. Written before that decision, so it sees no future.
 fn seed_ttl_history(directory: &std::path::Path) {
-    let rows = cache_rows(directory);
+    seed_history(directory, 600_000, |_| (0, 100_000));
+}
+
+/// Ten old rows thirty seconds apart, each caching 5k tokens more than the
+/// one before: every interval hits at either TTL, and only the writes differ,
+/// so the advisor's next decision suggests 5m.
+fn seed_5m_history(directory: &std::path::Path) {
+    seed_history(directory, 30_000, |index| (100_000 + 5_000 * index, 5_000));
+}
+
+/// Replace earlier synthetic rows with ten new ones `gap_ms` apart, ending
+/// before the session's real rows. `tokens(index)` is (read, created).
+fn seed_history(directory: &std::path::Path, gap_ms: u64, tokens: impl Fn(u64) -> (u64, u64)) {
+    let rows: Vec<Value> = cache_rows(directory)
+        .into_iter()
+        .filter(|row| {
+            !row["gateway_request_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("fixture-"))
+        })
+        .collect();
     let template = rows.last().unwrap();
     let start = template["observation"]["request_started_ms"]
         .as_u64()
@@ -2114,19 +2150,62 @@ fn seed_ttl_history(directory: &std::path::Path) {
         let mut row = template.clone();
         row["gateway_request_id"] = json!(format!("fixture-{index}"));
         row["provider_request_id"] = Value::Null;
-        let at = start - (11 - index) * 600_000;
+        let at = start - (11 - index) * gap_ms;
         row["observation"]["request_started_ms"] = json!(at);
         row["observation"]["response_started_ms"] = json!(at + 1);
         row["observation"]["response_completed_ms"] = json!(at + 2);
         row["observation"]["client_prefix_compatible"] = json!(true);
-        row["cache_creation_input_tokens"] = json!(100_000);
-        row["cache_read_input_tokens"] = json!(0);
+        let (read, created) = tokens(index);
+        row["cache_creation_input_tokens"] = json!(created);
+        row["cache_read_input_tokens"] = json!(read);
         writeln!(history, "{row}").unwrap();
     }
-    for row in rows {
+    for row in &rows {
         writeln!(history, "{row}").unwrap();
     }
     std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+}
+
+/// Move every recorded request `by_ms` into the past, as if the session had
+/// been idle that long since its last request.
+fn age_history(directory: &std::path::Path, by_ms: u64) {
+    let mut history = String::new();
+    for mut row in cache_rows(directory) {
+        for key in [
+            "request_started_ms",
+            "response_started_ms",
+            "response_completed_ms",
+        ] {
+            if let Some(at) = row["observation"][key].as_u64() {
+                row["observation"][key] = json!(at - by_ms);
+            }
+        }
+        writeln!(history, "{row}").unwrap();
+    }
+    std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+}
+
+fn last_decision(directory: &std::path::Path) -> Value {
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(directory.join("ttl-advice.json")).unwrap())
+            .unwrap();
+    state["decisions"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone()
+}
+
+/// A resumed session redraws the previous turn's status line. Wait for it, so
+/// the next turn's completion marker is not that restored line.
+fn expect_restored_status(cli: &PtySession) {
+    common::expect_screen(
+        cli,
+        |screen| !common::turn_status_identity(screen).is_empty(),
+        WAIT,
+        "restored turn status",
+    );
 }
 
 fn compact(cli: &mut PtySession, why: &str) {
@@ -2172,6 +2251,8 @@ fn ttl_panel_switches_when_cheapest_and_saves_the_choice() {
     let env = TestEnv::new_mock("ttl-switch");
     let capture = Capture::new();
     let path = fixture(&env, &capture);
+    // Pinned at 5m, so the panel's choices are the only thing moving the wire.
+    pin_ttl(&env, false);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
     let enabled = [
@@ -2254,7 +2335,7 @@ fn ttl_panel_switches_when_cheapest_and_saves_the_choice() {
         "{forced:?}"
     );
 
-    // auto removes the saved value; the auth mode decides again.
+    // auto removes the saved value; this session's stats decide again.
     cli.send("/cache ttl auto\r").unwrap();
     cli.expect("Saved · auto").unwrap();
     assert_eq!(saved_ttl(&env), Value::Null);
@@ -2280,6 +2361,7 @@ fn a_saved_1h_waits_for_a_cold_prefix_after_a_restart() {
     assert_eq!(saved_ttl(&env), json!(true));
 
     let mut cli = spawn_with_env(&env, &path, &enabled);
+    expect_restored_status(&cli);
     let from = capture.bodies().len();
     turn(&mut cli, "A quick restart finds the prefix warm.");
     let warm = sent_1h_since(&capture, from);
@@ -2295,6 +2377,131 @@ fn a_saved_1h_waits_for_a_cold_prefix_after_a_restart() {
         !cold.is_empty() && cold.iter().all(|one_hour| *one_hour),
         "{cold:?}"
     );
+    exit(&mut cli);
+}
+/// Unpinned, with the advisor on, the session's own history picks the TTL and
+/// the wire follows it at the cheapest moment: with too little evidence it
+/// stays 5m and says nothing; a periodic decision that favours 1h waits for a
+/// cold point and says so; the cold request switches and says it did; a later
+/// periodic decision that favours 5m moves back on the very next request.
+#[test]
+fn auto_ttl_follows_this_sessions_history_at_the_cheapest_moment() {
+    let decide_every = engine_core::cache_ttl::DECIDE_EVERY;
+    let env = TestEnv::new_mock("ttl-auto");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let id = Session::load_from_path(&path).unwrap().session_id;
+    let directory = env.config_home().join("cache/prompt-cache").join(id);
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "First observed request.");
+    let fresh = sent_1h_since(&capture, 0);
+    assert!(
+        !fresh.is_empty() && fresh.iter().all(|one_hour| !one_hour),
+        "{fresh:?}"
+    );
+    common::expect_screen_settled(
+        &cli,
+        |screen| {
+            screen
+                .rsplit_once('─')
+                .is_some_and(|(_, footer)| !footer.contains("Cache TTL"))
+        },
+        WAIT,
+        "no evidence, nothing to announce",
+    );
+
+    // History that favours 1h, seen by a periodic decision on a warm prefix.
+    seed_ttl_history(&directory);
+    let from = capture.bodies().len();
+    for index in 0..decide_every {
+        turn(&mut cli, &format!("Warm turn {index}."));
+    }
+    let warm = sent_1h_since(&capture, from);
+    assert!(
+        warm.iter().all(|one_hour| !one_hour),
+        "a warm prefix stays at 5m: {warm:?}"
+    );
+    let decision = last_decision(&directory);
+    assert_eq!(decision["trigger"], "periodic", "{decision}");
+    assert_eq!(decision["suggested_ttl_seconds"], 3600, "{decision}");
+    assert_eq!(decision["applied"], true, "{decision}");
+    footer_shows(
+        &cli,
+        "Cache TTL auto: 1h when cold",
+        "auto announces the wait",
+    );
+
+    // A compaction makes the next request cold, so the switch lands on it.
+    compact(&mut cli, "auto compaction");
+    let from = capture.bodies().len();
+    turn(&mut cli, "The first turn of the new context.");
+    let after = sent_1h_since(&capture, from);
+    assert!(
+        after.first() == Some(&true),
+        "the cold request switches: {after:?}"
+    );
+    footer_shows(&cli, "Cache TTL auto: now 1h", "auto reports the switch");
+    // The next periodic decision sees the same history and keeps 1h.
+    for index in 0..decide_every {
+        turn(&mut cli, &format!("Busy turn {index}."));
+    }
+
+    // History now favours 5m. The periodic decision DECIDE_EVERY requests
+    // after the cold one moves back at once, since 5m keeps the cache.
+    seed_5m_history(&directory);
+    for index in 0..=decide_every {
+        turn(&mut cli, &format!("Short-gap turn {index}."));
+    }
+    let after = sent_1h_since(&capture, from);
+    let back = after
+        .iter()
+        .position(|one_hour| !one_hour)
+        .expect("a later decision moves back to 5m");
+    assert_eq!(back, 2 * decide_every, "{after:?}");
+    assert!(after[back..].iter().all(|one_hour| !one_hour), "{after:?}");
+    let decision = last_decision(&directory);
+    assert_eq!(decision["trigger"], "periodic", "{decision}");
+    assert_eq!(decision["suggested_ttl_seconds"], 300, "{decision}");
+    exit(&mut cli);
+}
+
+/// A restart after a long idle finds the prefix cold: the first request
+/// decides on the history it now has, switches on that same request, and the
+/// footer says so.
+#[test]
+fn auto_ttl_decides_at_an_idle_cold_point_after_a_restart() {
+    let env = TestEnv::new_mock("ttl-auto-idle");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let id = Session::load_from_path(&path).unwrap().session_id;
+    let directory = env.config_home().join("cache/prompt-cache").join(id);
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "Warm the prefix at 5m.");
+    exit(&mut cli);
+    seed_ttl_history(&directory);
+    age_history(&directory, 11 * 60_000);
+
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    expect_restored_status(&cli);
+    let from = capture.bodies().len();
+    turn(&mut cli, "Back after a long idle.");
+    let back = sent_1h_since(&capture, from);
+    assert!(
+        back.first() == Some(&true),
+        "the cold request switches: {back:?}"
+    );
+    let decision = last_decision(&directory);
+    assert_eq!(decision["trigger"], "cold", "{decision}");
+    assert_eq!(decision["suggested_ttl_seconds"], 3600, "{decision}");
+    footer_shows(&cli, "Cache TTL auto: now 1h", "auto reports the switch");
     exit(&mut cli);
 }
 fn exit(cli: &mut PtySession) {

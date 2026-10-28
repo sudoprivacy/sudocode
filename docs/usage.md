@@ -581,6 +581,31 @@ For the canonical, live command list:
 scode --help
 ```
 
+### Experimental pinned composer
+
+Enable `experimental.promptViewport` to try a fixed composer, shaded submitted
+prompts and a one-line header for the answer currently being read:
+
+```json
+{"experimental":{"promptViewport":true}}
+```
+
+This temporary experiment is off by default and applies to the default REPL.
+Use the mouse wheel to browse; the composer also accepts Page Up / Page Down
+and Alt+End to return to the latest output. Typing preserves the reading
+position. The draft survives scrolling and resize. Use your terminal's native
+selection gesture (often Shift+drag) while mouse reporting is enabled.
+
+The experiment keeps the terminal's main buffer and existing inline renderer;
+it does not enter alternate-screen mode. On normal exit it restores rendered
+conversation output to native terminal history. Saved sessions remain the
+durable record and `--resume` restores their prompt boundaries.
+Older presentation rows live in a disposable disk spool; only nearby row layouts
+and the visible frame remain cached. Colors respect the terminal palette and
+`NO_COLOR`. This changes presentation only and adds no model requests or prompt
+context. Validation and graduation requirements live in the
+[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+
 ## Bash tool results
 
 Model-invoked `bash` returns compact JSON: `stdout` and the actual

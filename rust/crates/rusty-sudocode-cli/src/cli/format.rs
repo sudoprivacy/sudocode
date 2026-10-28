@@ -177,11 +177,36 @@ pub(crate) fn render_messages(
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
+    render_messages_observed(messages, term_width, renderer, |_, _| {})
+}
+
+/// Keep prompt locations as presentation metadata, never embedded terminal text.
+pub(crate) fn render_messages_with_prompts(
+    messages: &[runtime::ConversationMessage],
+    term_width: usize,
+    renderer: &crate::render::TerminalRenderer,
+) -> (String, Vec<usize>) {
+    let mut prompts = Vec::new();
+    let text = render_messages_observed(messages, term_width, renderer, |offset, msg| {
+        if msg.role == runtime::MessageRole::User {
+            prompts.push(offset);
+        }
+    });
+    (text, prompts)
+}
+
+fn render_messages_observed(
+    messages: &[runtime::ConversationMessage],
+    term_width: usize,
+    renderer: &crate::render::TerminalRenderer,
+    mut observe: impl FnMut(usize, &runtime::ConversationMessage),
+) -> String {
     let mut output = String::new();
     let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
         if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
             crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
+            observe(output.len() - rendered.trim_matches('\n').len(), msg);
         }
     }
     output
@@ -678,9 +703,7 @@ pub(crate) fn format_internal_prompt_progress_line(
     }
 }
 
-/// Render the REPL echo for a submitted user input. Each line is on its own
-/// row, padded out to `term_width` and wrapped in the gray-background SGR pair
-/// the REPL uses for echoed input.
+/// Render submitted input through the same formatter for live and replay.
 ///
 /// `lines_consumed` is the number of `\n`-delimited input lines so callers
 /// know how many rows of rustyline output to clear before printing the echo.
@@ -700,16 +723,22 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     let mut rendered = String::new();
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
-        // box uses, so a message echoed here (session-history replay on resume)
-        // is visually identical to how it appeared when you typed it: the plain
-        // `❯ text` prompt line, no styled background. Continuation lines indent
+        // box uses. Live commits and replay share this presentation; the
+        // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
         let body = format!("{prefix}{line}");
         if idx > 0 {
             rendered.push('\n');
         }
-        rendered.push_str(&body);
+        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
+            let styled = crate::render::prompt_style(false).apply(body).to_string();
+            rendered.push_str(
+                &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
+            );
+        } else {
+            rendered.push_str(&body);
+        }
     }
     (rendered, raw_lines.len())
 }

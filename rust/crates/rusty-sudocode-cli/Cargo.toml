@@ -27,7 +27,7 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "4d11b67981ebc10e7b54d9c3175da728aaf4b4ba" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "e752ec29e5ab0db0a976cd50901373c779bb0ec1" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 # v19 fixes buffered-input stalls when the external printer is enabled (#977).
@@ -47,6 +47,7 @@ service-host = { path = "../service-host" }
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
+tempfile = "3"
 syntect = "5"
 # Match the grammar/theme bundle in the Codex reference revision.
 two-face = { version = "=0.5.1", default-features = false, features = ["syntect-onig"] }
@@ -77,7 +78,6 @@ filedescriptor = "=0.8.3"
 # workspace's `unsafe_code = "forbid"` is kept absolute everywhere else.
 stdin-peek = { path = "../stdin-peek" }
 self-replace = "1.5"
-tempfile = "3"
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dependencies]

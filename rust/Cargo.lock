@@ -194,6 +194,7 @@ dependencies = [
  "futures-util",
  "http",
  "httpdate",
+ "hyper",
  "reqwest 0.12.28",
  "runtime",
  "serde",

@@ -15,7 +15,7 @@ mod retry_diagnostics;
 pub use response_capture::{
     ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder,
 };
-pub use retry_diagnostics::{RetryDiagnostics, RetryNotices};
+pub use retry_diagnostics::{Outage, RetryDiagnostics, RetryNotices};
 
 const SUDOCLAW_LOG_ROTATE_AFTER_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 const SUDOCLAW_LOG_MAX_ROTATED_FILES: usize = 3;

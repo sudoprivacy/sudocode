@@ -901,7 +901,7 @@ async fn ensure_a2a_receiver(
                 let _ = ack.send(false);
                 continue;
             };
-            let text = message.to_prompt(runtime::agent_mailbox::MailboxPromptFraming::Bracketed);
+            let text = message.to_prompt();
             // A retried mailbox cursor must refer to the same still-pending input.
             use std::hash::{Hash, Hasher};
             let mut digest = std::collections::hash_map::DefaultHasher::new();
@@ -910,8 +910,6 @@ async fn ensure_a2a_receiver(
                 .hash(&mut digest);
             let client_id = format!("peer:{:016x}", digest.finish());
             let mut states = driver.input_changes();
-            let mut events = driver.peer_events();
-            let sends_before = mailbox.sends_so_far();
             let action = engine_core::engine_events::InputAction::Submit {
                 client_id,
                 draft: None,
@@ -969,56 +967,6 @@ async fn ensure_a2a_receiver(
                 json!({"a2a":a2a}),
             )]));
             let _ = cx.send_notification(notification);
-            // Optional auto-reply observes the same engine events, but never holds
-            // the inbox cursor or blocks admission of the next peer message.
-            let sender = Arc::clone(&mailbox);
-            let reply_stop = stop.clone();
-            tokio::spawn(async move {
-                let mut is_committed = false;
-                let mut answer = String::new();
-                loop {
-                    let event = tokio::select! {
-                        () = reply_stop.cancelled() => break,
-                        event = events.recv() => event,
-                    };
-                    match event {
-                        Ok(engine_core::EngineEvent::InputCommitted(input)) if input.id == id => {
-                            is_committed = true
-                        }
-                        Ok(engine_core::EngineEvent::TextDelta { text }) if is_committed => {
-                            answer.push_str(&text)
-                        }
-                        Ok(engine_core::EngineEvent::TurnComplete(complete)) if is_committed => {
-                            if !complete.cancelled {
-                                if let Some(body) = runtime::spawn_task::auto_reply_body(
-                                    &message.kind,
-                                    &answer,
-                                    sends_before,
-                                    sender.sends_so_far(),
-                                ) {
-                                    let reply = runtime::agent_mailbox::MailboxEnvelope {
-                                        delivery: runtime::turn_input::InputDelivery::Steer,
-                                        from: sender.self_id().to_string(),
-                                        to: message.from,
-                                        body,
-                                        summary: None,
-                                        timestamp: 0,
-                                        color: None,
-                                        kind: runtime::agent_mailbox::kinds::AUTO_REPLY.to_string(),
-                                        request_id: message.request_id,
-                                    };
-                                    let _ = tokio::task::spawn_blocking(move || sender.send(reply))
-                                        .await;
-                                }
-                            }
-                            break;
-                        }
-                        Ok(engine_core::EngineEvent::TurnFailed { .. }) if is_committed => break,
-                        Err(_) => break,
-                        _ => {}
-                    }
-                }
-            });
         }
         stop.abort();
         match tokio::task::spawn_blocking(move || receiver.stop_and_join()).await {

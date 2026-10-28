@@ -253,25 +253,6 @@ impl Config {
             .map_err(|e| format!("mTLS dial {}: {e}", self.endpoint))?;
         Ok(Arc::new(client))
     }
-
-    /// System-prompt section telling the model its A2A identity and how to
-    /// reach peers. Delegates the reply contract + framing to the shared
-    /// [`crate::agent_mailbox::repl_a2a_prompt_section`] (the SSOT every REPL
-    /// receive path renders) and prepends the nexus-specific network note.
-    #[must_use]
-    pub fn peer_system_prompt(&self) -> String {
-        peer_system_prompt(&self.agent)
-    }
-}
-
-/// Stable node-namespace identity text, even before this agent has a credential.
-#[must_use]
-pub fn peer_system_prompt(agent: &str) -> String {
-    let base = crate::agent_mailbox::repl_a2a_prompt_section(agent);
-    format!(
-        "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
-         be on another machine; addressing it by name still reaches it."
-    )
 }
 
 #[cfg(test)]
@@ -308,16 +289,6 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
-    /// A throwaway `TlsPaths` for prompt tests that never dial.
-    fn test_tls() -> TlsPaths {
-        TlsPaths {
-            ca_pem: "ca.pem".into(),
-            client_cert: "agent.pem".into(),
-            client_key: "agent-key.pem".into(),
-            server_name: "nexus-node".into(),
-        }
-    }
-
     #[test]
     fn load_credential_from_manifest_path_or_dir() {
         let bundle = write_test_bundle("mac-ai");
@@ -334,26 +305,6 @@ mod tests {
         std::fs::write(&manifest, b"{ not json").unwrap();
         assert!(AgentCredential::load(&bundle).is_err());
         let _ = std::fs::remove_dir_all(&bundle);
-    }
-
-    #[test]
-    fn peer_prompt_names_self_and_points_at_discovery() {
-        let cfg = Config {
-            endpoint: "127.0.0.1:2126".into(),
-            agent: "operator".into(),
-            tls: test_tls(),
-        };
-        let p = cfg.peer_system_prompt();
-        assert!(p.contains("\"operator\""), "prompt must name self: {p}");
-        assert!(p.contains("send"), "prompt must teach the tool: {p}");
-        assert!(
-            p.contains("agent_list"),
-            "prompt must point at agent_list for discovery: {p}"
-        );
-        assert!(
-            p.contains("another machine"),
-            "prompt must carry the nexus network note: {p}"
-        );
     }
 
     #[test]

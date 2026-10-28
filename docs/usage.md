@@ -183,6 +183,16 @@ receiver stops. Hosts can also subscribe to structured tracing. Ordinary
 receivers use this status and the local log without emitting terminal notices;
 retries continue without writing into the terminal's input area.
 
+The current condition is reported separately as `Health` in `/status` and
+`health` in the structured peer status. It reads the same retry diagnostics, so
+it clears when they confirm recovery: every failed check has succeeded again
+after a short quiet period. An outage younger than 30 seconds stays `ok`, and
+`/status` lists the scope being retried; most outages recover on the next
+attempt. A longer one is `degraded`, with each failing scope and its detail.
+The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
+receiving recovers. `failing` means the node binding itself cannot be used.
+`SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
+
 The connection record alone does not start Nexus or mint an agent credential.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
 can resume the same locally owned Box after shared selection. A missing record still
@@ -581,6 +591,31 @@ For the canonical, live command list:
 scode --help
 ```
 
+### Experimental pinned composer
+
+Enable `experimental.promptViewport` to try a fixed composer, shaded submitted
+prompts and a one-line header for the answer currently being read:
+
+```json
+{"experimental":{"promptViewport":true}}
+```
+
+This temporary experiment is off by default and applies to the default REPL.
+Use the mouse wheel to browse; the composer also accepts Page Up / Page Down
+and Alt+End to return to the latest output. Typing preserves the reading
+position. The draft survives scrolling and resize. Use your terminal's native
+selection gesture (often Shift+drag) while mouse reporting is enabled.
+
+The experiment keeps the terminal's main buffer and existing inline renderer;
+it does not enter alternate-screen mode. On normal exit it restores rendered
+conversation output to native terminal history. Saved sessions remain the
+durable record and `--resume` restores their prompt boundaries.
+Older presentation rows live in a disposable disk spool; only nearby row layouts
+and the visible frame remain cached. Colors respect the terminal palette and
+`NO_COLOR`. This changes presentation only and adds no model requests or prompt
+context. Validation and graduation requirements live in the
+[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+
 ## Bash tool results
 
 Model-invoked `bash` returns compact JSON: `stdout` and the actual
@@ -715,6 +750,7 @@ scode --resume path/to/session.jsonl
 ```
 
 `--resume` replays the named session into the REPL with full context.
+The restored session ID scopes the runtime, default plan file, and session trace.
 
 `latest` prefers your most recently used interactive session with saved history. A newer
 `--print`/`-p` run keeps its own transcript without displacing that session.

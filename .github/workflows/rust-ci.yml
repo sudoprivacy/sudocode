@@ -31,8 +31,11 @@ on:
       - scripts/publish_release_mirror.py
       - scripts/generate_cache_metrics.py
       - scripts/cache_metrics.py
+      - scripts/check_cache_usage_fixtures.py
       - spec/cache_metrics.json
       - spec/prompt_cache_observations.json
+      - spec/cache_usage_fixtures.json
+      - spec/cache_usage_fixtures.schema.json
   pull_request:
     # `ready_for_review` starts the full run when a draft is marked ready.
     types: [opened, synchronize, reopened, ready_for_review]
@@ -63,8 +66,11 @@ on:
       - scripts/publish_release_mirror.py
       - scripts/generate_cache_metrics.py
       - scripts/cache_metrics.py
+      - scripts/check_cache_usage_fixtures.py
       - spec/cache_metrics.json
       - spec/prompt_cache_observations.json
+      - spec/cache_usage_fixtures.json
+      - spec/cache_usage_fixtures.schema.json
   # The merge queue tests the group that will become main: no path filter,
   # every required check reports.
   merge_group:
@@ -147,6 +153,14 @@ jobs:
         run: cargo fmt --all --check
       - name: Check generated cache metrics
         run: python3 ../scripts/generate_cache_metrics.py --check
+      - name: Validate public cache usage fixtures
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check public cache usage fixtures
+        run: |
+          python3 -m pip install jsonschema==4.26.0
+          python3 ../scripts/check_cache_usage_fixtures.py
 
   boundary-gate:
     if: *standard_ci
@@ -621,6 +635,54 @@ jobs:
         env:
           SCODE_TEST_BACKEND: mock
         run: cargo test --release -p rusty-sudocode-cli --test pty_model_stream_close raw_stream_capture_keeps_streaming_and_resume_responsive -- --exact --nocapture
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: '22'
+      - name: Install the shared terminal observer for the viewport experiment
+        if: runner.os == 'Linux'
+        run: npm ci --prefix ../e2e/terminal-resize
+      - name: Compile the explicit viewport measurement driver
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport --no-run --message-format=json-render-diagnostics > target/prompt-viewport-driver.jsonl
+      - name: Install the browser for viewport painting and native selection
+        if: runner.os == 'Linux'
+        run: ../e2e/terminal-resize/node_modules/.bin/playwright install --with-deps chromium
+      - name: Verify viewport painting, wheel input and native selection
+        if: runner.os == 'Linux'
+        env:
+          SCODE_VIEWPORT_MEASURE_DIR: ${{ runner.temp }}/prompt-viewport-browser
+        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_interaction -- --ignored --exact --nocapture
+      - name: Compare the opt-in viewport against normal input with unchanged budgets
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver=$(python -c 'import json; from pathlib import Path; records=[json.loads(line) for line in Path("target/prompt-viewport-driver.jsonl").read_text().splitlines()]; paths=[row["executable"] for row in records if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="pty_prompt_viewport" and row.get("executable")]; assert len(paths)==1, paths; print(paths[0])')
+          python ../scripts/benchmark_prompt_viewport.py --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-measurements"
+          python ../scripts/benchmark_prompt_viewport.py --observer browser --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-browser-comparison"
+      - name: Retain viewport samples and failed terminal traces
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-measurements
+          path: ${{ runner.temp }}/prompt-viewport-measurements/
+          # Both successful screenshots and original failures are reviewable.
+          if-no-files-found: warn
+      - name: Retain viewport browser screenshots and selection evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-browser
+          path: ${{ runner.temp }}/prompt-viewport-browser/
+          if-no-files-found: warn
+      - name: Retain paired browser CPU, memory and painted-key measurements
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-browser-comparison
+          path: ${{ runner.temp }}/prompt-viewport-browser-comparison/
+          if-no-files-found: warn
       - name: Check complete process startup budget
         shell: bash
         run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100 --report target/startup.json
@@ -734,6 +796,32 @@ jobs:
           ANTHROPIC_BASE_URL: https://api.sudorouter.ai
           SUDOCODE_TEST_MODEL: *live_model
         run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
+      - name: Deliver offline Nexus mail through a real model and first receiver start
+        working-directory: .
+        env:
+          SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-nexus-offline-config
+          SCODE_LIVE_AUTH_PROFILE: sudorouter
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const key = process.env.PROXY_AUTH_TOKEN;
+          if (!key) throw new Error('SUDOROUTER_CI_API_KEY is required for the offline Nexus PTY');
+          const dir = process.env.SUDO_CODE_CONFIG_HOME;
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'sudocode.json'), JSON.stringify({
+            auth_modes: { proxy: { sudorouter: { apiKey: key, baseUrl: 'https://api.sudorouter.ai/v1' } } },
+            models: {}
+          }), { mode: 0o600 });
+          NODE
+          bash e2e/nexus-a2a/run-live-offline.sh
+      - name: Remove offline Nexus model credentials
+        if: always()
+        env:
+          SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-nexus-offline-config
+        run: |
+          node -e "require('fs').rmSync(require('path').join(process.env.SUDO_CODE_CONFIG_HOME, 'sudocode.json'), { force: true })"
       - name: Summarize ACP model routing and usage
         if: always()
         working-directory: .

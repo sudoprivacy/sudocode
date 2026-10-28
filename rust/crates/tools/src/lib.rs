@@ -54,15 +54,6 @@ pub mod testing {
         )
     }
 
-    /// Test seam for the pure XML formatter used to synthesise the
-    /// resume prompt from mailbox envelopes.
-    #[must_use]
-    pub fn compose_next_turn_from_envelopes_for_test(
-        envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
-    ) -> String {
-        crate::compose_next_turn_from_envelopes(envelopes)
-    }
-
     /// Test seam for `prepare_agent_job`. Callers just want to fire
     /// the side effect (Verification -> reset_streak); the manifest
     /// return value is discarded because the test env has no real
@@ -6731,7 +6722,8 @@ where
             // A shutdown in a mixed batch cannot acknowledge ordinary messages
             // before their turn succeeds. Process that batch, then stop.
             is_shutdown_pending = has_shutdown;
-            current_prompt = compose_next_turn_from_envelopes(&new_envelopes);
+            current_prompt =
+                runtime::agent_mailbox::compose_next_turn_from_envelopes(&new_envelopes);
             continue;
         }
 
@@ -6775,9 +6767,6 @@ fn run_single_turn(
             .map_err(|e| e.to_string())
     }
 }
-
-// Preserve the public entry point while runtime owns mailbox-to-input composition.
-pub use runtime::agent_mailbox::compose_next_turn_from_envelopes;
 
 fn build_agent_runtime(
     job: &AgentJob,

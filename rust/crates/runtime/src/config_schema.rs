@@ -389,6 +389,11 @@ const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 /// there would validate and then fail to load.
 const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
+        "promptViewport",
+        FieldType::Bool,
+        "Experimental bounded transcript viewport with a pinned composer",
+    ),
+    FieldSchema::leaf(
         "peerDescriptions",
         FieldType::Bool,
         "Publish persistent peer descriptions with existing compaction calls",
@@ -428,7 +433,7 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
     FieldSchema::leaf(
         "cache_ttl_1h",
         FieldType::Bool,
-        "Hold Anthropic prompt caches for 1h instead of 5m, for any auth mode. Unset follows the auth mode: 1h on a subscription, 5m on an API key. Switching to 1h mid-conversation rewrites the cached prefix once at the 1h write price; scode applies it at the next cold point (idle past the TTL, compaction, resume). Switching to 5m keeps the cache",
+        "Pin Anthropic prompt caches to 1h (true) or 5m (false), for any auth mode. Unset is automatic: with the cacheTtlAdvisor experiment on, each session picks the cheaper TTL from its own cache history; otherwise the auth mode decides (1h on a subscription, 5m on an API key). Switching to 1h mid-conversation rewrites the cached prefix once at the 1h write price, so scode applies it at the next cold point (idle past the TTL, compaction, resume); switching to 5m keeps the cache",
     ),
     FieldSchema::object(
         "web_search",

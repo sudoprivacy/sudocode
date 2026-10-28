@@ -16,7 +16,7 @@ use runtime::{
     StaticToolExecutor, SystemPrompt, ToolError,
 };
 
-const CASE: &str = "runtime_resume_inherits_written_prefix_while_native_tool_runs";
+const CASE: &str = "runtime_resume_inherits_completed_turn_while_native_tool_runs";
 const CHILD: &str = "SCODE_SHARED_RUNTIME_CHILD";
 const RECEIPT: &str = "NEXUS_RUNTIME_HISTORY_RECEIPT";
 const WAIT: Duration = Duration::from_secs(30);
@@ -126,6 +126,130 @@ struct RunningTurn {
     thread: Option<thread::JoinHandle<Session>>,
 }
 
+const DATA_DIR_CASE: &str = "explicit_data_dir_reclaims_external_session_without_workspace_writes";
+const DATA_DIR_CHILD: &str = "SCODE_DATA_DIR_CLEANUP_CHILD";
+const DATA_DIR_ROOT: &str = "SCODE_DATA_DIR_CLEANUP_ROOT";
+
+struct CleanupClient(std::process::Child);
+
+impl Drop for CleanupClient {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn cleanup_client(root: &Path, role: &str) -> CleanupClient {
+    CleanupClient(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", DATA_DIR_CASE, "--nocapture", "--test-threads=1"])
+            .env(DATA_DIR_CHILD, role)
+            .env(DATA_DIR_ROOT, root)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn explicit_data_dir_reclaims_external_session_without_workspace_writes() {
+    std::env::set_var("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1");
+    if let Ok(role) = std::env::var(DATA_DIR_CHILD) {
+        data_dir_client(
+            &PathBuf::from(std::env::var_os(DATA_DIR_ROOT).unwrap()),
+            &role,
+        );
+        return;
+    }
+    for deletion in ["delete-journal", "delete-store"] {
+        let root = std::env::temp_dir().join(format!("scode-data-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir(root.join("external")).unwrap();
+        let _fixture = Fixture(root.clone());
+        let workspace = root.join("workspace");
+        let path = root.join("external/transcript.jsonl");
+        let seed = Session::new().with_workspace_root(&workspace);
+        std::fs::write(&path, seed.to_json().unwrap().render()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let mut owner = cleanup_client(&root, "owner");
+        wait_for(&root.join("ready"));
+        let mut deleter = cleanup_client(&root, deletion);
+        assert!(deleter.0.wait().unwrap().success());
+        assert!(root.join("deleted").exists());
+        assert!(path.exists(), "a live writer still owns the transcript");
+        assert!(!workspace.join(".scode").exists());
+        let references: Vec<_> = std::fs::read_dir(root.join("data/sessions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join(".cleanup"))
+            .collect();
+        assert_eq!(references.len(), 1);
+        assert_eq!(std::fs::read_dir(&references[0]).unwrap().count(), 1);
+        // Abrupt process death releases its native locks. No process remains
+        // that could run the deleter's in-memory scheduler.
+        owner.0.kill().unwrap();
+        owner.0.wait().unwrap();
+        assert!(path.exists());
+        let mut restarted = cleanup_client(&root, "restart");
+        assert!(restarted.0.wait().unwrap().success());
+        assert!(!path.exists());
+        assert!(path.with_extension("completions.json").exists());
+        assert_eq!(std::fs::read_dir(&references[0]).unwrap().count(), 0);
+        assert!(!workspace.join(".scode").exists());
+    }
+}
+
+fn data_dir_client(root: &Path, role: &str) {
+    let workspace = root.join("workspace");
+    #[cfg(unix)]
+    assert!(
+        std::fs::write(workspace.join("must-stay-read-only"), b"probe").is_err(),
+        "the actual test process must respect workspace write permissions"
+    );
+    let store = runtime::SessionStore::from_data_dir(root.join("data"), &workspace).unwrap();
+    let path = root.join("external/transcript.jsonl");
+    if role == "restart" {
+        let deadline = Instant::now() + WAIT;
+        while path.exists()
+            || std::fs::read_dir(store.sessions_dir().join(".cleanup"))
+                .unwrap()
+                .next()
+                .is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "ordinary startup did not reclaim the external Session"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    }
+    if role == "delete-store" {
+        store.delete_session(&path).unwrap();
+    } else {
+        let mut session = store.load_session(path.to_str().unwrap()).unwrap().session;
+        session.activate_persistence().unwrap();
+        let journal =
+            runtime::subagent_completion::CompletionJournal::open(&session, &workspace, true)
+                .unwrap();
+        if role == "owner" {
+            std::fs::write(root.join("ready"), b"ready").unwrap();
+            wait_for(&root.join("stop"));
+            drop(journal);
+            return;
+        }
+        assert_eq!(role, "delete-journal");
+        journal
+            .purge(&journal.storage_ref(), "data-dir-delete")
+            .unwrap();
+    }
+    std::fs::write(root.join("deleted"), b"deleted").unwrap();
+}
+
 #[test]
 fn legacy_migration_excludes_old_writers_preserves_archives_and_keeps_one_session() {
     std::env::set_var("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1");
@@ -217,22 +341,24 @@ fn assert_rejected_migrations_preserve_source(
     )
     .unwrap();
     runtime::subagent_completion::CompletionJournal::purge_stored(
-        &StdFsBackend,
+        std::sync::Arc::new(StdFsBackend),
         path,
         &deleted.session_id,
         cwd,
         binding["storageRef"].as_str().unwrap(),
         "legacy-migration-deleted",
+        None,
     )
     .unwrap();
-    let mut rejected = Session::load_from_path(path).unwrap();
-    assert!(rejected
-        .activate_persistence()
+    assert!(Session::load_from_path(path)
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
-    assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
-    assert_eq!(legacy_archives(directory).as_slice(), archives);
+    assert!(!path.exists());
+    assert!(
+        legacy_archives(directory).is_empty(),
+        "owned migration backups retire with their Session"
+    );
 }
 
 fn legacy_archives(directory: &Path) -> Vec<PathBuf> {
@@ -263,7 +389,7 @@ impl Drop for RunningTurn {
 }
 
 #[test]
-fn runtime_resume_inherits_written_prefix_while_native_tool_runs() {
+fn runtime_resume_inherits_completed_turn_while_native_tool_runs() {
     if let Some(root) = std::env::var_os(CHILD) {
         let root = PathBuf::from(root);
         std::fs::write(root.join("tool-pid"), std::process::id().to_string()).unwrap();
@@ -275,7 +401,7 @@ fn runtime_resume_inherits_written_prefix_while_native_tool_runs() {
 }
 
 #[test]
-fn legacy_runtime_resume_inherits_written_prefix_while_native_tool_runs() {
+fn legacy_runtime_resume_inherits_completed_turn_while_native_tool_runs() {
     exercise_runtime_history(false, true);
 }
 
@@ -286,6 +412,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     std::fs::create_dir(&root).unwrap();
     let fixture = Fixture(root.clone());
     let path = root.join("history.jsonl");
+    let store_root = root.join("configured-session-store");
     let seed = Session::new()
         .with_workspace_root(&root)
         .with_persistence_path(&path);
@@ -295,7 +422,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .build()
         .unwrap();
     let (mut a, requests) = runtime(
-        load(&path, false),
+        load(&path, false).with_session_store_root(&store_root),
         vec![answer("A_BEFORE_REFRESH"), answer("A_AFTER_REFRESH")],
         StaticToolExecutor::new(),
     );
@@ -315,6 +442,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .unwrap();
     assert!(transcript(load(&path, false).messages()).contains("B_PRIVATE_AFTER_A"));
     a.refresh_compaction_source().unwrap();
+    assert_eq!(a.session().session_store_root(), Some(store_root.as_path()));
     assert!(Arc::ptr_eq(
         &writer,
         &a.session().completion_writer().unwrap()
@@ -329,6 +457,23 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     let restored = load(&path, false);
     assert!(transcript(restored.messages()).contains("A_AFTER_REFRESH"));
     assert!(!transcript(restored.messages()).contains("B_PRIVATE_AFTER_A"));
+    let journal =
+        runtime::subagent_completion::CompletionJournal::open(a.session(), &root, true).unwrap();
+    journal
+        .purge(&journal.storage_ref(), "delete-after-refresh")
+        .unwrap();
+    assert!(store_root.join(".cleanup").is_dir());
+    assert_eq!(
+        a.refresh_compaction_source().unwrap_err().to_string(),
+        "session_deleted"
+    );
+    assert_eq!(
+        a.ensure_session_persistence_allowed()
+            .unwrap_err()
+            .to_string(),
+        "session_deleted"
+    );
+    drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
     drop(fixture);
@@ -336,7 +481,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
 
 #[test]
 #[ignore = "requires the real pinned Nexus daemon and mTLS credentials"]
-fn live_runtime_resume_inherits_written_prefix_and_keeps_native_tool_result() {
+fn live_runtime_resume_inherits_completed_turn_and_keeps_native_tool_result() {
     exercise_runtime_history(true, false);
 }
 
@@ -365,8 +510,9 @@ fn exercise_runtime_history(nexus: bool, legacy: bool) {
     wait_for(&root.join("tool-pid"));
     assert!(!root.join("actual-result").exists());
     let loaded = load(&path, nexus);
-    assert!(transcript(loaded.messages()).contains("A_LIVE_TOOL_PROMPT"));
-    assert!(loaded
+    assert!(!transcript(loaded.messages()).contains("A_LIVE_TOOL_PROMPT"));
+    assert!(transcript(loaded.messages()).contains("COMMON_COMPLETED_ANSWER"));
+    assert!(!loaded
         .messages()
         .iter()
         .any(|message| message.blocks.iter().any(|block| matches!(
@@ -381,7 +527,8 @@ fn exercise_runtime_history(nexus: bool, legacy: bool) {
     executor
         .block_on(b.run_turn("B_PRIVATE_PROMPT", None, None))
         .unwrap();
-    assert!(transcript(&requests.lock().unwrap()[0]).contains("A_LIVE_TOOL_PROMPT"));
+    assert!(!transcript(&requests.lock().unwrap()[0]).contains("A_LIVE_TOOL_PROMPT"));
+    assert!(transcript(&requests.lock().unwrap()[0]).contains("COMMON_COMPLETED_ANSWER"));
     assert!(
         !root.join("actual-result").exists(),
         "B must finish while A is still running"
@@ -528,7 +675,7 @@ fn assert_runtime_replay(path: &Path, nexus: bool, sid: &str) {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert!(
-        records.iter().any(|record| {
+        !records.iter().any(|record| {
             record["event"]["type"] == "projection"
                 && record["event"]["messages"]
                     .as_array()
@@ -542,7 +689,7 @@ fn assert_runtime_replay(path: &Path, nexus: bool, sid: &str) {
                         })
                     })
         }),
-        "interrupted recovery must persist its exact result payload"
+        "a completed-turn restore must not synthesize a result for the sibling's running tool"
     );
     assert!(
         records

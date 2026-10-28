@@ -664,6 +664,7 @@ pub fn format_status_report(
 }
 
 fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
+    use std::fmt::Write as _;
     let namespace = match (peer.namespace, &peer.endpoint, &peer.error) {
         (Some("node"), endpoint, error) => {
             let selected = endpoint
@@ -696,17 +697,44 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         }
         _ => "decided when this process first claims a conversation",
     };
+    let health = &peer.health;
+    let failing = match health.failing.as_slice() {
+        [] => None,
+        scopes => Some(
+            scopes
+                .iter()
+                .map(|(scope, _)| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    };
+    let age = health
+        .outage_secs
+        .map_or_else(String::new, |secs| format!(" for {secs}s"));
+    let health_line = match (health.level, failing) {
+        ("fail", _) => "failing: the node binding above cannot be used".to_string(),
+        ("warn", Some(failing)) => format!("degraded: {failing} failing{age}"),
+        ("warn", None) => format!("degraded: receiving not yet recovered{age}"),
+        (_, Some(failing)) => format!("ok; retrying {failing}{age}"),
+        _ => "ok".to_string(),
+    };
     let mut report = format!(
         "Peers
   Agent            {}
   Namespace        {namespace}
   Receiver         {receiver}
+  Health           {health_line}
   Cursor           {cursor}",
         peer.agent
     );
+    // A failed binding is already explained on the Namespace line.
+    if health.level != "fail" {
+        for (scope, detail) in &health.failing {
+            let _ = write!(report, "\n    {scope}: {detail}");
+        }
+    }
     if let Some(error) = &peer.last_receiver_error {
-        use std::fmt::Write as _;
-        let _ = write!(report, "\n  Last RX error    {error}");
+        let _ = write!(report, "\n  Last RX error    (history) {error}");
     }
     report
 }

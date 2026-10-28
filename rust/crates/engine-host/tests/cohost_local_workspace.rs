@@ -157,18 +157,16 @@ fn assert_shared_workspace_tools(
     // Use the actual canonicalized cohost mount and the absolute spellings a
     // native command can return. All aliases must reach the same VFS object.
     let native_file = cwd.join("from-shell.txt");
-    let native_paths = vec![native_file.to_string_lossy().into_owned()];
+    let native_path = native_file.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let native_paths = [native_path];
     #[cfg(windows)]
     let native_paths = {
-        let ordinary = native_paths[0]
+        let ordinary = native_path
             .strip_prefix(r"\\?\")
             .expect("canonicalized Windows cohost workspace")
             .to_string();
-        vec![
-            native_paths[0].clone(),
-            ordinary.clone(),
-            ordinary.replace('\\', "/"),
-        ]
+        [native_path, ordinary.clone(), ordinary.replace('\\', "/")]
     };
     for path in native_paths {
         assert_eq!(fs.read(&path).unwrap(), b"shell-bytes", "{path}");

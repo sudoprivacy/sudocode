@@ -90,7 +90,7 @@ mod platform {
 /// Win32 stderr cannot be made nonblocking like a Unix pipe. One reader drains
 /// the real pipe into a bounded queue; the UI tick never waits for pipe IO.
 /// Pipe creation reuses the PTY dependency. Standard-handle ownership uses std
-/// OwnedHandle and the existing Win32 wrapper crate, without pipe-type probes.
+/// `OwnedHandle` and the existing Win32 wrapper crate, without pipe-type probes.
 #[cfg(windows)]
 mod platform {
     use std::io::{self, Read};

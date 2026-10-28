@@ -8,8 +8,10 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use common::TestEnv;
 
 /// Human types `! printf …` at the prompt. The command runs immediately, its

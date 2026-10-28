@@ -9478,9 +9478,14 @@ fn drain_budget_for(timeout_ms: u64) -> Duration {
 
 #[cfg(test)]
 mod shell_group_tests {
-    use super::{drain_budget_for, run_in_process_group, ShellOutcome};
+    use super::drain_budget_for;
+    #[cfg(unix)]
+    use super::{run_in_process_group, ShellOutcome};
+    #[cfg(unix)]
     use runtime::HookAbortSignal;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     #[test]
     fn drain_budget_clamps_to_floor_for_tiny_timeouts() {
@@ -9502,6 +9507,7 @@ mod shell_group_tests {
         assert_eq!(drain_budget_for(600_000), Duration::from_secs(10));
     }
 
+    #[cfg(unix)]
     fn bash_available() -> bool {
         std::env::var_os("PATH").is_some_and(|paths| {
             std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file())

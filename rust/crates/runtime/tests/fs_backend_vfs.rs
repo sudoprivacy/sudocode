@@ -436,18 +436,16 @@ fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     fs.write("secret.txt", b"private").unwrap();
     policy.deny("/ws/secret.txt");
-    let mounts = vec![mount.to_string_lossy().into_owned()];
+    let native_mount = mount.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let mounts = [native_mount];
     #[cfg(windows)]
     let mounts = {
-        let ordinary = mounts[0]
+        let ordinary = native_mount
             .strip_prefix(r"\\?\")
             .expect("canonicalized Windows workspace")
             .to_string();
-        vec![
-            mounts[0].clone(),
-            ordinary.clone(),
-            ordinary.replace('\\', "/"),
-        ]
+        [native_mount, ordinary.clone(), ordinary.replace('\\', "/")]
     };
     for native_mount in mounts {
         let secret = format!("{native_mount}/secret.txt");

@@ -361,6 +361,7 @@ impl Drop for ReleaseFiles {
     }
 }
 
+#[cfg(unix)]
 fn assert_interleaved_code_colors(sess: &pty_expect::PtySession, screen: &str) {
     let colors = sess.render(|screen| {
         let raw = screen.raw();

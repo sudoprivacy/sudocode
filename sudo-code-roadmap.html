@@ -2499,6 +2499,8 @@ uses the shared durable storage identity and is coordinated with every admitted
 writer. Completion ownership and cache behavior stay behind the existing engine
 boundary. The accepted immediate deletion and automatic cleanup contract is
 recorded in <a href="docs/design/agent-context-storage-matrix.html#q1-deletion-contract">Q1</a>;
+<a href="docs/design/agent-context-storage-matrix.html#q1-backup-deletion">automatic backups</a>
+remain owned by the source Session and follow the same deletion and retirement rules;
 its remote implementation and backend acceptance remain open.</td><td>Two active prompts and independent task completions; reconnect
 and ACK retries; deletion racing with append; crash recovery with one sibling
 still alive. Verify old writers and ACKs are rejected, automatic cleanup resumes

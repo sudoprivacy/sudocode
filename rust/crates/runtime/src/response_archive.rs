@@ -70,12 +70,16 @@ pub(crate) struct ResponseArchiveWriter {
 }
 
 impl ResponseArchiveWriter {
+    pub(crate) fn lock_path(transcript: &Path) -> PathBuf {
+        transcript.with_extension("responses.lock")
+    }
+
     pub(crate) fn acquire(fs: &dyn FsBackend, transcript: &Path) -> Result<Arc<Self>, String> {
         if !fs.fenced_locks() {
             return Err("completion_storage_exclusion_unavailable".into());
         }
         crate::subagent_completion::check_response_storage(fs, transcript)?;
-        let path = transcript.with_extension("responses.lock");
+        let path = Self::lock_path(transcript);
         let deadline = Instant::now() + Duration::from_secs(1);
         let lock = loop {
             if let Some(lock) = fs

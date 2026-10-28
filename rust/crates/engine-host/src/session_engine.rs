@@ -1300,6 +1300,7 @@ impl engine_core::EngineDelegate for SessionEngine {
         // shared journal binding before releasing the session's writer.
         let _ = self.background_tasks.clone().with_completion(None);
         let session = self.lock_session();
+        session.runtime.api_client().flush_response_captures();
         let path = session.handle.path.clone();
         if session.runtime.ensure_session_persistence_allowed().is_ok() {
             let _ = session.runtime.session().save_to_path(&path);

@@ -702,6 +702,7 @@ impl SessionTracer {
         self.response_archive.is_some()
     }
 
+    #[must_use]
     pub fn begin_response_capture(
         &self,
         metadata: ResponseCaptureMetadata,

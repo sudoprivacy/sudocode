@@ -2484,7 +2484,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     if matches!(trimmed.as_str(), "/exit" | "/quit") {
-                        cli.persist_session()?;
+                        cli.persist_before_shutdown()?;
                         break;
                     }
                     // `!<cmd>` bash mode: run it here, no model turn.
@@ -2536,7 +2536,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 input::ReadOutcome::Exit => {
-                    cli.persist_session()?;
+                    cli.persist_before_shutdown()?;
                     break;
                 }
             }
@@ -2549,7 +2549,6 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     peer_abort.abort();
     drop(pending_peer_turns);
     let _ = peer_receiver.join();
-    loop_result?;
 
     // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
@@ -2572,7 +2571,8 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    Ok(())
+    cli.shutdown();
+    loop_result
 }
 
 /// Resolves when the OS delivers Ctrl-Break; on non-Windows it never resolves.
@@ -4389,7 +4389,7 @@ fn run_repl_iocraft_dispatch(
     // still be alive and the shared CLI mutex must remain accessible.
     {
         let cli_lock = cli_shared.lock().expect("LiveCli mutex");
-        let _ = cli_lock.persist_session();
+        let _ = cli_lock.persist_before_shutdown();
     }
     // Drop coordinator sender so bridge/poller threads see Disconnected,
     // which drops input_rx and lets the iocraft render loop exit.
@@ -4399,6 +4399,11 @@ fn run_repl_iocraft_dispatch(
     // On Windows PTYs that do not exit promptly, the join closure abandons
     // the thread after a bounded wait and process exit remains the fallback.
     (repl_join)();
+
+    // The cache panel retains the same lifecycle as the engine delegate.
+    // Release it before engine shutdown can drop the model client and drain
+    // its response recorders, rather than leaving them alive at process exit.
+    drop(ttl_lifecycle);
 
     // Unwrap the Arc and finalize telemetry. If the runner thread
     // still holds a clone, force-exit — session is already persisted.
@@ -4429,13 +4434,7 @@ fn run_repl_iocraft_dispatch(
 
     // Close through the engine seam before process exit so session-owned
     // background processes are killed and reaped, not left running.
-    let LiveCli {
-        engine_handle,
-        lifecycle,
-        ..
-    } = cli;
-    drop(lifecycle);
-    let _ = engine_handle.shutdown(Duration::from_secs(5));
+    cli.shutdown();
 
     // The iocraft render loop thread may still be alive (it blocks on
     // terminal events). Persistent state and engine teardown are complete.
@@ -4795,6 +4794,17 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
 }
 
 impl LiveCli {
+    /// Both REPLs await the same engine teardown before the process can exit.
+    fn shutdown(self) {
+        let Self {
+            engine_handle,
+            lifecycle,
+            ..
+        } = self;
+        drop(lifecycle);
+        let _ = engine_handle.shutdown(Duration::from_secs(5));
+    }
+
     /// True when the async REPL (queue mode) is active. In this mode the
     /// render thread owns stdin via iocraft, so interactive widgets
     /// (FuzzySelect, Select) cannot be used on the runner thread.
@@ -5984,6 +5994,14 @@ impl LiveCli {
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.lifecycle.persist().map_err(Into::into)
+    }
+
+    /// A deleted Session is already retired; closing it must not save it again.
+    fn persist_before_shutdown(&self) -> Result<(), Box<dyn std::error::Error>> {
+        match self.lifecycle.persist() {
+            Err(error) if error == "session_deleted" => Ok(()),
+            result => result.map_err(Into::into),
+        }
     }
 
     /// `!<command>` bash mode. Runs the command in the user's shell, prints

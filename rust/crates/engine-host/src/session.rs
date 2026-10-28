@@ -85,35 +85,7 @@ pub fn load_session_reference(
 }
 
 pub fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = runtime::fs_backend::StdFsBackend;
-    let (session_id, cwd) =
-        runtime::subagent_completion::CompletionJournal::storage_identity(&backend, path)?;
-    let binding =
-        runtime::subagent_completion::CompletionJournal::probe(&backend, path, &session_id, &cwd)?;
-    runtime::subagent_completion::CompletionJournal::purge_stored(
-        &backend,
-        path,
-        &session_id,
-        &cwd,
-        binding["storageRef"]
-            .as_str()
-            .ok_or("missing completion storage identity")?,
-        "native-session-delete",
-    )?;
-    if !path.exists() {
-        return Ok(());
-    }
-    fs::remove_file(path)?;
-    // GC the session's offloaded tool-results subtree (write-once blobs spilled
-    // from oversized tool outputs). The managed file is `<session-id>.jsonl`, so
-    // its stem is the session-id that namespaces the offload dir. Best-effort:
-    // an absent dir (session never offloaded anything) is not an error.
-    if let Some(dir) = Session::tool_results_dir_for(path, &session_id) {
-        let _ = fs::remove_dir_all(dir);
-    }
-    if let Some(dir) = Session::response_captures_dir_for(path, &session_id) {
-        let _ = fs::remove_dir_all(dir);
-    }
+    current_session_store()?.delete_session(path)?;
     Ok(())
 }
 

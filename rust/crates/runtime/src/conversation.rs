@@ -2619,7 +2619,11 @@ where
     /// validated or reloaded. A successful refresh must precede another write.
     pub fn ensure_session_persistence_allowed(&self) -> Result<(), SessionError> {
         if self.session_source_stale {
-            Err(SessionError::SourceChanged)
+            if self.session.persistence_deleted()? {
+                Err(SessionError::Format("session_deleted".into()))
+            } else {
+                Err(SessionError::SourceChanged)
+            }
         } else {
             Ok(())
         }

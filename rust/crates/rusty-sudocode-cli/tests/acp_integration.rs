@@ -8451,6 +8451,16 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     const SECOND: &str = "acp-pair-second";
     const PEER: &str = "acp-pair-peer";
     const SUMMARY: &str = "摘要 \"ready\" & <checked>\nSECOND-SUMMARY-LINE";
+    // The one peer wrapper carries the summary as an escaped attribute.
+    let summary_attr = format!(
+        "summary=\"{}\"",
+        SUMMARY
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('\n', "&#10;")
+    );
     let server = MockAnthropicService::spawn()
         .await
         .expect("mock service should start");
@@ -8538,13 +8548,13 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
                 update["params"]["_meta"]["sudocode"]["a2a"]["summary"],
                 SUMMARY
             );
-            assert!(text.contains(&format!("Summary: {SUMMARY}")), "{text}");
+            assert!(text.contains(&summary_attr), "{text}");
         } else {
             assert!(update["params"]["_meta"]["sudocode"]["a2a"]
                 .get("summary")
                 .is_none());
             assert!(
-                !text.contains("Summary:"),
+                !text.contains("summary="),
                 "legacy messages have no summary: {text}"
             );
         }
@@ -8573,7 +8583,9 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     loop {
         let requests = server.captured_requests().await;
         if requests.iter().any(|request| {
-            request.raw_body.contains("Summary: 摘要")
+            request
+                .raw_body
+                .contains(&summary_attr.replace('"', "\\\""))
                 && request.raw_body.contains("SECOND-SUMMARY-LINE")
                 && request.raw_body.contains("for acp-pair-first")
         }) {
@@ -8596,7 +8608,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
         .flat_map(|message| &message.blocks)
         .any(|block| {
             matches!(block, runtime::ContentBlock::Text { text }
-            if text.contains(&format!("Summary: {SUMMARY}")) && text.contains("for acp-pair-first"))
+            if text.contains(&summary_attr) && text.contains("for acp-pair-first"))
         }));
     client.shutdown().await;
     workspace.cleanup();

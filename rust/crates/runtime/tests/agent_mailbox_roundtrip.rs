@@ -204,44 +204,46 @@ fn structured_shutdown_envelope_survives_roundtrip() {
     );
 }
 
-/// The two hosts tell an agent the SAME things, and differ only in framing.
+/// Every host tells an agent the same A2A contract, and it matches what the agent sees.
 ///
-/// Equivalence between standalone `scode` and the co-host is the point of the shared
-/// engine, and a prompt is part of the contract a model is held to: the co-host once
-/// carried the reply contract and not the discovery one, so a co-hosted agent could
-/// answer a message but had no way to find out who else was reachable. Asserted on the
-/// rendered sections rather than trusted to the refactor, because the failure mode is
-/// two strings drifting and that is invisible at a call site.
+/// One section and one wrapper: the section describes the `<mailbox-message>` block
+/// that `compose_next_turn_from_envelopes` really produces, says that only `send`
+/// reaches a peer, and makes no claim about who reads the session. A host-specific
+/// promise is how plain ACP sessions came to be told "you stay silent" while their
+/// prose was being mailed to the sender.
 #[test]
-fn both_hosts_tell_an_agent_the_same_a2a_contract() {
-    let repl = agent_mailbox::repl_a2a_prompt_section("win-ai");
-    let cohost = runtime::spawn_task::cohost_a2a_prompt_section("win-ai");
+fn every_host_tells_an_agent_the_same_a2a_contract() {
+    let section = agent_mailbox::a2a_prompt_section("win-ai");
+    assert!(section.contains(&agent_mailbox::a2a_reply_contract("win-ai")));
+    assert!(section.contains(agent_mailbox::a2a_discovery_contract()));
 
-    // The shared halves, verbatim in both.
-    let reply = agent_mailbox::a2a_reply_contract("win-ai");
-    let discovery = agent_mailbox::a2a_discovery_contract();
-    for (host, text) in [("repl", &repl), ("cohost", &cohost)] {
+    let envelope = agent_mailbox::MailboxEnvelope::from_bytes(
+        br#"{"from":"peer","to":"win-ai","body":"hello"}"#,
+    )
+    .unwrap();
+    let wrapped = agent_mailbox::compose_next_turn_from_envelopes(&[envelope]);
+    assert_eq!(
+        wrapped,
+        "<mailbox-message from=\"peer\">\nhello\n</mailbox-message>"
+    );
+    assert!(
+        section.contains("`<mailbox-message"),
+        "the section describes the wrapper the agent is actually shown:\n{section}"
+    );
+    assert!(
+        section.contains("Only a `send` call reaches another agent"),
+        "the one delivery rule:\n{section}"
+    );
+    let lower = section.to_lowercase();
+    for claim in [
+        "human",
+        "controller",
+        "delivered to that sender",
+        "stay silent",
+    ] {
         assert!(
-            text.contains(&reply),
-            "{host} must carry the reply contract verbatim"
-        );
-        assert!(
-            text.contains(discovery),
-            "{host} must carry the discovery contract verbatim"
-        );
-        assert!(
-            text.contains("agent_list"),
-            "{host} must name the tool that answers 'who can I reach'"
+            !lower.contains(claim),
+            "no host-specific claim ({claim}):\n{section}"
         );
     }
-
-    // And each carries only ITS framing — the one host-specific value.
-    assert!(
-        cohost.contains("[message from <sender>]") && !cohost.contains("<mailbox-message"),
-        "the co-host describes its own framing and not the REPL's:\n{cohost}"
-    );
-    assert!(
-        repl.contains("<mailbox-message") && !repl.contains("[message from <sender>]"),
-        "the REPL describes its own framing and not the co-host's:\n{repl}"
-    );
 }

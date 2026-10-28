@@ -707,6 +707,7 @@ scode --resume path/to/session.jsonl
 ```
 
 `--resume` replays the named session into the REPL with full context.
+The restored session ID scopes the runtime, default plan file, and session trace.
 
 `latest` prefers your most recently used interactive session with saved history. A newer
 `--print`/`-p` run keeps its own transcript without displacing that session.

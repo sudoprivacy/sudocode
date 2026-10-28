@@ -986,11 +986,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let wait_model = model.clone();
             let mut cli = LiveCli::new(
                 model,
-                true,
                 allowed_tools,
                 permission_mode,
                 reasoning_effort,
                 auth_mode,
+                None,
             )?;
             // Non-interactive one-shot: SIGINT / Ctrl-C must gracefully cancel
             // the turn across the seam (the running tool returns interrupted and
@@ -1679,13 +1679,13 @@ fn run_resume(
             return Ok(());
         }
         // No commands — enter the interactive REPL with the restored session.
-        let mut cli = match LiveCli::new(
+        let cli = match LiveCli::new(
             model,
-            true,
             None,
             permission_mode,
             reasoning_effort,
             auth_mode,
+            Some((handle, session)),
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -1693,12 +1693,6 @@ fn run_resume(
                 std::process::exit(1);
             }
         };
-        // Load the restored session into the running CLI.
-        let session_ref = resolved_path.display().to_string();
-        if let Err(e) = cli.load_session(Some(session_ref)) {
-            eprintln!("failed to resume: {e}");
-            std::process::exit(1);
-        }
         // Enter the REPL loop (it renders banner + any existing messages).
         // Propagate terminal/save errors to the same top-level handler used
         // by a new REPL, after the loop has cleaned up its receiver/editor.
@@ -1844,15 +1838,15 @@ fn run_resumed_compaction(
     auth_mode: Option<AuthMode>,
     reasoning_effort: Option<String>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    let persisted = load_session_reference(&path.display().to_string())?;
     let cli = LiveCli::new(
         model.to_string(),
-        true,
         None,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        Some(persisted),
     )?;
-    cli.lifecycle.resume_session(&path.display().to_string())?;
     // Maintenance runs through the lifecycle port while the turn pump is
     // idle. Keep SIGINT alive until its receipts and final report are saved.
     let _cancel_guard = SignalCancelGuard::install_compaction(cli.lifecycle.clone());
@@ -2346,11 +2340,11 @@ fn run_repl(
     run_stale_base_preflight(base_commit.as_deref());
     let cli = LiveCli::new(
         model,
-        true,
         allowed_tools,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        None,
     )?;
 
     dispatch_repl(cli)
@@ -4774,16 +4768,12 @@ impl LiveCli {
 
     fn new(
         model: String,
-        enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
+        persisted: Option<(SessionHandle, Session)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // The engine always builds with tools enabled for the interactive
-        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
-        // seam doesn't model (SessionEngine is single-purpose here).
-        let _ = enable_tools;
         let system_prompt = startup::measure("system_prompt", build_system_prompt)?;
         let cwd = env::current_dir()?;
         let sudocode_config =
@@ -4804,21 +4794,40 @@ impl LiveCli {
         let mcp_servers = std::collections::BTreeMap::new();
         let engine = Arc::new(
             startup::measure("engine_build", || {
-                SessionEngine::build(
-                    &cwd,
-                    &mcp_servers,
-                    runtime::SystemPromptOverrides::default(),
-                    // The REPL always uses memory; the per-session switch is an
-                    // ACP-client knob (`_meta.sudocode.memory`).
-                    runtime::memory::MemoryMode::Enabled,
-                    system_prompt,
-                    model.clone(),
-                    Some(model),
-                    allowed_tools,
-                    Some(permission_mode),
-                    reasoning_effort,
-                    auth_mode,
-                )
+                if let Some((handle, mut session)) = persisted {
+                    session.mode = runtime::SessionMode::Interactive;
+                    SessionEngine::open_persisted(
+                        &cwd,
+                        handle,
+                        session,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model.clone(),
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                } else {
+                    SessionEngine::build(
+                        &cwd,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        // The REPL always uses memory; the per-session switch is an
+                        // ACP-client knob (`_meta.sudocode.memory`).
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model.clone(),
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                }
             })
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
         );
@@ -4831,7 +4840,7 @@ impl LiveCli {
         // (same pattern the todo store uses). Skip if the caller already set it
         // (tests point it at a temp path).
         if std::env::var_os("SUDOCODE_PLAN_FILE").is_none() {
-            let session_id = lifecycle.session_snapshot().session_id;
+            let session_id = lifecycle.session_handle().id;
             let sanitized: String = session_id
                 .chars()
                 .map(|c| {
@@ -6315,18 +6324,6 @@ impl LiveCli {
         self.lifecycle.resume_session(&session_ref)?;
         self.undone_tool_use_ids.clear();
         Ok(true)
-    }
-
-    /// Resume a pre-resolved session (for `--resume` at startup). The engine
-    /// reloads it by reference and swaps it in.
-    fn replace_with_session(
-        &mut self,
-        _session: runtime::Session,
-        handle: SessionHandle,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.lifecycle.resume_session(&handle.id)?;
-        self.undone_tool_use_ids.clear();
-        Ok(())
     }
 
     fn handle_config_set(

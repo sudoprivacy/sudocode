@@ -376,9 +376,9 @@ fn fire_entry(entry: &CronEntry) -> Result<(), String> {
     let result = (|| -> Result<(), Box<dyn Error>> {
         let mut cli = LiveCli::new(
             model,
-            true,
             None,
             PermissionMode::DangerFullAccess,
+            None,
             None,
             None,
         )?;

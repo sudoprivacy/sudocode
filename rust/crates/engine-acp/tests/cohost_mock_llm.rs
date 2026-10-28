@@ -181,8 +181,8 @@ impl kernel::core::dispatch::NativeInterceptHook for ModelWrites {
 /// Drive one co-hosted turn and report what came back, and how many times the
 /// model was asked to produce it.
 ///
-/// `transcript_is_stream` is whether the pair's transcript is the DT_STREAM a
-/// federated daemon provides, or the DT_REG a conversation degrades to when that
+/// `transcript_is_stream` is whether the pair's transcript is the `DT_STREAM` a
+/// federated daemon provides, or the `DT_REG` a conversation degrades to when that
 /// stream cannot be created; an agent has to behave the same on both, so the
 /// shape is a parameter rather than a second copy of this. `prompt` is a
 /// parameter for the same reason: a second scenario is a different question for
@@ -203,7 +203,9 @@ fn run_cohost_turn_with(
     prompt: &str,
     arrange: impl FnOnce(&Arc<Kernel>, &str) -> Result<(), String>,
 ) -> (String, usize, Arc<dyn FsBackend>) {
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let harness = harness();
     // The scripted model is shared by every test in this binary, so what this
     // turn cost is a DELTA. Counting the total made the assertion depend on how
@@ -235,17 +237,7 @@ fn run_cohost_turn_with(
     // provisioning path rather than planting entries by hand.
     // The user's descriptor, planted the way the trusted service plants one,
     // so the test's writes carry the same authority a real host's would.
-    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
-        Arc::clone(&kernel),
-        &AgentDescriptor {
-            pid: format!("pid-{USER}"),
-            name: USER.to_string(),
-            owner_id: "test-owner".to_string(),
-            zone_id: "root".to_string(),
-            ..AgentDescriptor::default()
-        },
-        "/".to_string(),
-    ));
+    let user_fs = test_agent_fs(&kernel, USER, "/");
     let workspace = agent_workspace(pid);
     user_fs
         .create_dir_all(&workspace)
@@ -286,13 +278,7 @@ fn run_cohost_turn_with(
         panic!("arranging the cohost workflow failed: {error}");
     }
 
-    let reply = wait_for_agent_reply(
-        &kernel,
-        &transcript,
-        &ctx,
-        agent_id,
-        Duration::from_secs(60),
-    );
+    let reply = wait_for_agent_reply(&kernel, &transcript, &ctx, agent_id, Duration::from_mins(1));
     // A send tool can deliver the reply before its turn finishes. Wait for the
     // durable receive acknowledgement before terminating the host.
     if reply.is_some() {
@@ -397,7 +383,7 @@ fn assert_model_traffic(
 /// number is a test that goes red on a slower machine for a reason that has nothing
 /// to do with the behaviour under test.
 ///
-/// The storm this test exists for had a STRUCTURAL signature instead. The DT_REG
+/// The storm this test exists for had a STRUCTURAL signature instead. The `DT_REG`
 /// fallback carries no `stream_next_offset`, so the durable read position never
 /// advanced and the same envelope was claimed 1030 times in a minute. A position past
 /// zero is the negation of exactly that: it says the consumer COMMITTED what it read,
@@ -438,7 +424,7 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
 
 /// The same turn, on a transcript that could not become a stream.
 ///
-/// `ensure_conversation` asks for a `"wal"` stream and gets a DT_REG whenever
+/// `ensure_conversation` asks for a `"wal"` stream and gets a `DT_REG` whenever
 /// federation is not wired, so this is not a corner case but every
 /// non-federated daemon. Delivery has to be exactly once there too: reading a
 /// byte-addressed transcript used to leave the cursor where it was, so every
@@ -510,7 +496,9 @@ fn a_cohost_turn_is_recorded_in_the_vfs() {
 /// reads the list; one that remembers the name from training calls it anyway.
 #[test]
 fn a_cohost_is_not_offered_crons_this_daemon_will_never_fire() {
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _harness = harness();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
@@ -629,17 +617,7 @@ fn a_cohost_subagent_consumes_a_followup_during_its_first_model_response() {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
-                    Arc::clone(kernel),
-                    &kernel::core::agents::registry::AgentDescriptor {
-                        pid: format!("pid-{agent}"),
-                        name: agent.to_string(),
-                        owner_id: "test-owner".to_string(),
-                        zone_id: "root".to_string(),
-                        ..kernel::core::agents::registry::AgentDescriptor::default()
-                    },
-                    format!("{workspace}/another-runtime"),
-                ));
+                let fs = test_agent_fs(kernel, agent, &format!("{workspace}/another-runtime"));
                 let tasks = tools::list_agent_snapshots_from_store_with(false, fs.as_ref())?;
                 if tasks.len() != 1 {
                     return Err(format!("expected one live task, found {tasks:?}"));
@@ -693,7 +671,7 @@ fn a_cohost_subagent_consumes_a_followup_during_its_first_model_response() {
 fn managed_call(
     kernel: &Kernel,
     method: &str,
-    request: serde_json::Value,
+    request: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let ctx = kernel::kernel::OperationContext::new("test-owner", "root", true, None, true);
     let response = kernel
@@ -714,7 +692,7 @@ fn wait_idle(kernel: &Kernel, pid: &serde_json::Value) {
         let state = managed_call(
             kernel,
             "get_session_v1",
-            serde_json::json!({"session_id":pid}),
+            &serde_json::json!({"session_id":pid}),
         )
         .unwrap();
         if state["state"] == "ready" {
@@ -732,7 +710,7 @@ fn stop_session(kernel: &Kernel, pid: &serde_json::Value) {
     managed_call(
         kernel,
         "cancel_v1",
-        serde_json::json!({"session_id":pid,"mode":"session"}),
+        &serde_json::json!({"session_id":pid,"mode":"session"}),
     )
     .unwrap();
 }
@@ -756,7 +734,7 @@ fn await_new_reply(
     let state = managed_call(
         kernel,
         "get_session_v1",
-        serde_json::json!({"session_id":pid}),
+        &serde_json::json!({"session_id":pid}),
     );
     panic!("no new reply during {phase}; cursor={cursor}; session={state:?}");
 }
@@ -764,7 +742,9 @@ fn await_new_reply(
 #[test]
 fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_session() {
     use serde_json::json;
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let harness = harness();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
@@ -786,17 +766,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     )
     .unwrap();
     let agent = "resume-agent";
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
-        Arc::clone(&kernel),
-        &AgentDescriptor {
-            pid: format!("pid-{agent}"),
-            name: agent.to_string(),
-            owner_id: "test-owner".to_string(),
-            zone_id: "root".to_string(),
-            ..AgentDescriptor::default()
-        },
-        "/".to_string(),
-    ));
+    let fs = test_agent_fs(&kernel, agent, "/");
     let mb = Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), USER.to_string()));
     let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent);
     provision_stream_transcript(&kernel, &transcript);
@@ -811,7 +781,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         &kernel,
         &a2a::conversation_transcript_path(&a2a::conversation_id(agent, "test-owner")),
     );
-    let first = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
+    let first = managed_call(&kernel, "start_session_v1", &request).unwrap();
     let first_controller =
         managed_harness::attach_controller(Arc::clone(&kernel), &first, false).unwrap();
     let sid = first["durable_session_id"].as_str().unwrap();
@@ -843,40 +813,12 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     let before_bytes = fs.read_to_string(&path).unwrap();
     assert!(fs.is_append_stream(&path).unwrap());
 
-    for (key, value) in [
-        ("agent_id", json!("another-agent")),
-        ("owner_id", json!("another-owner")),
-        ("zone_id", json!("another-zone")),
-        (
-            "repos",
-            json!([{"alias":"repo","host_path":"/repos/different"}]),
-        ),
-    ] {
-        let mut wrong = request.clone();
-        wrong[key] = value;
-        assert!(
-            managed_call(&kernel, "start_session_v1", wrong).is_err(),
-            "accepted changed {key}"
-        );
-        assert_eq!(fs.read_to_string(&path).unwrap(), before_bytes);
-    }
+    assert_hosted_restore_identity(&kernel, &request, &fs, &path, &before_bytes);
     // Ownership is the backend lock, not diagnostic fields in the register.
     // The old runtime must release it promptly, before its lease expires.
-    let receiver = Mailbox::daemon_absolute(Arc::clone(&fs), agent.to_string());
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(receipt) = receiver.read_unread(USER).unwrap() {
-            drop(receipt);
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "old reader did not release"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let _receiver = await_old_reader_release(&fs, agent);
     let captured_before = harness.requests_seen();
-    let second = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
+    let second = managed_call(&kernel, "start_session_v1", &request).unwrap();
     let second_controller =
         managed_harness::attach_controller(Arc::clone(&kernel), &second, true).unwrap();
     assert_ne!(second["session_id"], first["session_id"]);
@@ -897,7 +839,116 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     wait_idle(&kernel, &second["session_id"]);
     stop_session(&kernel, &second["session_id"]);
     second_controller.wait_closed();
-    let after = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
+    let after = assert_restored_managed_history(&fs, &path, &before, harness, captured_before);
+    assert_legacy_hosted_restore_refused(after, sid, &kernel, &fs, &path, &request, harness);
+}
+
+fn test_agent_fs(kernel: &Arc<Kernel>, agent: &str, workspace: &str) -> Arc<dyn FsBackend> {
+    Arc::new(KernelFsBackend::for_agent_descriptor(
+        Arc::clone(kernel),
+        &AgentDescriptor {
+            pid: format!("pid-{agent}"),
+            name: agent.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        workspace.to_owned(),
+    ))
+}
+
+fn assert_hosted_restore_identity(
+    kernel: &Kernel,
+    request: &serde_json::Value,
+    fs: &Arc<dyn FsBackend>,
+    path: &str,
+    before_bytes: &str,
+) {
+    for (key, value) in [
+        ("agent_id", json!("another-agent")),
+        ("owner_id", json!("another-owner")),
+        ("zone_id", json!("another-zone")),
+        (
+            "repos",
+            json!([{"alias":"repo","host_path":"/repos/different"}]),
+        ),
+    ] {
+        let mut wrong = request.clone();
+        wrong[key] = value;
+        assert!(
+            managed_call(kernel, "start_session_v1", &wrong).is_err(),
+            "accepted changed {key}"
+        );
+        assert_eq!(fs.read_to_string(path).unwrap(), before_bytes);
+    }
+}
+
+fn assert_legacy_hosted_restore_refused(
+    after: runtime::Session,
+    sid: &str,
+    kernel: &Kernel,
+    fs: &Arc<dyn FsBackend>,
+    path: &str,
+    request: &serde_json::Value,
+    harness: &Harness,
+) {
+    // Store listing and loading use the same backend as the hosted transcript.
+    let store = runtime::session_control::SessionStore::from_cwd_with(
+        after.workspace_root().unwrap(),
+        Arc::clone(fs),
+    )
+    .unwrap()
+    .with_identity(after.identity.clone().unwrap());
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    let loaded = store.load_session(sid).unwrap().session;
+    assert_eq!(loaded.messages(), after.messages());
+    // Legacy data remains readable locally but lacks the ownership proof a
+    // hosted restore requires. Do not silently adopt or replace it.
+    fs.delete(path).unwrap();
+    provision_stream_transcript(kernel, path);
+    let mut legacy = after;
+    legacy.identity = None;
+    legacy
+        .with_persistence_path(path)
+        .with_fs_backend(Arc::clone(fs))
+        .save_to_path(path)
+        .unwrap();
+    let unbound = runtime::Session::load_from_path_with(fs.as_ref(), path).unwrap();
+    assert!(unbound.identity.is_none());
+    assert_eq!(unbound.session_id, sid);
+    let unbound_bytes = fs.read_to_string(path).unwrap();
+    let requests_before_rejection = harness.requests_seen();
+    let error = managed_call(kernel, "start_session_v1", request).unwrap_err();
+    assert!(error.contains("co-host: restore session:"), "{error}");
+    assert_eq!(fs.read_to_string(path).unwrap(), unbound_bytes);
+    assert_eq!(harness.requests_seen(), requests_before_rejection);
+}
+
+fn await_old_reader_release(fs: &Arc<dyn FsBackend>, agent: &str) -> Mailbox {
+    let receiver = Mailbox::daemon_absolute(Arc::clone(fs), agent.to_string());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(receipt) = receiver.read_unread(USER).unwrap() {
+            drop(receipt);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "old reader did not release"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    receiver
+}
+
+fn assert_restored_managed_history(
+    fs: &Arc<dyn FsBackend>,
+    path: &str,
+    before: &runtime::Session,
+    harness: &Harness,
+    captured_before: usize,
+) -> runtime::Session {
+    let after = runtime::Session::load_from_path_with(fs.as_ref(), path).unwrap();
     assert_eq!(after.session_id, before.session_id);
     assert!(after.messages().len() > before.messages().len());
     assert_eq!(
@@ -914,34 +965,5 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "the resumed model must receive the old conversation"
     );
     assert_eq!(fs.readdir("/sessions").unwrap().len(), 1);
-    // Store listing and loading use the same backend as the hosted transcript.
-    let store = runtime::session_control::SessionStore::from_cwd_with(
-        after.workspace_root().unwrap(),
-        Arc::clone(&fs),
-    )
-    .unwrap()
-    .with_identity(after.identity.clone().unwrap());
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
-    let loaded = store.load_session(sid).unwrap().session;
-    assert_eq!(loaded.messages(), after.messages());
-    // Legacy data remains readable locally but lacks the ownership proof a
-    // hosted restore requires. Do not silently adopt or replace it.
-    fs.delete(&path).unwrap();
-    provision_stream_transcript(&kernel, &path);
-    let mut legacy = after;
-    legacy.identity = None;
-    legacy
-        .with_persistence_path(&path)
-        .with_fs_backend(Arc::clone(&fs))
-        .save_to_path(&path)
-        .unwrap();
-    let unbound = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
-    assert!(unbound.identity.is_none());
-    assert_eq!(unbound.session_id, sid);
-    let unbound_bytes = fs.read_to_string(&path).unwrap();
-    let requests_before_rejection = harness.requests_seen();
-    let error = managed_call(&kernel, "start_session_v1", request).unwrap_err();
-    assert!(error.contains("co-host: restore session:"), "{error}");
-    assert_eq!(fs.read_to_string(&path).unwrap(), unbound_bytes);
-    assert_eq!(harness.requests_seen(), requests_before_rejection);
+    after
 }

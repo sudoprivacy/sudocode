@@ -32,11 +32,11 @@ fn text_only_endpoint_rejects_agent_work_before_inference() {
     session.expect("tool calling").unwrap_or_else(|error| {
         panic!(
             "capability error missing: {error}; {}",
-            session.render(|screen| screen.contents())
+            session.render(common::screen_contents)
         )
     });
     assert_ne!(session.expect_eof().expect("failed turn exits"), 0);
-    let screen = session.render(|screen| screen.contents());
+    let screen = session.render(common::screen_contents);
     assert!(
         screen.contains("does not support") && screen.contains("tool calling"),
         "missing capability error in terminal: {screen}"
@@ -86,7 +86,7 @@ fn text_only_endpoint_rejects_agent_work_before_inference() {
 fn endpoint_catalog_reaches_the_running_model_picker() {
     let env = TestEnv::new("model-discovery");
     env.set_model_catalog(serde_json::json!({"data": [{
-        "id": "claude-unseen-2040", "context_window": 1234567,
+        "id": "claude-unseen-2040", "context_window": 1_234_567,
         "max_output_tokens": 98765, "vision_supported": true
     }]}));
     let mut session = env.spawn(&["--permission-mode", "read-only"]);
@@ -129,7 +129,7 @@ fn endpoint_catalog_reaches_the_running_model_picker() {
             assert!(
                 !remaining.is_zero(),
                 "new upstream model missing from running picker:\n{}",
-                session.render(|screen| screen.contents())
+                session.render(common::screen_contents)
             );
             session.set_default_timeout(remaining);
             session

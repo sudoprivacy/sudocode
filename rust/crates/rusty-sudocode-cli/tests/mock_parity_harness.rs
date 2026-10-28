@@ -6,6 +6,7 @@
 
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[cfg(windows)]
 #[path = "common/shell.rs"]
 mod shell;
 

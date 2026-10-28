@@ -22,8 +22,9 @@
 //! 4. Assertion: The parent's turn-2 response MUST contain both
 //!    - the `<task-notification>` opener, AND
 //!    - the sub-agent's sentinel content
-//!    (Either would be plausible via hallucination alone; both
-//!     together only survive if the push path fired end-to-end.)
+//!
+//! (Either would be plausible via hallucination alone; both
+//! together only survive if the push path fired end-to-end.)
 //!
 //! ## Local-only per plan §6.4
 
@@ -111,7 +112,7 @@ fn task_notification_pushed_into_next_user_turn_under_coord_mode() {
     //      <result> section.
     // If drain didn't fire, the parent would report NO_NOTIFICATIONS_SEEN.
     sess.expect(SENTINEL).unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "expected sentinel {SENTINEL} in parent's turn-2 report \
              (proves the push path fired end-to-end): {e}\n\

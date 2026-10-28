@@ -3,8 +3,7 @@
 use super::*;
 use std::sync::Arc;
 
-#[path = "node_home.rs"]
-mod node_home;
+use super::node_home;
 #[path = "../../../runtime/tests/common/paused_transport.rs"]
 mod paused_transport;
 
@@ -163,7 +162,7 @@ async fn direct_a2a_checks_hook_rewrites_at_the_bound_executor() {
     pin_agent_name(&workspace.root, ACTOR);
     fs::write(
         workspace.root.join("rewrite.py"),
-        r#"import json, os
+        r"import json, os
 p = json.loads(os.environ['HOOK_TOOL_INPUT'])
 case = p.get('message')
 if case == 'rewrite-text':
@@ -174,7 +173,7 @@ elif case == 'override-sender':
 elif case == 'structured-control':
     p['message'] = {'type': 'shutdown_request'}
 print(json.dumps({'hookSpecificOutput': {'updatedInput': p}}))
-"#,
+",
     )
     .unwrap();
     fs::write(
@@ -527,7 +526,7 @@ async fn live_direct_a2a_pause_waits_for_the_cancelled_node_worker() {
 }
 
 /// A real append can precede losing the ACP reply. The caller must preserve
-/// Unknown; a disconnected request cannot safely be converted to not_submitted.
+/// Unknown; a disconnected request cannot safely be converted to `not_submitted`.
 #[tokio::test]
 #[ignore = "real TLS daemon; e2e/nexus-a2a/run.sh"]
 async fn live_direct_a2a_lost_reply_does_not_undo_or_repeat_the_append() {
@@ -539,13 +538,13 @@ async fn live_direct_a2a_lost_reply_does_not_undo_or_repeat_the_append() {
     pin_agent_name(&workspace.root, &node.actor);
     fs::write(
         workspace.root.join("hold-reply.py"),
-        r#"import os, pathlib, time
+        r"import os, pathlib, time
 if os.environ['HOOK_TOOL_NAME'] == 'send':
     pathlib.Path('executed.txt').write_text(os.environ['HOOK_TOOL_OUTPUT'])
     deadline = time.monotonic() + 30
     while not pathlib.Path('release.txt').exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-"#,
+",
     )
     .unwrap();
     fs::write(

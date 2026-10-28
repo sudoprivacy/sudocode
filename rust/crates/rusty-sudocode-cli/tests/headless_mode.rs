@@ -66,9 +66,9 @@ impl Fixture {
     fn run(&self, args: &[&str], input: Option<&[u8]>) -> Output {
         let mut cmd = self.command();
         cmd.args(args);
-        self.run_command(cmd, input)
+        Self::run_command(cmd, input)
     }
-    fn run_command(&self, mut cmd: Command, input: Option<&[u8]>) -> Output {
+    fn run_command(mut cmd: Command, input: Option<&[u8]>) -> Output {
         if input.is_some() {
             cmd.stdin(Stdio::piped());
         }
@@ -116,7 +116,7 @@ fn node_model_route_fails_at_the_node_without_http_fallback() {
         "sonnet",
         "--output-format=json",
     ]);
-    let out = f.run_command(cmd, None);
+    let out = Fixture::run_command(cmd, None);
     assert!(!out.status.success());
     let result = json_output(&out);
     let error = result["error"].as_str().unwrap();
@@ -136,7 +136,7 @@ fn node_model_route_fails_at_the_node_without_http_fallback() {
         "read-only",
         "--output-format=json",
     ]);
-    let out = f.run_command(cmd, None);
+    let out = Fixture::run_command(cmd, None);
     assert!(
         out.status.success(),
         "{}",

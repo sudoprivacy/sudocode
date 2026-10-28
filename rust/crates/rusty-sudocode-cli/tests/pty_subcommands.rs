@@ -69,7 +69,7 @@ fn status_renders_text() {
 /// Steps:
 /// 1. Spawn scode doctor --output-format json.
 /// 2. Expect "checks" — proves doctor ran.
-/// 3. Expect "api_key" — proves it checked for API keys.
+/// 3. Expect "`api_key`" — proves it checked for API keys.
 /// 4. Exit 0.
 #[test]
 fn doctor_renders_json() {
@@ -92,8 +92,8 @@ fn doctor_renders_json() {
 ///
 /// Steps:
 /// 1. Spawn scode version --output-format json.
-/// 2. Expect "git_sha" — proves build info renders.
-/// 3. Expect "build_date" — proves date is included.
+/// 2. Expect "`git_sha`" — proves build info renders.
+/// 3. Expect "`build_date`" — proves date is included.
 /// 4. Exit 0.
 #[test]
 fn version_renders_json() {

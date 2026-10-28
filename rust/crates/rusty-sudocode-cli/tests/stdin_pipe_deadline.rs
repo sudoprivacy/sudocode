@@ -43,12 +43,12 @@ fn spawn_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Generous: the assertion is "finite, not 50 minutes". Binary startup on a
 /// cold CI runner dwarfs the 3s first-byte deadline being exercised.
-const OBSERVE_TIMEOUT: Duration = Duration::from_secs(60);
+const OBSERVE_TIMEOUT: Duration = Duration::from_mins(1);
 
 const WARNING_FRAGMENT: &str = "no stdin data received";
 

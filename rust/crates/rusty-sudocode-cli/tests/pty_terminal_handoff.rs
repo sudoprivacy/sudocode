@@ -28,7 +28,7 @@ fn memory_editor_owns_input_and_stderr_then_restores_the_repl() {
     let command = helper_command(
         env.workspace_root(),
         "editor",
-        r#"
+        r"
 import pathlib, sys
 assert sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()
 assert pathlib.Path(sys.argv[1]).resolve().is_relative_to(pathlib.Path.cwd().resolve())
@@ -39,7 +39,7 @@ print('EDITOR_READY', file=sys.stderr, flush=True)
 text = input()
 pathlib.Path(sys.argv[1]).write_bytes((text + '\n').encode())
 print('EDITOR_DONE', flush=True)
-"#,
+",
     );
     let mut child = env.spawn_with_env(
         &[],
@@ -113,11 +113,11 @@ fn memory_picker_cancels_and_selects_without_a_second_input_reader() {
     let command = helper_command(
         env.workspace_root(),
         "select editor",
-        r#"
+        r"
 import pathlib, sys
 assert pathlib.Path(sys.argv[1]).resolve().is_relative_to(pathlib.Path.cwd().resolve())
 pathlib.Path(sys.argv[1]).write_bytes(b'selected memory\n')
-"#,
+",
     );
     let mut child = env.spawn_with_env(
         &[],
@@ -158,7 +158,7 @@ fn status_pager_receives_eof_and_exclusive_terminal_input() {
     let command = helper_command(
         env.workspace_root(),
         "pager",
-        r#"
+        r"
 import pathlib, sys
 text = sys.stdin.read()
 assert text.strip(), 'pager must receive the report and EOF'
@@ -180,7 +180,7 @@ else:
             termios.tcsetattr(terminal, termios.TCSANOW, attrs)
 assert key == 'q', repr(key)
 print('PAGER_DONE', flush=True)
-"#,
+",
     );
     let mut child = env.spawn_with_env(
         &[],

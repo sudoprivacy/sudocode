@@ -46,7 +46,7 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
     // interrupt had nothing left to interrupt. Paying the whole cost up front
     // is what makes that impossible rather than unlikely. See `ArmedInterrupt`.
     let interrupt = ArmedInterrupt::arm(&workspace);
-    interrupt.wait_until_armed(Duration::from_secs(120));
+    interrupt.wait_until_armed(Duration::from_mins(2));
 
     let prompt = format!("{SCENARIO_PREFIX}bash_interrupt_long_running");
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
@@ -92,11 +92,11 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
     wait_for_bash_ready(
         &mut child,
         &workspace.join("cancel-ready"),
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     );
     interrupt.fire(child.id());
 
-    let status = wait_for_exit(&mut child, Duration::from_secs(60))
+    let status = wait_for_exit(&mut child, Duration::from_mins(1))
         .expect("scode should exit after the interrupt");
     let mut stdout = String::new();
     let mut stderr = String::new();
@@ -128,28 +128,7 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
         "interrupt should cancel the turn without a follow-up model call"
     );
 
-    let parsed: Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
-    let tool_results = parsed["tool_results"]
-        .as_array()
-        .expect("tool_results should be an array");
-    assert_eq!(tool_results.len(), 1);
-    assert_eq!(tool_results[0]["tool_name"], "bash");
-    assert_eq!(
-        tool_results[0]["is_error"], true,
-        "interrupted tool result: {}\nstderr:\n{stderr}",
-        tool_results[0]
-    );
-
-    let tool_output: Value = serde_json::from_str(
-        tool_results[0]["output"]
-            .as_str()
-            .expect("tool output should be a JSON string"),
-    )
-    .expect("bash output should parse as JSON");
-    assert_eq!(tool_output["interrupted"], true);
-    assert_eq!(tool_output["returnCodeInterpretation"], "interrupted");
-    assert_eq!(tool_output["stderr"], "Command interrupted by user");
-
+    assert_interrupted_tool_output(&stdout, &stderr);
     fs::remove_dir_all(&workspace).expect("workspace cleanup should succeed");
 }
 
@@ -260,6 +239,10 @@ struct ArmedInterrupt {
 /// Unix: `kill -INT`, the signal `SignalCancelGuard` installs a handler for.
 /// Nothing to prepare, so arming is bookkeeping and the wait returns at once.
 #[cfg(unix)]
+#[expect(
+    clippy::unused_self,
+    reason = "Keep the same consuming signal interface as the stateful Windows helper."
+)]
 impl ArmedInterrupt {
     fn arm(_workspace: &std::path::Path) -> Self {
         Self {}
@@ -396,4 +379,28 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         "scode-{label}-{}-{millis}-{counter}",
         std::process::id()
     ))
+}
+
+fn assert_interrupted_tool_output(stdout: &str, stderr: &str) {
+    let parsed: Value = serde_json::from_str(stdout).expect("stdout should be JSON");
+    let tool_results = parsed["tool_results"]
+        .as_array()
+        .expect("tool_results should be an array");
+    assert_eq!(tool_results.len(), 1);
+    assert_eq!(tool_results[0]["tool_name"], "bash");
+    assert_eq!(
+        tool_results[0]["is_error"], true,
+        "interrupted tool result: {}\nstderr:\n{stderr}",
+        tool_results[0]
+    );
+
+    let tool_output: Value = serde_json::from_str(
+        tool_results[0]["output"]
+            .as_str()
+            .expect("tool output should be a JSON string"),
+    )
+    .expect("bash output should parse as JSON");
+    assert_eq!(tool_output["interrupted"], true);
+    assert_eq!(tool_output["returnCodeInterpretation"], "interrupted");
+    assert_eq!(tool_output["stderr"], "Command interrupted by user");
 }

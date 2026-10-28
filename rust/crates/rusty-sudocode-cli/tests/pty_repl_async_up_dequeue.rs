@@ -12,7 +12,7 @@
 //!
 //! 1. **Start a long-running turn.** Send prompt A that triggers a bash tool
 //!    invocation the model has to wait on — gives the coordinator a real
-//!    "turn_active = true" window in which queue-during-turn matters.
+//!    "`turn_active` = true" window in which queue-during-turn matters.
 //! 2. **Queue during the turn.** Send `MARKER_QUEUED_INPUT\r` while A is
 //!    still executing → coordinator's `submit_during_turn` returns Queued;
 //!    the item lives in the shared queue behind the running turn.

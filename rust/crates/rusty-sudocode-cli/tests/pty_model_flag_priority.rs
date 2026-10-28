@@ -1,6 +1,6 @@
 //! Explicit default model -> actual file read -> resume/headless wire requests.
 //! CI checks CLI precedence with a deterministic transport on all platforms.
-//! SCODE_TEST_BACKEND=live additionally probes the compiled-in default provider.
+//! `SCODE_TEST_BACKEND=live` additionally probes the compiled-in default provider.
 mod common;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;

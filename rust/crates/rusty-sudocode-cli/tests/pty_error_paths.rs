@@ -20,7 +20,7 @@ use common::TestEnv;
 // 1. write_file in read-only mode
 // ──────────────────────────────────────────────────────────────────────
 
-/// Permission enforcement: write_file should fail in read-only mode.
+/// Permission enforcement: `write_file` should fail in read-only mode.
 ///
 /// Mock: tool call forced → scode returns permission error → model
 ///       says "denied" or "permission".
@@ -74,7 +74,7 @@ fn write_file_denied_in_read_only() {
 // 2. edit_file on non-existent file
 // ──────────────────────────────────────────────────────────────────────
 
-/// Missing file: edit_file on a file that doesn't exist.
+/// Missing file: `edit_file` on a file that doesn't exist.
 ///
 /// Mock: tool call forced → scode returns "not found" → model relays.
 /// Live: model may try and get error, or check first and report.

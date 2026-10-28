@@ -95,49 +95,7 @@ fn resume_pairs_reused_tool_ids_with_their_own_assistant_chain() {
     let path = root.join("interleaved.jsonl");
     let dump = root.join("requests");
     fs::create_dir_all(&dump).unwrap();
-    let metadata: Value = serde_json::from_str(
-        &Session::new()
-            .with_workspace_root(root)
-            .to_json()
-            .unwrap()
-            .render(),
-    )
-    .unwrap();
-    fs::write(&path, format!("{}\n", json!({"type":"history_checkpoint","history_version":1,"id":"seed","parent_id":null,"meta":metadata,"messages":[]}))).unwrap();
-    let messages = [
-        identified(
-            ConversationMessage::user_text("Read A"),
-            "a-user",
-            Some("seed"),
-            None,
-        ),
-        identified(
-            ConversationMessage::user_text("Read B"),
-            "b-user",
-            Some("seed"),
-            None,
-        ),
-        identified(tool_call(), "a-assistant", Some("a-user"), None),
-        identified(tool_call(), "b-assistant", Some("b-user"), None),
-        identified(
-            ConversationMessage::tool_result("call_1", "read_file", "A_PRIVATE_RESULT", false),
-            "a-result",
-            Some("a-assistant"),
-            Some("a-assistant"),
-        ),
-        identified(
-            ConversationMessage::tool_result("call_1", "read_file", "B_SELECTED_RESULT", false),
-            "b-result",
-            Some("b-assistant"),
-            Some("b-assistant"),
-        ),
-    ];
-    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-    for message in &messages {
-        let payload: Value = serde_json::from_str(&message.to_json().render()).unwrap();
-        writeln!(file, "{}", json!({"type":"message","message":payload})).unwrap();
-    }
-    drop(file);
+    seed_interleaved_tool_history(&path, root);
     let selected = Session::load_from_path(&path).unwrap();
     assert_eq!(selected.messages().len(), 3);
     assert_eq!(
@@ -166,7 +124,7 @@ fn resume_pairs_reused_tool_ids_with_their_own_assistant_chain() {
     cli.expect("The answer is 4").unwrap_or_else(|error| {
         panic!(
             "resumed model answer: {error}\n{}",
-            cli.render(|screen| screen.contents())
+            cli.render(common::screen_contents)
         )
     });
     assert_eq!(cli.expect_eof().unwrap(), 0);
@@ -241,7 +199,7 @@ fn run_print_turn(env: &TestEnv, transcript: &std::path::Path, marker: &str) {
     cli.expect("The answer is 4").unwrap_or_else(|error| {
         panic!(
             "resumed model answer: {error:?}\n{}",
-            cli.render(|screen| screen.contents())
+            cli.render(common::screen_contents)
         )
     });
     assert_eq!(cli.expect_eof().unwrap(), 0);
@@ -331,7 +289,7 @@ fn run_two_cli_contexts(is_second_started_late: bool, is_legacy_seed: bool) {
     let prompt = format!("SECOND_CONTEXT_PROMPT {prompt}");
     second.send(&prompt).unwrap();
     common::expect_input_line(
-        &second,
+        second,
         "SECOND_CONTEXT_PROMPT",
         env.timeout(),
         "second prompt entered",
@@ -450,7 +408,7 @@ fn assert_two_cli_contexts(
 fn write_gate(root: &std::path::Path) {
     fs::write(
         root.join("gate.cjs"),
-        r#"
+        r"
 const fs = require('fs');
 const label = process.argv[2];
 fs.writeFileSync(label + '.ready', 'tool running');
@@ -460,7 +418,7 @@ const timer = setInterval(() => {
   fs.appendFileSync(label + '.effect', label + ' durable effect');
   process.stdout.write((label + '_OUTPUT_').repeat(6000));
 }, 10);
-"#,
+",
     )
     .unwrap();
 }
@@ -681,7 +639,7 @@ fn idle_runtime_preserves_continuation_and_prevents_session_deletion() {
         .unwrap_or_else(|error| {
             panic!(
                 "live runtime deletion: {error}\n{}",
-                rejected.render(|s| s.contents())
+                rejected.render(common::screen_contents)
             )
         });
     exit_cli(&env, &mut rejected);
@@ -954,10 +912,10 @@ fn interrupted_final_records_recover_without_changing_committed_history() {
         let mut interrupted = committed.clone();
         match mode {
             "partial-json" => {
-                interrupted.extend_from_slice(br#"{"type":"message","message":{"blocks":["#)
+                interrupted.extend_from_slice(br#"{"type":"message","message":{"blocks":["#);
             }
             "partial-utf8" => {
-                interrupted.extend_from_slice(b"{\"type\":\"message\",\"text\":\"\xe4")
+                interrupted.extend_from_slice(b"{\"type\":\"message\",\"text\":\"\xe4");
             }
             _ => {
                 assert_eq!(interrupted.pop(), Some(b'\n'));
@@ -1079,4 +1037,50 @@ fn automatic_pruning_records_a_new_view_and_preserves_the_full_source_result() {
         !source_ids.contains(&pruned.history.as_ref().unwrap().id),
         "derived payload reused the source identity"
     );
+}
+
+fn seed_interleaved_tool_history(path: &std::path::Path, root: &std::path::Path) {
+    let metadata: Value = serde_json::from_str(
+        &Session::new()
+            .with_workspace_root(root)
+            .to_json()
+            .unwrap()
+            .render(),
+    )
+    .unwrap();
+    fs::write(path, format!("{}\n", json!({"type":"history_checkpoint","history_version":1,"id":"seed","parent_id":null,"meta":metadata,"messages":[]}))).unwrap();
+    let messages = [
+        identified(
+            ConversationMessage::user_text("Read A"),
+            "a-user",
+            Some("seed"),
+            None,
+        ),
+        identified(
+            ConversationMessage::user_text("Read B"),
+            "b-user",
+            Some("seed"),
+            None,
+        ),
+        identified(tool_call(), "a-assistant", Some("a-user"), None),
+        identified(tool_call(), "b-assistant", Some("b-user"), None),
+        identified(
+            ConversationMessage::tool_result("call_1", "read_file", "A_PRIVATE_RESULT", false),
+            "a-result",
+            Some("a-assistant"),
+            Some("a-assistant"),
+        ),
+        identified(
+            ConversationMessage::tool_result("call_1", "read_file", "B_SELECTED_RESULT", false),
+            "b-result",
+            Some("b-assistant"),
+            Some("b-assistant"),
+        ),
+    ];
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    for message in &messages {
+        let payload: Value = serde_json::from_str(&message.to_json().render()).unwrap();
+        writeln!(file, "{}", json!({"type":"message","message":payload})).unwrap();
+    }
+    drop(file);
 }

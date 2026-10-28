@@ -222,113 +222,8 @@ fn serve(
         ("200 OK", json!({"input_tokens": 1000}))
     } else if !is_post {
         ("200 OK", json!({"data": []}))
-    } else if mode == "openai-prompt-limit" && !compaction {
-        if number == 1 {
-            (
-                "400 Bad Request",
-                json!({"code":"invalid-argument","error":"This model's maximum prompt length is 200000 but the request contains 205005 tokens."}),
-            )
-        } else {
-            (
-                "200 OK",
-                json!({"id":"recovered-turn","object":"chat.completion","created":0,"model":"grok-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"GROK_PROMPT_RECOVERED"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010}}),
-            )
-        }
-    } else if mode == "budget-transport-exhausted"
-        || (mode == "budget-transport-fallback" && number <= 2)
-    {
-        (
-            "503 Service Unavailable",
-            json!({"type":"error", "error":{"type":"overloaded_error", "message":"fixture transient overload"}}),
-        )
-    } else if mode.starts_with("gemini-") {
-        let mut candidate = json!({"content":{"role":"model","parts":[{"text":"<summary>PROJECT_ALPHA complete checkpoint.</summary>"}]}});
-        if mode != "gemini-missing-terminal" {
-            candidate["finishReason"] = json!(if mode == "gemini-truncated" {
-                "MAX_TOKENS"
-            } else {
-                "STOP"
-            });
-        }
-        (
-            "200 OK",
-            json!({"candidates":[candidate],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":50}}),
-        )
-    } else if mode.starts_with("codex-") {
-        (
-            "200 OK",
-            json!({"usage":{"input_tokens":1000,"output_tokens":50}}),
-        )
-    } else if mode.starts_with("openai-") {
-        openai_completion_response(&first, mode, number)
-    } else if mode.starts_with("internal")
-        && (request["model"]
-            != if mode == "internal-prefixed" {
-                "intranet/apeiron-v1"
-            } else {
-                "apeiron-v1"
-            }
-            || request["max_tokens"].as_u64().unwrap_or(u64::MAX) > 1024)
-    {
-        (
-            "400 Bad Request",
-            json!({"type":"error","error":{"type":"invalid_request_error","message":format!("internal deployment rejected model={} max_tokens={}", request["model"], request["max_tokens"])}}),
-        )
-    } else if mode == "long-summary-fallback" && number == 1 {
-        (
-            "400 Bad Request",
-            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture cache-safe compaction not supported"}}),
-        )
-    } else if mode == "auth-unsupported" {
-        (
-            "401 Unauthorized",
-            json!({"type":"error", "error":{"type":"authentication_error", "message":"fixture auth scheme not supported; cache-safe compaction not supported"}}),
-        )
-    } else if matches!(mode, "error" | "post-error") {
-        (
-            "400 Bad Request",
-            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
-        )
     } else {
-        // A checkpoint that needs more than the former 8192-token ceiling.
-        // The provider truncates it when the actual request budget is too small.
-        let long_summary = mode.starts_with("long-summary");
-        let truncated = mode == "truncated"
-            || (mode == "budget-truncated-then-success" && number == 1)
-            || (long_summary && request["max_tokens"].as_u64().unwrap_or(0) < 10_000);
-        let mut text = match mode {
-            "empty" => String::new(),
-            "growing" => "unhelpful repetition ".repeat(20_000),
-            // The transport deliberately supplies complete but oversized
-            // checkpoints. The runtime must validate the installed history,
-            // even when a gateway ignores the requested visible-text budget.
-            "budget-weak-then-target" if number == 1 => framed_fixture_summary(8_999),
-            "budget-over-ceiling-then-success" if number == 1 => framed_fixture_summary(4_000),
-            "budget-transport-fallback" if number == 3 => framed_fixture_summary(8_999),
-            "budget-weak-then-target" | "budget-transport-fallback" => {
-                framed_fixture_summary(1_000)
-            }
-            "budget-over-target" => framed_fixture_summary(6_000),
-            "budget-small-output" => framed_fixture_summary(400),
-            "budget-delayed" => {
-                std::thread::sleep(Duration::from_secs(4));
-                framed_fixture_summary(1_000)
-            }
-            _ if long_summary && truncated => "<summary>Incomplete checkpoint".into(),
-            _ if long_summary => format!("<summary>PROJECT_ALPHA {}CHECKPOINT_COMPLETE</summary>", "fact ".repeat(7_200)),
-            _ => format!("<summary>Consolidated checkpoint {number}: preserve project ALPHA and pending deployment. Next: verify tests.</summary>"),
-        };
-        if compaction
-            && request
-                .to_string()
-                .contains("Optional checkpoint metadata:")
-        {
-            text.push_str("\n<agent-description>\"Updated peer task\"</agent-description>");
-        }
-        (
-            "200 OK",
-            json!({"id":"compact-fixture", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6", "content":[{"type":"text", "text":text}], "stop_reason":if truncated {"max_tokens"} else {"end_turn"}, "usage":{"input_tokens":1000,"output_tokens":if long_summary {10_000} else {50}}}),
-        )
+        model_compaction_response(&first, mode, number, &request, compaction)
     };
     #[cfg(unix)]
     if is_post {
@@ -1037,49 +932,7 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
         cli.send("/exit\r").unwrap();
         assert_eq!(cli.expect_eof().unwrap(), 0);
 
-        let requests = provider.requests.lock().unwrap();
-        let checkpoints: Vec<_> = requests
-            .iter()
-            .filter(|request| is_compaction_request(request))
-            .collect();
-        assert_eq!(checkpoints.len(), 2);
-        let tasks: Vec<_> = requests
-            .iter()
-            .filter(|request| !is_compaction_request(request))
-            .collect();
-        assert_eq!(tasks.len(), 1);
-        assert!(tasks[0]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| {
-                message["content"].as_array().is_some_and(|content| {
-                    content.iter().any(|block| {
-                        block["type"] == "image"
-                            && block["source"]["data"]
-                                .as_str()
-                                .is_some_and(|data| data.len() == 5_529_440)
-                    })
-                })
-            }));
-        assert!(checkpoints[0]["tools"].is_array());
-        assert!(checkpoints[1]["tools"].is_null());
-        let first_request = checkpoints[0].to_string();
-        let initial_cap: u64 = first_request
-            .split("This run requires the entire summary to fit within ")
-            .nth(1)
-            .unwrap()
-            .split(" tokens")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!(initial_cap >= 512);
-        if mode == "budget-truncated-then-success" {
-            assert_eq!(checkpoints[1]["max_tokens"], json!(initial_cap));
-        } else {
-            assert!(checkpoints[1]["max_tokens"].as_u64().unwrap() < initial_cap);
-        }
+        assert_retained_image_requests(&provider.requests.lock().unwrap(), mode);
     }
 }
 
@@ -1945,7 +1798,7 @@ fn compact_with_model(
     let budget = Duration::from_secs(30);
     let deadline = std::time::Instant::now() + budget;
     loop {
-        let screen = cli.render(|screen| screen.contents());
+        let screen = cli.render(common::screen_contents);
         if common::screen_contains(&screen, expected) {
             break;
         }
@@ -1965,8 +1818,8 @@ fn compact_with_model(
                     "scode exited with code {code} without ever showing \
                      {expected:?}\n{screen}"
                 ),
-                Err(_) => panic!(
-                    "timed out after {budget:?} waiting for {expected:?}; scode \
+                Err(error) => panic!(
+                    "timed out after {budget:?} waiting for {expected:?}: {error}; scode \
                      is still running\n{screen}"
                 ),
             }
@@ -2318,8 +2171,8 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
     );
 }
 
-/// TodoWrite is whole-list-replace with no read tool, so the model needs the
-/// exact list back in context after compaction discards the old TodoWrite
+/// `TodoWrite` is whole-list-replace with no read tool, so the model needs the
+/// exact list back in context after compaction discards the old `TodoWrite`
 /// messages. Seed a todo store, compact, and assert the compacted history
 /// carries the structured list forward (CC todo-continuity parity).
 #[test]
@@ -2690,7 +2543,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
     cli.send("\r").unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let screen = cli.render(|s| s.contents());
+        let screen = cli.render(common::screen_contents);
         if common::screen_contains(&screen, "no active history") {
             break;
         }
@@ -2852,18 +2705,7 @@ fn subagent_compaction_uses_shared_text_transport() {
     // No model was specified in the spawn. Both the child and its compaction
     // must use the parent's configured route, not the response's model label.
     assert!(requests.iter().all(|r| r["model"] == "intranet/child-v1"));
-    let manifests = std::fs::read_dir(workspace.root.join(".sudocode-agents"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .map(|entry| {
-            serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
-        })
-        .filter(|manifest| manifest.get("agentId").is_some())
-        .collect::<Vec<_>>();
-    assert_eq!(manifests.len(), 1);
-    assert_eq!(manifests[0]["model"], "claude-sonnet");
-    assert_eq!(manifests[0]["status"], "completed");
+    assert_delegated_manifest(&workspace);
     let checkpoint = checkpoints[0];
     let child_turns = requests.iter().filter(|request| {
         !is_compaction_request(request) && request["system"] == checkpoint["system"]
@@ -2995,7 +2837,7 @@ fn provider_prompt_length_rejection_compacts_before_resending_the_pending_turn()
     cli.expect("GROK_PROMPT_RECOVERED").unwrap_or_else(|error| {
         panic!(
             "pending turn did not complete after compaction: {error}\n{}\nrequest count: {}",
-            cli.render(|screen| screen.contents()),
+            cli.render(common::screen_contents),
             provider.requests.lock().unwrap().len()
         );
     });
@@ -3143,13 +2985,13 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
         .unwrap_or_else(|error| {
             panic!(
                 "{error}\n{}\nrequests: {:?}",
-                cli.render(|screen| screen.contents()),
+                cli.render(common::screen_contents),
                 provider
                     .requests
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|request| is_compaction_request(request))
+                    .map(is_compaction_request)
                     .collect::<Vec<_>>()
             );
         });
@@ -3170,4 +3012,190 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
         "no further task request after compaction fails"
     );
     assert!(requests.iter().any(is_compaction_request));
+}
+
+fn anthropic_checkpoint_response(
+    mode: &str,
+    number: usize,
+    request: &Value,
+    compaction: bool,
+) -> (&'static str, Value) {
+    // A checkpoint that needs more than the former 8192-token ceiling.
+    // The provider truncates it when the actual request budget is too small.
+    let long_summary = mode.starts_with("long-summary");
+    let truncated = mode == "truncated"
+        || (mode == "budget-truncated-then-success" && number == 1)
+        || (long_summary && request["max_tokens"].as_u64().unwrap_or(0) < 10_000);
+    let mut text = match mode {
+            "empty" => String::new(),
+            "growing" => "unhelpful repetition ".repeat(20_000),
+            // The transport deliberately supplies complete but oversized
+            // checkpoints. The runtime must validate the installed history,
+            // even when a gateway ignores the requested visible-text budget.
+            "budget-weak-then-target" if number == 1 => framed_fixture_summary(8_999),
+            "budget-over-ceiling-then-success" if number == 1 => framed_fixture_summary(4_000),
+            "budget-transport-fallback" if number == 3 => framed_fixture_summary(8_999),
+            "budget-weak-then-target" | "budget-transport-fallback" => {
+                framed_fixture_summary(1_000)
+            }
+            "budget-over-target" => framed_fixture_summary(6_000),
+            "budget-small-output" => framed_fixture_summary(400),
+            "budget-delayed" => {
+                std::thread::sleep(Duration::from_secs(4));
+                framed_fixture_summary(1_000)
+            }
+            _ if long_summary && truncated => "<summary>Incomplete checkpoint".into(),
+            _ if long_summary => format!("<summary>PROJECT_ALPHA {}CHECKPOINT_COMPLETE</summary>", "fact ".repeat(7_200)),
+            _ => format!("<summary>Consolidated checkpoint {number}: preserve project ALPHA and pending deployment. Next: verify tests.</summary>"),
+        };
+    if compaction
+        && request
+            .to_string()
+            .contains("Optional checkpoint metadata:")
+    {
+        text.push_str("\n<agent-description>\"Updated peer task\"</agent-description>");
+    }
+    (
+        "200 OK",
+        json!({"id":"compact-fixture", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6", "content":[{"type":"text", "text":text}], "stop_reason":if truncated {"max_tokens"} else {"end_turn"}, "usage":{"input_tokens":1000,"output_tokens":if long_summary {10_000} else {50}}}),
+    )
+}
+
+fn model_compaction_response(
+    first: &str,
+    mode: &str,
+    number: usize,
+    request: &Value,
+    compaction: bool,
+) -> (&'static str, Value) {
+    if mode == "openai-prompt-limit" && !compaction {
+        if number == 1 {
+            (
+                "400 Bad Request",
+                json!({"code":"invalid-argument","error":"This model's maximum prompt length is 200000 but the request contains 205005 tokens."}),
+            )
+        } else {
+            (
+                "200 OK",
+                json!({"id":"recovered-turn","object":"chat.completion","created":0,"model":"grok-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"GROK_PROMPT_RECOVERED"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010}}),
+            )
+        }
+    } else if mode == "budget-transport-exhausted"
+        || (mode == "budget-transport-fallback" && number <= 2)
+    {
+        (
+            "503 Service Unavailable",
+            json!({"type":"error", "error":{"type":"overloaded_error", "message":"fixture transient overload"}}),
+        )
+    } else if mode.starts_with("gemini-") {
+        let mut candidate = json!({"content":{"role":"model","parts":[{"text":"<summary>PROJECT_ALPHA complete checkpoint.</summary>"}]}});
+        if mode != "gemini-missing-terminal" {
+            candidate["finishReason"] = json!(if mode == "gemini-truncated" {
+                "MAX_TOKENS"
+            } else {
+                "STOP"
+            });
+        }
+        (
+            "200 OK",
+            json!({"candidates":[candidate],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":50}}),
+        )
+    } else if mode.starts_with("codex-") {
+        (
+            "200 OK",
+            json!({"usage":{"input_tokens":1000,"output_tokens":50}}),
+        )
+    } else if mode.starts_with("openai-") {
+        openai_completion_response(first, mode, number)
+    } else if mode.starts_with("internal")
+        && (request["model"]
+            != if mode == "internal-prefixed" {
+                "intranet/apeiron-v1"
+            } else {
+                "apeiron-v1"
+            }
+            || request["max_tokens"].as_u64().unwrap_or(u64::MAX) > 1024)
+    {
+        (
+            "400 Bad Request",
+            json!({"type":"error","error":{"type":"invalid_request_error","message":format!("internal deployment rejected model={} max_tokens={}", request["model"], request["max_tokens"])}}),
+        )
+    } else if mode == "long-summary-fallback" && number == 1 {
+        (
+            "400 Bad Request",
+            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture cache-safe compaction not supported"}}),
+        )
+    } else if mode == "auth-unsupported" {
+        (
+            "401 Unauthorized",
+            json!({"type":"error", "error":{"type":"authentication_error", "message":"fixture auth scheme not supported; cache-safe compaction not supported"}}),
+        )
+    } else if matches!(mode, "error" | "post-error") {
+        (
+            "400 Bad Request",
+            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
+        )
+    } else {
+        anthropic_checkpoint_response(mode, number, request, compaction)
+    }
+}
+
+fn assert_retained_image_requests(requests: &[Value], mode: &str) {
+    let checkpoints: Vec<_> = requests
+        .iter()
+        .filter(|request| is_compaction_request(request))
+        .collect();
+    assert_eq!(checkpoints.len(), 2);
+    let tasks: Vec<_> = requests
+        .iter()
+        .filter(|request| !is_compaction_request(request))
+        .collect();
+    assert_eq!(tasks.len(), 1);
+    assert!(tasks[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["content"].as_array().is_some_and(|content| {
+                content.iter().any(|block| {
+                    block["type"] == "image"
+                        && block["source"]["data"]
+                            .as_str()
+                            .is_some_and(|data| data.len() == 5_529_440)
+                })
+            })
+        }));
+    assert!(checkpoints[0]["tools"].is_array());
+    assert!(checkpoints[1]["tools"].is_null());
+    let first_request = checkpoints[0].to_string();
+    let initial_cap: u64 = first_request
+        .split("This run requires the entire summary to fit within ")
+        .nth(1)
+        .unwrap()
+        .split(" tokens")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(initial_cap >= 512);
+    if mode == "budget-truncated-then-success" {
+        assert_eq!(checkpoints[1]["max_tokens"], json!(initial_cap));
+    } else {
+        assert!(checkpoints[1]["max_tokens"].as_u64().unwrap() < initial_cap);
+    }
+}
+
+fn assert_delegated_manifest(workspace: &HarnessWorkspace) {
+    let manifests = std::fs::read_dir(workspace.root.join(".sudocode-agents"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
+        })
+        .filter(|manifest| manifest.get("agentId").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["model"], "claude-sonnet");
+    assert_eq!(manifests[0]["status"], "completed");
 }

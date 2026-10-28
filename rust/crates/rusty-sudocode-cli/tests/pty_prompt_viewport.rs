@@ -38,9 +38,13 @@ fn finish(session: &mut PtySession, env: &TestEnv) {
 }
 
 fn begin_history(env: &TestEnv, session: &mut PtySession) {
-    let document = (0..90)
-        .map(|row| format!("ViewportRow{row:03} ordinary answer text.\n\n"))
-        .collect::<String>();
+    let document = (0..90).fold(String::new(), |mut fixture_text, row| {
+        let _ = std::fmt::Write::write_fmt(
+            &mut fixture_text,
+            format_args!("ViewportRow{row:03} ordinary answer text.\n\n"),
+        );
+        fixture_text
+    });
     let prompt = common::terminal_host::prose_prompt(
         env,
         &document,
@@ -70,45 +74,7 @@ fn scrolling_keeps_the_editor_and_context_and_preserves_the_draft() {
         env.timeout(),
         "browse older answer",
     );
-    session.render(|screen| {
-        let raw = screen.raw();
-        assert!(
-            raw.rows(0, raw.size().1)
-                .next()
-                .unwrap()
-                .contains("PROSE_CONTROL"),
-            "context header: {}",
-            screen.contents()
-        );
-        let input_row = raw
-            .rows(0, raw.size().1)
-            .position(|row| row.contains("draft界"))
-            .unwrap();
-        assert!(
-            input_row >= 27,
-            "composer remains at the bottom: {input_row}"
-        );
-        assert_ne!(
-            format!(
-                "{:?}",
-                raw.cell(input_row.try_into().unwrap(), 80)
-                    .unwrap()
-                    .bgcolor()
-            ),
-            "Default",
-            "filled composer"
-        );
-        assert_ne!(
-            format!(
-                "{:?}",
-                raw.cell(input_row.try_into().unwrap(), 0)
-                    .unwrap()
-                    .fgcolor()
-            ),
-            "Default",
-            "fallback surface keeps readable text"
-        );
-    });
+    assert_browsing_editor_surface(&session);
     let before = session.render(|screen| {
         screen
             .raw()
@@ -216,7 +182,7 @@ fn shaded_prompts_replay_into_native_history_on_exit() {
     finish(&mut session, &env);
     assert!(
         session
-            .render(|s| s.contents())
+            .render(common::screen_contents)
             .contains("Say hello briefly"),
         "native record restored after the viewport closes"
     );
@@ -279,9 +245,13 @@ fn older_history_remains_readable_after_many_pages() {
     let env = TestEnv::new_mock("prompt-viewport-many-pages");
     let mut session = start(&env, true, false);
     let marker = common::turn_status_marker(&session);
-    let document = (0..600)
-        .map(|row| format!("ArchiveRow{row:03} ordinary answer text.\n\n"))
-        .collect::<String>();
+    let document = (0..600).fold(String::new(), |mut fixture_text, row| {
+        let _ = std::fmt::Write::write_fmt(
+            &mut fixture_text,
+            format_args!("ArchiveRow{row:03} ordinary answer text.\n\n"),
+        );
+        fixture_text
+    });
     let prompt = common::terminal_host::prose_prompt(
         &env,
         &document,
@@ -441,9 +411,13 @@ fn viewport_browser_interaction() {
 fn run_viewport_observer(observer: &str, enabled: bool) {
     let env = TestEnv::new_mock("prompt-viewport-measurements");
     let root = env.workspace_root();
-    let document = (0..90)
-        .map(|row| format!("ViewportRow{row:03} ordinary answer text.\n\n"))
-        .collect::<String>();
+    let document = (0..90).fold(String::new(), |mut fixture_text, row| {
+        let _ = std::fmt::Write::write_fmt(
+            &mut fixture_text,
+            format_args!("ViewportRow{row:03} ordinary answer text.\n\n"),
+        );
+        fixture_text
+    });
     let prompt = common::terminal_host::prose_prompt(
         &env,
         &document,
@@ -480,4 +454,46 @@ fn run_viewport_observer(observer: &str, enabled: bool) {
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
     assert_eq!(value["status"], "complete", "{value}");
     assert_eq!(value["enabled"], enabled);
+}
+
+fn assert_browsing_editor_surface(session: &PtySession) {
+    session.render(|screen| {
+        let raw = screen.raw();
+        assert!(
+            raw.rows(0, raw.size().1)
+                .next()
+                .unwrap()
+                .contains("PROSE_CONTROL"),
+            "context header: {}",
+            screen.contents()
+        );
+        let input_row = raw
+            .rows(0, raw.size().1)
+            .position(|row| row.contains("draft界"))
+            .unwrap();
+        assert!(
+            input_row >= 27,
+            "composer remains at the bottom: {input_row}"
+        );
+        assert_ne!(
+            format!(
+                "{:?}",
+                raw.cell(input_row.try_into().unwrap(), 80)
+                    .unwrap()
+                    .bgcolor()
+            ),
+            "Default",
+            "filled composer"
+        );
+        assert_ne!(
+            format!(
+                "{:?}",
+                raw.cell(input_row.try_into().unwrap(), 0)
+                    .unwrap()
+                    .fgcolor()
+            ),
+            "Default",
+            "fallback surface keeps readable text"
+        );
+    });
 }

@@ -853,9 +853,9 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
     // Keep the sentinel only in envelope metadata, while naming exactly which
     // received field belongs in the tool argument rather than asking for prose.
     const BODY: &str = concat!(
-        "Read the separate Summary: header above this message body. ",
+        "Read the summary attribute in this message's opening XML tag. ",
         "Use send to reply to this message's sender. Set the message argument ",
-        "to exactly the value after Summary:, without the label, instructions, ",
+        "to exactly that attribute's value, without quotes, instructions, ",
         "extra whitespace, or any other text. Then say ACP-SUMMARY-COMPLETE. ",
         "Do not write files or run shell commands."
     );

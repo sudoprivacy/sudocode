@@ -1254,16 +1254,13 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
                     metrics.read_share_pct = None;
                     metrics.write_share_pct = None;
                 }
-                let mut report = serde_json::json!({
-                    "session": index + 1,
-                    "tracked_requests": stats.tracked_requests,
-                    "cache_efficiency": metrics,
-                    "completion_intervals": engine_core::cache_report::completion_intervals(
-                        &root.join(name).join("requests.jsonl")),
-                });
-                if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-                    report["ttl_advisor"] = engine_core::cache_advisor::report(&root.join(name));
-                }
+                let mut report = engine_core::cache_report::session_report(
+                    &root.join(name),
+                    runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor),
+                );
+                report["session"] = serde_json::json!(index + 1);
+                report["tracked_requests"] = serde_json::json!(stats.tracked_requests);
+                report["cache_efficiency"] = serde_json::json!(metrics);
                 report
             }).collect::<Vec<_>>(),
         });

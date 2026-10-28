@@ -178,7 +178,7 @@ pub struct SessionRequestFields {
 /// `sticky.hash_source` was `cacheable_content` rather than the session id.
 ///
 /// Derived rather than persisted, so this adds no on-disk state; hashed
-/// through UUIDv5 so the hostname and username never leave the machine.
+/// through `UUIDv5` so the hostname and username never leave the machine.
 fn device_id() -> &'static str {
     static DEVICE_ID: OnceLock<String> = OnceLock::new();
     DEVICE_ID.get_or_init(|| {

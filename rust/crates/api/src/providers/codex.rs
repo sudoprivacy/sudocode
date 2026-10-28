@@ -187,7 +187,7 @@ impl CodexClient {
                 &headers,
                 &payload,
                 &self.retry_policy,
-                |response| check_codex_response(response),
+                check_codex_response,
                 trace_id,
             )
             .await?;
@@ -423,10 +423,9 @@ impl SseParser {
         // Look for the double-newline frame separator.
         let (frame_end, sep_len) = if let Some(pos) = text.find("\n\n") {
             (pos, 2)
-        } else if let Some(pos) = text.find("\r\n\r\n") {
-            (pos, 4)
         } else {
-            return None;
+            let pos = text.find("\r\n\r\n")?;
+            (pos, 4)
         };
 
         let frame_text = &text[..frame_end];

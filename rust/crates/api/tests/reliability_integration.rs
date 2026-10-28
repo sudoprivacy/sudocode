@@ -377,7 +377,7 @@ fn timeout_config_resolves_seconds_zero_and_env() {
 
     let default = TimeoutConfig::default();
     assert_eq!(default.connect_timeout, Some(Duration::from_secs(30)));
-    assert_eq!(default.read_timeout, Some(Duration::from_secs(300)));
+    assert_eq!(default.read_timeout, Some(Duration::from_mins(5)));
 
     // Env parsing: explicit value, zero-disables, garbage falls back.
     // Serialized against other env-touching tests via the process env itself

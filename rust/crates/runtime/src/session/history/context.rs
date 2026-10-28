@@ -30,7 +30,7 @@ impl ContextHistory {
         let record = if history.graph().latest_commit().is_none() {
             HistoryRecord::initialize(seed.ok_or_else(|| invalid("new history requires a seed"))?)?
         } else {
-            source.map_or_else(HistoryRecord::branch_latest, |id| {
+            source.map_or_else(HistoryRecord::branch_latest_completed, |id| {
                 HistoryRecord::branch(id.into())
             })
         };
@@ -42,7 +42,7 @@ impl ContextHistory {
         match current.history.commit(&record, COMMIT_TIMEOUT)? {
             RecordOutcome::Applied => {}
             RecordOutcome::Rejected(reason) if reason == "history_already_initialized" => {
-                let branch = source.map_or_else(HistoryRecord::branch_latest, |id| {
+                let branch = source.map_or_else(HistoryRecord::branch_latest_completed, |id| {
                     HistoryRecord::branch(id.into())
                 });
                 current.context = branch.context_id().into();

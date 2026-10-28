@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 
 const MAX_BYTES: u64 = 512 * 1024;
 const MAX_DECISIONS: usize = 16;
-const MIN_INTERVALS: usize = 8;
+/// Reuse intervals the replay needs before it suggests anything.
+pub const MIN_INTERVALS: usize = 8;
 const SWITCH_MARGIN: f64 = 0.10;
 
 #[derive(Clone, Default, Deserialize)]
@@ -170,6 +171,57 @@ struct Decision {
     suggested_ttl_seconds: u32,
     reason: String,
     training: Scenario,
+    /// What prompted the decision; empty in files from older builds, which
+    /// only decided at context boundaries.
+    #[serde(default)]
+    trigger: String,
+    /// Whether this decision chose the TTL on the wire, because none was
+    /// pinned. False for advice only, and in files from older builds.
+    #[serde(default)]
+    applied: bool,
+}
+
+/// What prompts a decision. Pinned sessions decide only at boundaries; an
+/// automatic TTL also decides at cold points and every few requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trigger {
+    /// A new context: runtime build or resume, compaction, a model or route change.
+    Boundary,
+    /// The next request follows an idle longer than the TTL in use.
+    Cold,
+    /// Enough requests since the last decision.
+    Periodic,
+}
+
+impl Trigger {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Boundary => "boundary",
+            Self::Cold => "cold",
+            Self::Periodic => "periodic",
+        }
+    }
+}
+
+/// What a decision means for an automatic TTL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Too few reuse intervals, or a model without prices.
+    NoEvidence,
+    /// Both TTLs cost about the same; keep the one in use.
+    Keep,
+    /// This TTL is cheaper by more than the margin.
+    Seconds(u32),
+}
+
+fn verdict(decision: &Decision) -> Verdict {
+    match decision.reason.as_str() {
+        "hypothetical_1h_saving" | "hypothetical_5m_saving" => {
+            Verdict::Seconds(decision.suggested_ttl_seconds)
+        }
+        "within_uncertainty_margin" => Verdict::Keep,
+        _ => Verdict::NoEvidence,
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -308,17 +360,68 @@ fn replay(
 }
 
 /// Called once for a new context, or after a successfully committed compact.
-/// Rebuilding/resuming the same context preserves the already made decision.
-pub fn context_boundary(directory: &Path, segment: u64, model: &str, route: &str, configured: u32) {
-    let mut state = state(directory);
-    if state.decisions.last().is_some_and(|d| {
+/// Rebuilding/resuming the same context keeps the latest decision, which may
+/// be an automatic one from the previous process. Returns its verdict and
+/// whether it was made just now.
+#[must_use]
+pub fn context_boundary(
+    directory: &Path,
+    segment: u64,
+    model: &str,
+    route: &str,
+    configured: u32,
+    applied: bool,
+) -> (Verdict, bool) {
+    let state = state(directory);
+    if let Some(last) = state.decisions.last().filter(|d| {
         d.context_segment == segment
             && d.model == model
             && d.route_key == route
             && d.configured_ttl_seconds == configured
     }) {
-        return;
+        return (verdict(last), false);
     }
+    let verdict = decide_into(
+        state,
+        directory,
+        (segment, model, route),
+        configured,
+        Trigger::Boundary,
+        applied,
+    );
+    (verdict, true)
+}
+
+/// Decide now, whatever was decided before: an automatic TTL does so at a
+/// cold point and every few requests, so a long context still adapts. The
+/// margin is around `current`, the TTL in use, so it does not flip-flop.
+#[must_use]
+pub fn decide(
+    directory: &Path,
+    segment: u64,
+    model: &str,
+    route: &str,
+    current: u32,
+    trigger: Trigger,
+) -> Verdict {
+    decide_into(
+        state(directory),
+        directory,
+        (segment, model, route),
+        current,
+        trigger,
+        true,
+    )
+}
+
+fn decide_into(
+    mut state: State,
+    directory: &Path,
+    (segment, model, route): (u64, &str, &str),
+    configured: u32,
+    trigger: Trigger,
+    applied: bool,
+) -> Verdict {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -368,7 +471,10 @@ pub fn context_boundary(directory: &Path, segment: u64, model: &str, route: &str
         suggested_ttl_seconds: suggestion,
         reason: reason.to_owned(),
         training,
+        trigger: trigger.label().to_owned(),
+        applied,
     });
+    let result = state.decisions.last().map_or(Verdict::NoEvidence, verdict);
     if state.decisions.len() > MAX_DECISIONS {
         state
             .decisions
@@ -383,6 +489,7 @@ pub fn context_boundary(directory: &Path, segment: u64, model: &str, route: &str
             }
         }
     }
+    result
 }
 
 /// Sanitized view consumed by the existing CLI report. No second cost formula
@@ -390,6 +497,8 @@ pub fn context_boundary(directory: &Path, segment: u64, model: &str, route: &str
 #[must_use]
 pub fn report(directory: &Path) -> Value {
     let state = state(directory);
+    // Unpinned sessions follow their latest decision; pinned ones only advise.
+    let applied = state.decisions.last().is_some_and(|d| d.applied);
     let (rows, coverage) = history(directory);
     let table = prices();
     let mut seen = HashSet::new();
@@ -405,7 +514,7 @@ pub fn report(directory: &Path) -> Value {
         }
     }
     json!({
-        "mode": "advisory_only", "applied": false,
+        "mode": if applied { "automatic" } else { "advisory_only" }, "applied": applied,
         "timing_basis": "request_start", "upstream_ttl": "unknown",
         "cost_basis": table.basis, "price_version": table.version,
         "comparison_kind": "hypothetical_not_causal_or_billed_savings",
@@ -443,9 +552,30 @@ pub struct TtlAdvice {
     /// model the price table does not know.
     pub switch_now_usd: Option<f64>,
     pub switch_cold_usd: Option<f64>,
+    /// No TTL is pinned: the session's own history picks it.
+    pub auto: bool,
+    /// Whether the decision had enough reuse intervals to compare at all.
+    pub has_evidence: bool,
+    /// Reuse intervals the decision replayed; [`MIN_INTERVALS`] are needed.
+    pub intervals: usize,
 }
 
 impl TtlAdvice {
+    /// The TTL an automatic session is heading for: the cheaper one when the
+    /// history shows a saving, the one in use within the margin, and 5m
+    /// without evidence. Its first full write is the cheaper one, and moving
+    /// to 1h later at a cold point costs nothing extra.
+    #[must_use]
+    pub fn auto_target(&self) -> u32 {
+        if self.has_saving {
+            self.suggested_seconds
+        } else if self.has_evidence {
+            self.effective_seconds
+        } else {
+            300
+        }
+    }
+
     /// The suggested TTL's saving over the other one, as a percentage.
     #[must_use]
     pub fn saving_pct(&self) -> f64 {
@@ -537,14 +667,52 @@ pub fn ttl_advice(session_id: &str, model: &str) -> Option<TtlAdvice> {
         cached_tokens,
         switch_now_usd: price.map(|p| tokens * (p.write_1h - p.read) / 1_000_000.0),
         switch_cold_usd: price.map(|p| tokens * (p.write_1h - p.write_5m) / 1_000_000.0),
+        auto: status.auto,
+        has_evidence: verdict(&decision) != Verdict::NoEvidence,
+        intervals: decision.training.eligible_intervals,
     })
 }
 
-/// The footer tip for the current recommendation: a pending switch, or a
-/// suggestion that differs from the TTL in use. `None` otherwise.
+/// The footer tip for the current recommendation. Pinned: a pending switch,
+/// or a suggestion that differs from the TTL in use. Automatic: what it is
+/// about to do, or what it just did when `just_switched`. `None` otherwise.
 #[must_use]
-pub fn session_tip(session_id: &str, model: &str) -> Option<crate::Tip> {
+pub fn session_tip(session_id: &str, model: &str, just_switched: bool) -> Option<crate::Tip> {
     let advice = ttl_advice(session_id, model)?;
+    if advice.auto {
+        let saving = if advice.has_saving {
+            format!(" (−{:.0}%)", advice.saving_pct())
+        } else {
+            String::new()
+        };
+        let target = advice.auto_target();
+        // Waiting for a cold point can be cut short or pinned instead, so that
+        // tip is a footer stop; a done switch is only news.
+        let (priority, message) = if just_switched {
+            (
+                crate::TipPriority::Normal,
+                format!(
+                    "Cache TTL auto: now {}{saving}",
+                    ttl_label(advice.effective_seconds)
+                ),
+            )
+        } else if target != advice.effective_seconds {
+            // A move to 5m reaches the next request; one to 1h waits for a
+            // cold point, where the prefix is rewritten anyway.
+            let when = if target == 3600 {
+                "when cold"
+            } else {
+                "next request"
+            };
+            (
+                crate::TipPriority::Important,
+                format!("Cache TTL auto: {} {when}{saving}", ttl_label(target)),
+            )
+        } else {
+            return None;
+        };
+        return Some(crate::Tip { priority, message });
+    }
     if let Some(pending) = advice.pending {
         let message = match pending.choice {
             crate::cache_ttl::TtlChoice::OneHour if !pending.force_now => {

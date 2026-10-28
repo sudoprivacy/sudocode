@@ -45,8 +45,11 @@ module.exports = async function forkContract(args) {
   if (candidate?.status.state !== 'success')
     throw new Error('The completed real fork measurement must qualify before publishing');
 
+  // Keep the positive case on the real SDK Context. Its repo getter must also
+  // survive the copied contexts used by the rejection cases below.
+  const copiedContext = { ...context, repo: context.repo };
   const staleAttempt = await publish({ ...observed, context: {
-    ...context, payload: { ...context.payload, workflow_run: {
+    ...copiedContext, payload: { ...context.payload, workflow_run: {
       ...context.payload.workflow_run, run_attempt: context.payload.workflow_run.run_attempt - 1,
     } },
   } });
@@ -63,7 +66,7 @@ module.exports = async function forkContract(args) {
     throw new Error(`${label}: an invalid publication unexpectedly qualified`);
   };
   // This publisher's own real run is not an eligible measurement workflow.
-  await reject('wrong workflow', { context: { ...context, payload: {
+  await reject('wrong workflow', { context: { ...copiedContext, payload: {
     ...context.payload, workflow_run: { ...context.payload.workflow_run, id: context.runId },
   } } }, 'Expected a fork rendering pull_request run from this repository');
 
@@ -79,6 +82,8 @@ module.exports = async function forkContract(args) {
     run_id: candidate.run_id, run_attempt: candidate.run_attempt,
     head: candidate.status.sha, positive: 1, rejected: 3,
     attempted_status_writes: attemptedWrites, posted_test_statuses: 0,
+    context_type: context.constructor?.name,
+    context_repo_is_own_property: Object.hasOwn(context, 'repo'),
   }, null, 2));
   core.info('Actual fork run qualifies; stale attempt, wrong workflow and stale artifact rejected');
 };

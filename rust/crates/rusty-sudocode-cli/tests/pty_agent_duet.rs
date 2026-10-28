@@ -237,7 +237,7 @@ fn run_duet(transport: &Transport, offline: bool) {
     // ── 3. The SENDER: another real scode, whose model calls `send` ────────
     // Its own workspace and home: on a node a session's identity is its own
     // name, so two sessions sharing a workspace would be one agent.
-    let sender_env = TestEnv::new("duet-sender");
+    let sender_env = env.peer("duet-sender");
     let prompt = sender_env.prompt(
         &format!(
             "Use send to message {RECEIVER}. The message body must be exactly \

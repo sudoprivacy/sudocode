@@ -700,12 +700,8 @@ pub(crate) fn build_runtime_with_plugin_state(
         if !deferred_section.is_empty() {
             system_prompt.append_dynamic_section(deferred_section);
         }
-        // A2A: teach the model its identity + how to reply, so a receiving loop
-        // knows it can `send` back to a named peer and doesn't echo the message
-        // framing. A host that supplied its own mailbox also drives delivery, and
-        // the prose describing that framing travels with the driver rather than
-        // being guessed here — the co-host's messages arrive wrapped in
-        // `[message from <sender>]`, which only its loop knows to emit.
+        // A2A: teach the model its identity and that only `send` reaches a peer.
+        // A host that supplied its own mailbox adds the same section itself.
         if let Some(peer) = &peer {
             system_prompt.append_dynamic_section(peer.prompt_section());
         }

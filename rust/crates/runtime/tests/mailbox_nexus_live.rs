@@ -1960,6 +1960,9 @@ fn live_cohost_shared_sid_concurrent_contexts() {
             thread::sleep(Duration::from_millis(10));
         }
     };
+    std::fs::write(root.join("SEED.release"), "release").unwrap();
+    let seed = first_controller.request("session/prompt", prompt("SEED"));
+    assert_eq!(seed["result"]["stopReason"], "end_turn", "{seed}");
     let (second, second_controller) = thread::scope(|scope| {
         let _release = Release(vec![root.join("A.release"), root.join("B.release")]);
         let first_prompt = prompt("A");
@@ -2052,17 +2055,14 @@ fn live_cohost_shared_sid_concurrent_contexts() {
     let requests = operator.readdir("/model", "").unwrap();
     for label in ["A", "B"] {
         let own = format!("{label}_CONTEXT_PROMPT");
-        let other = format!("{}_CONTEXT_PROMPT", if label == "A" { "B" } else { "A" });
-        let is_later_resume = label == "B";
+        let other_label = if label == "A" { "B" } else { "A" };
+        let other = format!("{other_label}_CONTEXT_PROMPT");
         let captured: Vec<_> = requests
             .iter()
             .filter(|entry| entry.name.ends_with(".prompt"))
             .filter_map(|entry| operator.read(&listed_path("/model", &entry.name), "").ok())
             .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|request| request["body"]["messages"].to_string().contains(&own))
-            .filter(|request| {
-                is_later_resume || !request["body"]["messages"].to_string().contains(&other)
-            })
             .collect();
         assert!(
             !captured.is_empty(),
@@ -2070,17 +2070,15 @@ fn live_cohost_shared_sid_concurrent_contexts() {
         );
         for request in captured {
             let messages = request["body"]["messages"].to_string();
-            assert_eq!(
-                messages.contains(&other),
-                is_later_resume,
-                "a later resume inherits the source's already written input"
+            assert!(
+                messages.contains("SEED_CONTEXT_PROMPT") && messages.contains("SEED_MODEL_DONE"),
+                "both runtimes inherit the latest completed turn"
             );
-            if is_later_resume {
-                assert!(
-                    !messages.contains("A_MODEL_DONE"),
-                    "the source's later reply must stay outside the frozen continuation"
-                );
-            }
+            assert!(
+                !messages.contains(&other)
+                    && !messages.contains(&format!("{other_label}_MODEL_DONE")),
+                "a sibling's running input and later reply stay in that sibling's context"
+            );
         }
     }
     let linked_agent = format!("{agent}-linked");

@@ -942,7 +942,7 @@ impl Session {
             let graph = history::HistoryGraph::decode(contents.as_bytes())?;
             return match head {
                 Some(head) => graph.revision_session(&head),
-                None => graph.resume_session(),
+                None => graph.completed_session(None),
             }
             .map_err(SessionError::Io);
         }
@@ -1349,7 +1349,7 @@ impl Session {
     pub(crate) fn from_persisted_contents(contents: &str) -> Result<Self, SessionError> {
         let is_record_history = history::is_record_history(contents.as_bytes());
         let mut session = if is_record_history {
-            history::HistoryGraph::decode(contents.as_bytes())?.resume_session()?
+            history::HistoryGraph::decode(contents.as_bytes())?.completed_session(None)?
         } else {
             match JsonValue::parse(contents) {
                 Ok(value) if Self::is_snapshot(&value) => Self::from_json(&value)?,

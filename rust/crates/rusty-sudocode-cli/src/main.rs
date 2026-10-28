@@ -1287,7 +1287,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
     }
     println!("  interval data   per-session in JSON; response completion, expiry unconfirmed");
     if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-        println!("  TTL advice      advisory only; decisions and forward scenarios in JSON; requests unchanged");
+        println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
     }
     println!("  breaks          {unexpected} unexpected, {expected} expected");
     if !by_cause.is_empty() {
@@ -2820,7 +2820,7 @@ fn run_pending_peer_turns(
 ) {
     while let Ok((message, receipt)) = pending.try_recv() {
         waiting.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        let prompt = tools::compose_next_turn_from_envelopes(&[message]);
+        let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(&[message]);
         println!(
             "{}",
             cli::received::render_prompt(
@@ -3457,7 +3457,7 @@ impl Drop for ReplTurnCancelMonitor {
 /// line separates the echo from the turn output that follows, matching the
 /// spacing between other scrollback blocks.
 fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
-    output.print_block(cli::format::format_input_echo(display, render::query_terminal_width()).0);
+    output.user_prompt(display);
 }
 
 /// Commit a received envelope through the same formatter used by replay.
@@ -3471,7 +3471,6 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
     output.print_block(rendered);
 }
 
-/// The footer's cache-TTL tip and whether it offers a switch.
 /// Peer-messaging health, not raw receiver errors, reaches the footer. An
 /// outage that heals within the grace period shows nothing, and the tip clears
 /// itself once receiving recovers. Detail stays in `/status`.
@@ -3516,15 +3515,23 @@ fn a2a_health_tip(health: &runtime::mailbox::ReceiverHealth) -> Option<engine_co
     })
 }
 
+/// The footer's cache-TTL tip and whether it offers a choice. Pinned, the tip
+/// suggests the other TTL; automatic, it is a stop only while a move to 1h
+/// waits for a cold point, which can be applied now or pinned instead.
 fn cache_tip(session_id: &str, model: &str) -> repl_ui::CacheTip {
     let advice = engine_core::cache_advisor::ttl_advice(session_id, model);
+    let just_switched = engine_core::cache_ttl::take_switch_notice(session_id);
     let actionable = advice.as_ref().is_some_and(|advice| {
-        advice.pending.is_none()
-            && advice.has_saving
-            && advice.suggested_seconds != advice.effective_seconds
+        if advice.auto {
+            !just_switched && advice.auto_target() == 3600 && advice.effective_seconds == 300
+        } else {
+            advice.pending.is_none()
+                && advice.has_saving
+                && advice.suggested_seconds != advice.effective_seconds
+        }
     });
     repl_ui::CacheTip {
-        tip: engine_core::cache_advisor::session_tip(session_id, model),
+        tip: engine_core::cache_advisor::session_tip(session_id, model, just_switched),
         advice,
         actionable,
     }
@@ -3551,8 +3558,18 @@ fn apply_cache_ttl(
         }
         (TtlChoice::OneHour, true) => "1h from the next request (rewrites the cached prefix once)",
         (TtlChoice::FiveMinutes, _) => "5m from the next request",
-        (TtlChoice::Auto, _) => {
+        (TtlChoice::Auto, _)
+            if !runtime::experiments::is_enabled(
+                runtime::experiments::Experiment::CacheTtlAdvisor,
+            ) =>
+        {
             "auto: the auth mode decides (1h on a subscription, 5m on an API key)"
+        }
+        (TtlChoice::Auto, false) => {
+            "auto: follows this session's cache stats (to 5m at once, to 1h at the next cold start)"
+        }
+        (TtlChoice::Auto, true) => {
+            "auto: follows this session's cache stats, from the next request"
         }
     };
     match saved {
@@ -3562,12 +3579,41 @@ fn apply_cache_ttl(
 }
 
 /// `Prompt cache TTL: …` for `/cache` and `/cache ttl`.
-fn cache_ttl_status(session_id: &str) -> String {
+fn cache_ttl_status(session_id: &str, model: &str) -> String {
+    use engine_core::cache_advisor::{ttl_label, MIN_INTERVALS};
     use engine_core::cache_ttl::TtlChoice;
     let status = engine_core::cache_ttl::status(session_id);
-    let now = status
-        .effective_seconds
-        .map_or("not sent yet", engine_core::cache_advisor::ttl_label);
+    let now = status.effective_seconds.map_or("not sent yet", ttl_label);
+    if status.auto {
+        let verdict = engine_core::cache_advisor::ttl_advice(session_id, model).map_or(
+            String::new(),
+            |advice| {
+                let target = advice.auto_target();
+                let heading = if target == advice.effective_seconds {
+                    String::new()
+                } else if target == 3600 {
+                    ", switching to 1h at the next cold start".to_owned()
+                } else {
+                    format!(", switching to {} at the next request", ttl_label(target))
+                };
+                if !advice.has_evidence {
+                    format!(
+                        ": collecting {}/{MIN_INTERVALS} reuse intervals{heading}",
+                        advice.intervals
+                    )
+                } else if advice.has_saving {
+                    format!(
+                        ": {} ≈{:.0}% cheaper here{heading}",
+                        ttl_label(advice.suggested_seconds),
+                        advice.saving_pct()
+                    )
+                } else {
+                    format!(": 5m and 1h within 10% here{heading}")
+                }
+            },
+        );
+        return format!("Prompt cache TTL: {now} · auto{verdict}");
+    }
     let pending = status.pending.map_or(String::new(), |pending| {
         let (label, when) = match (pending.choice, pending.force_now) {
             (TtlChoice::OneHour, false) => ("1h", "at the next cold start"),
@@ -3590,13 +3636,20 @@ fn run_repl_iocraft_dispatch(
     // session's messages to scrollback (same as the rustyline path), not just
     // the banner — otherwise a resumed conversation looks empty. Both come from
     // one println in spawn_repl_ui, before raw mode.
-    let banner = {
+    let (banner, startup_prompts) = {
         let banner = cli.startup_banner();
-        let history = cli.render_restored_scrollback();
+        let (history, prompts) = cli.render_restored_scrollback();
         if history.is_empty() {
-            banner
+            (banner, Vec::new())
         } else {
-            format!("{banner}\n{history}")
+            let offset = banner.len() + 1;
+            (
+                format!("{banner}\n{history}"),
+                prompts
+                    .into_iter()
+                    .map(|position| position + offset)
+                    .collect(),
+            )
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
@@ -3639,7 +3692,13 @@ fn run_repl_iocraft_dispatch(
                 .dequeue_all_human()
         })
     };
-    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos, Some(dequeue_hook));
+    let repl = repl_ui::spawn_repl_ui(
+        &permission_label,
+        &banner,
+        startup_prompts,
+        seed_todos,
+        Some(dequeue_hook),
+    );
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
@@ -3908,7 +3967,8 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
-                        let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
+                        let prompt =
+                            runtime::agent_mailbox::compose_next_turn_from_envelopes(&[msg]);
                         (
                             prompt.clone(),
                             prompt,
@@ -5022,16 +5082,23 @@ impl LiveCli {
     /// `render_messages` the rustyline REPL replays on resume, so both REPL
     /// paths render the session SSOT identically — the iocraft path previously
     /// printed only the banner, leaving a resumed session's history invisible.
-    fn render_restored_scrollback(&self) -> String {
+    fn render_restored_scrollback(&self) -> (String, Vec<usize>) {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
-            return String::new();
+            return (String::new(), Vec::new());
         }
         let term_width = crossterm::terminal::size()
             .map(|(cols, _)| cols as usize)
             .unwrap_or(80);
         let renderer = render::TerminalRenderer::new();
-        render_messages(&session.messages(), term_width, &renderer)
+        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
+            cli::format::render_messages_with_prompts(&session.messages(), term_width, &renderer)
+        } else {
+            (
+                render_messages(&session.messages(), term_width, &renderer),
+                Vec::new(),
+            )
+        }
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the
@@ -5879,7 +5946,10 @@ impl LiveCli {
                 let session = self.lifecycle.session_snapshot();
                 let usage = UsageTracker::from_session(&session).cumulative_usage();
                 self.out_println(format_cost_report(usage));
-                self.out_println(cache_ttl_status(&self.lifecycle.session_handle().id));
+                self.out_println(cache_ttl_status(
+                    &self.lifecycle.session_handle().id,
+                    &self.lifecycle.current_model(),
+                ));
                 false
             }
             SlashCommand::CacheTtl { value, now } => {
@@ -5893,7 +5963,10 @@ impl LiveCli {
                 };
                 match choice {
                     Some(choice) => self.out_println(apply_cache_ttl(&session_id, choice, now)),
-                    None => self.out_println(cache_ttl_status(&session_id)),
+                    None => self.out_println(cache_ttl_status(
+                        &session_id,
+                        &self.lifecycle.current_model(),
+                    )),
                 }
                 false
             }

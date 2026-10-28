@@ -70,7 +70,8 @@ module.exports = async function publishFork({ github, context, core, root, polic
       throw new Error('Measured PR base or head changed; rerun its rendering workflow');
     const outputs = {};
     const approval = await require(path.join(root, 'e2e/terminal-resize/policy-review.cjs'))({
-      github, context: { ...context, eventName: 'pull_request', sha: run.head_sha,
+      // Context.repo is a prototype getter, so object spread does not copy it.
+      github, context: { ...context, repo: context.repo, eventName: 'pull_request', sha: run.head_sha,
         payload: { pull_request: pr } },
       core: { ...core, setOutput: (name, value) => { outputs[name] = value; } },
       root, output: path.join(root, 'final-rendering-approval'),

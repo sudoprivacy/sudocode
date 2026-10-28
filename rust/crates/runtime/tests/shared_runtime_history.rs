@@ -16,7 +16,7 @@ use runtime::{
     StaticToolExecutor, SystemPrompt, ToolError,
 };
 
-const CASE: &str = "runtime_resume_inherits_written_prefix_while_native_tool_runs";
+const CASE: &str = "runtime_resume_inherits_completed_turn_while_native_tool_runs";
 const CHILD: &str = "SCODE_SHARED_RUNTIME_CHILD";
 const RECEIPT: &str = "NEXUS_RUNTIME_HISTORY_RECEIPT";
 const WAIT: Duration = Duration::from_secs(30);
@@ -263,7 +263,7 @@ impl Drop for RunningTurn {
 }
 
 #[test]
-fn runtime_resume_inherits_written_prefix_while_native_tool_runs() {
+fn runtime_resume_inherits_completed_turn_while_native_tool_runs() {
     if let Some(root) = std::env::var_os(CHILD) {
         let root = PathBuf::from(root);
         std::fs::write(root.join("tool-pid"), std::process::id().to_string()).unwrap();
@@ -275,7 +275,7 @@ fn runtime_resume_inherits_written_prefix_while_native_tool_runs() {
 }
 
 #[test]
-fn legacy_runtime_resume_inherits_written_prefix_while_native_tool_runs() {
+fn legacy_runtime_resume_inherits_completed_turn_while_native_tool_runs() {
     exercise_runtime_history(false, true);
 }
 
@@ -336,7 +336,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
 
 #[test]
 #[ignore = "requires the real pinned Nexus daemon and mTLS credentials"]
-fn live_runtime_resume_inherits_written_prefix_and_keeps_native_tool_result() {
+fn live_runtime_resume_inherits_completed_turn_and_keeps_native_tool_result() {
     exercise_runtime_history(true, false);
 }
 
@@ -365,8 +365,9 @@ fn exercise_runtime_history(nexus: bool, legacy: bool) {
     wait_for(&root.join("tool-pid"));
     assert!(!root.join("actual-result").exists());
     let loaded = load(&path, nexus);
-    assert!(transcript(loaded.messages()).contains("A_LIVE_TOOL_PROMPT"));
-    assert!(loaded
+    assert!(!transcript(loaded.messages()).contains("A_LIVE_TOOL_PROMPT"));
+    assert!(transcript(loaded.messages()).contains("COMMON_COMPLETED_ANSWER"));
+    assert!(!loaded
         .messages()
         .iter()
         .any(|message| message.blocks.iter().any(|block| matches!(
@@ -381,7 +382,8 @@ fn exercise_runtime_history(nexus: bool, legacy: bool) {
     executor
         .block_on(b.run_turn("B_PRIVATE_PROMPT", None, None))
         .unwrap();
-    assert!(transcript(&requests.lock().unwrap()[0]).contains("A_LIVE_TOOL_PROMPT"));
+    assert!(!transcript(&requests.lock().unwrap()[0]).contains("A_LIVE_TOOL_PROMPT"));
+    assert!(transcript(&requests.lock().unwrap()[0]).contains("COMMON_COMPLETED_ANSWER"));
     assert!(
         !root.join("actual-result").exists(),
         "B must finish while A is still running"
@@ -528,7 +530,7 @@ fn assert_runtime_replay(path: &Path, nexus: bool, sid: &str) {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert!(
-        records.iter().any(|record| {
+        !records.iter().any(|record| {
             record["event"]["type"] == "projection"
                 && record["event"]["messages"]
                     .as_array()
@@ -542,7 +544,7 @@ fn assert_runtime_replay(path: &Path, nexus: bool, sid: &str) {
                         })
                     })
         }),
-        "interrupted recovery must persist its exact result payload"
+        "a completed-turn restore must not synthesize a result for the sibling's running tool"
     );
     assert!(
         records

@@ -123,7 +123,7 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_RECORD_LOG_RECEIPT="$(native_path "$RECORD_RECEIPT")" \
   "${RECORD_TEST[@]}" live_record_log_commits_large_frames_from_independent_clients -- --ignored --nocapture
 
-echo "== [deterministic] runtime resume inherits the written prefix while a native tool runs =="
+echo "== [deterministic] runtime resume inherits the completed turn while a native tool runs =="
 cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_runtime_history -- --nocapture
 HISTORY_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_history_records)
 HISTORY_RECEIPT="$AUTHON_DATA_DIR/shared-history.json"
@@ -135,7 +135,7 @@ RUNTIME_HISTORY_RECEIPT="$AUTHON_DATA_DIR/runtime-history.json"
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_RUNTIME_HISTORY_RECEIPT="$(native_path "$RUNTIME_HISTORY_RECEIPT")" \
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_runtime_history \
-    live_runtime_resume_inherits_written_prefix_and_keeps_native_tool_result -- --ignored --nocapture
+    live_runtime_resume_inherits_completed_turn_and_keeps_native_tool_result -- --ignored --nocapture
 
 if [ "$(uname -s)" = Linux ]; then
   echo "== [deterministic] native failed flush requires a durable read barrier =="

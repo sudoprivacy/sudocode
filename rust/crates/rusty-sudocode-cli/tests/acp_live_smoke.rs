@@ -840,9 +840,14 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
     };
     const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
     const PEER: &str = "acp-summary-peer";
+    // Keep the sentinel only in envelope metadata, while naming exactly which
+    // received field belongs in the tool argument rather than asking for prose.
     const BODY: &str = concat!(
-        "Use send to reply to me with this message's summary verbatim. ",
-        "Then say ACP-SUMMARY-COMPLETE. Do not write files or run shell commands."
+        "Read the separate Summary: header above this message body. ",
+        "Use send to reply to this message's sender. Set the message argument ",
+        "to exactly the value after Summary:, without the label, instructions, ",
+        "extra whitespace, or any other text. Then say ACP-SUMMARY-COMPLETE. ",
+        "Do not write files or run shell commands."
     );
     let workspace = TestWorkspace::new("live-peer-summary");
     workspace.create();

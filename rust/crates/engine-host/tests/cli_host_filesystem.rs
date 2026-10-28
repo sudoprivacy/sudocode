@@ -234,7 +234,7 @@ fn every_method_takes_the_host_spelling() {
         fs.read_to_string(&at("atomic.txt")).expect("read atomic"),
         "atomic\n"
     );
-    assert_reader_snapshot(fs.as_ref(), &at("atomic.txt"));
+    let _snapshot_reader = assert_reader_snapshot(fs.as_ref(), &at("atomic.txt"));
 
     // Directories, renames, removals.
     fs.create_dir_all(&at("sub/deeper"))
@@ -303,7 +303,7 @@ fn every_method_takes_the_host_spelling() {
     );
 }
 
-fn assert_reader_snapshot(fs: &dyn runtime::FsBackend, path: &str) {
+fn assert_reader_snapshot(fs: &dyn runtime::FsBackend, path: &str) -> std::fs::File {
     let mut opened = std::fs::File::open(path).expect("open committed snapshot");
     fs.write_atomic(path, b"replacement publication\n")
         .expect("replace atomic");
@@ -317,6 +317,7 @@ fn assert_reader_snapshot(fs: &dyn runtime::FsBackend, path: &str) {
         fs.read_to_string(path).expect("read replacement"),
         "replacement publication\n"
     );
+    opened
 }
 
 /// Every stored concern follows the BACKEND, for both hosts.

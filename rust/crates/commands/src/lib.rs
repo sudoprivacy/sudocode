@@ -1554,7 +1554,7 @@ pub fn validate_slash_command_input(
             SlashCommand::Cost
         }
         "resume" => SlashCommand::Resume {
-            session_path: remainder.map(|s| s.to_string()),
+            session_path: remainder,
         },
         "config" => {
             if args.first().map(|s| s.to_ascii_lowercase()) == Some("set".into()) {
@@ -2036,7 +2036,7 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             target: None,
         }),
         ["list", ..] => Err(usage_error("plugin list", "")),
-        ["available"] | ["marketplace"] | ["marketplace", "available"] => {
+        ["available" | "marketplace"] | ["marketplace", "available"] => {
             Ok(SlashCommand::Plugins {
                 action: Some("available".to_string()),
                 target: None,
@@ -2778,7 +2778,7 @@ pub fn handle_mcp_slash_command_json_with_plugins(
 /// into the runtime-config servers, returning the merged map plus a provenance
 /// map keyed by server name. User/global runtime servers always win on name
 /// collision (matches `cli::mcp::merged_mcp_servers`). Plugin servers also
-/// carry their plugin id so `scode mcp` can attribute them to a SudoCode
+/// carry their plugin id so `scode mcp` can attribute them to a `SudoCode`
 /// plugin in both text and JSON output.
 fn merge_plugin_mcp_servers(
     runtime_servers: &BTreeMap<String, ScopedMcpServerConfig>,
@@ -2804,12 +2804,14 @@ fn merge_plugin_mcp_servers(
                 continue;
             };
             for (server_name, server_config) in plugin_servers {
-                if !servers.contains_key(&server_name) {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    servers.entry(server_name)
+                {
                     provenance.insert(
-                        server_name.clone(),
+                        entry.key().clone(),
                         plugin.capability_summary.plugin_id.clone(),
                     );
-                    servers.insert(server_name, server_config);
+                    entry.insert(server_config);
                 }
             }
         }
@@ -3195,6 +3197,38 @@ fn render_mcp_report_for(
     }
 }
 
+fn render_mcp_list_json(
+    loader: &ConfigLoader,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Value {
+    match loader.load() {
+        Ok(runtime_config) => {
+            let (servers, provenance) =
+                merge_plugin_mcp_servers(runtime_config.mcp().servers(), plugin_load_outcome);
+            let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("status".to_string(), Value::String("ok".to_string()));
+                map.insert("config_load_error".to_string(), Value::Null);
+            }
+            value
+        }
+        Err(err) => {
+            let empty = std::collections::BTreeMap::new();
+            let (servers, provenance) = merge_plugin_mcp_servers(&empty, plugin_load_outcome);
+            let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("status".to_string(), Value::String("degraded".to_string()));
+                map.insert(
+                    "config_load_error".to_string(),
+                    Value::String(err.to_string()),
+                );
+            }
+            value
+        }
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn render_mcp_report_json_for(
     loader: &ConfigLoader,
@@ -3213,40 +3247,7 @@ fn render_mcp_report_json_for(
     }
 
     match normalize_optional_args(args) {
-        None | Some("list") => {
-            // #144: match #143's degraded envelope contract. On config parse
-            // failure, emit top-level `status: "degraded"` with
-            // `config_load_error`, empty servers[], and exit 0. On clean
-            // runs, the existing serializer adds `status: "ok"` below.
-            match loader.load() {
-                Ok(runtime_config) => {
-                    let (servers, provenance) = merge_plugin_mcp_servers(
-                        runtime_config.mcp().servers(),
-                        plugin_load_outcome,
-                    );
-                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
-                    if let Some(map) = value.as_object_mut() {
-                        map.insert("status".to_string(), Value::String("ok".to_string()));
-                        map.insert("config_load_error".to_string(), Value::Null);
-                    }
-                    Ok(value)
-                }
-                Err(err) => {
-                    let empty = std::collections::BTreeMap::new();
-                    let (servers, provenance) =
-                        merge_plugin_mcp_servers(&empty, plugin_load_outcome);
-                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
-                    if let Some(map) = value.as_object_mut() {
-                        map.insert("status".to_string(), Value::String("degraded".to_string()));
-                        map.insert(
-                            "config_load_error".to_string(),
-                            Value::String(err.to_string()),
-                        );
-                    }
-                    Ok(value)
-                }
-            }
-        }
+        None | Some("list") => Ok(render_mcp_list_json(loader, cwd, plugin_load_outcome)),
         Some(args) if is_help_arg(args) => Ok(render_mcp_usage_json(None)),
         Some("show") => Ok(render_mcp_usage_json(Some("show"))),
         Some(args) if args.split_whitespace().next() == Some("show") => {

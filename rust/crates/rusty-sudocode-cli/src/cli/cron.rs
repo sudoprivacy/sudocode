@@ -375,7 +375,7 @@ fn fire_entry(entry: &CronEntry) -> Result<(), String> {
     let model = resolve_repl_model(DEFAULT_MODEL.to_owned());
     let result = (|| -> Result<(), Box<dyn Error>> {
         let mut cli = LiveCli::new(
-            model,
+            &model,
             true,
             None,
             PermissionMode::DangerFullAccess,

@@ -161,7 +161,7 @@ impl Peer {
                 sink,
             ),
             Self::Disk(name) => runtime::mailbox::spawn_local_poller(
-                runtime::mailbox::local_pair_root(),
+                &runtime::mailbox::local_pair_root(),
                 name.clone(),
                 abort,
                 sink,

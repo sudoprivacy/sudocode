@@ -331,8 +331,7 @@ pub(crate) fn command_exists(name: &str) -> bool {
     Command::new("which")
         .arg(name)
         .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|output| output.status.success())
 }
 
 pub(crate) fn parse_history_count(raw: Option<&str>) -> Result<usize, String> {

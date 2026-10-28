@@ -351,6 +351,7 @@ impl<R> TurnInputCoordinator<R> {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn peek_display(&self) -> Vec<String> {
         self.queue.iter().map(|q| q.input.display.clone()).collect()
     }

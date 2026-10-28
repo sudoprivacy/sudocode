@@ -1264,7 +1264,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
     if config
         .auth_modes
         .get("proxy")
-        .is_none_or(|accounts| accounts.is_empty())
+        .is_none_or(std::collections::BTreeMap::is_empty)
     {
         return DiagnosticCheck::new(
             "Account",

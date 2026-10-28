@@ -96,13 +96,13 @@ mod tests {
             ColorSupport::NoColor,
         ] {
             let renderer = TerminalRenderer::new().with_color_support(support);
-            let rendered =
+            let formatted_text =
                 renderer.render_markdown_with_width("PlainBefore ~~ThemeStrike~~ PlainAfter", 100);
-            let text = StyledText::from_ansi(&rendered);
+            let text = StyledText::from_ansi(&formatted_text);
             assert_eq!(text.text.trim_end(), "PlainBefore ThemeStrike PlainAfter");
             let spans = contents(&text);
             if support == ColorSupport::NoColor {
-                assert!(!rendered.contains('\x1b'));
+                assert!(!formatted_text.contains('\x1b'));
             } else {
                 let strike = text
                     .spans(0..text.text.len())

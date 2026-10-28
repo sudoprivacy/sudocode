@@ -12,17 +12,19 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Hash)]
 pub(super) struct FooterHints<'a> {
     pub transient: Option<&'a str>,
+    /// What the keys do while typing; `None` when the input is empty.
     pub controls: Option<&'a str>,
+    /// The one key that matters while not typing, after the workspace position.
+    pub ambient: &'a str,
 }
 
 #[derive(Clone, Default, Hash)]
 pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
     cache: Option<Tip>,
-    /// Where the workspace is: its branch, or the short commit when HEAD is
-    /// detached. State rather than advice, so it is not a `Tip`: it rides on
-    /// the routine filler and yields the slot to every real tip.
-    branch: Option<String>,
+    /// Where the workspace is, `repo ⎇ branch`. State rather than advice, so it
+    /// is not a `Tip`: it leads the not-typing filler and yields to every tip.
+    position: Option<String>,
 }
 
 impl FooterTips {
@@ -39,8 +41,8 @@ impl FooterTips {
     pub fn cache(&mut self, tip: Option<Tip>) {
         self.cache = tip;
     }
-    pub fn branch(&mut self, label: Option<String>) {
-        self.branch = label;
+    pub fn position(&mut self, label: Option<String>) {
+        self.position = label;
     }
     pub fn begin_turn(&mut self) {
         self.model.clear();
@@ -50,7 +52,6 @@ impl FooterTips {
         &self,
         permission: &str,
         tasks: &TaskBrowser,
-        submitted: bool,
         active: bool,
         hints: FooterHints<'_>,
         width: usize,
@@ -65,17 +66,13 @@ impl FooterTips {
             priority: TipPriority::Normal,
             message: message.to_string(),
         });
-        let guidance = if submitted {
-            "/help · /exit"
-        } else {
-            "Type /help for commands · Tab completes /commands"
-        };
-        // The branch leads the filler so truncation trims the guidance first.
-        let ordinary = Tip {
+        // Not typing: where the workspace is, then the key that matters now.
+        // The position leads so truncation trims the key hint first.
+        let ambient = Tip {
             priority: TipPriority::Normal,
-            message: match &self.branch {
-                Some(branch) => format!("⎇ {branch} · {guidance}"),
-                None => guidance.into(),
+            message: match &self.position {
+                Some(position) => format!("{position} · {}", hints.ambient),
+                None => hints.ambient.into(),
             },
         };
         // A focused cache tip is the footer's selection and says how to act on it.
@@ -96,7 +93,7 @@ impl FooterTips {
             })
             .filter(|tip| !active || tip.priority == TipPriority::Urgent)
             .or(control.as_ref())
-            .or((!active).then_some(&ordinary))
+            .or(Some(&ambient))
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
         let selected = focused.as_ref().or(selected);
 

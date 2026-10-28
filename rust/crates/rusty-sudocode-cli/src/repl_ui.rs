@@ -299,8 +299,8 @@ pub enum UiCommand {
     },
     SetTip(engine_core::Tip),
     SetCacheTip(CacheTip),
-    /// The workspace's branch, or short commit when detached, for the footer.
-    SetBranch(Option<String>),
+    /// Where the workspace is, `repo ⎇ branch`, for the footer.
+    SetWorkspacePosition(Option<String>),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -386,8 +386,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::SetCacheTip(tip));
     }
 
-    pub(crate) fn set_branch(&self, label: Option<String>) {
-        let _ = self.tx.send(UiCommand::SetBranch(label));
+    pub(crate) fn set_workspace_position(&self, label: Option<String>) {
+        let _ = self.tx.send(UiCommand::SetWorkspacePosition(label));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -1930,7 +1930,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .set_cache_advice(view.advice, view.actionable);
                             frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
+                        Ok(UiCommand::SetWorkspacePosition(label)) => {
+                            footer_tips.write().position(label);
+                        }
                         Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
                         Ok(UiCommand::SetTurnResult { text, turn }) => {
                             turn_result.set(Some((turn, text)));
@@ -2178,12 +2180,29 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    let controls = if turn_active {
+    // Typing, the footer says what the keys do; not typing, where the workspace
+    // is and the one key that matters now. Only the draft's kind feeds this,
+    // never its text, so keystrokes within a kind leave the footer cached.
+    let (typing, command) = {
+        let draft = input_value.read();
+        (!draft.is_empty(), draft.starts_with('/'))
+    };
+    let controls = if typing && turn_active {
         Some(running_input_controls(pending_input))
-    } else if pending_input {
-        Some("Enter send · Esc flush · ↑ edit queued")
+    } else if command {
+        Some("Tab completes · Enter runs")
+    } else if typing {
+        Some("Enter send · Shift+Enter newline · Tab queue")
     } else {
         None
+    };
+    // While queued input exists, Esc flushes it rather than cancelling.
+    let ambient = match (turn_active, pending_input) {
+        (true, true) => "Esc flush · Ctrl+C cancel",
+        (true, false) => "Esc/Ctrl+C cancel",
+        (false, true) => "Enter send · Esc flush · ↑ edit queued",
+        (false, false) if submitted => "/help",
+        (false, false) => "Type /help for commands",
     };
     let explicit_hint = footer_hint.read().clone();
     let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
@@ -2194,12 +2213,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let hints = FooterHints {
             transient: native_hint,
             controls,
+            ambient,
         };
         hooks.use_memo(
             || {
-                let render = |permission| {
-                    Arc::new(tips.render(permission, &browser, submitted, turn_active, hints, w))
-                };
+                let render =
+                    |permission| Arc::new(tips.render(permission, &browser, turn_active, hints, w));
                 (render(&perm), render("compact · enlarge to expand"))
             },
             (
@@ -2208,7 +2227,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 browser.footer_label(false),
                 browser.footer_label(true),
                 browser.focus,
-                submitted,
                 turn_active,
                 hints,
                 w,

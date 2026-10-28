@@ -610,12 +610,20 @@ one contextual tip. General startup guidance also lives here. The highest
 priority applicable tip wins: immediate local interaction feedback, then model
 tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
-over cache advice. Routine `/help` guidance fills otherwise unused space,
-led by the workspace's position: `⎇ <branch>`, or `⎇ <short commit>` when HEAD
-is detached. The position is state rather than advice, so every tip takes the
-slot from it; it is read at startup and refreshed when each turn ends, and the
-per-turn status line no longer repeats it.
-While a turn runs, only urgent tips are shown.
+over cache advice. While a turn runs, only urgent tips are shown.
+
+Below the tips, the slot depends only on whether you are typing. Typing, it
+says what the keys do: `Enter send · Shift+Enter newline · Tab queue`, `Tab
+completes · Enter runs` for a `/command`, or `Enter steer · Tab queue · …`
+while a turn runs. Not typing, it shows where the workspace is followed by the
+one key that matters now, idle or running alike: `sudocode ⎇ main · /help`,
+`· Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C cancel` when
+input is queued. The repository is named by its shared git directory, so every
+worktree of one repository shows the same name; a detached HEAD names the
+branch tip it sits on, `sudocode ⎇ origin/main@4d3c4ad4`, or just the commit.
+The position is state rather than advice, so every tip takes the slot from it;
+it is read at startup and refreshed when each turn ends, and the per-turn
+status line no longer repeats it.
 
 The model has an always-loaded, read-only `set_tip` tool:
 

@@ -1298,11 +1298,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
 
 #[allow(clippy::too_many_lines)]
 fn check_auth_health() -> DiagnosticCheck {
-    let env_present = |key: &str| {
-        env::var(key)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    };
+    let env_present = |key: &str| env::var(key).is_ok_and(|value| !value.trim().is_empty());
     let anthropic_api_key_present = env_present("ANTHROPIC_API_KEY");
     let anthropic_auth_token_present = env_present("ANTHROPIC_AUTH_TOKEN");
     let api_key_present = anthropic_api_key_present || anthropic_auth_token_present;

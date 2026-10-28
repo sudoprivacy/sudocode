@@ -397,7 +397,7 @@ pub(crate) fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit
         "Prompt history".to_string(),
         format!("  Total            {total}"),
         format!("  Showing          {} most recent", shown.len()),
-        format!("  Reverse search   Ctrl-R in the REPL"),
+        "  Reverse search   Ctrl-R in the REPL".to_string(),
         String::new(),
     ];
     for (offset, entry) in shown.iter().enumerate() {

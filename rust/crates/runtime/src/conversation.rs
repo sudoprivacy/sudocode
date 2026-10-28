@@ -3466,8 +3466,7 @@ fn tool_results_include_requested_deliverable(
                 return false;
             }
             serde_json::from_str::<Value>(output)
-                .ok()
-                .is_some_and(|value| json_contains_requested_deliverable_path(&value, intent))
+                .is_ok_and(|value| json_contains_requested_deliverable_path(&value, intent))
         })
     })
 }

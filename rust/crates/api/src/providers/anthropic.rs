@@ -1785,12 +1785,10 @@ fn record_thinking_transformations(
 /// the server's own answer, so it distinguishes "we sent something different"
 /// from "what arrived was different from what we sent".
 fn cache_diagnostics_enabled() -> bool {
-    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS")
-        .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
+    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS").is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
 }
 
 /// Write the request body that is about to be sent to `SUDOCODE_DUMP_REQUESTS`,

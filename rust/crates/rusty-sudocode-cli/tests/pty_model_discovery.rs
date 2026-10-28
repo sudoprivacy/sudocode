@@ -95,16 +95,12 @@ fn endpoint_catalog_reaches_the_running_model_picker() {
     // picker. Reading disk alone would miss the original immutable-cache bug.
     let deadline = Instant::now() + env.timeout();
     loop {
-        let loaded = std::fs::read_dir(env.config_home().join("cache/model-catalogs"))
-            .ok()
-            .is_some_and(|files| {
+        let loaded =
+            std::fs::read_dir(env.config_home().join("cache/model-catalogs")).is_ok_and(|files| {
                 files.filter_map(Result::ok).any(|file| {
                     file.path().extension() == Some(std::ffi::OsStr::new("json"))
                         && std::fs::read_to_string(file.path())
-                            .ok()
-                            .is_some_and(|body| {
-                                !env.is_mock() || body.contains("claude-unseen-2040")
-                            })
+                            .is_ok_and(|body| !env.is_mock() || body.contains("claude-unseen-2040"))
                 })
             });
         if loaded {

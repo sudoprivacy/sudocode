@@ -8,20 +8,24 @@ use runtime::{ContentBlock, MessageRole, Session, SessionStore};
 
 fn file_session(env: &common::TestEnv) -> Option<Session> {
     let store = SessionStore::from_cwd(env.workspace_root()).ok()?;
-    // Resume creates an empty placeholder alongside the real conversation.
-    let sessions: Vec<_> = store
+    let transcript = store
         .list_sessions()
         .ok()?
         .into_iter()
-        .filter(|session| session.message_count > 0)
-        .collect();
-    if sessions.len() != 1 {
-        return None;
-    }
-    Session::load_from_path(&sessions[0].path).ok()
+        .find(|session| session.message_count > 0)?;
+    Session::load_from_path(&transcript.path).ok()
 }
 
 fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
+    assert_eq!(
+        SessionStore::from_cwd(env.workspace_root())
+            .unwrap()
+            .list_sessions()
+            .unwrap()
+            .len(),
+        1,
+        "resuming a conversation must retain its single persisted session identity",
+    );
     let session = file_session(env).expect("expected one persisted conversation");
     let fixture = env.workspace_root().join("fixture.txt");
     let mut reads = std::collections::BTreeSet::new();
@@ -154,6 +158,31 @@ fn interactive_file_reads_updated_contents_after_resume() {
         assert_eq!(cli.expect_eof().unwrap(), 0);
         assert_file_roundtrip(&env, &nonce, if resume { "resume" } else { "interactive" });
     }
+}
+
+#[test]
+fn failed_resume_keeps_the_workspace_without_a_new_session() {
+    let env = common::TestEnv::new("headless-missing-resume");
+    let mut child = env.spawn(&[
+        "-p",
+        "Read fixture.txt.",
+        "--resume",
+        "missing-session-for-startup-acceptance",
+        "--output-format=json",
+    ]);
+    assert_ne!(child.expect_eof().unwrap(), 0);
+    assert!(
+        common::screen_tail(&child, 12000).contains("missing-session-for-startup-acceptance"),
+        "startup must reach the requested resume target",
+    );
+    assert!(
+        SessionStore::from_cwd(env.workspace_root())
+            .unwrap()
+            .list_sessions()
+            .unwrap()
+            .is_empty(),
+        "a failed resume must leave the durable session inventory unchanged",
+    );
 }
 
 #[test]

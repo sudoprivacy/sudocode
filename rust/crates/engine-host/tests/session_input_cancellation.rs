@@ -122,8 +122,8 @@ fn cancelling_permission_and_question_releases_input_before_the_turn_drains() {
             SystemPromptOverrides::default(),
             MemoryMode::default(),
             SystemPrompt::default(),
-            "scripted".into(),
-            Some("scripted".into()),
+            "scripted",
+            Some("scripted"),
             None,
             Some(if reason == "permission" {
                 PermissionMode::Prompt

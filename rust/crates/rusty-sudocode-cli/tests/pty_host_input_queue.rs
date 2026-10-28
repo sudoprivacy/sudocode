@@ -104,7 +104,7 @@ impl Host {
     fn runtime_status(&mut self) -> Value {
         self.request(
             "_sudocode/session/status",
-            json!({"sessionId":self.session}),
+            &json!({"sessionId":self.session}),
         )
     }
 

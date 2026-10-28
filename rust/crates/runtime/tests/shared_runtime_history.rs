@@ -116,7 +116,31 @@ impl Drop for Fixture {
         if std::thread::panicking() {
             eprintln!("Retained runtime history evidence: {}", self.0.display());
         } else {
-            std::fs::remove_dir_all(&self.0).unwrap();
+            // Still a failure, never retried or ignored: something writing
+            // here after every handle was dropped means a runtime did not shut
+            // down cleanly. Name what was left so the writer can be found.
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                let mut left = Vec::new();
+                let mut pending = vec![self.0.clone()];
+                while let Some(dir) = pending.pop() {
+                    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            pending.push(path.clone());
+                        }
+                        left.push(
+                            path.strip_prefix(&self.0)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string(),
+                        );
+                    }
+                }
+                panic!(
+                    "removing {} failed: {error}; still present after every handle was dropped: {left:?}",
+                    self.0.display()
+                );
+            }
         }
     }
 }

@@ -362,6 +362,7 @@ fn assert_rejected_migrations_preserve_source(
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
+    wait_for_reclaimed_session(path, &directory.join(".cleanup"));
     assert!(!path.exists());
     assert!(
         legacy_archives(directory).is_empty(),

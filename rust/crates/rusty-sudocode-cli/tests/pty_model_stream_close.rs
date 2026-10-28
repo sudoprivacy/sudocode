@@ -109,7 +109,22 @@ struct StreamProvider {
     requests: Arc<AtomicUsize>,
     terminal_connection_state: Arc<AtomicUsize>,
     bodies: Arc<Mutex<Vec<Value>>>,
+    disconnect: Option<Arc<BodyDisconnect>>,
     worker: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum BodyFailure {
+    #[default]
+    Reset,
+    PrematureEof,
+}
+
+#[derive(Default)]
+struct BodyDisconnect {
+    failure: BodyFailure,
+    ready: AtomicBool,
+    fired: AtomicBool,
 }
 
 fn peer_closed(socket: &TcpStream) -> bool {
@@ -125,6 +140,20 @@ fn peer_closed(socket: &TcpStream) -> bool {
 
 impl StreamProvider {
     fn new(kind: ResponseKind) -> Self {
+        Self::with_disconnect(kind, None)
+    }
+
+    fn disconnecting(kind: ResponseKind, failure: BodyFailure) -> Self {
+        Self::with_disconnect(
+            kind,
+            Some(Arc::new(BodyDisconnect {
+                failure,
+                ..BodyDisconnect::default()
+            })),
+        )
+    }
+
+    fn with_disconnect(kind: ResponseKind, disconnect: Option<Arc<BodyDisconnect>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -137,6 +166,7 @@ impl StreamProvider {
         let count = requests.clone();
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let captured = bodies.clone();
+        let wire_disconnect = disconnect.clone();
         let worker = thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
@@ -156,7 +186,7 @@ impl StreamProvider {
                     assert_eq!(request["stream"], true);
                 }
                 captured.lock().unwrap().push(request.clone());
-                if liveness_response(&mut socket, kind, index, &stop) {
+                if liveness_response(&mut socket, kind, index, &stop, wire_disconnect.as_deref()) {
                     continue;
                 }
                 if let Some(response) = error_response(kind, index) {
@@ -189,6 +219,7 @@ impl StreamProvider {
             requests,
             terminal_connection_state,
             bodies,
+            disconnect,
             worker: Some(worker),
         }
     }
@@ -1089,6 +1120,7 @@ fn liveness_response(
     kind: ResponseKind,
     index: usize,
     stop: &AtomicBool,
+    disconnect: Option<&BodyDisconnect>,
 ) -> bool {
     let is_live = kind.is_liveness_fixture();
     if !is_live {
@@ -1118,6 +1150,9 @@ fn liveness_response(
     ) || (drops_once && index == 0);
     let texts = if drops_once && index > 0 {
         ["CONTINUED_", "AFTER_", "DROP"]
+    } else if disconnect.is_some() && index == 0 {
+        // A paragraph boundary makes admission observable while the stream stays open.
+        ["STREAM_", "BODY_", "VERIFIED\n\n"]
     } else {
         ["STREAM_", "BODY_", "VERIFIED"]
     };
@@ -1162,29 +1197,50 @@ fn liveness_response(
         }
     }
     if heartbeat || partial {
-        socket
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
-        let started = std::time::Instant::now();
-        while !stop.load(Ordering::SeqCst) && !peer_closed(socket) {
-            if matches!(kind, ResponseKind::FiniteHeartbeat)
-                && started.elapsed() >= Duration::from_secs(3)
-            {
-                let _ = socket.write_all(body.as_bytes());
-                break;
-            }
-            let frame: &[u8] = if matches!(kind, ResponseKind::ChatAnnotations) {
-                b"data: {\"id\":\"\",\"model\":\"\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"content_filter_results\":{}}]}\n\n"
-            } else {
-                b": ping\n\n"
-            };
-            if socket.write_all(frame).is_err() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+        hold_stream_open(socket, kind, &body, stop, disconnect);
     }
     true
+}
+
+fn hold_stream_open(
+    socket: &mut TcpStream,
+    kind: ResponseKind,
+    body: &str,
+    stop: &AtomicBool,
+    disconnect: Option<&BodyDisconnect>,
+) {
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !stop.load(Ordering::SeqCst) && !peer_closed(socket) {
+        if let Some(disconnect) =
+            disconnect.filter(|disconnect| disconnect.ready.load(Ordering::SeqCst))
+        {
+            if matches!(disconnect.failure, BodyFailure::Reset) {
+                socket2::SockRef::from(&*socket)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+            }
+            disconnect.fired.store(true, Ordering::SeqCst);
+            break;
+        }
+        if matches!(kind, ResponseKind::FiniteHeartbeat)
+            && started.elapsed() >= Duration::from_secs(3)
+        {
+            let _ = socket.write_all(body.as_bytes());
+            break;
+        }
+        let frame: &[u8] = if matches!(kind, ResponseKind::ChatAnnotations) {
+            b"data: {\"id\":\"\",\"model\":\"\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"content_filter_results\":{}}]}\n\n"
+        } else {
+            b": ping\n\n"
+        };
+        if socket.write_all(frame).is_err() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn check_liveness(
@@ -1195,7 +1251,25 @@ fn check_liveness(
 ) {
     let env = TestEnv::new_mock("stream-liveness");
     let provider = StreamProvider::new(kind);
-    configure_peer(&env, &provider, kind);
+    check_liveness_with_provider(
+        kind,
+        read_timeout,
+        expected_requests,
+        is_success,
+        &env,
+        &provider,
+    );
+}
+
+fn check_liveness_with_provider(
+    kind: ResponseKind,
+    read_timeout: &str,
+    expected_requests: usize,
+    is_success: bool,
+    env: &TestEnv,
+    provider: &StreamProvider,
+) {
+    configure_peer(env, provider, kind);
     let log = env.workspace_root().join("stream-events.jsonl");
     let is_tool = matches!(
         kind,
@@ -1242,6 +1316,7 @@ fn check_liveness(
         ],
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(30)));
+    release_body_disconnect(&mut cli, env, provider, is_tool);
     let code = cli.expect_eof().unwrap_or_else(|error| {
         panic!(
             "stream liveness: {error}; requests={}\n{}",
@@ -1249,6 +1324,12 @@ fn check_liveness(
             common::screen_tail(&cli, 6000)
         )
     });
+    if let Some(disconnect) = &provider.disconnect {
+        assert!(
+            disconnect.fired.load(Ordering::SeqCst),
+            "the real socket must disconnect"
+        );
+    }
     assert_eq!(code == 0, is_success, "{}", common::screen_tail(&cli, 6000));
     let actual_requests = provider.requests.load(Ordering::SeqCst);
     let diagnostic = if actual_requests == expected_requests {
@@ -1278,8 +1359,8 @@ fn check_liveness(
     );
     let observed = ResponseCheck {
         kind,
-        env: &env,
-        provider: &provider,
+        env,
+        provider,
         screen: &screen,
         exit: code,
         log_path: &log,
@@ -1287,6 +1368,81 @@ fn check_liveness(
     let bodies = provider.bodies.lock().unwrap();
     observed.assert_liveness_replay(&bodies, expected_requests, is_tool, continues);
     observed.assert_liveness_completion(&bodies, is_tool, always_drops, interactive);
+}
+
+/// Disconnect after visible output, or durable tool completion in print mode.
+fn release_body_disconnect(
+    cli: &mut pty_expect::PtySession,
+    env: &TestEnv,
+    provider: &StreamProvider,
+    is_tool: bool,
+) {
+    let Some(disconnect) = &provider.disconnect else {
+        return;
+    };
+    let budget = Duration::from_secs(30);
+    let deadline = Instant::now() + common::at_least(budget);
+    common::expect_screen(
+        cli,
+        |screen| {
+            if is_tool {
+                // Print mode publishes its final answer only. The saved tool
+                // result proves admission before the deliberately lost body.
+                has_completed_liveness_tool(env)
+            } else {
+                common::screen_contains(screen, "STREAM_BODY_VERIFIED")
+            }
+        },
+        budget,
+        "real response admitted before connection disconnect",
+    );
+    disconnect.ready.store(true, Ordering::SeqCst);
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .expect("disconnect admission fits the original receive budget");
+    assert!(!remaining.is_zero());
+    cli.set_default_timeout(remaining);
+}
+
+fn has_completed_liveness_tool(env: &TestEnv) -> bool {
+    std::fs::read_to_string(env.workspace_root().join("once.txt"))
+        .is_ok_and(|content| content == "once\n")
+        && runtime::SessionStore::from_cwd(env.workspace_root())
+            .ok()
+            .and_then(|store| store.load_session("latest").ok())
+            .is_some_and(|saved| {
+                saved
+                    .session
+                    .messages()
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .any(|block| {
+                        matches!(
+                            block,
+                            runtime::ContentBlock::ToolResult {
+                                is_error: false,
+                                ..
+                            }
+                        )
+                    })
+            })
+}
+
+#[test]
+fn http_body_disconnects_continue_saved_output_without_reexecuting_completed_tools() {
+    for failure in [BodyFailure::Reset, BodyFailure::PrematureEof] {
+        for kind in [
+            ResponseKind::ChatDropThenContinue,
+            ResponseKind::NativeDropThenContinue,
+            ResponseKind::ResponsesDropThenContinue,
+            ResponseKind::ToolThenDrop,
+        ] {
+            eprintln!("body disconnect: failure={failure:?}, kind={kind:?}");
+            let env = TestEnv::new_mock("stream-disconnect");
+            let provider = StreamProvider::disconnecting(kind, failure);
+            check_liveness_with_provider(kind, "8", 2, true, &env, &provider);
+        }
+    }
 }
 
 #[test]

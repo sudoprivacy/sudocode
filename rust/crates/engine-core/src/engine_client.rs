@@ -60,7 +60,14 @@ pub struct EngineApiClient {
 
 impl Drop for EngineApiClient {
     fn drop(&mut self) {
-        // Covers every host, including runtimes taken out of BuiltRuntime.
+        self.flush_response_captures();
+    }
+}
+
+impl EngineApiClient {
+    /// Drain session-owned response evidence before the host retires its
+    /// persistence writer. Other lifecycle readers may still retain this client.
+    pub fn flush_response_captures(&self) {
         if !api::flush_response_captures(&self.session_id, Duration::from_secs(2)) {
             if let Some(tracer) = self.session_tracer() {
                 tracer.record("response_capture_shutdown_timeout", serde_json::Map::new());

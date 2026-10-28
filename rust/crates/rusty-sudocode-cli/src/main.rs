@@ -2574,6 +2574,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    cli.shutdown();
     Ok(())
 }
 
@@ -4341,6 +4342,11 @@ fn run_repl_iocraft_dispatch(
     // the thread after a bounded wait and process exit remains the fallback.
     (repl_join)();
 
+    // The cache panel retains the same lifecycle as the engine delegate.
+    // Release it before engine shutdown can drop the model client and drain
+    // its response recorders, rather than leaving them alive at process exit.
+    drop(ttl_lifecycle);
+
     // Unwrap the Arc and finalize telemetry. If the runner thread
     // still holds a clone, force-exit — session is already persisted.
     let cli = match Arc::try_unwrap(cli_shared) {
@@ -4370,13 +4376,7 @@ fn run_repl_iocraft_dispatch(
 
     // Close through the engine seam before process exit so session-owned
     // background processes are killed and reaped, not left running.
-    let LiveCli {
-        engine_handle,
-        lifecycle,
-        ..
-    } = cli;
-    drop(lifecycle);
-    let _ = engine_handle.shutdown(Duration::from_secs(5));
+    cli.shutdown();
 
     // The iocraft render loop thread may still be alive (it blocks on
     // terminal events). Persistent state and engine teardown are complete.
@@ -4725,6 +4725,17 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
 }
 
 impl LiveCli {
+    /// Both REPLs await the same engine teardown before the process can exit.
+    fn shutdown(self) {
+        let Self {
+            engine_handle,
+            lifecycle,
+            ..
+        } = self;
+        drop(lifecycle);
+        let _ = engine_handle.shutdown(Duration::from_secs(5));
+    }
+
     /// True when the async REPL (queue mode) is active. In this mode the
     /// render thread owns stdin via iocraft, so interactive widgets
     /// (FuzzySelect, Select) cannot be used on the runner thread.

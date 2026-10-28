@@ -1,4 +1,4 @@
-//! Integration test for the SendMessage tool's mailbox surface —
+//! Integration test for the `SendMessage` tool's mailbox surface —
 //! `runtime::agent_mailbox`.
 //!
 //! Complements `session_pre_seed.rs` and `fork_dispatch_context.rs`;
@@ -16,8 +16,7 @@ fn temp_workspace(label: &str) -> std::path::PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_nanos()),
     ));
     fs::create_dir_all(&root).expect("workspace tmp dir");
     root
@@ -69,7 +68,10 @@ fn append_fills_timestamp_when_zero() {
     .expect("append should succeed");
     let contents = fs::read_to_string(&path).expect("read jsonl");
     let value: serde_json::Value = serde_json::from_str(contents.trim()).expect("parse jsonl");
-    let ts = value.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ts = value
+        .get("timestamp")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     assert!(
         ts > 0,
         "append_envelope must stamp `timestamp` with the current unix seconds when caller passes 0"

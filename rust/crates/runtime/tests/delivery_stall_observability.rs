@@ -70,7 +70,7 @@ fn a_refused_batch_records_a_consumer_refused_stall_with_the_stuck_offset() {
     // exactly the condition the fleet hit during a long turn.
     let seen = Arc::clone(&handed_over);
     let poller = runtime::mailbox::spawn_local_poller(
-        root.path().to_path_buf(),
+        root.path(),
         "receiver-under-test".to_string(),
         abort.clone(),
         move |_envelope: &MailboxEnvelope| {
@@ -169,7 +169,7 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
 
     let seen = Arc::clone(&handed_over);
     let poller = runtime::mailbox::spawn_local_poller(
-        root.path().to_path_buf(),
+        root.path(),
         "pinned-receiver".to_string(),
         abort.clone(),
         move |_envelope: &MailboxEnvelope| {
@@ -248,7 +248,7 @@ fn an_accepted_batch_records_no_stall() {
 
     let seen = Arc::clone(&accepted);
     let poller = runtime::mailbox::spawn_local_poller(
-        root.path().to_path_buf(),
+        root.path(),
         "accepting-receiver".to_string(),
         abort.clone(),
         move |_envelope: &MailboxEnvelope| {

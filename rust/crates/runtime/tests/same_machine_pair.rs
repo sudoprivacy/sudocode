@@ -22,8 +22,7 @@ use runtime::mailbox::{local_agent_name, InboxConvention, Mailbox};
 fn tmp_root(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let p = std::env::temp_dir().join(format!("pair-{label}-{nanos}-{}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     p

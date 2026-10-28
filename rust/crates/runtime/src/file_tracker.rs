@@ -228,11 +228,21 @@ mod tests {
     use std::fs;
 
     fn create_test_tracker() -> TurnFileTracker {
+        // These tests run on parallel threads of one process, and a clock with
+        // microsecond resolution (macOS) can give two of them the same time.
+        // A shared directory then fails one test's cleanup with
+        // DirectoryNotEmpty, so each tracker also takes the next counter value.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir_name = format!("scode-tracker-test-{}-{}", std::process::id(), unique_id);
+        let dir_name = format!(
+            "scode-tracker-test-{}-{}-{}",
+            std::process::id(),
+            unique_id,
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let tmp_dir = std::env::temp_dir().join(dir_name);
 
         // Ensure clean state

@@ -80,6 +80,20 @@ the evaluator still comes from the base. Baselines never update automatically.
 Candidate compilation has read permissions and no persisted checkout token;
 the separate status publisher executes trusted code only.
 
+PR builds use `pull_request`, so forks receive the normal read-only token,
+no repository secrets, and the existing fork-run approval checks. The policy
+and measurement harness are checked out from the protected base. Same-repository
+PRs publish through the existing trusted status job. Forks use
+`render-publish.yml`, a separate `workflow_run` publisher that executes only
+default-branch code and reads the fixed-name policy artifact as JSON data.
+It binds the actual workflow, fork, branch, head and run attempt to the live PR,
+rechecks current-head policy approval and required measurement jobs, and rejects
+stale revisions. Starting a fork measurement sets the gate pending; only its
+qualified completion can pass it. Its live contract verifies a real qualifying
+run and rejects an old attempt, another workflow, and a stale artifact head
+without posting test statuses. Performance budgets and the baseline are
+unchanged. See GitHub's [secure workflow guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+
 A repository administrator who authored a PR may explicitly approve **harness-only**
 changes in a GitHub `COMMENTED` review bound to the current commit. Its first line
 must be `<!-- scode-render-harness-admin-approval -->`. CI verifies the review's

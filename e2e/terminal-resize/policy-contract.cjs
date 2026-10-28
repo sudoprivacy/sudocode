@@ -30,7 +30,7 @@ module.exports = async function contract({ github, context, core, root }) {
       payload: { inputs: { pull_request: String(pr.number) } },
     }, 'Dispatch the open main PR from its current same-repository head branch');
     await reject('PR event', {
-      ...context, repo: context.repo, eventName: 'pull_request_target',
+      ...context, repo: context.repo, eventName: 'pull_request',
       payload: { pull_request: { ...pr, head: { ...pr.head, sha: stale } } },
     }, 'PR advanced; run the current commit');
   } finally {

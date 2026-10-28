@@ -184,6 +184,7 @@ def run(binary, root):
             first, second = first.result(), second.result()
         assert first['nexusPid'] == second['nexusPid'] and first['instance'] == second['instance']
         assert first['zone_id'], 'Readiness must name the serving zone'
+        node_id = (root / 'data/.node_id').read_bytes()
         identity = json.loads((root / 'identity/identity.json').read_text())
         assert all(zone['zone_id'] != 'foreign-fixture-zone' for zone in identity['zones'])
         assert unrelated.read_text(encoding='utf-8') == unrelated_body
@@ -273,7 +274,9 @@ def run(binary, root):
         b.request('service.shutdown')
         b.close()
         b = Rpc(binary, root)
-        b.request('service.start')
+        restarted = b.request('service.start')
+        assert restarted['instance'] != first['instance'], 'Restart must replace the stopped supervisor'
+        assert (root / 'data/.node_id').read_bytes() == node_id, 'Restart changed the durable node identity'
         assert b.request('vault.get', {'namespace': namespace, 'key': 'sample'}) == secret + '-rotated'
         assert base64.b64decode(b.request('files.read', {'path': '/acceptance/body/alias'})) == data
         # Installation removal is restricted to assemblies, retaining the data root.
@@ -284,6 +287,7 @@ def run(binary, root):
         assert not b.request('service.checkInstalled')['installed'], 'Shutdown recreated an installation'
         b.request('service.install', timeout=600)
         b.request('service.start')
+        assert (root / 'data/.node_id').read_bytes() == node_id, 'Installation repair changed the durable node identity'
         assert b.request('vault.get', {'namespace': namespace, 'key': 'sample'}) == secret + '-rotated'
         print('PASS: frontend closure, service restart and installation repair preserve data', flush=True)
         check_cli_setup(binary, root, b)

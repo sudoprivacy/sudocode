@@ -373,9 +373,9 @@ this subset. Explicit system-prompt replacement still replaces those defaults.
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
 hooks, approval, or an execution slot; amber while running; the code theme's
-green on success; and red on failure. The opening and closing
-caps stay bold to separate adjacent calls; long vertical borders use normal
-weight without dimming. Colors adapt to dark/light backgrounds and terminal
+green on success; and red on failure. Frame strokes use normal weight without
+dimming so corners align with vertical borders across terminal fonts.
+Colors adapt to dark/light backgrounds and terminal
 color depth. `ColorTheme` is the single semantic color interface; its `info`
 role (including Thinking/Reasoning) and successful tool borders share one
 soft-green definition. Syntax-backed colors load on demand and stay cached.

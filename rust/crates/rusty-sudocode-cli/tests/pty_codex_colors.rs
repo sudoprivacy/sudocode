@@ -538,7 +538,7 @@ fn expect_bash_sample(sess: &PtySession, sample: &Value, prefix: &str, no_color:
     );
 }
 
-fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str, no_color: bool) {
+fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str) {
     common::expect_screen(
         sess,
         |_| {
@@ -566,14 +566,14 @@ fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str, no_colo
                         let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
                         format!("{:?}", cell.fgcolor()) == foreground
                             && format!("{:?}", cell.bgcolor()) == "Default"
-                            && cell.bold() == (cap && !no_color)
+                            && !cell.bold()
                             && !cell.dim()
                     })
                 })
             })
         },
         common::DEFAULT_TIMEOUT,
-        "tool status color, bold endpoints and normal vertical border",
+        "tool status color and regular frame strokes",
     );
 }
 
@@ -591,9 +591,8 @@ fn expect_completed_bash_borders(sess: &PtySession, light: bool, no_color: bool)
         sess,
         &format!("Bash({})", mock_anthropic_service::CODEX_BASH_SINGLE),
         success,
-        no_color,
     );
-    expect_tool_border(sess, "Bash(# Shell colors", success, no_color);
+    expect_tool_border(sess, "Bash(# Shell colors", success);
 }
 
 fn assert_running_title_resizes(sess: &mut PtySession, header: &str, light: bool, no_color: bool) {
@@ -713,7 +712,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     } else {
         "Idx(247)"
     };
-    expect_tool_border(&sess, &header, queued, no_color);
+    expect_tool_border(&sess, &header, queued);
     assert_running_title_resizes(&mut sess, &header, light, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
@@ -726,7 +725,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
     sess.resize(80, 78).unwrap();
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
-    expect_tool_border(&sess, &header, queued, no_color);
+    expect_tool_border(&sess, &header, queued);
     sess.send("\x15").unwrap();
     common::expect_screen(
         &sess,
@@ -789,7 +788,7 @@ fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
         common::DEFAULT_TIMEOUT,
         "denied Bash result",
     );
-    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(9)", false);
+    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(9)");
     finish(&mut sess);
 }
 

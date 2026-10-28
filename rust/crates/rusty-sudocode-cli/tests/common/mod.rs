@@ -196,6 +196,20 @@ where
     F: Fn(&str) -> bool,
 {
     let deadline = Instant::now() + at_least(budget);
+    expect_screen_before_view(sess, pred, deadline, budget, context, contents)
+}
+
+fn expect_screen_before_view<F>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     loop {
         let screen = sess.render(contents);
         if pred(&screen) {
@@ -255,6 +269,20 @@ where
     F: Fn(&str) -> bool,
 {
     let deadline = Instant::now() + at_least(budget);
+    expect_screen_settled_before_view(sess, pred, deadline, budget, context, contents)
+}
+
+fn expect_screen_settled_before_view<F>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let mut previous: Option<String> = None;
     let mut stable = 0u32;
     let mut satisfied = false;
@@ -432,7 +460,7 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
         sess,
         // A process that has not painted its prompt yet also has an empty
         // screen. It must not accept keystrokes as a ready REPL.
-        |screen| screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty(),
+        is_ready_for_input,
         budget,
         &format!("{context}: the input line never cleared"),
     );
@@ -492,31 +520,55 @@ pub fn turn_status_marker(sess: &PtySession) -> String {
     turn_status_identity(&sess.render(screen_contents))
 }
 
-/// Submit one line only after the live editor has acknowledged all its text.
+/// Submit and complete one turn within a single deadline for readiness, input
+/// acknowledgement, response completion and the final settled editor.
 ///
 /// Capture the completed-turn marker after this acknowledgement, before Enter.
 /// A marker read while resumed history is still painting can precede an old
 /// result line and incorrectly identify that replay as a newly completed turn.
 /// Match every typed character from the live prompt, using physical rows to
 /// preserve wrapped drafts independently of either renderer's chrome layout.
-#[must_use]
-pub fn submit_line(sess: &mut PtySession, text: &str, budget: Duration, context: &str) -> String {
+pub fn run_turn(sess: &mut PtySession, text: &str, budget: Duration, context: &str) {
     assert!(!text.is_empty() && !text.contains(['\r', '\n']));
-    expect_input_line_cleared(sess, budget, context);
+    let deadline = Instant::now() + budget;
+    expect_input_line_cleared_before(sess, deadline, budget, context);
     sess.send(text).unwrap();
-    expect_screen_rows(
+    expect_screen_before_view(
         sess,
         |screen| {
             input_after_prompt(screen).is_some_and(|input| {
                 compact_screen_text(input).starts_with(&compact_screen_text(text))
             })
         },
+        deadline,
         budget,
         &format!("{context}: the live editor did not acknowledge the submitted line"),
+        screen_rows,
     );
     let marker = turn_status_marker(sess);
     sess.send("\r").unwrap();
-    marker
+    expect_turn_complete_before(sess, &marker, deadline, budget, context);
+    expect_input_line_cleared_before(sess, deadline, budget, "turn completed");
+}
+
+fn is_ready_for_input(screen: &str) -> bool {
+    screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty()
+}
+
+fn expect_input_line_cleared_before(
+    sess: &PtySession,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+) {
+    expect_screen_settled_before_view(
+        sess,
+        is_ready_for_input,
+        deadline,
+        budget,
+        &format!("{context}: the input line never cleared"),
+        screen_contents,
+    );
 }
 
 /// Block until the turn submitted after `marker` was taken has finished AND the
@@ -557,12 +609,22 @@ pub fn expect_turn_complete_after(
     context: &str,
 ) {
     let deadline = Instant::now() + budget;
+    expect_turn_complete_before(sess, marker, deadline, budget, context);
+}
+
+fn expect_turn_complete_before(
+    sess: &PtySession,
+    marker: &str,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+) {
     loop {
         let screen = sess.render(screen_contents);
         let status = turn_status_line(&screen);
         let identity = turn_status_identity(&screen);
         let fresh = !identity.is_empty() && identity != marker;
-        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen).is_empty() {
+        if fresh && is_ready_for_input(&screen) {
             return;
         }
         if Instant::now() >= deadline {

@@ -1721,9 +1721,7 @@ fn cache_diagnostics_survive_resume_without_crossing_session_boundaries() {
 }
 
 fn turn(cli: &mut PtySession, text: &str) {
-    let marker = common::submit_line(cli, text, WAIT, text);
-    common::expect_turn_complete_after(cli, &marker, WAIT, text);
-    common::expect_input_line_cleared(cli, WAIT, "turn completed");
+    common::run_turn(cli, text, WAIT, text);
 }
 
 fn cache_rows(directory: &std::path::Path) -> Vec<Value> {

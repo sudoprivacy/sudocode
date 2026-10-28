@@ -1620,6 +1620,7 @@ impl ResponseCheck<'_> {
         // add a fully allocated response, and recover its context anchor.
         let mut resumed = env.spawn_with_env(&["--permission-mode", "read-only", "--resume"], &[]);
         common::expect_input_line_cleared(&resumed, env.timeout(), "resumed usage prompt");
+        let marker = common::turn_status_marker(&resumed);
         resumed.send("Continue the stream result").unwrap();
         common::expect_input_line(
             &resumed,
@@ -1643,7 +1644,12 @@ impl ResponseCheck<'_> {
             env.timeout(),
             "persist the resumed response",
         );
-        common::expect_input_line_cleared(&resumed, env.timeout(), "resumed turn complete");
+        common::expect_turn_complete_after(
+            &resumed,
+            &marker,
+            env.timeout(),
+            "resumed turn complete",
+        );
         resumed.send("/exit").unwrap();
         common::expect_input_line(&resumed, "/exit", env.timeout(), "exit input");
         resumed.send("\r").unwrap();

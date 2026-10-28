@@ -124,6 +124,7 @@ pub struct Probe {
     /// Locks dropped while partitioned. Held, not released, so the node keeps
     /// them until their TTL runs out.
     leaked: Mutex<Vec<Arc<dyn FsLock>>>,
+    register_writes: Mutex<std::collections::HashMap<String, (bool, u64)>>,
     /// When the [`Fault::ReaderRenewHeld`] renewal was requested, and whether
     /// the test has released it.
     held_since: Mutex<Option<Instant>>,
@@ -141,6 +142,7 @@ impl Probe {
             reader_claim_delay: Mutex::new(None),
             seat_release_gate: Mutex::new(None),
             leaked: Mutex::new(Vec::new()),
+            register_writes: Mutex::default(),
             held_since: Mutex::new(None),
             hold_released: (Mutex::new(false), Condvar::new()),
             register_write_failed: Mutex::new(None),
@@ -149,6 +151,32 @@ impl Probe {
 
     pub fn set(&self, fault: Fault) {
         *self.fault.lock().unwrap() = fault;
+    }
+
+    /// Fail only this exact register's writes, leaving all locks and reads real.
+    pub fn fail_register_writes(&self, path: &str, fail: bool) -> u64 {
+        let mut writes = self.register_writes.lock().unwrap();
+        let (active, attempts) = writes.entry(path.into()).or_default();
+        *active = fail;
+        *attempts
+    }
+
+    pub fn register_write_attempts(&self, path: &str) -> u64 {
+        self.register_writes
+            .lock()
+            .unwrap()
+            .get(path)
+            .map_or(0, |(_, attempts)| *attempts)
+    }
+
+    fn check_register_write(&self, path: &str) -> io::Result<()> {
+        if let Some((fail, attempts)) = self.register_writes.lock().unwrap().get_mut(path) {
+            *attempts += 1;
+            if *fail {
+                return Err(injected("reader register write transport error"));
+            }
+        }
+        Ok(())
     }
 
     fn fault(&self) -> Fault {
@@ -463,6 +491,7 @@ impl FaultyBackend {
     /// [`Fault::ReaderRegisterWriteFailsAfterLeaseLoss`], for any write of a
     /// reader's register.
     fn register_write(&self, path: &str) -> io::Result<()> {
+        self.probe.check_register_write(path)?;
         if !is_reader_register(path) || !self.probe.take_register_write_failure() {
             return Ok(());
         }

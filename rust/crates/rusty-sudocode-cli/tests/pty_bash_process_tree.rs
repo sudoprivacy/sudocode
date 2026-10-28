@@ -1,5 +1,6 @@
-//! Live regression: cancelling a foreground tool must stop its descendants.
-//! Run with `SCODE_TEST_BACKEND=live` and Node.js on PATH.
+//! Cancelling a foreground tool must stop its actual descendants.
+//! The default provider is scripted; `SCODE_TEST_BACKEND=live` also checks a real model.
+//! Requires Node.js on PATH.
 mod common;
 
 use std::fs;
@@ -48,12 +49,12 @@ fn is_exited(node: &str, pid: u64) -> bool {
 /// The marker comes from a grandchild, so neither a canned reply nor killing
 /// just the shell can satisfy the assertions. The next turn reads its run ID.
 #[test]
-fn live_esc_reaps_bash_descendants_and_next_turn_works() {
+fn esc_reaps_bash_descendants_and_next_turn_works() {
     run_bash_tree_workflow(true);
 }
 
 #[test]
-fn live_timeout_reaps_bash_descendants_and_next_turn_works() {
+fn timeout_reaps_bash_descendants_and_next_turn_works() {
     run_bash_tree_workflow(false);
 }
 
@@ -61,7 +62,7 @@ fn write_fixture(root: &Path) -> (String, String) {
     let node = Command::new("node")
         .args(["-p", "process.execPath"])
         .output()
-        .expect("Node.js is required for the live descendant fixture");
+        .expect("Node.js is required for the descendant fixture");
     assert!(node.status.success());
     let node = String::from_utf8(node.stdout).expect("node path UTF-8");
     let node = node.trim().replace('\\', "/");
@@ -91,17 +92,17 @@ fn write_fixture(root: &Path) -> (String, String) {
 
 fn run_bash_tree_workflow(is_cancel: bool) {
     let env = common::TestEnv::new("bash-tree-cancel");
-    if !env.is_live() {
-        eprintln!(
-            "SKIP: requires SCODE_TEST_BACKEND=live; a mock cannot prove model/tool cancellation"
-        );
-        return;
-    }
+    let turn_budget = if env.is_live() {
+        common::LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
     let root = env.workspace_root();
     let (node, run_id) = write_fixture(root);
     let command = format!("\"{node}\" parent.cjs");
     let timeout_ms = if is_cancel { 120_000 } else { 5_000 };
     let prompt = format!("This workspace contains a local process-cancellation regression fixture. parent.cjs starts descendant.cjs, which records its PID and a synthetic run_id in started.json. Use the bash tool to run exactly: {command}. Run once in the foreground with timeout={timeout_ms}. Do not retry, read or edit either script.");
+    let prompt = tool_prompt(&env, "foreground", &prompt, &command, timeout_ms);
     let mut session = env.spawn(&[
         "--permission-mode",
         "danger-full-access",
@@ -114,7 +115,7 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     session.send(&format!("{prompt}\r")).expect("start tool");
     let started = root.join("started.json");
     assert!(
-        wait_for(|| started.exists(), common::LIVE_TURN_BUDGET),
+        wait_for(|| started.exists(), turn_budget),
         "real grandchild did not start: {}",
         common::screen_tail(&session, 4000)
     );
@@ -149,7 +150,7 @@ fn run_bash_tree_workflow(is_cancel: bool) {
         common::expect_turn_complete_after(
             &session,
             &first_marker,
-            common::LIVE_TURN_BUDGET,
+            turn_budget,
             "initial tool turn completed",
         );
     }
@@ -165,6 +166,13 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     let follow_up = format!(
         "Continue the local process-cancellation regression fixture. Use the bash tool to run exactly: \"{node}\" recover.cjs. Run once in the foreground. This reads the synthetic run_id recorded by descendant.cjs in started.json and writes that run ID to recovered.txt. Execute it; do not just describe it."
     );
+    let follow_up = tool_prompt(
+        &env,
+        "recovery",
+        &follow_up,
+        &format!("\"{node}\" recover.cjs"),
+        5_000,
+    );
     session
         .send(&format!("{follow_up}\r"))
         .expect("follow-up turn");
@@ -174,17 +182,12 @@ fn run_bash_tree_workflow(is_cancel: bool) {
                 fs::read_to_string(root.join("recovered.txt"))
                     .is_ok_and(|text| text.trim() == run_id)
             },
-            common::LIVE_TURN_BUDGET,
+            turn_budget,
         ),
         "next turn did not write the recovered run ID: {}",
         common::screen_tail(&session, 4000)
     );
-    common::expect_turn_complete_after(
-        &session,
-        &marker,
-        common::LIVE_TURN_BUDGET,
-        "recovery turn completed",
-    );
+    common::expect_turn_complete_after(&session, &marker, turn_budget, "recovery turn completed");
     common::expect_input_line_cleared(&session, Duration::from_secs(90), "ready to exit");
     session.send("/exit").expect("type exit");
     common::expect_input_line(
@@ -195,4 +198,22 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     );
     session.send("\r").expect("submit exit");
     assert_eq!(session.expect_eof().expect("clean exit"), 0);
+}
+
+fn tool_prompt(
+    env: &common::TestEnv,
+    id: &str,
+    prompt: &str,
+    command: &str,
+    timeout_ms: u64,
+) -> String {
+    if env.is_live() {
+        return prompt.to_string();
+    }
+    let calls = serde_json::json!([{
+        "id": id,
+        "name": "Bash",
+        "input": {"command": command, "timeout": timeout_ms, "run_in_background": false}
+    }]);
+    format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
 }

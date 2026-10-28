@@ -104,6 +104,14 @@ impl ContextHistory {
         self.history.graph().context_session(&self.context)
     }
 
+    /// Refresh this continuation, never the latest sibling's committed view.
+    #[inline]
+    pub(crate) fn refresh_session(&mut self) -> io::Result<Session> {
+        self.check()?;
+        self.history.refresh()?;
+        self.session()
+    }
+
     pub(crate) fn revision(&self) -> io::Result<&str> {
         self.check()?;
         self.history

@@ -5,6 +5,8 @@ import net from 'node:net';
 const [port, scenario, ...args] = process.argv.slice(2);
 assert.deepEqual(args, ['app-server', 'proxy', '--sock', 'fixture-native.sock']);
 assert.ok(['normal', 'ignore-close'].includes(scenario));
+assert.equal(process.env.SCODE_NATIVE_ENV_SENTINEL, 'owned-proxy');
+assert.equal(process.env.CODEX_THREAD_ID, undefined, 'an explicit child environment is complete, not merged');
 if (scenario === 'ignore-close') {
   process.on('SIGTERM', () => {});
   setInterval(() => {}, 1000);

@@ -13,8 +13,10 @@ async function main(): Promise<void> {
   await once(server, 'listening');
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
+  const proxyEnv: NodeJS.ProcessEnv = { ...process.env, SCODE_NATIVE_ENV_SENTINEL: 'owned-proxy' };
+  delete proxyEnv.CODEX_THREAD_ID;
   const config = { codexArgv: [process.execPath, path.join(root, 'test/fixtures/codex-stdio-proxy.mjs'), String(address.port), 'normal'],
-    socket: 'fixture-native.sock' };
+    socket: 'fixture-native.sock', env: proxyEnv as Record<string, string> };
   const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
   const clientReplies: unknown[] = [];
   const original = process.env.CODEX_THREAD_ID ?? 'fixture-original';
@@ -67,6 +69,8 @@ async function main(): Promise<void> {
   };
   try {
     await assert.rejects(connectCodex({ codexArgv: ['bad\0argv'] }), /configuration/);
+    await assert.rejects(connectCodex({ ...config, env: { 'bad\0name': 'value' } }), /configuration/);
+    await assert.rejects(connectCodex({ ...config, env: { VALUE: 1 } as unknown as Record<string, string> }), /configuration/);
     if (process.env.CODEX_THREAD_ID) {
       await assert.rejects(connectCodexCallback({ ...config, threadId: `${original}-different`, peers: [],
         log: path.join(directory, 'wrong-owner.jsonl') }, 'existing-acp'), /owning CODEX_THREAD_ID/);

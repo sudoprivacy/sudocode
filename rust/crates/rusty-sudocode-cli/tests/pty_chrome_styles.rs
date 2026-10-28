@@ -95,6 +95,42 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     }
 }
 
+fn expect_frame_caps(sess: &PtySession, color: &str) {
+    // Bold corners shift inside their cells in Menlo even though plain text
+    // and column positions match. This contract also covers live overlays.
+    if let Some(root) = std::env::var_os("SCODE_FRAME_SNAPSHOT_DIR") {
+        common::expect_screen(
+            sess,
+            |screen| screen.contains("╭─") && screen.contains("╰─"),
+            common::DEFAULT_TIMEOUT,
+            "complete frame before raster capture",
+        );
+        let snapshot = sess.render(|screen| {
+            let (rows, cols) = screen.raw().size();
+            serde_json::json!({
+                "rows": rows, "cols": cols,
+                "ansi": String::from_utf8(screen.raw().contents_formatted()).unwrap(),
+            })
+        });
+        let thread = std::thread::current();
+        let name = format!("{}-{color}", thread.name().unwrap_or("frame"));
+        let name: String = name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect();
+        let root = std::path::PathBuf::from(root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(format!("{name}.json")),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+    }
+    for cap in ["╭─", "╰─"] {
+        expect_style(sess, cap, (color, false, false));
+    }
+}
+
 fn settle_chrome(sess: &PtySession) {
     // A styled label (or the prompt byte itself) can arrive before the frame
     // finishes. Resizing in that window reflows the startup banner while the
@@ -495,7 +531,8 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
-    expect_style(&sess, "╰─", (green, !no_color, false));
+    expect_frame_caps(&sess, green);
+    expect_style(&sess, "│", (green, false, false));
     exit(&mut sess);
 }
 
@@ -553,14 +590,14 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     } else {
         "Idx(247)"
     };
-    expect_style(&sess, "╭─", (border, !no_color, false));
+    expect_frame_caps(&sess, border);
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
     sess.send("\t").expect("queue draft");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
-    expect_style(&sess, "╭─", (border, !no_color, false));
+    expect_frame_caps(&sess, border);
     sess.send("\x1b[A").expect("recall queued message");
     common::expect_input_line(
         &sess,

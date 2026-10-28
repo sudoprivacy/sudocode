@@ -2,6 +2,7 @@
 
 mod a2a;
 mod plan;
+pub(super) use a2a::summary_preview;
 
 use std::fmt::Write as _;
 
@@ -1005,8 +1006,8 @@ impl ToolCardContent {
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
-/// syntax-theme green (ok), or red (error). Bold caps distinguish adjacent
-/// calls; the long vertical border uses normal weight without dimming.
+/// syntax-theme green (ok), or red (error). All frame strokes use regular
+/// weight without dimming so the corners align with the vertical border.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -1059,7 +1060,6 @@ pub(crate) fn render_tool_card_with_width(
             .map(String::as_str),
         term_width,
         color,
-        true,
     )
 }
 
@@ -2161,8 +2161,6 @@ pub(crate) struct TurnStatus<'a> {
     pub elapsed: Option<Duration>,
     /// Session-cumulative wall-clock time across every turn (the `Σs` field).
     pub cumulative_duration: Option<Duration>,
-    /// Current git branch, when the workspace is a repository.
-    pub branch: Option<&'a str>,
     /// The proxy account the turn was billed to, when one resolved. Shown
     /// because a session spends someone's money and the name is otherwise
     /// invisible until the bill arrives; `/status` carries which rule chose it.
@@ -2236,8 +2234,8 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
 /// token count, estimated cost (when pricing for the model is known), elapsed
-/// wall-clock time for the turn, context-window occupancy, and the current git
-/// branch (when one is available). Labels use the theme's muted foreground;
+/// wall-clock time for the turn, and context-window occupancy. The workspace's
+/// branch lives in the footer instead: it is state, not a per-turn figure. Labels use the theme's muted foreground;
 /// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
@@ -2259,7 +2257,6 @@ pub(crate) fn turn_status_line_with_context_estimate(
         context_window,
         elapsed,
         cumulative_duration,
-        branch,
         account,
     } = status;
 
@@ -2321,10 +2318,6 @@ pub(crate) fn turn_status_line_with_context_estimate(
         if let Some(share) = total.read_share_pct {
             line.push(format!(" · Σ⚡{share:.0}%"));
         }
-    }
-    if let Some(branch) = branch.filter(|b| !b.is_empty()) {
-        line.push(" · ");
-        line.push(branch);
     }
     line
 }
@@ -3359,7 +3352,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3382,7 +3374,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(0.3)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3408,7 +3399,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3437,7 +3427,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3445,45 +3434,6 @@ mod tests {
             plain.contains("~$90.00"),
             "estimate should be model-priced and marked: {plain}"
         );
-    }
-
-    #[test]
-    fn turn_status_line_appends_branch_when_present() {
-        let usage = TokenUsage::default();
-        let rendered = format_turn_status_line(&TurnStatus {
-            model: "claude-opus-4-6",
-            turn: 1,
-            usage: &usage,
-            cumulative_usage: &usage,
-            context_tokens: None,
-            context_window: None,
-            elapsed: Some(Duration::from_millis(800)),
-            cumulative_duration: None,
-            branch: Some("feat/tui-backlog-179"),
-            account: None,
-        });
-        let plain = strip_ansi(&rendered);
-        assert!(plain.ends_with("feat/tui-backlog-179"), "{plain}");
-    }
-
-    #[test]
-    fn turn_status_line_omits_branch_when_empty() {
-        let usage = TokenUsage::default();
-        let rendered = format_turn_status_line(&TurnStatus {
-            model: "claude-opus-4-6",
-            turn: 1,
-            usage: &usage,
-            cumulative_usage: &usage,
-            context_tokens: None,
-            context_window: None,
-            elapsed: Some(Duration::from_millis(800)),
-            cumulative_duration: None,
-            branch: Some(""),
-            account: None,
-        });
-        let plain = strip_ansi(&rendered);
-        // Trailing segment should be the duration, not an empty " · ".
-        assert!(plain.ends_with("+0.8s"), "{plain}");
     }
 
     #[test]
@@ -3569,7 +3519,6 @@ mod tests {
             context_window: Some(1_000_000),
             elapsed: Some(Duration::from_secs_f64(0.5)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3589,7 +3538,6 @@ mod tests {
             context_window: Some(1_000_000),
             elapsed: Some(Duration::from_secs_f64(0.5)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3608,7 +3556,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_millis(500)),
             cumulative_duration: None,
-            branch: None,
             account: Some("fujitoken"),
         });
         let plain = strip_ansi(&rendered);
@@ -3655,7 +3602,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: Some(Duration::from_secs(312)),
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3678,7 +3624,6 @@ mod tests {
             context_window: None,
             elapsed: None,
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);

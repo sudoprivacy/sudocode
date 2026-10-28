@@ -1942,7 +1942,7 @@ shortcut. This changes presentation, not slot allocation or input ownership.</p>
 <p>Dependencies: <strong>crossterm 0.28</strong>,
 <strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
 <strong>iocraft 0.8</strong>, <strong>smol 2</strong>,
-<strong>rustyline 15</strong> (sync path), <strong>serde_json</strong>.</p>
+<strong>rustyline 19</strong> (sync path, upstream buffered-input fix for external diagnostics), <strong>serde_json</strong>.</p>
 
 <h4>Phase 0 · Structural cleanup</h4>
 
@@ -2573,19 +2573,24 @@ until its v0.8.16 tag.</p>
 
 <h3 id="agent-runtime-tasks">Implementation and acceptance tasks</h3>
 
-<p><strong>Standalone startup while the node is offline.</strong>
-With an existing readable node record and credential, constructing the session's
-peer client does not perform a network probe. Ordinary startup and resume keep
-the node namespace while the receiver retries and A2A operations report their
-actual errors. Receiver-seat retries print an unchanged error once, reset that
-diagnostic after a successful receiver-seat check, and retain the existing retry
-interval. PTY acceptance requires usable input after a completed offline turn
-and covers both renderers, restored history and a
-failed real send without a disk inbox. Record parsing, missing credential files
-and identity mismatches still fail startup; representing those conditions as
-A2A unavailable, and explicit
-disk-to-node handoff, remain follow-up work. This does not provision a service
-or change cohost ownership.</p>
+<p><strong>Standalone startup with unavailable A2A.</strong>
+A present node record selects one shared node mailbox even when parsing,
+credential resolution or node IO fails. Ordinary startup and resume remain
+usable; A2A tools report the actual error without selecting disk. The original
+receiver retries local binding resolution and presence announcement before
+claiming its seat. These attempts share the same
+<code>telemetry::RetryDiagnostics</code> as receiver checks and completion
+persistence; the <a href="docs/design/background-retry-diagnostics.md">reporter
+and native input owner</a> retain the original cause without repeatedly
+repainting the prompt. PTY coverage exercises both renderers, restored history,
+missing credentials, actual failed sends and same-process receiver retries.
+ACP stdio coverage exercises the same loaded session before and after preparing
+a bundle and checks zero model requests. An isolated real-TLS-daemon fixture
+checks direct append and the original receiver after bundle publication;
+source preparation does not establish that it passed. A constructed client's
+credentials stay fixed, and explicit disk-to-node handoff and portable service
+provisioning remain follow-up work. Cohost retains its injected mailbox and
+host-service requirements.</p>
 
 <table>
 <thead><tr><th>Task</th><th>Implementation evidence</th><th>Next acceptance</th></tr></thead>

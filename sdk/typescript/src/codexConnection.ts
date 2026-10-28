@@ -6,6 +6,8 @@ import { timeout } from './timeout';
 export interface CodexConnectionConfig {
   codexArgv: string[];
   socket?: string;
+  /** Complete environment for the owned proxy; omitted inherits the caller's. */
+  env?: Record<string, string>;
   closeTimeoutMs?: number;
   onNotificationError?: (error: unknown) => void | Promise<void>;
 }
@@ -37,6 +39,9 @@ export function validateCodexConnectionConfig(config: CodexConnectionConfig): vo
   if (!Array.isArray(config.codexArgv) || !config.codexArgv.length
       || config.codexArgv.some(arg => typeof arg !== 'string' || !arg || arg.includes('\0'))
       || (config.socket !== undefined && typeof config.socket !== 'string')
+      || (config.env !== undefined && (!config.env || typeof config.env !== 'object' || Array.isArray(config.env)
+        || Object.entries(config.env).some(([name, value]) => !name || /[=\0]/.test(name)
+          || typeof value !== 'string' || value.includes('\0'))))
       || (config.closeTimeoutMs !== undefined && (!Number.isFinite(config.closeTimeoutMs) || config.closeTimeoutMs <= 0))
       || (config.onNotificationError !== undefined && typeof config.onNotificationError !== 'function')) {
     throw new Error('Invalid native Codex connection configuration');
@@ -49,7 +54,9 @@ export async function connectCodex(
 ): Promise<CodexConnection> {
   validateCodexConnectionConfig(config);
   const child = spawn(config.codexArgv[0], [...config.codexArgv.slice(1), 'app-server', 'proxy',
-    ...(config.socket ? ['--sock', config.socket] : [])], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    ...(config.socket ? ['--sock', config.socket] : [])], {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env: config.env,
+    });
   const wire = Duplex.from({ readable: child.stdout, writable: child.stdin });
   const socket = new WebSocket('ws://localhost/', { createConnection: () => wire, handshakeTimeout: 10000 });
   let stderr = '';

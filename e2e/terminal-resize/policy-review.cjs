@@ -39,10 +39,12 @@ module.exports = async function review({ github, context, core, root, output }) 
     });
     if (files.length !== current.data.changed_files) throw new Error('incomplete PR file list');
     const affectsPerformance = name => name.startsWith('rust/')
-      || name.startsWith('e2e/terminal-resize/') || name === '.github/workflows/render-performance.yml';
+      || name.startsWith('e2e/terminal-resize/') || name === '.github/workflows/render-performance.yml'
+      || name === '.github/workflows/render-publish.yml';
     isNeeded = files.some(file => affectsPerformance(file.filename)
       || (file.previous_filename && affectsPerformance(file.previous_filename)));
     const protectedPath = name => name === '.github/workflows/render-performance.yml'
+      || name === '.github/workflows/render-publish.yml'
       || name.startsWith('e2e/terminal-resize/')
       || name.startsWith('rust/crates/rusty-sudocode-cli/tests/common/')
       || name === 'rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs'

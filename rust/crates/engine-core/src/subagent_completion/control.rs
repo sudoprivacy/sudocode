@@ -30,6 +30,20 @@ pub(super) struct DeliveryState {
 }
 
 impl CompletionState {
+    #[inline]
+    pub(super) fn persistence_diagnostics(&self) -> &telemetry::RetryDiagnostics {
+        self.persistence_diagnostics.get_or_init(|| {
+            Box::new(telemetry::RetryDiagnostics::new(
+                "engine-completion",
+                self.binding
+                    .as_ref()
+                    .map_or("unbound session", |binding| binding.session_id.as_str()),
+                "Task completion persistence is pending; retrying in the background.",
+                "Task completion persistence checks recovered.",
+            ))
+        })
+    }
+
     /// Composition only: open the journal shared with this session's writer.
     pub fn open(session: &runtime::Session, cwd: &Path, create: bool) -> Result<Arc<Self>, String> {
         let state = Arc::new(Self {
@@ -343,8 +357,7 @@ impl CompletionState {
             }
             return;
         }
-        if let Err(error) = self.retry_terminals() {
-            eprintln!("[engine-completion] terminal persistence pending: {error}");
+        if self.retry_terminals().is_err() {
             self.delivery
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

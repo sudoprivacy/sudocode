@@ -87,41 +87,42 @@ fn assert_ordered_response(screen: &str) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn captured_diagnostics_preserve_utf8_across_pipe_reads() {
-    let env = TestEnv::new_mock("render-stderr-framing");
-    let mut sess = start(
-        &env,
-        "queue",
-        &["--permission-mode", "read-only"],
-        (140, 120),
-    );
-    // The rejected key produces one diagnostic longer than the capture pipe's
-    // read buffer, with a multibyte character spanning that read boundary.
-    let key = format!("x{}DIAGNOSTIC-END", "界".repeat(1500));
-    sess.send(&format!("\x1b[200~/config set {key} value\x1b[201~"))
-        .expect("paste invalid config command");
-    common::expect_screen(
-        &sess,
-        |s| s.contains("Pasted") || s.contains("/config set"),
-        common::DEFAULT_TIMEOUT,
-        "config input",
-    );
-    sess.send("\r").expect("submit config command");
-    let screen = common::expect_screen_settled(
-        &sess,
-        |s| s.contains("Error: Unknown setting:") && s.contains("DIAGNOSTIC-END"),
-        common::DEFAULT_TIMEOUT,
-        "captured diagnostic",
-    );
-    assert!(
-        common::screen_contains(&screen, &format!("Unknown setting: \"{key}\"")),
-        "diagnostic was split or decoded before its bytes were complete: {screen}"
-    );
-    assert!(!screen.contains('�'), "corrupted UTF-8: {screen}");
-    assert_eq!(env.captured_message_count(), 0);
-    finish(&mut sess);
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("render-stderr-framing");
+        let mut sess = start(&env, mode, &["--permission-mode", "read-only"], (140, 120));
+        // The rejected key produces one diagnostic longer than the capture pipe's
+        // read buffer, with a multibyte character spanning that read boundary.
+        let key = format!("x{}DIAGNOSTIC-END", "界".repeat(1500));
+        sess.send(&format!("\x1b[200~/config set {key} value\x1b[201~"))
+            .expect("paste invalid config command");
+        common::expect_screen(
+            &sess,
+            |s| s.contains("Pasted") || s.contains("/config set"),
+            common::DEFAULT_TIMEOUT,
+            "config input",
+        );
+        sess.send("\r").expect("submit config command");
+        let screen = common::expect_screen_settled(
+            &sess,
+            |s| s.contains("Error: Unknown setting:") && s.contains("DIAGNOSTIC-END"),
+            common::DEFAULT_TIMEOUT,
+            "captured diagnostic",
+        );
+        assert!(
+            common::screen_contains(&screen, &format!("Unknown setting: \"{key}\"")),
+            "diagnostic was split or decoded before its bytes were complete: {screen}"
+        );
+        assert!(!screen.contains('�'), "corrupted UTF-8: {screen}");
+        common::expect_input_line_cleared(
+            &sess,
+            common::DEFAULT_TIMEOUT,
+            "input after captured diagnostic",
+        );
+        assert_eq!(env.captured_message_count(), 0);
+        finish(&mut sess);
+    }
 }
 
 #[cfg(unix)]

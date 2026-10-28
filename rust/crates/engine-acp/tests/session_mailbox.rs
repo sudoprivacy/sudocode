@@ -89,7 +89,7 @@ fn until(
 fn assert_runtime_state(kernel: &Kernel, pid: &Value, expected: &str, reason: Option<&str>) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let state = call(kernel, "get_session_v1", json!({"session_id":pid}));
+        let state = call(kernel, "get_session_v1", &json!({"session_id":pid}));
         if state["state"] == expected && state["reason"].as_str() == reason {
             eprintln!("RUNTIME_STATE_PROOF state={expected} reason={reason:?} pid={pid}");
             return;
@@ -283,7 +283,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     );
     assert_cohost_permission_turns(&mailbox, &kernel, &started, &fs, sid);
     let (peer_path, _peer) = exercise_cohost_peer_input(&mailbox, &kernel, &fs);
-    assert_cohost_question_turns(&mailbox, sid);
+    assert_cohost_question_turns(&mailbox, &kernel, &started, sid);
     // Only `send` reaches a peer. The peer's turn above answered in prose and called
     // no tool, and two complete turns have run since, so anything the session would
     // ever deliver for it is in the conversation by now: nothing from the worker is.
@@ -356,12 +356,12 @@ fn assert_cohost_permission_turns(
         );
         assert_eq!(state["state"], "awaiting_input");
         assert_runtime_state(
-            &kernel,
+            kernel,
             &started["session_id"],
             "awaiting_input",
             Some("permission"),
         );
-        assert_status(&mailbox, sid, "awaiting_input", Some("permission"));
+        assert_status(mailbox, sid, "awaiting_input", Some("permission"));
         if cancelled {
             send(
                 mailbox,
@@ -381,6 +381,7 @@ fn assert_cohost_permission_turns(
             );
         }
         let (terminal, events) = until(mailbox, |message| message["id"] == turn);
+        assert_runtime_state(kernel, &started["session_id"], "ready", None);
         assert_eq!(
             terminal["result"]["stopReason"],
             if cancelled { "cancelled" } else { "end_turn" },
@@ -482,7 +483,12 @@ fn exercise_cohost_peer_input(
     (peer_path, peer)
 }
 
-fn assert_cohost_question_turns(mailbox: &SessionMailbox<Kernel>, sid: &str) {
+fn assert_cohost_question_turns(
+    mailbox: &SessionMailbox<Kernel>,
+    kernel: &Arc<Kernel>,
+    started: &Value,
+    sid: &str,
+) {
     // Reverse questions and cancellation travel on the same channel as permissions.
     for (turn, cancelled) in [("cancel-question", true), ("answer-question", false)] {
         send(
@@ -512,7 +518,7 @@ fn assert_cohost_question_turns(mailbox: &SessionMailbox<Kernel>, sid: &str) {
         assert_eq!(question["params"]["sessionId"], sid);
         assert_eq!(question["params"]["questions"][0]["id"], "q1");
         assert_runtime_state(
-            &kernel,
+            kernel,
             &started["session_id"],
             "awaiting_input",
             Some("question"),
@@ -589,12 +595,12 @@ fn assert_parallel_question_progress(
         "question is still unanswered"
     );
     assert_runtime_state(
-        &kernel,
+        kernel,
         &started["session_id"],
         "awaiting_input",
         Some("question"),
     );
-    assert_status(&mailbox, sid, "awaiting_input", Some("question"));
+    assert_status(mailbox, sid, "awaiting_input", Some("question"));
     send(
         mailbox,
         json!({"jsonrpc":"2.0","id":question["id"],
@@ -973,7 +979,11 @@ fn open_scripted_controller(
         &mailbox,
         json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
     );
-    until(&mailbox, |message| message["id"] == "init");
+    let (initialized, _) = until(&mailbox, |message| message["id"] == "init");
+    assert_eq!(
+        initialized["result"]["_meta"]["sudocode"]["runtimeStatus"]["version"], 1,
+        "{initialized}"
+    );
     send(
         &mailbox,
         json!({"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/","mcpServers":[]}}),

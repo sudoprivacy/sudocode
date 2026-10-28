@@ -497,6 +497,7 @@ fn run_live_inventory_workflow(
     let nonce = start_live_inventory(mailbox, fs, sid);
     let InventoryObservation {
         permissions,
+        status_queries,
         completed_tools,
         text,
         finished,
@@ -505,6 +506,7 @@ fn run_live_inventory_workflow(
         fs,
         capture_dir,
         started["session_id"].as_str().unwrap(),
+        sid,
         deadline,
     );
     // Close before assertions too: a failed live assertion must release its agent.
@@ -531,6 +533,7 @@ fn run_live_inventory_workflow(
         finished,
         "live workflow exceeded {LIVE_WORKFLOW_BUDGET:?}: {text}"
     );
+    assert_eq!(status_queries, permissions);
     assert!(
         permissions > 0,
         "controller never received a tool permission request"
@@ -595,62 +598,87 @@ fn receive_live_inventory(
     fs: &KernelFsBackend<Kernel>,
     capture_dir: &std::path::Path,
     process_id: &str,
+    sid: &str,
     deadline: Instant,
 ) -> InventoryObservation {
-    let mut permissions = 0;
-    let mut completed_tools = 0;
-    let mut text = String::new();
-    let mut finished = false;
+    let mut observation = InventoryObservation::default();
+    let mut pending_permission = None;
     while let Some(payload) = receive_before(mailbox, deadline) {
         match payload {
             SessionPayload::Rpc { message } => {
                 eprintln!("[mailbox] {message}");
-                if message["method"] == "session/request_permission" {
-                    if permissions == 0 {
+                if message["id"] == "live-runtime-status" {
+                    assert!(message.get("error").is_none(), "{message}");
+                    let status = &message["result"];
+                    assert_eq!(status["foreground"]["state"], "awaiting_input", "{status}");
+                    assert_eq!(
+                        status["foreground"]["waiting_for"], "permission",
+                        "{status}"
+                    );
+                    observation.status_queries += 1;
+                    let (id, option) = pending_permission
+                        .take()
+                        .expect("approval is still pending");
+                    send(
+                        mailbox,
+                        json!({"jsonrpc":"2.0","id":id,
+                        "result":{"outcome":{"outcome":"selected","optionId":option}}}),
+                    );
+                } else if message["method"] == "session/request_permission" {
+                    if observation.permissions == 0 {
                         assert_request_context(capture_dir, process_id);
                     }
-                    permissions += 1;
-                    assert!(permissions <= 12, "unexpected tool loop: {message}");
-                    approve_live_inventory_tool(mailbox, fs, process_id, &message);
+                    observation.permissions += 1;
+                    assert!(
+                        observation.permissions <= 12,
+                        "unexpected tool loop: {message}"
+                    );
+                    let approval =
+                        prepare_live_inventory_permission(mailbox, fs, process_id, &message);
+                    assert!(pending_permission.replace(approval).is_none());
+                    send(
+                        mailbox,
+                        json!({"jsonrpc":"2.0","id":"live-runtime-status",
+                        "method":"_sudocode/session/status","params":{"sessionId":sid}}),
+                    );
                 } else if message["id"] == "inventory" {
                     assert!(message.get("error").is_none(), "{message}");
                     assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
-                    finished = true;
+                    observation.finished = true;
                     break;
                 } else {
                     let update = &message["params"]["update"];
                     if update["status"] == "completed" {
-                        completed_tools += 1;
+                        observation.completed_tools += 1;
                     }
                     if update["sessionUpdate"] == "agent_message_chunk" {
-                        text.push_str(update["content"]["text"].as_str().unwrap_or_default());
+                        observation
+                            .text
+                            .push_str(update["content"]["text"].as_str().unwrap_or_default());
                     }
                 }
             }
             SessionPayload::Closed { reason } => panic!("closed: {reason}"),
         }
     }
-    InventoryObservation {
-        permissions,
-        completed_tools,
-        text,
-        finished,
-    }
+    observation
 }
 
+#[derive(Default)]
 struct InventoryObservation {
     permissions: usize,
+    status_queries: usize,
     completed_tools: usize,
     text: String,
     finished: bool,
 }
 
-fn approve_live_inventory_tool(
+fn prepare_live_inventory_permission(
     mailbox: &SessionMailbox<Kernel>,
     fs: &KernelFsBackend<Kernel>,
     process_id: &str,
     message: &Value,
-) {
+) -> (Value, Value) {
     let input: Value = serde_json::from_str(
         message["params"]["toolCall"]["rawInput"]
             .as_str()
@@ -688,9 +716,5 @@ fn approve_live_inventory_tool(
         .find(|o| o["kind"] == "allow_once")
         .unwrap()["optionId"]
         .clone();
-    send(
-        mailbox,
-        json!({"jsonrpc":"2.0","id":message["id"],
-                        "result":{"outcome":{"outcome":"selected","optionId":option}}}),
-    );
+    (message["id"].clone(), option)
 }

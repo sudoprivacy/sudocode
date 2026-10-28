@@ -9,6 +9,9 @@
 //!
 //! - [`stdin_is_readable`]: whether stdin has data waiting, consuming nothing.
 //! - [`decode_console_bytes`]: what bytes in the console's code page spell.
+//! - On Windows, the owned stderr swap used by the terminal capture owner.
+//! - [`prevent_standard_handle_inheritance`]: keep launcher pipes out of a
+//!   background process on Windows.
 //!
 //! # Why stdin readiness
 //!
@@ -30,6 +33,88 @@
 //! knows every code page the system can be set to.
 
 use std::time::Duration;
+
+/// Replace stderr for the existing terminal owner, without querying a pipe's
+/// type while synchronous IO may be blocked on it. The caller serializes
+/// standard-stream replacement. A handle still installed on stdin or stdout
+/// remains borrowed; only an exclusively displaced handle is returned owned.
+#[cfg(windows)]
+#[inline]
+pub fn replace_stderr_handle(
+    source: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<Option<std::os::windows::io::OwnedHandle>> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let replacement = source.try_clone_to_owned()?;
+    // SAFETY: these calls read the process's standard handle slots, not buffers.
+    let (previous, input, output) = unsafe {
+        (
+            GetStdHandle(STD_ERROR_HANDLE),
+            GetStdHandle(STD_INPUT_HANDLE),
+            GetStdHandle(STD_OUTPUT_HANDLE),
+        )
+    };
+    // SAFETY: the owned duplicate is valid and remains alive during the call.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, replacement.as_raw_handle()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The successful slot replacement now owns this duplicate. A failed swap
+    // above instead drops it normally and leaves the old slot untouched.
+    let _ = replacement.into_raw_handle();
+    if previous.is_null()
+        || previous == INVALID_HANDLE_VALUE
+        || previous == input
+        || previous == output
+    {
+        return Ok(None);
+    }
+    // SAFETY: this valid handle was removed from stderr and is not installed
+    // on either other standard stream. No owner was constructed before success.
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(previous) }))
+}
+
+/// Keep this process's standard handles out of subsequently spawned children.
+///
+/// Explicit child stdio still works: Rust duplicates the selected handles.
+/// The inherit flags stay cleared so a concurrent spawn cannot inherit a
+/// launcher's pipe during a temporary restoration window. No handle is closed.
+#[cfg(windows)]
+pub fn prevent_standard_handle_inheritance() -> std::io::Result<()> {
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, ERROR_INVALID_HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    for handle in [
+        io::stdin().as_raw_handle(),
+        io::stdout().as_raw_handle(),
+        io::stderr().as_raw_handle(),
+    ] {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        // SAFETY: each handle is borrowed from a live standard stream. This
+        // only clears its inheritance flag; it neither closes nor replaces it.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_INVALID_HANDLE as i32) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unix process spawning does not need the Windows inheritance adjustment.
+#[cfg(not(windows))]
+pub fn prevent_standard_handle_inheritance() -> std::io::Result<()> {
+    Ok(())
+}
 
 /// What a readiness peek concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -208,6 +208,6 @@ fn write_plan_choice_exit_rejects_execution() {
         "plan-exit",
         "4",
         "User chose to exit plan mode without executing",
-        true,
+        false,
     );
 }

@@ -276,7 +276,7 @@ fn base_command_with_mode(
     token: &str,
     permission_mode: &str,
 ) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    let mut cmd = Command::new(common::scode_bin());
     cmd.current_dir(&workspace.root)
         .env_clear()
         .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
@@ -828,6 +828,108 @@ async fn live_anthropic_smoke_stdio() {
 
     let mut client = spawn_stdio_client(&workspace, &token);
     run_live_scenarios(&mut client, &workspace).await;
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// A real model must read the summary, send it back, and preserve its record.
+#[tokio::test]
+async fn live_peer_summary_reaches_model_client_and_saved_session() {
+    let Some(token) = proxy_token() else {
+        return;
+    };
+    const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
+    const PEER: &str = "acp-summary-peer";
+    const BODY: &str = concat!(
+        "Use send to reply to me with this message's summary verbatim. ",
+        "Then say ACP-SUMMARY-COMPLETE. Do not write files or run shell commands."
+    );
+    let workspace = TestWorkspace::new("live-peer-summary");
+    workspace.create();
+    workspace.write_sudocode_json();
+    let mut client = spawn_stdio_client_with_mode(&workspace, &token, "danger-full-access");
+    scenario_initialize(&mut client).await;
+    let (_, created) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(), "mcpServers": []
+            }),
+        )
+        .await;
+    let session_id = created["result"]["sessionId"]
+        .as_str()
+        .expect("session created");
+    let agent = created["result"]["_meta"]["sudocode"]["peer"]["agent"]
+        .as_str()
+        .expect("session exposes its peer identity");
+    let peer = runtime::mailbox::Mailbox::workspace_local(
+        &runtime::mailbox::local_pair_root_in(&workspace.config_home),
+        PEER.into(),
+    );
+    peer.ensure_presence().unwrap();
+    peer.send(runtime::agent_mailbox::MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: PEER.into(),
+        to: agent.into(),
+        body: BODY.into(),
+        summary: Some(SUMMARY.into()),
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    })
+    .unwrap();
+    timeout(RECV_TIMEOUT, async {
+        let mut saw_summary = false;
+        let mut answer = String::new();
+        loop {
+            let message = client.recv().await;
+            if message["params"]["sessionId"] != session_id {
+                continue;
+            }
+            let update = &message["params"]["update"];
+            if update["sessionUpdate"] == "user_message_chunk" {
+                assert_eq!(
+                    message["params"]["_meta"]["sudocode"]["a2a"]["summary"],
+                    SUMMARY
+                );
+                assert!(update["content"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("Summary: {SUMMARY}")));
+                saw_summary = true;
+            }
+            if update["sessionUpdate"] == "agent_message_chunk" {
+                answer.push_str(update["content"]["text"].as_str().unwrap_or_default());
+            }
+            if saw_summary && answer.contains("ACP-SUMMARY-COMPLETE") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("live peer summary turn completes");
+    let conversations = peer.list_conversations().unwrap();
+    assert_eq!(conversations.len(), 1);
+    let (replies, _) = peer.poll_conversation(&conversations[0], 0, 0).unwrap();
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply.body == SUMMARY && reply.from == agent && reply.to == PEER),
+        "the model must read the summary and actually send it: {replies:?}"
+    );
+    let saved = runtime::SessionStore::from_cwd(&workspace.root)
+        .unwrap()
+        .load_session("latest")
+        .unwrap()
+        .session;
+    assert!(saved
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .any(|block| matches!(block, runtime::ContentBlock::Text { text }
+            if text.contains(&format!("Summary: {SUMMARY}")))));
     client.shutdown().await;
     workspace.cleanup();
 }

@@ -17,7 +17,7 @@ await build({ ...shared, entryPoints: ['src/server.ts'], outfile: 'dist/server.c
       ? { path: './index.cjs', external: true } : undefined);
   },
 }] });
-for (const test of ['acpIntegration', 'mcpIntegration']) {
+for (const test of ['acpIntegration', 'mcpIntegration', 'codexConnectionIntegration']) {
   await build({ ...shared, entryPoints: [`test/${test}.ts`], outfile: `dist/testing/${test}.cjs`,
     external: ['../dist/index.cjs'] });
 }

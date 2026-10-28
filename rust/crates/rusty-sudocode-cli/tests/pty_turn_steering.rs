@@ -631,13 +631,15 @@ fn core_sender(env: &TestEnv) -> (String, PtySession) {
     (target, sender)
 }
 
+const CORE_SEND_SUMMARY: &str = "auxiliary information";
+
 fn expect_core_delivery(receiver: &PtySession, sender: &PtySession, label: &str) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         common::expect_screen(
             receiver,
             |view| {
                 view.lines()
-                    .any(|line| line.contains(label) && line.contains("PEER_CORE_SEND_BODY"))
+                    .any(|line| line.contains(label) && line.contains(CORE_SEND_SUMMARY))
             },
             common::LIVE_TURN_BUDGET,
             "core send's delivery intent survives transport and receipt",
@@ -654,7 +656,7 @@ fn core_send_delivery(delivery: engine_events::InputDelivery) {
     let (env, mut receiver, _release) = start("core-send-delivery", true);
     let (target, mut sender) = core_sender(&env);
     let body = "Auxiliary calibration result: PEER_CORE_SEND_BODY = 42.";
-    let mut input = json!({"to":target, "message":body, "summary":"auxiliary information"});
+    let mut input = json!({"to":target, "message":body, "summary":CORE_SEND_SUMMARY});
     if delivery == engine_events::InputDelivery::Queue {
         input["delivery"] = json!("queue");
     }
@@ -679,7 +681,10 @@ fn core_send_delivery(delivery: engine_events::InputDelivery) {
     common::expect_screen_settled(
         &receiver,
         |view| {
-            view.contains("ORIGINAL_TOOL_RESULT") && view.contains("ctx ") && view.contains("/help")
+            view.contains("ORIGINAL_TOOL_RESULT")
+                && view.contains("PEER_CORE_SEND_BODY")
+                && view.contains("ctx ")
+                && view.contains("/help")
         },
         common::LIVE_TURN_BUDGET,
         "original task finishes after receiving peer input",
@@ -950,11 +955,11 @@ fn pre_admission_boundary(pause_at: &str) {
         common::DEFAULT_TIMEOUT,
         "provider boundary is held open",
     );
-    // A server-side write is not client consumption. Reasoning activity
+    // A server-side write is not client consumption. Thinking activity
     // confirms the client has entered thinking; its text may be folded in UI.
     common::expect_screen(
         &session,
-        |view| view.contains("Reasoning"),
+        |view| view.contains("Thinking..."),
         common::DEFAULT_TIMEOUT,
         "client entered thinking before steering",
     );

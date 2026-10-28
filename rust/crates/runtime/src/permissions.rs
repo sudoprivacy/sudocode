@@ -266,8 +266,19 @@ impl From<&str> for PromptText {
     }
 }
 
+/// Presentation intent carried through the existing question boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QuestionPresentation {
+    #[default]
+    Question,
+    PlanReview {
+        plan_file: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionPromptRequest {
+    pub presentation: QuestionPresentation,
     pub title: Option<String>,
     pub description: Option<PromptText>,
     pub fields: Vec<QuestionField>,

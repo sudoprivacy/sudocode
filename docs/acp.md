@@ -212,6 +212,11 @@ SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-sonnet-4-6 \
 The `Live Bash process tree` CI job runs this workflow on Linux and Windows for
 main pushes and manual workflow runs, using `SUDOROUTER_CI_API_KEY`.
 
+Incoming peer `user_message_chunk` notifications carry
+`_meta.sudocode.a2a` with `from`, `kind`, and the optional sender-supplied
+`summary`. The full summary also accompanies the body in the persisted model
+input. Clients can use this metadata for their own message presentation.
+
 ### Direct A2A requests
 
 Hosts check `initialize.result._meta.sudocode.directA2a.version == 1`. Two

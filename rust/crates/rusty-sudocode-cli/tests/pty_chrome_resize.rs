@@ -159,6 +159,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    const PEER_SUMMARY: &str = "queued resize acceptance";
     let env = TestEnv::new("a2a-real-resize");
     let first = format!("A2A-BUSY-MARKER {}", "preview ".repeat(12));
     let body = format!(
@@ -194,7 +195,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
                             from: "mac-ai".into(),
                             to: receiver.file_name().unwrap().to_string_lossy().into_owned(),
                             body,
-                            summary: Some("queued resize acceptance".into()),
+                            summary: Some(PEER_SUMMARY.into()),
                             timestamp: 0,
                             color: None,
                             kind: agent_mailbox::kinds::MESSAGE.into(),
@@ -214,6 +215,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
         serde_json::json!({
             "prompt": prompt,
             "firstLine": first.trim_end(),
+            "peerSummary": PEER_SUMMARY,
             "expectedReply": if env.is_live() { "A2A-ACK" } else { "The answer is 4" },
         }),
     );

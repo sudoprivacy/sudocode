@@ -8,10 +8,19 @@ use super::{
     ToolCardContent, ToolStatus, TOOL_OUTPUT_DISPLAY_MAX_LINES,
 };
 
-/// Bound prose previews without clipping the exact addresses needed by `send`.
+/// The same sender-supplied summary appears on outgoing and incoming cards.
 #[inline]
-fn preview(text: &str) -> String {
-    truncate_output_for_display(text.trim(), 3, 240)
+pub(crate) fn summary_preview(text: &str) -> String {
+    format!(
+        "Summary: {}",
+        truncate_output_for_display(text.trim(), 3, 240)
+    )
+}
+
+/// Bound the message body independently of its concise summary and address.
+#[inline]
+fn message_preview(text: &str) -> String {
+    truncate_output_for_display(text.trim(), 6, 960)
 }
 
 #[inline]
@@ -67,11 +76,11 @@ pub(super) fn send_card(
     let mut header = format!("{} → {target}", tool_label("send"));
     let mut body = Vec::new();
     if let Some(summary) = string(input, "summary").filter(|s| !s.trim().is_empty()) {
-        body.push(format!("Summary: {}", preview(summary)));
+        body.push(summary_preview(summary));
     }
     if let Some(message) = input.get("message") {
         match message {
-            Value::String(text) => body.push(preview(text)),
+            Value::String(text) => body.push(message_preview(text)),
             Value::Object(_) => {
                 let Some(kind) = string(message, "type") else {
                     return generic_tool_card("send", input, output, status);
@@ -97,7 +106,7 @@ pub(super) fn send_card(
                 body.push(intent);
                 for key in ["reason", "feedback"] {
                     if let Some(text) = string(message, key) {
-                        body.push(preview(text));
+                        body.push(message_preview(text));
                     }
                 }
             }

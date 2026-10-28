@@ -1,6 +1,10 @@
 //! Background task discovery, inspection and control through the real terminal.
 mod common;
 #[path = "support/wire_requests.rs"]
+#[allow(
+    dead_code,
+    reason = "This journey decodes tool blocks; other PTYs use the shared dump-file filter."
+)]
 mod wire_requests;
 
 use common::TestEnv;
@@ -178,6 +182,90 @@ fn background_shell_footer_and_details_keep_output_after_parent_finishes() {
 }
 
 #[test]
+fn background_status_is_static_and_results_do_not_displace_turn_statistics() {
+    let (env, _release) = task_env("background-status-conclusion");
+    let mut session = start(
+        &env,
+        &[shell(
+            "status",
+            "while [ ! -f release ]; do sleep 0.1; done; echo STATUS_RESULT_READY",
+            "Status conclusion fixture",
+        )],
+    );
+    let view = common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.lines().any(|line| {
+                line.starts_with("1 task still running · turn ")
+                    && line.trim_end().ends_with(" finished")
+            }) && view
+                .lines()
+                .any(|line| line.contains("danger-full-access") && line.contains("1 terminal"))
+        },
+        common::LIVE_TURN_BUDGET,
+        "foreground conclusion and task footer have distinct content",
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        session.render(|s| s
+            .raw()
+            .rows(0, s.raw().size().1)
+            .collect::<Vec<_>>()
+            .join("\n")),
+        view,
+        "background overview does not animate or advance a clock"
+    );
+    session.send("后台-draft").unwrap();
+    common::expect_input_line(
+        &session,
+        "后台-draft",
+        common::DEFAULT_TIMEOUT,
+        "idle typing",
+    );
+    session.resize(12, 32).unwrap();
+    common::expect_screen_rows(
+        &session,
+        |view| view.lines().any(|line| line.trim() == "1 running"),
+        common::DEFAULT_TIMEOUT,
+        "compact status preserves the task conclusion",
+    );
+    session.resize(40, 100).unwrap();
+    common::expect_input_line(
+        &session,
+        "后台-draft",
+        common::DEFAULT_TIMEOUT,
+        "resize retained draft",
+    );
+    session.send("\x15").unwrap();
+    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "clear draft");
+    let marker = common::turn_status_marker(&session);
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    common::expect_turn_complete_after(
+        &session,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "completion notification starts and finishes a new foreground turn",
+    );
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            let statistics = view.lines().position(|line| line.contains("· turn "));
+            let unread = view.lines().position(|line| {
+                line.contains("danger-full-access") && line.contains("1 new result")
+            });
+            matches!((statistics, unread), (Some(a), Some(b)) if a != b)
+                && view.contains("ctx ")
+                && !common::turn_status_line(view).contains("still running")
+        },
+        common::LIVE_TURN_BUDGET,
+        "statistics and unread result remain on their own surfaces",
+    );
+    open(&mut session);
+    screen(&session, "STATUS_RESULT_READY");
+    close(session);
+}
+
+#[test]
 fn urgent_tip_shares_the_footer_and_survives_task_browsing_and_resize() {
     let (env, _release) = task_env("background-with-tip");
     let calls = [
@@ -244,6 +332,7 @@ fn failed_background_shell_exposes_unread_result_and_exit_code() {
         )],
     );
     screen(&session, "1 new result");
+    screen(&session, "1 background task failed");
     open(&mut session);
     screen(&session, "  FAILURE_EVIDENCE");
     screen(&session, "exit 7");
@@ -257,6 +346,17 @@ fn failed_background_shell_exposes_unread_result_and_exit_code() {
     assert!(
         !view.contains("new result"),
         "read result must hide footer:\n{view}"
+    );
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.contains("ctx ")
+                && !view
+                    .lines()
+                    .any(|line| line.starts_with("1 background task failed"))
+        },
+        common::LIVE_TURN_BUDGET,
+        "reading the failed result restores turn statistics",
     );
     session.send("/ps\r").unwrap();
     screen(&session, "Enter details");
@@ -745,11 +845,15 @@ fn release_background_task_input_measurement() {
             "Background output workload",
         )],
     );
-    common::expect_screen(
+    // start already waits for the parent turn; measure while the producer lives.
+    common::expect_screen_rows(
         &session,
-        |s| s.contains("Concurrency batch done.") && s.contains("ctx "),
+        |view| {
+            view.lines()
+                .any(|line| line.contains("danger-full-access") && line.contains("1 terminal"))
+        },
         Duration::from_secs(30),
-        "background launch complete",
+        "background producer active before measurement",
     );
     report_resources("background_before_wait");
     std::thread::sleep(Duration::from_secs(5));

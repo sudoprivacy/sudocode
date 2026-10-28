@@ -29,5 +29,8 @@ prost-build = "0.13"
 protoc-bin-vendored = "3"
 toml = "0.8"
 
+[target.'cfg(windows)'.dependencies]
+stdin-peek = { path = "../stdin-peek" }
+
 [lints]
 workspace = true

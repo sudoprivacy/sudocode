@@ -13,6 +13,93 @@ use engine_events::{
 };
 use std::{collections::BTreeMap, time::Instant};
 
+/// One projection of task events for the status row and footer. Reading state
+/// belongs to this browser; execution state always comes from the producer.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(super) struct TaskSummary {
+    terminals: usize,
+    agents: usize,
+    running: usize,
+    stopping: usize,
+    unconfirmed: usize,
+    unread: usize,
+    failed: usize,
+}
+
+impl TaskSummary {
+    pub fn status_lines(
+        self,
+        width: usize,
+        completed_turn: Option<u32>,
+    ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
+        let active = self.running + self.stopping;
+        let (full, short, color) = if self.unconfirmed > 0 {
+            (
+                format!(
+                    "{} unconfirmed",
+                    quantity(self.unconfirmed, "background task")
+                ),
+                format!("{} unconfirmed", self.unconfirmed),
+                theme().activity_colors(true).label,
+            )
+        } else if self.failed > 0 {
+            (
+                format!("{} failed", quantity(self.failed, "background task")),
+                format!("{} failed", self.failed),
+                theme().error,
+            )
+        } else if self.stopping > 0 {
+            (
+                format!("Stopping {}…", quantity(self.stopping, "background task")),
+                format!("{} stopping", self.stopping),
+                theme().activity_colors(false).label,
+            )
+        } else if self.running > 0 {
+            (
+                format!("{} still running", quantity(self.running, "task")),
+                format!("{} running", self.running),
+                theme().activity_colors(false).label,
+            )
+        } else {
+            return None;
+        };
+        let suffix = if (self.unconfirmed > 0 || self.failed > 0) && active > 0 {
+            format!(" · {active} active")
+        } else if self.stopping > 0 && self.running > 0 {
+            format!(" · {} still running", self.running)
+        } else {
+            String::new()
+        };
+        let mut full = format!("{full}{suffix}");
+        if let Some(turn) = completed_turn {
+            use std::fmt::Write as _;
+            let _ = write!(full, " · turn {turn} finished");
+        }
+        let style = crossterm::style::ContentStyle {
+            foreground_color: (crate::render::ColorSupport::detect()
+                != crate::render::ColorSupport::NoColor)
+                .then_some(color),
+            ..Default::default()
+        };
+        let render = |label: &str| {
+            let mut text = StyledText::default();
+            text.push(style, &truncate_to_width(label, width));
+            std::sync::Arc::new(text)
+        };
+        let summary = render(&short);
+        let full = if display_width(&full) > width {
+            summary.clone()
+        } else {
+            render(&full)
+        };
+        Some((full, summary))
+    }
+}
+
+fn quantity(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(super) enum TaskFocus {
     #[default]
@@ -43,7 +130,8 @@ struct Entry {
 pub(super) struct TaskBrowser {
     entries: BTreeMap<String, Entry>,
     rows: Vec<String>,
-    summary: String,
+    summary: TaskSummary,
+    footer_summary: String,
     compact_summary: String,
     pub focus: TaskFocus,
     selected: Option<String>,
@@ -57,7 +145,7 @@ pub(super) struct TaskBrowser {
 impl TaskBrowser {
     /// Apply producer state and report whether the visible browser changed.
     pub fn update(&mut self, event: BackgroundTaskEvent) -> bool {
-        let previous_summary = self.summary.clone();
+        let previous_summary = self.summary;
         let previous_focus = self.focus;
         match event {
             BackgroundTaskEvent::Updated(task) => {
@@ -114,56 +202,67 @@ impl TaskBrowser {
     }
 
     fn refresh_summary(&mut self) {
-        let mut terminals = 0;
-        let mut agents = 0;
-        let mut unread = 0;
+        let mut summary = TaskSummary::default();
         for id in &self.rows {
             let entry = &self.entries[id];
             if entry.task.status.is_active() {
                 match entry.task.kind {
-                    BackgroundTaskKind::Terminal => terminals += 1,
-                    BackgroundTaskKind::Agent => agents += 1,
+                    BackgroundTaskKind::Terminal => summary.terminals += 1,
+                    BackgroundTaskKind::Agent => summary.agents += 1,
                 }
+                if entry.task.status == BackgroundTaskStatus::Stopping {
+                    summary.stopping += 1;
+                } else {
+                    summary.running += 1;
+                }
+            } else if entry.task.status == BackgroundTaskStatus::ExecutionUnconfirmed {
+                summary.unconfirmed += 1;
             } else if !entry.read {
-                unread += 1;
+                summary.unread += 1;
+                summary.failed += usize::from(entry.task.status == BackgroundTaskStatus::Failed);
             }
         }
+        if self.summary == summary {
+            return;
+        }
+        self.summary = summary;
         let mut parts = Vec::new();
-        if terminals > 0 {
-            parts.push(format!(
-                "{terminals} terminal{}",
-                if terminals == 1 { "" } else { "s" }
-            ));
+        if summary.terminals > 0 {
+            parts.push(quantity(summary.terminals, "terminal"));
         }
-        if agents > 0 {
-            parts.push(format!(
-                "{agents} agent{}",
-                if agents == 1 { "" } else { "s" }
-            ));
+        if summary.agents > 0 {
+            parts.push(quantity(summary.agents, "agent"));
         }
-        if unread > 0 {
-            parts.push(format!(
-                "{unread} new result{}",
-                if unread == 1 { "" } else { "s" }
-            ));
+        if summary.unconfirmed > 0 {
+            parts.push(format!("{} unconfirmed", summary.unconfirmed));
         }
-        self.summary = parts.join(" · ");
+        if summary.unread > 0 {
+            parts.push(quantity(summary.unread, "new result"));
+        }
+        self.footer_summary = parts.join(" · ");
         let mut compact = Vec::new();
-        if terminals > 0 {
-            compact.push(format!("{terminals}t"));
+        if summary.terminals > 0 {
+            compact.push(format!("{}t", summary.terminals));
         }
-        if agents > 0 {
-            compact.push(format!("{agents}a"));
+        if summary.agents > 0 {
+            compact.push(format!("{}a", summary.agents));
         }
-        if unread > 0 {
-            compact.push(format!("+{unread}"));
+        if summary.unconfirmed > 0 {
+            compact.push(format!("{}?", summary.unconfirmed));
+        }
+        if summary.unread > 0 {
+            compact.push(format!("+{}", summary.unread));
         }
         self.compact_summary = compact.join(" ");
     }
 
     #[inline]
     pub fn has_tasks(&self) -> bool {
-        !self.summary.is_empty()
+        !self.footer_summary.is_empty()
+    }
+    #[inline]
+    pub fn summary(&self) -> TaskSummary {
+        self.summary
     }
     #[inline]
     pub fn is_panel(&self) -> bool {
@@ -319,7 +418,7 @@ impl TaskBrowser {
         let summary = if compact {
             &self.compact_summary
         } else {
-            &self.summary
+            &self.footer_summary
         };
         if self.focus == TaskFocus::Footer {
             format!("{summary} · Enter to view")

@@ -136,7 +136,7 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
                         // the same Markdown after the document entered history.
                         let row = rows.iter().rposition(|row| {
                             row.contains(needle)
-                                && !matches!(row.trim_start().chars().next(), Some('❯' | '╭' | '│'))
+                                && !matches!(row.trim_start().chars().next(), Some('❯' | '╭'))
                         })?;
                         let byte = rows[row].find(needle)?;
                         let col = rows[row][..byte].width();
@@ -193,19 +193,17 @@ fn assert_document(sess: &PtySession, no_color: bool) {
         ],
     );
     let start = text
-        .rfind("[Choose an action]")
-        .or_else(|| text.rfind("Choose an action\n"));
-    if let Some(start) = start {
-        let document = &text[start..];
-        assert!(
-            !document.contains("**Verify bold**"),
-            "emphasis must be rendered: {document}"
-        );
-        assert!(
-            !document.contains("```rust"),
-            "fences must be rendered: {document}"
-        );
-    }
+        .rfind("╭─ Plan · awaiting review")
+        .expect("the complete saved plan has its own review frame");
+    let document = &text[start..];
+    assert!(
+        !document.contains("**Verify bold**"),
+        "emphasis must be rendered: {document}"
+    );
+    assert!(
+        !document.contains("```rust"),
+        "fences must be rendered: {document}"
+    );
 }
 
 fn choose(sess: &mut PtySession, queue: bool, choice: &str) {
@@ -317,20 +315,45 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
-    assert!(
-        text.contains(plan),
-        "execution must receive the reviewed file, including framing"
+    let review: runtime::plan_store::PlanReviewResult = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        review.status,
+        runtime::plan_store::PlanReviewStatus::Approved
     );
     assert!(
         !text.contains("you will receive"),
         "no future prompt promise"
     );
+    let call = blocks
+        .iter()
+        .find(|block| block["type"] == "tool_use" && block["id"] == result["tool_use_id"])
+        .expect("preserve tool pairing across reset");
+    let reviewed = call["input"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines: Vec<_> = plan
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.len() > 30)
+        .collect();
     assert!(
-        blocks
-            .iter()
-            .any(|block| block["type"] == "tool_use" && block["id"] == result["tool_use_id"]),
-        "preserve tool pairing across reset"
+        !lines.is_empty(),
+        "the reviewed plan has lines worth checking"
     );
+    for line in lines {
+        assert!(
+            reviewed.contains(line),
+            "execution must see the reviewed plan through its write_plan call: {line}"
+        );
+        assert!(
+            !review.message.contains(line),
+            "approval must not repeat the plan the model already sent: {line}"
+        );
+    }
 }
 
 fn approve(queue: bool, clear: bool, no_color: bool) {
@@ -358,16 +381,9 @@ fn approve(queue: bool, clear: bool, no_color: bool) {
         "saved document: {saved}"
     );
     assert_document(&sess, no_color);
-    if queue {
-        sess.resize(100, 72).unwrap();
-        common::expect_screen(
-            &sess,
-            |s| s.contains("let verified = true;") && s.contains("Keep context & execute"),
-            env.timeout(),
-            "reflowed plan",
-        );
-        assert_document(&sess, no_color);
-    }
+    // The pinned native terminal in pty_review_scrollback verifies styles
+    // through resize and history movement in color and NoColor. This PTY's
+    // screen-only parser has no scrollback to inspect after that movement.
     let marker = common::turn_status_marker(&sess);
     choose(&mut sess, queue, if clear { "1" } else { "2" });
     common::expect_turn_complete_after(

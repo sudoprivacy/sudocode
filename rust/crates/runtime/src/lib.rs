@@ -211,7 +211,7 @@ pub use permissions::{
     PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
     PermissionPromptDecision, PermissionPromptSink, PermissionPrompter, PermissionRequest,
     PromptQueue, PromptReply, PromptText, QuestionField, QuestionKind, QuestionOption,
-    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
+    QuestionPresentation, QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
 pub use plugin_lifecycle::{
     DegradedMode, DiscoveryResult, PluginHealthcheck, PluginLifecycle, PluginLifecycleEvent,

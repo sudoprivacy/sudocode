@@ -127,7 +127,7 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
             raw.rows(0, raw.size().1)
                 .enumerate()
                 .filter_map(|(row, line)| {
-                    let col = line.find("Thinking")?;
+                    let col = line.find("Working...")?;
                     let column = unicode_width::UnicodeWidthStr::width(&line[..col]);
                     let cell = raw.cell(u16::try_from(row).ok()?, u16::try_from(column).ok()?)?;
                     Some((line, format!("{:?}", cell.fgcolor())))
@@ -136,18 +136,18 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
         });
         if let Some((line, color)) = snapshot {
             if line.contains("(3s)") && !line.contains('↓') {
-                assert_eq!(color, "Rgb(166, 227, 161)", "initial wait remains green");
+                assert_eq!(color, "Default", "initial wait keeps terminal foreground");
                 saw_initial_wait = true;
             }
             if line.contains("↓ 9 tokens") || line.contains("↓ 11 tokens") {
                 if color == warning {
                     saw_stall = true;
                 } else {
-                    assert_eq!(color, "Rgb(166, 227, 161)");
+                    assert_eq!(color, "Default");
                     saw_long_progress = true;
                 }
             }
-            if line.contains("↓ 13 tokens") && color == "Rgb(166, 227, 161)" {
+            if line.contains("↓ 13 tokens") && color == "Default" {
                 saw_recovery = true;
                 break;
             }

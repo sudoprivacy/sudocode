@@ -207,7 +207,7 @@ impl ColorTheme {
         }
     }
 
-    /// Info — active spinner, thinking indicator and informational labels.
+    /// Informational labels and task-detail status; activity uses its own roles.
     /// Shares the soft-green palette source with completed tool borders.
     pub fn info(&self) -> Color {
         self.soft_green(ColorSupport::detect())
@@ -220,7 +220,7 @@ impl ColorTheme {
         let label = if is_warning {
             self.warning
         } else {
-            self.soft_green(support)
+            Color::Reset
         };
         ActivityColors {
             logo: support.color(self.logo),

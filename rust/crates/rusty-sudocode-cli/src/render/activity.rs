@@ -14,8 +14,8 @@ use super::{spinner_progress::SpinnerProgress, text_layout, theme, RESET};
 
 mod brand_spinner;
 
-pub(crate) const THINKING_LABEL: &str = "Thinking...";
-pub(super) const REASONING_LABEL: &str = "Reasoning...";
+pub(crate) const WORKING_LABEL: &str = "Working...";
+pub(super) const THINKING_LABEL: &str = "Thinking...";
 
 #[derive(Clone)]
 enum ActivityPhase {
@@ -127,7 +127,7 @@ impl ActivityState {
             ActivityPhase::Working if tools.count > 0 || tools.progress.is_some() => {
                 StatusContent::Tools(tools)
             }
-            ActivityPhase::Working => StatusContent::Thinking,
+            ActivityPhase::Working => StatusContent::Working,
         };
         let reasoning = matches!(content, StatusContent::Reasoning);
         let warning =
@@ -161,7 +161,7 @@ pub(crate) struct ToolActivity<'a> {
 
 /// Mutually exclusive content modules inside the existing status row.
 enum StatusContent<'a> {
-    Thinking,
+    Working,
     Reasoning,
     Tools(ToolActivity<'a>),
     Retry {
@@ -175,8 +175,8 @@ impl StatusContent<'_> {
     #[inline]
     fn label(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            Self::Thinking => THINKING_LABEL.into(),
-            Self::Reasoning => REASONING_LABEL.into(),
+            Self::Working => WORKING_LABEL.into(),
+            Self::Reasoning => THINKING_LABEL.into(),
             Self::Retry {
                 attempt,
                 max_retries,

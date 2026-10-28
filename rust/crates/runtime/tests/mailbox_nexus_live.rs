@@ -2994,6 +2994,118 @@ fn live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age() {
     );
 }
 
+/// A real receiver must retain a lapsed commit as structured attribution
+/// without reporting a transport outage. A later injected register I/O error
+/// in that same receiver must still produce the original retry diagnostic.
+#[test]
+#[ignore = "requires the harness's real mTLS Nexus daemon"]
+fn live_retry_diagnostics_distinguish_commit_lapse_from_register_io() {
+    use lease_fault::Fault;
+    use runtime::mailbox::{DeliveryStall, LeaseLoss};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const CHILD_LOG: &str = "SCODE_COMMIT_RETRY_FIXTURE_LOG";
+    const LAPSE: &str = "accepted before a commit's lease lapses";
+
+    // Isolate the existing process-wide local sink; never mutate the parent
+    // test process's logging environment or depend on a previous test's sink.
+    let Ok(log) = std::env::var(CHILD_LOG) else {
+        let root = std::env::temp_dir().join(format!("scode-commit-retry-{}", fresh()));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("retry.jsonl");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "live_retry_diagnostics_distinguish_commit_lapse_from_register_io",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD_LOG, &log)
+            .env("SCODE_LOG_PATH", &log)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "real-node commit diagnostic fixture failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    };
+
+    let armed = AtomicBool::new(false);
+    let rig = StallRig::start("commit-retry", move |probe, message| {
+        if message.body == LAPSE && !armed.swap(true, Ordering::AcqRel) {
+            hold_reader_renewal_past(probe, Instant::now(), Duration::from_secs(21));
+        }
+        true
+    });
+    rig.send("settle the original reader");
+    wait_until(
+        "the original reader's first commit",
+        Duration::from_secs(20),
+        &|| rig.position().is_some_and(|offset| offset > 0),
+    );
+    let before = rig.position().unwrap();
+    rig.send(LAPSE);
+    wait_until(
+        "the lapsed commit refusal",
+        Duration::from_secs(60),
+        &|| !rig.stalls().is_empty(),
+    );
+    let first = rig.stalls();
+    assert_eq!(first.len(), 1, "one commit refusal: {first:?}");
+    assert_eq!(first[0].stall, DeliveryStall::CommitRefused);
+    assert!(matches!(first[0].loss, Some(LeaseLoss::Lapsed { .. })));
+    rig.probe.release_reader_renewal();
+    wait_until(
+        "natural redelivery and commit",
+        Duration::from_secs(60),
+        &|| {
+            rig.deliveries(LAPSE).len() == 2 && rig.position().is_some_and(|offset| offset > before)
+        },
+    );
+    let commit_records = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|record| {
+                record["attributes"]["context"]["peer"] == rig.peer
+                    && record["attributes"]["context"]["operation"] == "commit"
+            })
+            .collect()
+    };
+    assert!(
+        commit_records().is_empty(),
+        "lease expiry is attribution, not a transport reconnect notice"
+    );
+
+    // Positive control: do not pass by suppressing all commit diagnostics.
+    let recovered = rig.position().unwrap();
+    rig.probe.set(Fault::ReaderRegisterWriteFailsAfterLeaseLoss);
+    rig.send("a real register I/O refusal");
+    wait_until(
+        "the I/O refusal and natural recovery",
+        Duration::from_secs(45),
+        &|| rig.stalls().len() == 2 && rig.position().is_some_and(|offset| offset > recovered),
+    );
+    let events = rig.stalls();
+    assert_eq!(events[1].stall, DeliveryStall::CommitRefused);
+    assert_eq!(events[1].loss, None, "keep the refusal's original cause");
+    let records = commit_records();
+    assert!(
+        records.iter().any(|record| {
+            let props = &record["attributes"];
+            props["context"]["loss"].is_null()
+                && props["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("INJECTED"))
+        }),
+        "the actual register I/O cause must still be logged: {records:?}"
+    );
+}
+
 /// Hold the reader's next renewal in flight, from `armed` on, and return once
 /// the last renewal the node answered (or the claim) was requested `past` ago.
 /// The probe stamps each renewal a moment after the lease does, so the lease's

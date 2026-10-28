@@ -227,13 +227,34 @@ impl InboxConvention {
     }
 }
 
+type BackendResolver = dyn Fn() -> Result<Arc<dyn FsBackend>, String> + Send + Sync;
+
+/// A fixed transport, or a host's still-unavailable binding to that transport.
+/// Resolving must keep the selected namespace and return the actual backend;
+/// it must never substitute a local filesystem after an error.
+#[derive(Clone)]
+pub(crate) enum MailboxBackend {
+    Fixed(Arc<dyn FsBackend>),
+    Resolving(Arc<BackendResolver>),
+}
+
+impl MailboxBackend {
+    #[inline]
+    pub(crate) fn resolve(&self) -> Result<Arc<dyn FsBackend>, String> {
+        match self {
+            Self::Fixed(backend) => Ok(Arc::clone(backend)),
+            Self::Resolving(resolve) => resolve(),
+        }
+    }
+}
+
 /// Transport-agnostic agent mailbox.
 ///
 /// Wraps an [`FsBackend`] + path convention, providing send/receive that
 /// works identically whether the underlying transport is a local JSONL
 /// file or a nexus DT_STREAM.
 pub struct Mailbox {
-    backend: Arc<dyn FsBackend>,
+    backend: MailboxBackend,
     self_id: String,
     convention: InboxConvention,
     /// Recipients whose inbox this mailbox has already created.
@@ -258,6 +279,11 @@ pub struct Mailbox {
 
 impl Mailbox {
     pub fn new(backend: Arc<dyn FsBackend>, self_id: String, convention: InboxConvention) -> Self {
+        Self::with_backend(MailboxBackend::Fixed(backend), self_id, convention)
+    }
+
+    #[inline]
+    fn with_backend(backend: MailboxBackend, self_id: String, convention: InboxConvention) -> Self {
         Self {
             backend,
             self_id,
@@ -291,6 +317,22 @@ impl Mailbox {
     #[must_use]
     pub fn daemon_absolute(backend: Arc<dyn FsBackend>, self_id: String) -> Self {
         Self::new(backend, self_id, InboxConvention::new(String::new()))
+    }
+
+    /// Keep a daemon namespace while its host prepares this agent's connection.
+    /// Every IO path, including the existing receiver, uses the same resolver.
+    /// A failed resolution is an explicit IO failure, never an empty scope.
+    #[inline]
+    #[must_use]
+    pub fn daemon_resolving(
+        self_id: String,
+        resolve: impl Fn() -> Result<Arc<dyn FsBackend>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_backend(
+            MailboxBackend::Resolving(Arc::new(resolve)),
+            self_id,
+            InboxConvention::new(String::new()),
+        )
     }
 
     /// A mailbox rooted under a host directory: `self_id`'s conversations at
@@ -372,6 +414,7 @@ impl Mailbox {
     #[inline]
     fn backend_frames(&self, path: &str) -> Result<bool, String> {
         self.backend
+            .resolve()?
             .is_append_stream(path)
             .map_err(|error| format!("classify mailbox {path}: {error}"))
     }
@@ -444,7 +487,7 @@ impl Mailbox {
             ));
         }
         Ok(crate::agent_description::DescriptionStore::new(
-            Arc::clone(&self.backend),
+            self.backend.clone(),
             format!(
                 "{}/{agent}/{}",
                 self.convention.agents_dir(),
@@ -557,6 +600,7 @@ impl Mailbox {
     pub fn ensure_presence(&self) -> Result<(), String> {
         let dir = self.convention.chat_list_dir(&self.self_id);
         self.backend
+            .resolve()?
             .create_dir_all(&dir)
             .map_err(|e| format!("announce {} at {dir}: {e}", self.self_id))
     }
@@ -584,10 +628,11 @@ impl Mailbox {
                 self.self_id
             ));
         }
+        let backend = self.backend.resolve()?;
         let root = self.convention.conversation_root(&self.self_id, peer);
         for (owner, other) in [(self.self_id.as_str(), peer), (peer, self.self_id.as_str())] {
             let dir = self.convention.chat_list_dir(owner);
-            self.backend
+            backend
                 .create_dir_all(&dir)
                 .map_err(|e| format!("create chat list {dir}: {e}"))?;
             // A link, which is what this is: an index pointing into the flat
@@ -606,12 +651,12 @@ impl Mailbox {
             // where a privilege-free symlink does not exist. `read_link` is the follow
             // half on both, so a caller resolving the index is backend-agnostic.
             let alias = self.convention.chat_list_path(owner, other);
-            self.backend
+            backend
                 .link(&alias, &root)
                 .map_err(|e| format!("index conversation for {owner} at {alias}: {e}"))?;
         }
         let path = self.transcript_path(peer);
-        self.backend
+        backend
             .create_append_log(&path, crate::agent_mailbox::DEFAULT_STREAM_CAPACITY)
             .map_err(|e| format!("ensure conversation with {peer} at {path}: {e}"))
     }
@@ -675,6 +720,7 @@ impl Mailbox {
         if self.backend_frames(&path)? {
             return self
                 .backend
+                .resolve()?
                 .append(&path, &envelope.to_bytes())
                 .map_err(|e| format!("mailbox send to {path}: {e}"));
         }
@@ -693,7 +739,7 @@ impl Mailbox {
         // that variant was describing a conversation (both parties reading and
         // writing one log) as if it were a special case, and with conventions
         // collapsed there is exactly one shape to write.
-        crate::agent_mailbox::append_envelope_via(self.backend.as_ref(), &path, envelope)
+        crate::agent_mailbox::append_envelope_via(self.backend.resolve()?.as_ref(), &path, envelope)
     }
 
     /// Read new messages from own inbox starting at `cursor`.
@@ -747,12 +793,12 @@ impl Mailbox {
         block_ms: u64,
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let mut out = Vec::new();
+        let backend = self.backend.resolve()?;
         let mut first = true;
         loop {
             let blocking = first && block_ms > 0;
             first = false;
-            let (data, next, eof) = self
-                .backend
+            let (data, next, eof) = backend
                 .tail_read(path, cursor, if blocking { block_ms } else { 0 })
                 .map_err(|e| format!("mailbox poll {path}@{cursor}: {e}"))?;
             if eof {
@@ -786,7 +832,7 @@ impl Mailbox {
         } else {
             // Through the backend, for the same reason the write is: the
             // transcript of a kernel-backed conversation is not on host disk.
-            match self.backend.read(&path) {
+            match self.backend.resolve()?.read(&path) {
                 Ok(bytes) => Ok(crate::agent_mailbox::parse_envelope_lines(&bytes)),
                 // Nothing written yet is an empty conversation, not a failure.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -808,7 +854,8 @@ impl Mailbox {
     /// has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         let dir = self.convention.agents_dir();
-        let entries = match self.backend.readdir(&dir) {
+        let backend = self.backend.resolve()?;
+        let entries = match backend.readdir(&dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(format!("list recipients at {dir}: {error}")),
@@ -831,7 +878,7 @@ impl Mailbox {
                 continue;
             }
             let chat_list = self.convention.chat_list_dir(&entry.name);
-            if self.backend.exists(&chat_list).map_err(|e| {
+            if backend.exists(&chat_list).map_err(|e| {
                 format!(
                     "list recipients at {dir}: cannot tell whether {} announced presence \
                      ({chat_list}): {e}",
@@ -860,7 +907,7 @@ impl Mailbox {
     /// does not exist yet is not an error — see below.
     pub fn list_conversations(&self) -> Result<Vec<String>, String> {
         let dir = self.convention.chat_list_dir(&self.self_id);
-        match self.backend.readdir(&dir) {
+        match self.backend.resolve()?.readdir(&dir) {
             Ok(entries) => {
                 let mut peers: Vec<String> = entries.into_iter().map(|e| e.name).collect();
                 peers.sort();
@@ -1012,7 +1059,7 @@ fn instance_id() -> String {
 
 /// A durable cursor guarded by the backend's atomic exclusive lock.
 pub struct ConversationReader {
-    backend: Arc<dyn FsBackend>,
+    backend: MailboxBackend,
     path: String,
     holder: String,
     agent: String,
@@ -1022,19 +1069,20 @@ impl ConversationReader {
     /// The register as currently stored, or `None` if this agent has never read
     /// this conversation.
     fn load(&self) -> Result<Option<ReaderRegister>, String> {
-        crate::cursor_fence::load_plain(self.backend.as_ref(), &self.path)
+        crate::cursor_fence::load_plain(self.backend.resolve()?.as_ref(), &self.path)
     }
 
     /// Hold the conversation's lock, then claim its register through
     /// [`crate::cursor_fence`]. `None` while another instance holds either.
     fn acquire(self) -> Result<Option<OwnedReader>, String> {
-        let Some(lease) = HeldLease::try_acquire(&self.backend, &format!("{}.lock", self.path))
+        let backend = self.backend.resolve()?;
+        let Some(lease) = HeldLease::try_acquire(&backend, &format!("{}.lock", self.path))
             .map_err(|e| format!("claim reader {}: {e}", self.path))?
         else {
             return Ok(None);
         };
         let Some((cursor, offset)) = crate::cursor_fence::RegisterCursor::claim(
-            Arc::clone(&self.backend),
+            backend,
             self.path,
             self.holder,
             now_ms() + READER_LEASE_MS,
@@ -1451,7 +1499,7 @@ impl Mailbox {
             path: self
                 .convention
                 .reader_path(&self.self_id, peer, &self.self_id),
-            backend: Arc::clone(&self.backend),
+            backend: self.backend.clone(),
             holder: instance_id(),
             agent: self.self_id.clone(),
         }
@@ -1468,7 +1516,7 @@ impl Mailbox {
             self.convention.agents_dir(),
             self.self_id
         );
-        HeldLease::try_acquire(&self.backend, &path).map_err(|e| {
+        HeldLease::try_acquire(&self.backend.resolve()?, &path).map_err(|e| {
             format!(
                 "claim the receiver seat for {} at {path}: {e}",
                 self.self_id
@@ -1480,8 +1528,10 @@ impl Mailbox {
 /// What a receiver in this process is doing for its agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverState {
-    /// This instance does not hold the receiver seat. Another instance can
-    /// hold it, or the backend can be unavailable while this instance retries.
+    /// Configuration or transport IO has not made the receiver usable yet.
+    Unavailable,
+    /// Another instance of the agent holds its receiver seat; this one waits to
+    /// take over.
     Standby,
     /// This instance holds the agent's receiver seat and tails its
     /// conversations.
@@ -1492,6 +1542,7 @@ impl ReceiverState {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unavailable => "unavailable",
             Self::Standby => "standby",
             Self::Receiving => "receiving",
         }
@@ -1504,12 +1555,12 @@ impl ReceiverState {
 pub struct PeerStatus {
     /// The agent name the session answers to.
     pub agent: String,
-    /// `"node"` or `"disk"`; `None` when attaching failed.
+    /// The selected `"node"` or `"disk"` namespace, even when unavailable.
     pub namespace: Option<&'static str>,
     /// The node's `host:port`, when attached to one.
     pub endpoint: Option<String>,
-    /// `"receiving"`, `"standby"`, or `"none"` when this process runs no
-    /// receiver for the agent.
+    /// `"receiving"`, `"standby"`, `"unavailable"`, or `"none"` when this
+    /// process runs no receiver for the agent.
     pub receiver: &'static str,
     /// When a received message runs: `"automatic"` as soon as the session is
     /// idle, or `"next_prompt"` in the synchronous REPL, which runs it once the
@@ -1520,7 +1571,7 @@ pub struct PeerStatus {
     /// [`crate::cursor_fence::CursorGuarantee`]), or `"none"` until this
     /// process has claimed a conversation for the agent.
     pub cursor: &'static str,
-    /// Why attaching failed, when it did.
+    /// The last local node-binding error, when it could not yet be resolved.
     pub error: Option<String>,
     /// Most recent background receiver failure in this process. Historical:
     /// receiving can recover while this diagnostic remains inspectable.
@@ -1553,15 +1604,27 @@ pub fn cursor_guarantee(agent: &str) -> Option<crate::cursor_fence::CursorGuaran
         .copied()
 }
 
-/// Receivers running in this process: per agent name, how many are standing
-/// by and how many are receiving.
 #[derive(Default)]
 struct ReceiverObservation {
+    last_error: Option<String>,
+    unavailable: usize,
     standby: usize,
     receiving: usize,
-    last_error: Option<String>,
 }
 
+impl ReceiverObservation {
+    #[inline]
+    fn count_mut(&mut self, state: ReceiverState) -> &mut usize {
+        match state {
+            ReceiverState::Unavailable => &mut self.unavailable,
+            ReceiverState::Standby => &mut self.standby,
+            ReceiverState::Receiving => &mut self.receiving,
+        }
+    }
+}
+
+/// Receiver state in this process, per agent. These are runtime observations,
+/// not persisted delivery positions or proof that a remote peer is online.
 static RECEIVER_STATES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, ReceiverObservation>>,
 > = std::sync::OnceLock::new();
@@ -1579,8 +1642,9 @@ fn receiver_states(
 #[must_use]
 pub fn receiver_state(agent: &str) -> Option<ReceiverState> {
     match receiver_states().get(agent) {
-        Some(state) if state.receiving > 0 => Some(ReceiverState::Receiving),
-        Some(state) if state.standby > 0 => Some(ReceiverState::Standby),
+        Some(counts) if counts.receiving > 0 => Some(ReceiverState::Receiving),
+        Some(counts) if counts.standby > 0 => Some(ReceiverState::Standby),
+        Some(counts) if counts.unavailable > 0 => Some(ReceiverState::Unavailable),
         _ => None,
     }
 }
@@ -1603,6 +1667,23 @@ fn report_receiver_error(mailbox: &Mailbox, label: &str, error: String) {
         .last_error = Some(error);
 }
 
+/// One operational observation feeds the existing status/tracing owner and
+/// the shared retry policy. Neither consumer changes the operation's result.
+#[inline]
+fn observe_receiver_failure(
+    mailbox: &Mailbox,
+    diagnostics: &telemetry::RetryDiagnostics,
+    scope: &str,
+    error: &str,
+) {
+    report_receiver_error(
+        mailbox,
+        diagnostics.component(),
+        format!("{scope}: {error}"),
+    );
+    diagnostics.failed(scope, error);
+}
+
 /// One receiver's entry in [`receiver_state`], withdrawn when it stops.
 struct ReceiverStateEntry {
     agent: String,
@@ -1616,15 +1697,10 @@ impl ReceiverStateEntry {
         }
         let mut states = receiver_states();
         let counts = states.entry(self.agent.clone()).or_default();
-        match self.state.replace(state) {
-            Some(ReceiverState::Standby) => counts.standby -= 1,
-            Some(ReceiverState::Receiving) => counts.receiving -= 1,
-            None => {}
+        if let Some(previous) = self.state.replace(state) {
+            *counts.count_mut(previous) -= 1;
         }
-        match state {
-            ReceiverState::Standby => counts.standby += 1,
-            ReceiverState::Receiving => counts.receiving += 1,
-        }
+        *counts.count_mut(state) += 1;
     }
 }
 
@@ -1632,12 +1708,10 @@ impl Drop for ReceiverStateEntry {
     fn drop(&mut self) {
         let mut states = receiver_states();
         if let Some(counts) = states.get_mut(&self.agent) {
-            match self.state {
-                Some(ReceiverState::Standby) => counts.standby -= 1,
-                Some(ReceiverState::Receiving) => counts.receiving -= 1,
-                None => {}
+            if let Some(previous) = self.state {
+                *counts.count_mut(previous) -= 1;
             }
-            if counts.standby == 0 && counts.receiving == 0 {
+            if counts.unavailable == 0 && counts.standby == 0 && counts.receiving == 0 {
                 states.remove(&self.agent);
             }
         }
@@ -1688,6 +1762,7 @@ impl Drop for ReceiverStateEntry {
 /// conversation's read position, so a tail finishing a delivery while the agent
 /// seat changes hands cannot be read twice. [`receiver_state`] reports which of
 /// the two this process is doing.
+#[inline]
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
     block_ms: u64,
@@ -1695,50 +1770,81 @@ pub fn spawn_inbox_poller(
     abort: crate::HookAbortSignal,
     sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
 ) -> std::thread::JoinHandle<()> {
+    spawn_inbox_poller_with_notices(
+        mailbox,
+        block_ms,
+        label,
+        abort,
+        telemetry::RetryNotices::LogOnly,
+        sink,
+    )
+}
+
+/// The same receiver for a host which explicitly owns retry presentation.
+/// Terminal notices require a host-owned capture/printer; ordinary receivers
+/// expose errors through their existing status, tracing and local log instead.
+pub fn spawn_inbox_poller_with_notices(
+    mailbox: Arc<Mailbox>,
+    block_ms: u64,
+    label: &'static str,
+    abort: crate::HookAbortSignal,
+    notices: telemetry::RetryNotices,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
+) -> std::thread::JoinHandle<()> {
     let sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync> = Arc::new(sink);
     std::thread::Builder::new()
         .name(format!("{label}-inbox"))
         .spawn(move || {
+            // Credential or node availability may arrive after startup. Keep
+            // retrying the same mailbox, including its presence announcement,
+            // before claiming the receiver seat. No second receiver is needed.
+            let mut announced = false;
             let mut state = ReceiverStateEntry {
                 agent: mailbox.self_id().to_string(),
                 state: None,
             };
-            state.set(ReceiverState::Standby);
-            // Announce before listening. A receiver that only becomes visible
-            // once someone has written to it cannot be found by whoever wants
-            // to write, and cannot be observed to be running at all.
-            if let Err(e) = mailbox.ensure_presence() {
-                report_receiver_error(
-                    &mailbox,
+            let diagnostics = Arc::new(
+                telemetry::RetryDiagnostics::new(
                     label,
-                    format!("announcing this agent failed: {e}"),
-                );
-            }
-            // Keep retrying an offline node without repainting the terminal
-            // with the same error on every discovery tick. A changed error or
-            // a new outage after a successful receiver-seat check is reported again.
-            let mut last_claim_error = None;
+                    mailbox.self_id(),
+                    "Message receiving is interrupted; retrying in the background.",
+                    "Message receive checks recovered.",
+                )
+                .with_notices(notices),
+            );
             while !abort.is_aborted() {
-                state.set(ReceiverState::Standby);
+                state.set(ReceiverState::Unavailable);
+                if !announced {
+                    if let Err(e) = mailbox.ensure_presence() {
+                        observe_receiver_failure(
+                            &mailbox,
+                            &diagnostics,
+                            "presence announcement",
+                            &e,
+                        );
+                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
+                        continue;
+                    }
+                    announced = true;
+                    diagnostics.succeeded("presence announcement");
+                }
                 let seat = match mailbox.claim_receiver() {
                     Ok(Some(seat)) => seat,
                     Ok(None) => {
-                        last_claim_error = None;
+                        state.set(ReceiverState::Standby);
+                        diagnostics.succeeded("receiver seat");
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                     Err(e) => {
-                        if last_claim_error.as_ref() != Some(&e) {
-                            report_receiver_error(&mailbox, label, e.clone());
-                            last_claim_error = Some(e);
-                        }
+                        observe_receiver_failure(&mailbox, &diagnostics, "receiver seat", &e);
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                 };
-                last_claim_error = None;
+                diagnostics.succeeded("receiver seat");
                 state.set(ReceiverState::Receiving);
-                receive_while_seated(&mailbox, &seat, block_ms, label, &abort, &sink);
+                receive_while_seated(&mailbox, &seat, block_ms, &diagnostics, &abort, &sink);
             }
         })
         .expect("spawn inbox receiver thread")
@@ -1753,7 +1859,7 @@ fn receive_while_seated(
     mailbox: &Arc<Mailbox>,
     seat: &HeldLease,
     block_ms: u64,
-    label: &'static str,
+    diagnostics: &Arc<telemetry::RetryDiagnostics>,
     abort: &crate::HookAbortSignal,
     sink: &Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
 ) {
@@ -1763,6 +1869,7 @@ fn receive_while_seated(
     while !abort.is_aborted() && seat.is_valid() {
         match mailbox.list_conversations() {
             Ok(peers) => {
+                diagnostics.succeeded("conversation discovery");
                 for peer in peers {
                     if tailing.contains_key(&peer) {
                         continue;
@@ -1771,21 +1878,23 @@ fn receive_while_seated(
                         Arc::clone(mailbox),
                         peer.clone(),
                         block_ms,
-                        label,
+                        Arc::clone(diagnostics),
                         tails_stop.clone(),
                         Arc::clone(sink),
                     );
                     tailing.insert(peer, tail);
                 }
             }
-            Err(e) => {
-                report_receiver_error(mailbox, label, format!("listing conversations failed: {e}"));
-            }
+            Err(e) => observe_receiver_failure(mailbox, diagnostics, "conversation discovery", &e),
         }
         sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
     }
     if let Some(loss) = seat.loss() {
-        report_receiver_error(mailbox, label, format!("receiver seat lost: {loss}"));
+        report_receiver_error(
+            mailbox,
+            diagnostics.component(),
+            format!("receiver seat lost: {loss}"),
+        );
     }
     // Joining is what makes the receiver's handle mean "the receiver has
     // stopped". Without it the caller's join returns while N tails are still
@@ -1942,25 +2051,80 @@ fn global_delivery_log() -> &'static DeliveryLog {
     LOG.get_or_init(DeliveryLog::default)
 }
 
-fn record_delivery_stall(
-    peer: &str,
-    holder: &str,
-    offset: Option<u64>,
-    tail: Option<u64>,
-    stall: DeliveryStall,
-    loss: Option<LeaseLoss>,
-    repeats: u32,
-) {
-    global_delivery_log().record(DeliveryEvent {
-        peer: peer.to_string(),
-        holder: holder.to_string(),
-        offset,
-        tail,
-        stall,
-        loss,
-        repeats,
-        at_ms: now_ms(),
-    });
+impl DeliveryEvent {
+    #[inline]
+    fn new(
+        peer: &str,
+        holder: &str,
+        offset: Option<u64>,
+        tail: Option<u64>,
+        stall: DeliveryStall,
+        loss: Option<LeaseLoss>,
+        repeats: u32,
+    ) -> Self {
+        Self {
+            peer: peer.to_string(),
+            holder: holder.to_string(),
+            offset,
+            tail,
+            stall,
+            loss,
+            repeats,
+            at_ms: now_ms(),
+        }
+    }
+
+    /// All consumers receive the facts captured at the original decision.
+    /// A refused consumer or lost lease is not a transport reconnect warning.
+    #[inline]
+    fn observe(
+        self,
+        mailbox: &Mailbox,
+        diagnostics: &telemetry::RetryDiagnostics,
+        scope: &str,
+        error: Option<&str>,
+    ) {
+        let observation = error.map(|error| {
+            let operation = match self.stall {
+                DeliveryStall::ClaimFailed => "claim",
+                DeliveryStall::PollFailed => "poll",
+                DeliveryStall::CommitRefused => "commit",
+                DeliveryStall::ConsumerRefused => "consumer",
+                DeliveryStall::LeaseLost => "lease",
+            };
+            // Keep the captured cause in status even when expiry/transfer is
+            // not an I/O outage. Never re-query the lease after the refusal.
+            let context = if matches!(
+                self.loss,
+                Some(
+                    LeaseLoss::NotHeld { .. }
+                        | LeaseLoss::LateSuccess { .. }
+                        | LeaseLoss::Lapsed { .. }
+                )
+            ) {
+                None
+            } else {
+                Some(serde_json::Map::from_iter([
+                    ("peer".into(), self.peer.clone().into()),
+                    ("holder".into(), self.holder.clone().into()),
+                    ("operation".into(), operation.into()),
+                    ("offset".into(), self.offset.into()),
+                    ("tail".into(), self.tail.into()),
+                    ("stall".into(), format!("{:?}", self.stall).into()),
+                    ("loss".into(), self.loss.map(|loss| loss.to_string()).into()),
+                    ("repeats".into(), self.repeats.into()),
+                ]))
+            };
+            (error, format!("{operation} {scope}: {error}"), context)
+        });
+        global_delivery_log().record(self);
+        if let Some((error, status, context)) = observation {
+            report_receiver_error(mailbox, diagnostics.component(), status);
+            if let Some(context) = context {
+                diagnostics.failed_with(scope, error, context);
+            }
+        }
+    }
 }
 
 /// Delivery stalls observed by this process, oldest first.
@@ -1977,13 +2141,14 @@ fn spawn_conversation_tail(
     mailbox: Arc<Mailbox>,
     peer: String,
     block_ms: u64,
-    label: &'static str,
+    diagnostics: Arc<telemetry::RetryDiagnostics>,
     abort: crate::HookAbortSignal,
     sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
-        .name(format!("{label}-tail"))
+        .name(format!("{}-tail", diagnostics.component()))
         .spawn(move || {
+            let scope = format!("conversation with {peer}");
             while !abort.is_aborted() {
                 let mut reader = match mailbox.conversation_reader(&peer).acquire() {
                     Ok(Some(reader)) => reader,
@@ -1992,12 +2157,7 @@ fn spawn_conversation_tail(
                         continue;
                     }
                     Err(e) => {
-                        report_receiver_error(
-                            &mailbox,
-                            label,
-                            format!("claiming reader for {peer}: {e}"),
-                        );
-                        record_delivery_stall(
+                        DeliveryEvent::new(
                             &peer,
                             "",
                             None,
@@ -2005,7 +2165,8 @@ fn spawn_conversation_tail(
                             DeliveryStall::ClaimFailed,
                             None,
                             0,
-                        );
+                        )
+                        .observe(&mailbox, &diagnostics, &scope, Some(&e));
                         sleep_unless_aborted(&abort, block_ms.max(1));
                         continue;
                     }
@@ -2017,12 +2178,7 @@ fn spawn_conversation_tail(
                         match mailbox.poll_conversation(&peer, reader.offset, block_ms) {
                             Ok(batch) => batch,
                             Err(e) => {
-                                report_receiver_error(
-                                    &mailbox,
-                                    label,
-                                    format!("polling conversation with {peer}: {e}"),
-                                );
-                                record_delivery_stall(
+                                DeliveryEvent::new(
                                     &peer,
                                     reader.cursor.holder(),
                                     Some(reader.offset),
@@ -2030,6 +2186,12 @@ fn spawn_conversation_tail(
                                     DeliveryStall::PollFailed,
                                     None,
                                     0,
+                                )
+                                .observe(
+                                    &mailbox,
+                                    &diagnostics,
+                                    &scope,
+                                    Some(&e),
                                 );
                                 sleep_unless_aborted(&abort, block_ms.max(1));
                                 continue;
@@ -2053,12 +2215,7 @@ fn spawn_conversation_tail(
                         stall_repeats = 0;
                         if next > reader.offset {
                             if let Err(e) = reader.commit(next) {
-                                report_receiver_error(
-                                    &mailbox,
-                                    label,
-                                    format!("committing reader for {peer}: {e}"),
-                                );
-                                record_delivery_stall(
+                                DeliveryEvent::new(
                                     &peer,
                                     reader.cursor.holder(),
                                     Some(reader.offset),
@@ -2066,6 +2223,12 @@ fn spawn_conversation_tail(
                                     DeliveryStall::CommitRefused,
                                     e.loss,
                                     0,
+                                )
+                                .observe(
+                                    &mailbox,
+                                    &diagnostics,
+                                    &scope,
+                                    Some(&e.message),
                                 );
                                 break;
                             }
@@ -2085,7 +2248,7 @@ fn spawn_conversation_tail(
                             } else {
                                 (DeliveryStall::ConsumerRefused, None)
                             };
-                            record_delivery_stall(
+                            DeliveryEvent::new(
                                 &peer,
                                 reader.cursor.holder(),
                                 Some(reader.offset),
@@ -2093,16 +2256,23 @@ fn spawn_conversation_tail(
                                 stall,
                                 loss,
                                 stall_repeats,
+                            )
+                            .observe(
+                                &mailbox,
+                                &diagnostics,
+                                &scope,
+                                None,
                             );
                         }
                         sleep_unless_aborted(&abort, retry_delay_ms);
                         retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
                     }
+                    diagnostics.succeeded(&scope);
                 }
                 if let Some(loss) = reader.lease.loss() {
                     report_receiver_error(
                         &mailbox,
-                        label,
+                        diagnostics.component(),
                         format!("reader for {peer} lost: {loss}"),
                     );
                 }

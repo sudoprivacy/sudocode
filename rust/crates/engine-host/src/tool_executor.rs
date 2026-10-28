@@ -587,6 +587,7 @@ impl AskUserQuestionCliInput {
         };
 
         Ok(QuestionPromptRequest {
+            presentation: runtime::QuestionPresentation::Question,
             title: self.title,
             description: self
                 .description
@@ -670,12 +671,19 @@ impl CliToolExecutor {
             .map_err(ToolError::new)?;
         let plan = runtime::plan_store::read_plan(&self.tool_registry.fs_handle())
             .ok_or_else(|| ToolError::new("saved plan could not be read for approval"))?;
+        let plan_file = runtime::plan_store::plan_file_path(&self.tool_registry.fs_handle())
+            .map_err(ToolError::new)?
+            .display()
+            .to_string();
 
         // Ask the user how to proceed — ACROSS THE SEAM. The pump's
         // QuestionAdapter turns this into a QuestionRequest the renderer answers
         // (the REPL / iocraft / ACP each draw the dialog + read the choice their
         // own way), so it works on Windows too (no raw stdin read_line here).
         let request = QuestionPromptRequest {
+            presentation: runtime::QuestionPresentation::PlanReview {
+                plan_file: plan_file.clone(),
+            },
             title: Some("Choose an action".to_string()),
             description: Some(runtime::PromptText::Markdown(plan.clone().into())),
             fields: vec![QuestionField {
@@ -732,16 +740,26 @@ impl CliToolExecutor {
                         "The saved plan changed while approval was pending. Present the current plan with write_plan for review before executing.",
                     ));
                 }
-                let mut output = ToolOutput::text(format!(
-                    "The user APPROVED the plan. Implement it now.\n\n{plan}"
-                ));
+                // No echo of the plan: this result stays paired with its write_plan
+                // call under both options (clearing context keeps the current
+                // exchange), and that call's input already holds the plan, which
+                // the check above proves is exactly what the user approved. A copy
+                // here would only sit in context, twice, for the rest of the session.
+                let mut output = plan_review_output(&runtime::plan_store::PlanReviewResult::new(
+                    runtime::plan_store::PlanReviewStatus::Approved,
+                    plan_file,
+                    "The user APPROVED the plan in this write_plan call. Implement it now."
+                        .to_string(),
+                ))?;
                 if answer.value == "1" {
                     output.context_action = Some(ToolContextAction::RestartFromCurrentExchange);
                 }
                 Ok(output)
             }
-            "4" => Err(ToolError::new(
-                "User chose to exit plan mode without executing. The plan is saved; wait for further instructions.",
+            "4" => plan_review_output(&runtime::plan_store::PlanReviewResult::new(
+                runtime::plan_store::PlanReviewStatus::Cancelled,
+                plan_file,
+                "User chose to exit plan mode without executing. The plan is saved; wait for further instructions.".into(),
             )),
             // "3" (Keep planning) or any free-text answer is treated as a comment:
             // feed it back so the model revises the plan and calls write_plan again.
@@ -753,10 +771,26 @@ impl CliToolExecutor {
                         "User feedback on the plan: {other}\nRevise the plan accordingly and call write_plan again."
                     )
                 };
-                Err(ToolError::new(feedback))
+                let mut result = runtime::plan_store::PlanReviewResult::new(
+                    runtime::plan_store::PlanReviewStatus::RevisionRequested,
+                    plan_file,
+                    feedback,
+                );
+                if other != "3" && !other.trim().is_empty() {
+                    result.feedback = Some(other.to_owned());
+                }
+                plan_review_output(&result)
             }
         }
     }
+}
+
+fn plan_review_output(
+    result: &runtime::plan_store::PlanReviewResult,
+) -> Result<ToolOutput, ToolError> {
+    serde_json::to_string_pretty(result)
+        .map(ToolOutput::text)
+        .map_err(|error| ToolError::new(error.to_string()))
 }
 
 /// Build a `bash` progress callback that forwards STRUCTURED progress to a seam

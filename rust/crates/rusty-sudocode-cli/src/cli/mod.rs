@@ -12,6 +12,7 @@ pub(crate) mod pager;
 pub(crate) mod received;
 pub(crate) mod session;
 pub(crate) mod session_ui;
+pub(crate) mod setup;
 pub(crate) mod status;
 pub(crate) mod undo;
 pub(crate) mod unified_diff;

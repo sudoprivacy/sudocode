@@ -8,10 +8,12 @@ publish.workspace = true
 # Deliberately NOT `[lints] workspace = true`.
 #
 # The workspace root sets `unsafe_code = "forbid"`, and `forbid` cannot be
-# relaxed from inside a crate that inherits it. Two Win32 questions need FFI and
-# therefore `unsafe`: whether a pipe holds data without starting a read
-# (`PeekNamedPipe`), and what text bytes in the console's code page spell
-# (`MultiByteToWideChar`). Isolating those calls here keeps `forbid` absolute in
+# relaxed from inside a crate that inherits it. These Win32 operations need
+# FFI and therefore `unsafe`: peeking pipe readiness (`PeekNamedPipe`), decoding
+# console bytes (`MultiByteToWideChar`), swapping the owned stderr handle
+# (`GetStdHandle` / `SetStdHandle`), and clearing standard-handle inheritance
+# before a background spawn (`SetHandleInformation`). Isolating these calls here
+# keeps `forbid` absolute in
 # every other crate: this file is the workspace's entire `unsafe` surface.
 #
 # If you are tempted to add anything else to this crate — don't. Each function

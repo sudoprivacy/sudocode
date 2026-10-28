@@ -614,15 +614,15 @@ coverage starts fresh and is tracked here as the single source.</p>
   (3) bash streaming output → (4) MCP progress notifications.
 </div>
 
-<p><strong>CCB validation:</strong> <code>src/screens/REPL.tsx</code> derives query activity from <code>QueryGuard</code> separately from <code>showSpinner</code>, and distinguishes approval/input waiting from busy and idle. Codex's <code>BottomPane::set_task_running</code> likewise keeps task state independent of status visibility. Scode uses its existing ordered <code>EngineEvent::State</code> stream as the foreground authority. Its activity cue stays visible through streamed output, with input waiting owned by the question/approval panel; temporary legacy spinner suspension cannot change the engine lifecycle.</p>
+<p><strong>CCB validation:</strong> <code>src/screens/REPL.tsx</code> derives query activity from <code>QueryGuard</code> separately from <code>showSpinner</code>, and distinguishes approval/input waiting from busy and idle. Codex's <code>BottomPane::set_task_running</code> likewise keeps task state independent of status visibility. CCB <code>src/components/Spinner/TeammateSpinnerLine.tsx</code> distinguishes teammate idle from active work; scode keeps its existing task browser rather than adding a teammate tree. Codex <code>970111f6</code> uses terminal foreground/brightness for activity and dim secondary metadata; scode retains its amber brand animation and central <code>ColorTheme</code>. Scode uses its existing ordered <code>EngineEvent::State</code> stream as the foreground authority. Its activity cue stays visible through streamed output, with input waiting owned by the question/approval panel; temporary legacy spinner suspension cannot change the engine lifecycle.</p>
 
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td>Inline terminal refresh (unified render loop)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>repl_ui.rs ReplApp</code></td><td>Async REPL uses <strong>iocraft</strong> <code>render_loop()</code> — Rust equivalent of CC's Ink. Bottom chrome (spinner + separator + TextInput prompt + separator + footer) is a single iocraft component tree. <code>UseOutput::println()</code> routes turn output above the fixed chrome. Spinner ticks via <code>use_future</code> at 80ms. Keyboard input via <code>use_terminal_events</code> replaces rustyline in the async path. PR #382 removed MultiProgress; PR #383 added iocraft.</td></tr>
-    <tr><td>Foreground lifecycle and elapsed timer</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_foreground_activity</code></td><td><code>render/activity.rs ActivityState</code> projects <code>Running / AwaitingInput / Idle</code> from the engine event bridge. Status and footer share one lifecycle snapshot. Thinking/Reasoning and running-tool content share the existing status row, with one amber brand animation. Questions and approvals stop activity and own the existing input panel; idle restores the result/footer. Shared inline/one-shot formatters preserve elapsed time, model, tokens and ETA.</td></tr>
+    <tr><td>Foreground lifecycle and elapsed timer</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_foreground_activity</code> · <code>pty_background_tasks</code></td><td><code>render/activity.rs ActivityState</code> projects <code>Running / AwaitingInput / Idle</code> from the engine event bridge. Status and footer share one foreground lifecycle snapshot and the task browser's cached event projection. Foreground activity owns the status row, then a static background conclusion with the completed turn number, then turn statistics. Running, stopping, unconfirmed execution and unread failures remain distinct; ordinary unread results stay in the footer. Questions and approvals own the input panel. Hidden task output introduces no animation or clock redraw. Shared inline/one-shot formatters preserve elapsed time, model, tokens and ETA.</td></tr>
     <tr><td>Spinner status line — token counter (↓ N tokens)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_spinner_token_counter::status_line_shows_token_count_after_turn</code> · <code>live_spinner_shows_token_counter_during_streaming</code></td><td>Spinner shows <code>↓ N tokens</code> (bytes/4 approximation) after 1s of streaming. Shared <code>AtomicU32</code> counter incremented on each <code>TextDelta</code> in <code>api_client.rs</code>, read by spinner thread in <code>render.rs</code>.</td></tr>
-    <tr><td>Spinner status line — reasoning status</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_render_boundaries</code> · <code>pty_chrome_styles</code></td><td>Actual thinking deltas select <code>Reasoning...</code>; other model work uses <code>Thinking...</code>. A fixed four-cell animation approximates the Sudoprivacy mark and uses the existing <code>ColorTheme.logo</code> role. Tools prioritize available progress; quiet tools show their canonical name or active count. Time and tokens share the same row. Streamed prose does not hide foreground activity. Asynchronous output suspension does not reset reasoning or retry phase. All colors use <code>ColorTheme</code>.</td></tr>
+    <tr><td>Spinner status line — reasoning status</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_render_boundaries</code> · <code>pty_chrome_styles</code></td><td>Actual thinking deltas select <code>Thinking...</code>; other model work uses <code>Working...</code>. A fixed four-cell animation approximates the Sudoprivacy mark and uses the existing <code>ColorTheme.logo</code> role. Tools prioritize available progress; quiet tools show their canonical name or active count. Time and tokens share the same row; ordinary activity text uses terminal foreground and metadata uses the muted role. Streamed prose does not hide foreground activity. Asynchronous output suspension does not reset reasoning or retry phase. All colors use <code>ColorTheme</code>.</td></tr>
     <tr><td>Spinner status line — token budget / ETA</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs Spinner</code></td><td>When <code>max_output_tokens</code> is set (from <code>max_tokens_for_model</code>), spinner shows <code>↓ 1.2k / 16k (8%) ~3m</code>. Rate-based ETA: <code>output_tokens / elapsed</code>. Falls back to plain <code>↓ N tokens</code> when budget unknown.</td></tr>
     <tr><td>Spinner status line — stall detection (yellow status text)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs Spinner</code></td><td>Shared <code>SpinnerProgress</code> records response, tool progress and phase activity; after response bytes arrive, status text uses <code>ColorTheme.warning</code> when no progress occurs for 3s (reasoning is exempt). The brand animation stays amber. Same semantic as CC's <code>useStalledAnimation</code>.</td></tr>
     <tr><td>Bash tool streaming output (onProgress)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_bash_streaming::bash_streaming_shows_progress_for_slow_commands</code></td><td><code>execute_bash_streaming</code> in <code>bash.rs</code> pipes stdout/stderr via <code>tokio::io::BufReader</code>, reads line-by-line, calls <code>BashProgressCallback</code> every ~1s. <code>CliToolExecutor</code> installs a callback that pauses the spinner and prints the last 3 lines in dim style. Thread-local callback avoids changing <code>ToolExecutor</code> trait.</td></tr>
@@ -1942,7 +1942,7 @@ shortcut. This changes presentation, not slot allocation or input ownership.</p>
 <p>Dependencies: <strong>crossterm 0.28</strong>,
 <strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
 <strong>iocraft 0.8</strong>, <strong>smol 2</strong>,
-<strong>rustyline 15</strong> (sync path), <strong>serde_json</strong>.</p>
+<strong>rustyline 19</strong> (sync path, upstream buffered-input fix for external diagnostics), <strong>serde_json</strong>.</p>
 
 <h4>Phase 0 · Structural cleanup</h4>
 
@@ -2119,6 +2119,17 @@ impact, lowest implementation cost first:</p>
 </table>
 
 <h4>Inline rendering design principles</h4>
+
+<p><strong>Plan review presentation.</strong> The existing question boundary
+carries explicit plan-review intent and the authoritative saved-file path.
+Both REPLs and the document inspector use the shared Markdown renderer and
+left frame to separate the complete plan from preceding reasoning and the
+decision controls. Structured review results distinguish approval, revision,
+cancellation and draft saving; ordinary review feedback is not a tool error.
+The completed card retains the decision, path and feedback without repeating
+abbreviated input fields. Acceptance: <code>pty_plan_presentation</code>,
+<code>pty_plan_markdown</code>, <code>pty_plan_review</code> and
+<code>pty_plan_confirm</code>, including real-provider review and revision.</p>
 
 <p><strong>Todo semantic emphasis.</strong> All summary quantities, including
 zero, use bold terminal foreground; labels and punctuation use readable muted
@@ -2554,19 +2565,24 @@ until its v0.8.16 tag.</p>
 
 <h3 id="agent-runtime-tasks">Implementation and acceptance tasks</h3>
 
-<p><strong>Standalone startup while the node is offline.</strong>
-With an existing readable node record and credential, constructing the session's
-peer client does not perform a network probe. Ordinary startup and resume keep
-the node namespace while the receiver retries and A2A operations report their
-actual errors. Receiver-seat retries print an unchanged error once, reset that
-diagnostic after a successful receiver-seat check, and retain the existing retry
-interval. PTY acceptance requires usable input after a completed offline turn
-and covers both renderers, restored history and a
-failed real send without a disk inbox. Record parsing, missing credential files
-and identity mismatches still fail startup; representing those conditions as
-A2A unavailable, and explicit
-disk-to-node handoff, remain follow-up work. This does not provision a service
-or change cohost ownership.</p>
+<p><strong>Standalone startup with unavailable A2A.</strong>
+A present node record selects one shared node mailbox even when parsing,
+credential resolution or node IO fails. Ordinary startup and resume remain
+usable; A2A tools report the actual error without selecting disk. The original
+receiver retries local binding resolution and presence announcement before
+claiming its seat. These attempts share the same
+<code>telemetry::RetryDiagnostics</code> as receiver checks and completion
+persistence; the <a href="docs/design/background-retry-diagnostics.md">reporter
+and native input owner</a> retain the original cause without repeatedly
+repainting the prompt. PTY coverage exercises both renderers, restored history,
+missing credentials, actual failed sends and same-process receiver retries.
+ACP stdio coverage exercises the same loaded session before and after preparing
+a bundle and checks zero model requests. An isolated real-TLS-daemon fixture
+checks direct append and the original receiver after bundle publication;
+source preparation does not establish that it passed. A constructed client's
+credentials stay fixed, and explicit disk-to-node handoff and portable service
+provisioning remain follow-up work. Cohost retains its injected mailbox and
+host-service requirements.</p>
 
 <table>
 <thead><tr><th>Task</th><th>Implementation evidence</th><th>Next acceptance</th></tr></thead>

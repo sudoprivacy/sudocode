@@ -37,7 +37,7 @@ fn write_plan_persists_the_plan_file() {
         &[("SUDOCODE_PLAN_FILE", plan_file.to_str().unwrap())],
     );
 
-    sess.expect("(?i)write_plan")
+    sess.expect("(?i)write_?plan")
         .expect("model must invoke write_plan (agent trigger)");
 
     let exit = sess.expect_eof().expect("scode should exit");

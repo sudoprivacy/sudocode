@@ -46,6 +46,7 @@ pub(crate) fn select_memory(
     Some(show_slash_selection(
         ui,
         QuestionPromptView {
+            presentation: runtime::QuestionPresentation::Question,
             title: Some("Memory".into()),
             description: Some("Type to filter; Enter to edit; Esc to cancel".into()),
             index: 0,

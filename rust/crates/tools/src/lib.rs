@@ -287,6 +287,7 @@ use runtime::{
     cron_registry::CronRegistry,
     current_workspace_root, dedupe_superseded_commit_events, edit_file, glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
+    plan_store::compose_task_framing,
     read_file,
     summary_compression::compress_summary_text,
     todo_store::TodoStore,
@@ -4200,17 +4201,6 @@ fn with_task_template(mut schema: serde_json::Value, required: bool) -> serde_js
     schema
 }
 
-/// Compose the shared task-framing sections into a markdown block, prepended to
-/// a plan body or a handed-off task prompt so both carry the same structure.
-fn compose_task_framing(context: &str, constraints: &str, acceptance: &str) -> String {
-    format!(
-        "## Context\n{}\n\n## Constraints\n{}\n\n## Acceptance Criteria\n{}\n",
-        context.trim(),
-        constraints.trim(),
-        acceptance.trim(),
-    )
-}
-
 /// Like [`compose_task_framing`] but for the optional `send` path: returns
 /// `None` when none of the three fields carry content (a plain chat message),
 /// so only a genuine task hand-off gets the framing block. Empty fields are
@@ -4238,14 +4228,19 @@ fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
     }
     // The plan file is the SSOT — always structured: the three framing sections
     // (enforced as required params) then the plan body.
-    let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
-    let document = format!("{framing}\n{content}\n");
+    let document = runtime::plan_store::compose_document(
+        &input.context,
+        &input.constraints,
+        &input.acceptance,
+        content,
+    );
     let path = runtime::plan_store::write_plan(&document, fs)?;
-    to_pretty_json(json!({
-        "ok": true,
-        "planFile": path.display().to_string(),
-        "message": "Plan saved.",
-    }))
+    serde_json::to_string_pretty(&runtime::plan_store::PlanReviewResult::new(
+        runtime::plan_store::PlanReviewStatus::DraftSaved,
+        path.display().to_string(),
+        "Plan saved.".into(),
+    ))
+    .map_err(|error| error.to_string())
 }
 
 fn run_structured_output(input: StructuredOutputInput) -> Result<String, String> {
@@ -6781,62 +6776,8 @@ fn run_single_turn(
     }
 }
 
-/// Render a batch of freshly-arrived mailbox envelopes into a single
-/// synthetic user-turn text. Each envelope is wrapped in an
-/// XML-shaped `<mailbox-*>` block so the model can tell them apart
-/// from ordinary user prompts and — critically — so a follow-up
-/// SendMessage in the middle of a stream doesn't look like it came
-/// from the human user.
-///
-/// Multiple envelopes are concatenated with a blank line so the
-/// model treats them as distinct messages. Order preserves the
-/// mailbox write order (JSONL is append-only).
-pub fn compose_next_turn_from_envelopes(
-    envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
-) -> String {
-    let mut blocks = Vec::with_capacity(envelopes.len());
-    for env in envelopes {
-        let tag = match env.kind.as_str() {
-            runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST => "shutdown-request",
-            runtime::agent_mailbox::kinds::SHUTDOWN_RESPONSE => "shutdown-response",
-            runtime::agent_mailbox::kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
-            _ => "mailbox-message",
-        };
-        let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&env.from));
-        if let Some(rid) = &env.request_id {
-            header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
-        }
-        header.push('>');
-        // `from` and `request-id` are escaped above so a hostile envelope can't
-        // break this synthetic prompt. The body is the same envelope from the
-        // same stranger, and it is the field that can both close `</{tag}>`
-        // early and impersonate a `<system-reminder>` — so it gets the same
-        // treatment, through the one neutralizer the co-host loop also uses.
-        blocks.push(format!(
-            "{header}\n{}\n</{tag}>",
-            runtime::agent_mailbox::neutralize_untrusted_markup(&env.body)
-        ));
-    }
-    blocks.join("\n\n")
-}
-
-/// Minimal XML-attribute escape for the mailbox envelope headers.
-/// Only escapes `"` and `&` — the character set for `from` / request-id
-/// is `[A-Za-z0-9_-]` in practice, but a hostile envelope shouldn't
-/// break the synthetic prompt.
-fn xml_attr_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
+// Preserve the public entry point while runtime owns mailbox-to-input composition.
+pub use runtime::agent_mailbox::compose_next_turn_from_envelopes;
 
 fn build_agent_runtime(
     job: &AgentJob,

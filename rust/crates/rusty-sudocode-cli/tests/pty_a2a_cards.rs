@@ -98,7 +98,7 @@ fn send_replay_keeps_receipts_addresses_errors_and_bounded_previews() {
     let env = TestEnv::new_mock("send-card-history");
     let mut source = Session::new().with_workspace_root(env.workspace_root());
     let address = "reviewer-具体地址-1234567890123456789012345678901234567890";
-    let message = "验证完成，保留完整原文。\nSecond preview line.\nThird preview line.\nHIDDEN-TAIL-ONLY-IN-SESSION";
+    let message = "验证完成，保留完整原文。\nSecond preview line.\nThird preview line.\nFourth preview line.\nFifth preview line.\nSixth preview line.\nHIDDEN-TAIL-ONLY-IN-SESSION";
     add(
         &mut source,
         "plain",
@@ -159,6 +159,10 @@ fn send_replay_keeps_receipts_addresses_errors_and_bounded_previews() {
             "Summary: 验证结果摘要",
             "Sent to inbox",
             "Third preview line.",
+            "Fourth preview line.",
+            "Fifth preview line.",
+            "Sixth preview line.",
+            "+1 more line",
             "full output preserved in session",
             "No recipients · no inboxes written",
             "Written to 2 inboxes: peer-one, peer-two",
@@ -190,6 +194,54 @@ fn send_replay_keeps_receipts_addresses_errors_and_bounded_previews() {
             "the receipt belongs to the title, before the labeled summary: {screen}"
         );
     });
+}
+
+#[test]
+fn send_summary_and_body_keep_independent_preview_limits() {
+    let env = TestEnv::new_mock("send-preview-limits");
+    let mut source = Session::new().with_workspace_root(env.workspace_root());
+    let summary = format!("summary-start {} SUMMARY-HIDDEN", "界".repeat(400));
+    let body = "BODY-ONE\nBODY-TWO\nBODY-THREE\nBODY-FOUR\nBODY-FIVE\nBODY-SIX\nBODY-HIDDEN";
+    add(
+        &mut source,
+        "summary-limit",
+        "send",
+        &json!({"to":"peer","summary":summary,"message":body}),
+        &json!({"success":true}),
+        false,
+    );
+    let long_body = format!("CHAR-CAP-START {} CHAR-CAP-END", "界".repeat(1200));
+    add(
+        &mut source,
+        "body-limit",
+        "send",
+        &json!({"to":"peer","message":long_body}),
+        &json!({"success":true}),
+        false,
+    );
+    replay(
+        &env,
+        &source,
+        "Recorded body-limit.",
+        &[52, 120],
+        |screen| {
+            for marker in [
+                "Summary: summary-start",
+                "BODY-ONE",
+                "BODY-SIX",
+                "CHAR-CAP-START",
+                "full output preserved in session",
+            ] {
+                assert!(screen.contains(marker), "missing {marker}: {screen}");
+            }
+            for hidden in ["SUMMARY-HIDDEN", "BODY-HIDDEN", "CHAR-CAP-END"] {
+                assert!(
+                    !screen.contains(hidden),
+                    "preview leaked {hidden}: {screen}"
+                );
+            }
+        },
+    );
 }
 
 #[test]

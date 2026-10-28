@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! [PendingSlot]   ← in-flight tools and queued messages
-//! [StatusSlot]    ← activity | turn_result | empty
+//! [StatusSlot]    ← foreground | background | turn_result | empty
 //! [TodoSlot]      ← todo summary and items | empty
 //! ──── separator ────
 //! [InputSlot]     ← text_input | question_panel
@@ -50,116 +50,22 @@ pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
 
-// ── stderr redirect ───────────────────────────────────────────────────
-
-/// Windows stub — stderr redirect is a no-op on non-Unix platforms.
-#[cfg(not(unix))]
-mod stderr_redirect {
-    pub struct StderrRedirect;
-    impl StderrRedirect {
-        pub fn activate() -> Option<Self> {
-            None
-        }
-        pub fn drain(&self) -> Option<Vec<u8>> {
-            None
-        }
-        pub fn suspend(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-        pub fn resume(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-}
-
-/// Unix pipe-based stderr redirect: replaces fd 2 with a pipe so that
-/// any library writing to stderr (e.g. tracing, nix, openssl) does not
-/// corrupt the iocraft canvas.  Captured bytes are drained each tick and
-/// routed through the iocraft stdout handle.
-///
-/// All syscalls go through `nix`'s safe wrappers — no `unsafe` blocks.
-#[cfg(unix)]
-mod stderr_redirect {
-    use std::io::Read;
-    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-
-    pub struct StderrRedirect {
-        read_file: std::fs::File,
-        write_fd: OwnedFd,
-        original_stderr: OwnedFd,
-    }
-
-    impl StderrRedirect {
-        /// Replace fd 2 with the write end of a pipe.  Returns `Some` on
-        /// success.  The read end is kept for `drain()`.
-        pub fn activate() -> Option<Self> {
-            let (read_fd, write_fd): (OwnedFd, OwnedFd) = nix::unistd::pipe().ok()?;
-            let original_stderr = std::io::stderr().as_fd().try_clone_to_owned().ok()?;
-
-            // Make the read end non-blocking so drain() never stalls.
-            let flags =
-                nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).ok()?;
-            let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
-            oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
-            nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(oflags)).ok()?;
-
-            let read_file = std::fs::File::from(read_fd);
-            nix::unistd::dup2(write_fd.as_raw_fd(), 2).ok()?;
-            Some(Self {
-                read_file,
-                write_fd,
-                original_stderr,
-            })
-        }
-
-        /// External programs inherit the real terminal, not the capture pipe.
-        pub fn suspend(&self) -> std::io::Result<()> {
-            nix::unistd::dup2(self.original_stderr.as_raw_fd(), 2)?;
-            Ok(())
-        }
-
-        pub fn resume(&self) -> std::io::Result<()> {
-            nix::unistd::dup2(self.write_fd.as_raw_fd(), 2)?;
-            Ok(())
-        }
-
-        /// Non-blocking drain: returns captured text or `None`.
-        pub fn drain(&self) -> Option<Vec<u8>> {
-            let mut buf = [0u8; 4096];
-            let mut collected = Vec::new();
-            let mut file = &self.read_file;
-            loop {
-                match file.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => collected.extend_from_slice(&buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-            }
-            if collected.is_empty() {
-                None
-            } else {
-                Some(collected)
-            }
-        }
-    }
-
-    impl Drop for StderrRedirect {
-        fn drop(&mut self) {
-            let _ = self.suspend();
-        }
-    }
-}
+use crate::stderr_capture as stderr_redirect;
 
 // ── ChromeSlot enums ──────────────────────────────────────────────────
 
 /// ChromeSlot: status area above the separator. One variant renders at a time.
 ///
-/// Priority: Activity > TurnResult > Empty.
+/// Priority: Foreground > Background > TurnResult > Empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StatusSlot {
     /// Running model, tool, or retry activity; input panels own waiting states.
     Active(String),
+    /// Static task conclusion; shares the footer's event-fed task projection.
+    Background {
+        full: Arc<StyledText>,
+        summary: Arc<StyledText>,
+    },
     /// Turn result (tokens/cost/ctx). Cleared when the next turn starts.
     TurnResult(Arc<StyledText>),
     /// Nothing — slot not rendered, saves vertical space.
@@ -189,6 +95,7 @@ pub struct QuestionOptionView {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionPromptView {
+    pub presentation: runtime::QuestionPresentation,
     pub title: Option<String>,
     pub description: Option<runtime::PromptText>,
     pub index: usize,
@@ -386,9 +293,14 @@ pub enum UiCommand {
     },
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
-    SetTurnResult(Arc<StyledText>),
+    SetTurnResult {
+        text: Arc<StyledText>,
+        turn: u32,
+    },
     SetTip(engine_core::Tip),
     SetCacheTip(CacheTip),
+    /// The workspace's branch, or short commit when detached, for the footer.
+    SetBranch(Option<String>),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -448,10 +360,11 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ClearQuestion);
     }
 
-    pub(crate) fn set_turn_result(&self, text: &crate::render::StyledLine) {
-        let _ = self
-            .tx
-            .send(UiCommand::SetTurnResult(Arc::new(text.structured())));
+    pub(crate) fn set_turn_result(&self, text: &crate::render::StyledLine, turn: u32) {
+        let _ = self.tx.send(UiCommand::SetTurnResult {
+            text: Arc::new(text.structured()),
+            turn,
+        });
     }
 
     pub fn show_input_hint(&self, text: &str) {
@@ -471,6 +384,10 @@ impl UiCommandSender {
 
     pub(crate) fn set_cache_tip(&self, tip: CacheTip) {
         let _ = self.tx.send(UiCommand::SetCacheTip(tip));
+    }
+
+    pub(crate) fn set_branch(&self, label: Option<String>) {
+        let _ = self.tx.send(UiCommand::SetBranch(label));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -1421,7 +1338,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut frame = hooks.use_state(|| 0usize);
     let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
-    let mut turn_result = hooks.use_state(|| None::<Arc<StyledText>>);
+    let mut turn_result = hooks.use_state(|| None::<(u32, Arc<StyledText>)>);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
@@ -1471,9 +1388,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         InputSlot::FuzzySelect(state) => Some(&state.question),
                         _ => None,
                     };
-                    if let Some(description) = question.and_then(|q| q.description.as_ref()) {
+                    if let Some(question) = question.filter(|q| q.description.is_some()) {
                         let document = prompt_text::render_document(
-                            description,
+                            question.description.as_ref().expect("description checked"),
+                            &question.presentation,
                             crate::render::query_terminal_width(),
                         );
                         let _ = input_tx_for_events.send(InputEvent::InspectDocument(document));
@@ -1969,6 +1887,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 if let Some(description) = &question.description {
                                     let document = prompt_text::render_document(
                                         description,
+                                        &question.presentation,
                                         crate::render::query_terminal_width(),
                                     );
                                     write_iocraft_output(&stdout_for_future, &document, true);
@@ -2011,9 +1930,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .set_cache_advice(view.advice, view.actionable);
                             frame.set(frame.get().wrapping_add(1));
                         }
+                        Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
                         Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
-                        Ok(UiCommand::SetTurnResult(text)) => {
-                            turn_result.set(Some(text));
+                        Ok(UiCommand::SetTurnResult { text, turn }) => {
+                            turn_result.set(Some((turn, text)));
                         }
                         Ok(UiCommand::UpdateTodos(todos)) => {
                             if let Ok(mut items) = todo_items_for_future.lock() {
@@ -2157,9 +2077,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .take()
     {
         system.suspend(move || {
-            let redir = stderr_redir.lock().expect("stderr redirect mutex poisoned");
+            let mut redir = stderr_redir.lock().expect("stderr redirect mutex poisoned");
             let released = redir
-                .as_ref()
+                .as_mut()
                 .map_or(Ok(()), stderr_redirect::StderrRedirect::suspend);
             let is_released = released.is_ok();
             if request.ready.send(released).is_ok() && is_released {
@@ -2167,7 +2087,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let _ = request.resume.recv();
             }
             let restored = redir
-                .as_ref()
+                .as_mut()
                 .map_or(Ok(()), stderr_redirect::StderrRedirect::resume);
             let _ = request.done.send(restored);
         });
@@ -2184,7 +2104,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let submitted = *has_submitted.read();
     let turn_active = activity_state != EngineState::Idle;
 
-    // StatusSlot: Activity > TurnResult > Empty
+    let mut browser = tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Output-only task events do not invalidate these bounded static strings.
+    // Both surfaces consume the browser's existing event projection, even idle.
+    let completed_turn = turn_result.read().as_ref().map(|(turn, _)| *turn);
+    let background_status = hooks.use_memo(
+        || browser.summary().status_lines(w, completed_turn),
+        (browser.summary(), w, completed_turn),
+    );
+
+    // StatusSlot: Foreground > Background > TurnResult > Empty
     let status_slot = if activity_state == EngineState::Running {
         // Reuse the existing status row and shared column layout. No additional
         // live rows can spill into scrollback as tool output grows.
@@ -2209,7 +2140,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // The existing question/approval panel owns this interaction. No
         // animation or duplicate waiting instruction above InputSlot.
         StatusSlot::Empty
-    } else if let Some(ref tr) = *turn_result.read() {
+    } else if let Some((full, summary)) = &background_status {
+        StatusSlot::Background {
+            full: full.clone(),
+            summary: summary.clone(),
+        }
+    } else if let Some((_, ref tr)) = *turn_result.read() {
         StatusSlot::TurnResult(tr.clone())
     } else {
         StatusSlot::Empty
@@ -2237,9 +2173,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let perm = permission_mode.clone();
     let sep = "\u{2500}".repeat(w);
-    let mut browser = tasks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let pending_input = pending
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2332,13 +2265,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let question_style = chrome_style(chrome_theme.primary);
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
+        StatusSlot::Background { full, .. } => full.clone(),
         StatusSlot::TurnResult(s) => s.clone(),
-        StatusSlot::Empty => Default::default(),
+        StatusSlot::Empty => Arc::default(),
     };
     let status_summary = match &status_slot {
-        StatusSlot::Active(_) => "Status: turn active",
-        StatusSlot::TurnResult(_) => "Status: last turn (collapsed)",
-        StatusSlot::Empty => "",
+        StatusSlot::Active(_) => ansi("Status: turn active"),
+        StatusSlot::Background { summary, .. } => summary.clone(),
+        StatusSlot::TurnResult(_) => ansi("Status: last turn (collapsed)"),
+        StatusSlot::Empty => Arc::default(),
     };
     let heading = ansi_with_style(
         question
@@ -2410,7 +2345,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     128usize.div_ceil(w.max(1))
                 },
                 full: status_text,
-                summary: ansi(status_summary),
+                summary: status_summary.clone(),
             },
             Slot {
                 minimum_full_rows: 0,
@@ -2424,9 +2359,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
         ],
         format!(
-            "{running} tools · {queued} queued · {} todos · {} status",
+            "{running} tools · {queued} queued · {} todos · {}",
             todos.len(),
-            usize::from(!matches!(status_slot, StatusSlot::Empty))
+            if matches!(status_slot, StatusSlot::Background { .. }) {
+                status_summary.text.clone()
+            } else {
+                format!(
+                    "{} status",
+                    usize::from(!matches!(status_slot, StatusSlot::Empty))
+                )
+            }
         ),
         &mut measured,
     );
@@ -2880,6 +2822,7 @@ mod tests {
 
     fn question_with_options() -> QuestionPromptView {
         QuestionPromptView {
+            presentation: runtime::QuestionPresentation::Question,
             title: Some("Setup".to_string()),
             description: None,
             index: 0,
@@ -2911,6 +2854,7 @@ mod tests {
     #[test]
     fn enter_in_question_mode_routes_answer_instead_of_prompt() {
         let question = QuestionPromptView {
+            presentation: runtime::QuestionPresentation::Question,
             title: None,
             description: None,
             index: 0,

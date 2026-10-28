@@ -52,9 +52,10 @@
   "scripts": {
     "build": "tsc --emitDeclarationOnly && node scripts/build.cjs",
     "check": "tsc --noEmit -p tsconfig.test.json",
-    "test": "npm run build && npm run check && node dist/testing/acpIntegration.cjs && node test/portable.cjs",
+    "test": "npm run build && npm run check && node dist/testing/acpIntegration.cjs && node dist/testing/codexConnectionIntegration.cjs && node test/portable.cjs",
     "pack:runtime": "node scripts/pack.cjs",
-    "test:native": "node scripts/native.cjs"
+    "test:native": "node scripts/native.cjs",
+    "test:codex-lifecycle": "node test/nativeCodexLifecycle.cjs"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "1.9.0",

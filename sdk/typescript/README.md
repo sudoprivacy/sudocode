@@ -48,11 +48,14 @@ scode binary, node record, certificate or model credential bundle.
 
 The bridge's ACP capability handshake does not certify the Nexus backend
 protocol. Record the full CLI source/hash and the daemon release separately.
-Starting with scode 0.2.36 (Nexus pin v0.8.23), remote filesystem operations
-require `InspectTarget` to resolve the operation-authorized target before
-classifying linked streams. Pair that CLI with a daemon implementing the
-v0.8.23 contract. An older node returning `UNIMPLEMENTED` fails the operation;
-there is no legacy fallback that guesses link targets or bypasses authority.
+Starting with scode 0.2.36 (Nexus pin v0.8.23), `InspectTarget` resolves the
+operation-authorized target, including linked streams. The current backend also
+supports older nodes for classification: only an `Unsupported` target query
+uses the entry's own authenticated `Stat` type, without following a link.
+Target-based authorization still requires `InspectTarget` and fails closed when
+it is unavailable. Permission, transport and other errors do not select this
+compatibility branch. Qualify the exact CLI/node pair rather than infer backend
+compatibility from an ACP initialize response.
 
 For a frozen older node, retain its independently tested compatible CLI.
 Changing the bridge package or successfully initializing ACP does not upgrade
@@ -123,6 +126,123 @@ visibility/addressability, not online proof. The host binds actual actor and
 namespace; the wrapper does not accept a caller-selected sender.
 
 ## Optional Codex callback adapter and existing-thread migration
+
+The current bridge binds one explicitly configured ACP SID and callback thread.
+It is not a global autojoin entry for arbitrary Codex conversations. The
+[Codex autojoin investigation](../../docs/design/codex-network-autojoin.md)
+records the native startup/context boundaries and acceptance required for that
+mode, including idle-start behavior and authorized Agent enrollment.
+
+`connectCodex({codexArgv, socket?, env?, closeTimeoutMs?, onNotificationError?}, onNotification?)`
+exposes the existing native proxy transport for context inspection. It returns
+`initialized`, `request`, `exited`, `lastNotificationError` and an idempotent
+`close` that waits for its own spawned process, with bounded forced exit. Both
+ACP and native shutdown use the same timeout primitive. This never stops the
+native server; an arbitrary wrapper's other descendants are outside that exit
+receipt. Pass the actual executable, or Node plus a script path, rather than a
+Windows `.cmd` shell wrapper: spawning uses `shell:false`.
+
+An optional `env` is the complete environment for that owned proxy process,
+matching Node's spawn semantics. It is not merged with the controller's
+environment. Omission retains normal inheritance. An isolated caller can
+therefore supply private `CODEX_HOME`, `HOME`/`USERPROFILE` and Windows application
+directories without a shell wrapper or mutation of the controller's environment.
+Include required platform variables such as `PATH` and `SystemRoot` explicitly.
+
+Server requests are ignored without responding, even when their IDs overlap
+local pending calls. They belong to the actual frontend, including broadcast
+authentication refresh. Only notifications reach the optional observer. Its
+exceptions/rejections are retained in `lastNotificationError` and sent to the
+optional diagnostic observer without failing requests or printing to stderr.
+The callback below uses this same transport implementation.
+
+Native requests are sent once. `CodexRequestError.outcome` is `not_sent` for a
+local pre-send refusal; once submitted, transport failure is `unknown`. A remote
+JSON-RPC error is retained as `rpcError` with outcome `unknown`: the transport
+does not certify that an arbitrary failed RPC had no side effects. No error or
+active-to-idle race triggers an automatic resend. The helper does not start a
+native server, select an Agent, enroll an
+identity or discover other frontend endpoints. Native notifications are
+observations, not proof of network admission. Close the connection in `finally`
+after a read-only `thread/loaded/list` / `thread/read` inspection.
+
+### Opt-in native Codex lifecycle fixture
+
+Run from this SDK checkout after `npm run build`, or from a transferred fixture
+kit containing its canonical `manifest.json` and hash-matched `dist/index.cjs`,
+using an already installed native Codex executable. A transferred kit needs no
+Git checkout, npm install or rebuild. This test does not download or install Codex, connect
+to Nexus, enroll an Agent, change the user's configuration or modify a live
+frontend. It retains its temporary configuration and receipts for inspection.
+
+```sh
+npm run test:codex-lifecycle -- --codex /absolute/path/to/codex --output /absolute/evidence/path --case idle
+npm run test:codex-lifecycle -- --codex /absolute/path/to/codex --output /absolute/evidence/path --case cancelled-resume
+```
+
+The same `test/nativeCodexLifecycle.cjs` orchestrator runs on both platforms.
+Unix defaults to `test/fixtures/nativeCodexTui.py`. Windows uses the bundled
+`test/fixtures/nativeCodexTui.windows.py`, which calls ConPTY through Python's
+standard library without another package. Select that driver with
+`--driver '<JSON argv>'`, containing the available Python executable and the
+absolute script path. A missing driver fails before starting native processes;
+there is no protocol-only fallback. Use the actual `codex.exe`, not `codex.cmd`.
+`--temp-root` selects an existing private temporary directory when the platform's
+default socket path would be too long.
+
+The fixture performs these steps:
+
+1. Launch one isolated `codex app-server --listen unix://`. Its temporary
+   `CODEX_HOME` owns the default control socket. Two real CLI processes run
+   `codex --no-alt-screen --cd <same workspace>` and discover that existing
+   native endpoint. No `--remote` override substitutes for this discovery.
+   Socket readiness lists its directory entry: Windows AF_UNIX reparse points
+   cannot be stat'ed. The actual canonical connection is the next barrier.
+2. An independent connection uses the shared `connectCodex`, observes actual
+   `thread/started` notifications and checks both original IDs, idle state and
+   canonical workspace with `thread/loaded/list` and `thread/read`. A listed ID
+   can still read as `notLoaded` during initialization. The original 20-second
+   startup deadline covers both inventory and actual idle readiness; a started
+   event alone is not the barrier.
+3. Each terminal driver types `/exit` one key at a time and then Return while
+   continuing to drain output. A fast input burst can be treated as a multiline
+   paste. All CLI exit codes must be zero; forced CLI termination fails the case.
+4. After the initial idle checks, both resume cases explicitly name the original
+   fixture thread with `thread/name/set`, preventing an unrelated automatic
+   title-generation worker. All HTTP requests still count. `cancelled-resume`
+   starts a synthetic user turn and holds its mock response open; a 503 can
+   drive retries before some native builds display the user item. It waits for
+   actual terminal history, explicitly interrupts the turn, closes both CLIs and runs
+   `codex resume <original ID> --no-alt-screen --cd <workspace>`. It checks the
+   restored ID, canonical cwd and visible original user history. The loopback
+   mock's request count must not increase during resume.
+5. The private child environment explicitly excludes loopback from proxies;
+   system proxy fallback otherwise caused HTTP 502 before the mock saw any
+   request on Mac and Windows. Outside the explicit seed phase the endpoint
+   rejects model requests. `completed-resume` serves exactly one minimal
+   Responses SSE seed and requires actual assistant history before testing
+   resume. Resume must add zero requests. Cancelled seed responses are destroyed
+   during cleanup. Endpoint counters do not establish a global inference-attempt
+   count.
+
+The platform driver's argv is followed by the complete native Codex argv. It
+owns exactly that CLI and reads `{"action":"close"}` from stdin. JSON lines on
+stdout report `{"event":"spawn","pid":...}` and finally
+`{"event":"exit","pid":...,"returncode":0}`. Diagnostic events `terminate`,
+`kill` or `normal_exit_timeout` prevent normal-exit acceptance. Its stderr is
+captured separately. `NATIVE_LIFECYCLE_PTY_TRACE` names a temporary JSON snapshot
+containing `pid` and a bounded UTF-8 `outputTail`; replace that file atomically so
+the orchestrator cannot read a partially written snapshot.
+
+Receipts record executable/library/fixture hashes, versions, method names,
+notification IDs, per-phase mock requests and real process exits. Native server
+cleanup has bounded TERM/KILL phases and reports the actual result; forced
+server cleanup does not prove graceful server quiescence. On Windows, both
+signals terminate the process, so graceful server shutdown always remains
+unproven regardless of the reported signal name. Loaded threads may
+outlive a disconnected CLI, and source labels alone do not establish root
+identity. These checks do not qualify Agent enrollment, a production handoff,
+all frontend launch modes or automatic network admission.
 
 `codexCallback` is an optional adapter, separate from the ACP transport. It
 connects to the existing native app-server proxy/socket and original loaded

@@ -4,6 +4,10 @@ Day-to-day `scode` workflows.
 
 ## Installation and updates
 
+Choose daemon-free execution or shared local services with
+[`scode setup`](shared-services.md). The runtime owner, installation behavior
+and separate collaboration-enrollment boundary are defined there.
+
 Install macOS/Linux with the [installer](../install.sh), or choose a platform
 package from [GitHub Releases](https://github.com/sudoprivacy/sudocode/releases/latest).
 Release builds check for updates in the background when an interactive terminal
@@ -155,27 +159,59 @@ remains owned by global `settings.json` and project `settings.local.json`.
 ### Standalone sessions and the local Nexus node
 
 Standalone `scode` reads `~/.nexus/run/node.json` when selecting its peer
-namespace. With a readable record and credential files for this agent,
-starting or resuming a session does not wait for the node to answer. Ordinary
-model and workspace work can continue while the node is offline. The receiver
-retries its existing node connection, and A2A tools report node IO errors;
-they do not redirect messages to a disk inbox. An uncertain send result must
-not be retried automatically.
+namespace. Starting or resuming an ordinary session does not require that node
+to answer or this agent's bundle to be ready. A present but unusable record,
+missing credential files or an identity mismatch leave A2A unavailable with
+the actual cause in `/status` and tool results. They do not redirect messages
+to a disk inbox or prevent ordinary model and workspace work.
+
+Background receive failures share one diagnostic reporter across the receiver's
+conversations. It retains the first error, changed errors and repeat counts in
+the existing rotated local `scode.log` / `sudoclaw.log`; `SCODE_LOG_PATH` can
+select the file. A healthy peer does not hide another peer's failure. Retrying
+task-completion persistence uses the same reporting implementation. Services
+which own terminal notices emit at most one reminder per minute and report
+recovery only after all observed failures clear and checks stay healthy.
+See [background retry diagnostics](design/background-retry-diagnostics.md)
+for the shared implementation and repository audit.
 
 Background receiver errors are available as `Last RX error` in `/status` and
 `last_receiver_error` in the structured peer status. This is the most recent
 failure in the current process, not a claim that the node remains offline.
 It is retained with the receiver's transient state and removed when its last
-receiver stops. Hosts can also subscribe to structured tracing. An unchanged
-receiver-seat error is recorded once; retries continue without writing into
-the terminal's input area.
+receiver stops. Hosts can also subscribe to structured tracing. Ordinary
+receivers use this status and the local log without emitting terminal notices;
+retries continue without writing into the terminal's input area.
 
-This does not start Nexus or mint an agent credential. A missing record still
-selects the same-machine disk namespace. Record parsing, missing credential
-files and credential identity mismatches still stop startup; a lazy client is
-not proof that TLS authentication will succeed. Changing an already running session
-from disk to node remains an explicit handoff. Receiver ownership and a selected
-node endpoint in `/status` are not proof that a remote peer is online.
+The connection record alone does not start Nexus or mint an agent credential.
+An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
+can resume the same locally owned Box after shared selection. A missing record still
+selects the same-machine disk namespace for that process. When a node was
+selected, its tools and original receiver share one binding: the receiver
+retries local configuration and credential resolution, then retries node IO
+through the same client. Preparing the missing bundle can therefore make
+that binding usable without starting another receiver. A failed or uncertain
+send is never automatically resent. Receiver `unavailable` means the receiver
+could not initialize; `standby` means another instance holds its seat.
+
+Automatic shared-service preparation keeps ordinary startup usable when that
+configured record is unusable; the receiver retains the selected namespace and
+reports its cause. Explicit `scode setup` and `setup --check` still return their
+actual failures. A dangling node-record symlink is a configured but unusable
+record, not permission to prepare a replacement service.
+
+A constructed client is not proof that TLS authentication succeeds. The
+client's credentials remain fixed after construction; rotation or replacing
+an unusable constructed client is not covered by local binding retries.
+Changing a running session from disk to node remains an explicit handoff.
+Receiver ownership and a selected node endpoint in `/status` are not proof
+that a remote peer is online. Cohost continues using its injected mailbox and
+requires its host services.
+
+An ordinary HTTP model can run while A2A is unavailable. A model explicitly
+configured through a `nexus://` mount still needs the selected node's
+authenticated filesystem; model traffic keeps that mount's authorization and
+hooks.
 
 ### CLI packages
 
@@ -395,8 +431,15 @@ request or combining usage from the two responses. HTTP failures before a
 response starts remain eligible for the normal transport retry policy.
 
 Incoming peer messages appear in a separate `Message from <peer>` frame with
-muted content and a blue peer name. This presentation does not alter the
-message envelope or content supplied to the model.
+muted framing and a blue peer name. Sender-supplied `Summary:` text appears above
+the complete body and is preferred in the one-line queued preview. Live display
+and resumed history use the same presentation; older messages without a summary
+continue to show their body. The summary travels with the existing envelope into
+the saved turn and model context.
+
+Outgoing `send` cards keep the summary concise and preview up to six source
+lines of the body, with a character cap. Lines wrap to the terminal width; a
+truncation notice points to the complete message preserved in the session.
 
 Queued messages use muted labels and normal-intensity bodies, and Todo
 items distinguish active and completed states. This uses the same palette as
@@ -498,6 +541,14 @@ plan, or clear conversation history.
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The
 saved document is the source for both the preview and the approved tool result.
+Both REPLs show it in a distinct `Plan · awaiting review` frame with the saved
+file path. Reasoning stays above the review, and the choices stay below it.
+Completed `WritePlan` cards show the review decision and file path rather than
+abbreviated plan arguments. Revision feedback and cancellation are normal
+review outcomes; failures to save or validate a plan remain errors.
+On resume, review documents are reconstructed from their recorded tool inputs
+with the same document composer. A later edit to the current plan file does
+not rewrite an earlier proposal in conversation history.
 If it changes while review is pending, it must be presented again for approval.
 “Clear context & execute” discards exploration messages after the current tool
 exchange completes, then continues execution in the same turn without another
@@ -577,7 +628,11 @@ one contextual tip. General startup guidance also lives here. The highest
 priority applicable tip wins: immediate local interaction feedback, then model
 tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
-over cache advice. Routine `/help` guidance fills otherwise unused space.
+over cache advice. Routine `/help` guidance fills otherwise unused space,
+led by the workspace's position: `⎇ <branch>`, or `⎇ <short commit>` when HEAD
+is detached. The position is state rather than advice, so every tip takes the
+slot from it; it is read at startup and refreshed when each turn ends, and the
+per-turn status line no longer repeats it.
 While a turn runs, only urgent tips are shown.
 
 The model has an always-loaded, read-only `set_tip` tool:

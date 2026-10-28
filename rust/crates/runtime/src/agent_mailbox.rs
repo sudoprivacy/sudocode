@@ -29,6 +29,7 @@
 //! JSON-encoded structured payload and `kind` is that message type.
 //! Recipients parse `kind` before deciding how to interpret `body`.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -172,7 +173,51 @@ fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
+/// Model input framing for the existing mailbox receive paths.
+#[derive(Clone, Copy)]
+pub enum MailboxPromptFraming {
+    Xml,
+    Bracketed,
+}
+
 impl MailboxEnvelope {
+    /// Compose model input at the mailbox boundary, preserving full nonblank summaries.
+    #[must_use]
+    pub fn to_prompt(&self, framing: MailboxPromptFraming) -> String {
+        let body = neutralize_untrusted_markup(&self.body);
+        let summary = self.summary.as_deref().filter(|s| !s.trim().is_empty());
+        match framing {
+            MailboxPromptFraming::Xml => {
+                let tag = match self.kind.as_str() {
+                    kinds::SHUTDOWN_REQUEST => "shutdown-request",
+                    kinds::SHUTDOWN_RESPONSE => "shutdown-response",
+                    kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
+                    _ => "mailbox-message",
+                };
+                let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&self.from));
+                if let Some(id) = &self.request_id {
+                    let _ = write!(header, " request-id=\"{}\"", xml_attr_escape(id));
+                }
+                if let Some(summary) = summary {
+                    let _ = write!(header, " summary=\"{}\"", xml_attr_escape(summary));
+                }
+                format!("{header}>\n{body}\n</{tag}>")
+            }
+            MailboxPromptFraming::Bracketed => {
+                let sender = neutralize_untrusted_markup(&self.from).replace(['\r', '\n'], " ");
+                let header = format!("[message from {sender}]");
+                if let Some(summary) = summary {
+                    format!(
+                        "{header}\n\nSummary: {}\n\n{body}",
+                        neutralize_untrusted_markup(summary)
+                    )
+                } else {
+                    format!("{header}\n\n{body}")
+                }
+            }
+        }
+    }
+
     /// Serialise to JSON bytes (the nexus DT_STREAM wire format).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -184,6 +229,34 @@ impl MailboxEnvelope {
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
     }
+}
+
+/// Compose an ordered batch with the shared XML message framing.
+#[must_use]
+pub fn compose_next_turn_from_envelopes(envelopes: &[MailboxEnvelope]) -> String {
+    envelopes
+        .iter()
+        .map(|envelope| envelope.to_prompt(MailboxPromptFraming::Xml))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Escape attributes while keeping multiline summaries on one header line.
+fn xml_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            '\t' => out.push_str("&#9;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Markup the harness owns: the tag the system prompt tells the model is

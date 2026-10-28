@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { ReadableStream, TransformStream, WritableStream } from 'node:stream/web';
 import * as acp from '@agentclientprotocol/sdk';
+import { timeout } from './timeout';
 
 export type {
   ContentBlock, InitializeResponse, PromptResponse, RequestPermissionRequest,
@@ -97,13 +98,6 @@ function duration(value: number | undefined, fallback: number): number {
     throw new Error('ACP timeout must be a finite positive number');
   }
   return value;
-}
-
-function timeout<T>(operation: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    operation.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
-  });
 }
 
 async function abortable<T>(operation: (signal: AbortSignal) => Promise<T>, signals: AbortSignal[]): Promise<T> {

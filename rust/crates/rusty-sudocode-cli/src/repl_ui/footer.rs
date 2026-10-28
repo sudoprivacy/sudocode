@@ -19,6 +19,10 @@ pub(super) struct FooterHints<'a> {
 pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
     cache: Option<Tip>,
+    /// Where the workspace is: its branch, or the short commit when HEAD is
+    /// detached. State rather than advice, so it is not a `Tip`: it rides on
+    /// the routine filler and yields the slot to every real tip.
+    branch: Option<String>,
 }
 
 impl FooterTips {
@@ -34,6 +38,9 @@ impl FooterTips {
     }
     pub fn cache(&mut self, tip: Option<Tip>) {
         self.cache = tip;
+    }
+    pub fn branch(&mut self, label: Option<String>) {
+        self.branch = label;
     }
     pub fn begin_turn(&mut self) {
         self.model.clear();
@@ -58,12 +65,17 @@ impl FooterTips {
             priority: TipPriority::Normal,
             message: message.to_string(),
         });
+        let guidance = if submitted {
+            "/help · /exit"
+        } else {
+            "Type /help for commands · Tab completes /commands"
+        };
+        // The branch leads the filler so truncation trims the guidance first.
         let ordinary = Tip {
             priority: TipPriority::Normal,
-            message: if submitted {
-                "/help · /exit".into()
-            } else {
-                "Type /help for commands · Tab completes /commands".into()
+            message: match &self.branch {
+                Some(branch) => format!("⎇ {branch} · {guidance}"),
+                None => guidance.into(),
             },
         };
         // A focused cache tip is the footer's selection and says how to act on it.

@@ -110,13 +110,32 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// Observe durable reclamation before the fixture removes its worker's files.
+fn wait_for_reclaimed_session(transcript: &Path, references: &Path) {
+    let deadline = Instant::now() + WAIT;
+    while transcript.exists() || std::fs::read_dir(references).unwrap().next().is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "deleted Session was not reclaimed: transcript={}, references={}",
+            transcript.display(),
+            references.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct Fixture(PathBuf);
 impl Drop for Fixture {
     fn drop(&mut self) {
         if std::thread::panicking() {
             eprintln!("Retained runtime history evidence: {}", self.0.display());
         } else {
-            std::fs::remove_dir_all(&self.0).unwrap();
+            std::fs::remove_dir_all(&self.0).unwrap_or_else(|error| {
+                panic!(
+                    "runtime history fixture removal failed: {}: {error}",
+                    self.0.display()
+                )
+            });
         }
     }
 }
@@ -213,19 +232,7 @@ fn data_dir_client(root: &Path, role: &str) {
     let store = runtime::SessionStore::from_data_dir(root.join("data"), &workspace).unwrap();
     let path = root.join("external/transcript.jsonl");
     if role == "restart" {
-        let deadline = Instant::now() + WAIT;
-        while path.exists()
-            || std::fs::read_dir(store.sessions_dir().join(".cleanup"))
-                .unwrap()
-                .next()
-                .is_some()
-        {
-            assert!(
-                Instant::now() < deadline,
-                "ordinary startup did not reclaim the external Session"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_for_reclaimed_session(&path, &store.sessions_dir().join(".cleanup"));
         return;
     }
     if role == "delete-store" {
@@ -462,7 +469,8 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     journal
         .purge(&journal.storage_ref(), "delete-after-refresh")
         .unwrap();
-    assert!(store_root.join(".cleanup").is_dir());
+    let references = store_root.join(".cleanup");
+    assert_eq!(std::fs::read_dir(&references).unwrap().count(), 1);
     assert_eq!(
         a.refresh_compaction_source().unwrap_err().to_string(),
         "session_deleted"
@@ -476,6 +484,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
+    wait_for_reclaimed_session(&path, &references);
     drop(fixture);
 }
 

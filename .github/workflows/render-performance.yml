@@ -1,10 +1,10 @@
 name: Rendering performance
 
 on:
-  # Automatic PR checks use the protected base. An approved administrator may
-  # also dispatch this workflow for a selected PR. Candidate execution has read
-  # permissions; its measurement harness always comes from the PR base.
-  pull_request_target:
+  # PR measurements use the pull_request trust context, with read-only access
+  # for forks. Policy and measurement code come from the protected PR base.
+  # Fork status publication has its own trusted workflow and executes no PR code.
+  pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   # The queue does not re-measure: it carries each queued PR's own gate result
@@ -73,7 +73,7 @@ jobs:
       pull_number: ${{ steps.policy.outputs.pull_number }}
     steps:
       - name: Mark the candidate gate pending
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
@@ -240,7 +240,7 @@ jobs:
 
   status:
     name: Publish rendering gate
-    if: always() && !cancelled() && (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.pull_request != ''))
+    if: always() && !cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.pull_request != ''))
     needs: [contract, policy, measure]
     runs-on: ubuntu-24.04
     permissions:

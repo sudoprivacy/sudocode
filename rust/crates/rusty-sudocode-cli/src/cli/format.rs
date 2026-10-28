@@ -1006,8 +1006,8 @@ impl ToolCardContent {
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
-/// syntax-theme green (ok), or red (error). Bold caps distinguish adjacent
-/// calls; the long vertical border uses normal weight without dimming.
+/// syntax-theme green (ok), or red (error). All frame strokes use regular
+/// weight without dimming so the corners align with the vertical border.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -1060,7 +1060,6 @@ pub(crate) fn render_tool_card_with_width(
             .map(String::as_str),
         term_width,
         color,
-        true,
     )
 }
 

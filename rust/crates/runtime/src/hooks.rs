@@ -545,7 +545,22 @@ impl HookRunner {
             child.env("HOOK_TOOL_OUTPUT", tool_output);
         }
 
-        match child.output_with_stdin(payload.as_bytes(), abort_signal) {
+        // The tool input and output also reach the hook through its environment.
+        // Linux refuses any single environment string over 128 KiB and macOS caps
+        // the total near 1 MiB, so a large tool call would stop the hook from
+        // starting at all. When that happens the hook never ran, so retry once
+        // without those two variables: stdin still carries the complete payload.
+        let mut execution = child.output_with_stdin(payload.as_bytes(), abort_signal);
+        if execution
+            .as_ref()
+            .is_err_and(|error| error.kind() == ErrorKind::ArgumentListTooLong)
+        {
+            child
+                .env_remove("HOOK_TOOL_INPUT")
+                .env_remove("HOOK_TOOL_OUTPUT");
+            execution = child.output_with_stdin(payload.as_bytes(), abort_signal);
+        }
+        match execution {
             Ok(CommandExecution::Finished(output)) => {
                 let stdout = process_text::decode_process_output(&output.stdout)
                     .text
@@ -991,6 +1006,11 @@ impl CommandWithStdin {
         self
     }
 
+    fn env_remove(&mut self, key: &str) -> &mut Self {
+        self.command.env_remove(key);
+        self
+    }
+
     fn output_with_stdin(
         &mut self,
         stdin: &[u8],
@@ -998,11 +1018,17 @@ impl CommandWithStdin {
     ) -> std::io::Result<CommandExecution> {
         let mut child = self.command.spawn()?;
         if let Some(mut child_stdin) = child.stdin.take() {
-            // Hooks can ignore their input and finish before it is written.
-            // Still collect their output and exit status to preserve decisions.
-            match child_stdin.write_all(stdin) {
-                Err(error) if error.kind() != ErrorKind::BrokenPipe => return Err(error),
-                _ => {}
+            // Hooks can ignore their input and finish before it is written; a
+            // broken pipe still leaves their exit status and output to decide
+            // allow, deny or failure. Any other write error is fatal, and the
+            // child is reaped first: `Child` does not kill on drop, so returning
+            // without it would leave the hook process running.
+            if let Err(error) = child_stdin.write_all(stdin) {
+                if error.kind() != ErrorKind::BrokenPipe {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
             }
         }
 

@@ -852,6 +852,16 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
             let InputContentBlock::Text { text } = block else {
                 return None;
             };
+            if let Some((_, path)) = text.split_once("TOOL_BATCH_FILE:") {
+                let path = serde_json::Deserializer::from_str(path)
+                    .into_iter::<String>()
+                    .next()?
+                    .ok()?;
+                return serde_json::from_str(
+                    &std::fs::read_to_string(path).expect("tool batch file"),
+                )
+                .ok();
+            }
             let (_, batch) = text.split_once("TOOL_BATCH:")?;
             serde_json::Deserializer::from_str(batch)
                 .into_iter::<Vec<Value>>()

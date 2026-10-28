@@ -163,7 +163,6 @@ impl ReceivedMessage<'_> {
                 .chain(std::iter::once(body.trim_end_matches('\n'))),
             width,
             theme().muted,
-            false,
         );
         if renderer.color_support() == ColorSupport::NoColor {
             StyledText::from_ansi(&output).text

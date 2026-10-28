@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 // Keep their complete lifetimes separate even with the default parallel runner.
 static PROCESS_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
+// One budget covers setup, model round trips, approvals and verification.
+// The runtime owns each provider request's stream-idle protection.
+const LIVE_WORKFLOW_BUDGET: Duration = Duration::from_mins(10);
+
 struct RestoreEnvironment {
     cwd: std::path::PathBuf,
     variables: [(&'static str, Option<std::ffi::OsString>); 2],
@@ -77,17 +81,29 @@ impl Drop for CloseSession<'_> {
 
 fn response(mailbox: &SessionMailbox<Kernel>, id: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        match mailbox.receive(100).unwrap() {
-            Some(SessionPayload::Rpc { message }) if message["id"] == id => {
+    while let Some(payload) = receive_before(mailbox, deadline) {
+        match payload {
+            SessionPayload::Rpc { message } if message["id"] == id => {
                 assert!(message.get("error").is_none(), "{message}");
                 return message["result"].clone();
             }
-            Some(SessionPayload::Closed { reason }) => panic!("closed: {reason}"),
+            SessionPayload::Closed { reason } => panic!("closed: {reason}"),
             _ => {}
         }
     }
     panic!("no response to {id}");
+}
+
+fn receive_before(mailbox: &SessionMailbox<Kernel>, deadline: Instant) -> Option<SessionPayload> {
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let wait_ms = u64::try_from(remaining.as_millis())
+            .unwrap_or(u64::MAX)
+            .clamp(1, 100);
+        if let Some(payload) = mailbox.receive(wait_ms).unwrap() {
+            return Some(payload);
+        }
+    }
+    None
 }
 
 fn assert_request_context(directory: &std::path::Path, process_id: &str) {
@@ -120,17 +136,22 @@ fn assert_request_context(directory: &std::path::Path, process_id: &str) {
     assert!(requests > 0, "no real provider request was captured");
 }
 
-fn live_text_turn(mailbox: &SessionMailbox<Kernel>, sid: &str, id: &str, prompt: &str) -> String {
+fn live_text_turn(
+    mailbox: &SessionMailbox<Kernel>,
+    sid: &str,
+    id: &str,
+    prompt: &str,
+    deadline: Instant,
+) -> String {
     send(
         mailbox,
         json!({"jsonrpc":"2.0","id":id,"method":"session/prompt",
         "params":{"sessionId":sid,"prompt":[{"type":"text","text":prompt}]}}),
     );
-    let deadline = Instant::now() + Duration::from_secs(120);
     let mut text = String::new();
-    while Instant::now() < deadline {
-        match mailbox.receive(100).unwrap() {
-            Some(SessionPayload::Rpc { message }) => {
+    while let Some(payload) = receive_before(mailbox, deadline) {
+        match payload {
+            SessionPayload::Rpc { message } => {
                 assert_ne!(
                     message["method"], "session/request_permission",
                     "context-only workflow unexpectedly requested a tool: {message}"
@@ -148,11 +169,10 @@ fn live_text_turn(mailbox: &SessionMailbox<Kernel>, sid: &str, id: &str, prompt:
                     );
                 }
             }
-            Some(SessionPayload::Closed { reason }) => panic!("closed: {reason}"),
-            None => {}
+            SessionPayload::Closed { reason } => panic!("closed: {reason}"),
         }
     }
-    panic!("live text turn {id} timed out: {text}");
+    panic!("live workflow exceeded {LIVE_WORKFLOW_BUDGET:?} during {id}: {text}");
 }
 
 fn run_live_compaction(
@@ -160,6 +180,7 @@ fn run_live_compaction(
     fs: &dyn FsBackend,
     sid: &str,
     model: &str,
+    deadline: Instant,
 ) {
     let nonce = format!(
         "COMPACT_{}",
@@ -184,13 +205,13 @@ fn run_live_compaction(
         })
         .collect::<String>();
     let reviewed = live_text_turn(mailbox, sid, "order",
-        &format!("Review this order using only this conversation: batch {nonce}, units {units}, unit price 29, delivery 47. Calculate units times price plus delivery and reply with the batch and subtotal. Use the supplied data without tools, files or persistent memory. The supporting shipment ledger below is archived and contributes no charges to this order.\n{ledger}"));
+        &format!("Review this order using only this conversation: batch {nonce}, units {units}, unit price 29, delivery 47. Calculate units times price plus delivery and reply with the batch and subtotal. Use the supplied data without tools, files or persistent memory. The supporting shipment ledger below is archived and contributes no charges to this order.\n{ledger}"), deadline);
     assert!(
         reviewed.contains(&nonce) && reviewed.contains(&subtotal.to_string()),
         "{reviewed}"
     );
     let fee = live_text_turn(mailbox, sid, "fee",
-        "Add a fee of 13 to the order subtotal for our final total. Reply with only the final numeric total; no tools are needed.");
+        "Add a fee of 13 to the order subtotal for our final total. Reply with only the final numeric total; no tools are needed.", deadline);
     assert!(fee.contains(&total.to_string()), "{fee}");
     // The current review packet also gives token-based tail retention enough
     // recent context to leave the archived ledger in the compactable prefix.
@@ -200,9 +221,9 @@ fn run_live_compaction(
         })
         .collect::<String>();
     let ready = live_text_turn(mailbox, sid, "review",
-        &format!("Confirm the order is ready for review in one sentence using this review checklist. Do not repeat its identifier or amounts. No tools are needed.\n{checklist}"));
+        &format!("Confirm the order is ready for review in one sentence using this review checklist. Do not repeat its identifier or amounts. No tools are needed.\n{checklist}"), deadline);
     assert!(!ready.trim().is_empty(), "no review confirmation");
-    let compacted = live_text_turn(mailbox, sid, "compact", "/compact");
+    let compacted = live_text_turn(mailbox, sid, "compact", "/compact", deadline);
     eprintln!("[compaction] {compacted}");
     let requests: Vec<Value> = fs
         .readdir("/model")
@@ -254,7 +275,7 @@ fn run_live_compaction(
         "summary input lost actual order data"
     );
     let recalled = live_text_turn(mailbox, sid, "recall",
-        "State our reviewed order's batch code and final total, including the fee. Use the conversation history; no tools are needed.");
+        "State our reviewed order's batch code and final total, including the fee. Use the conversation history; no tools are needed.", deadline);
     assert!(
         recalled.contains(&nonce) && recalled.contains(&total.to_string()),
         "compaction lost actual order data: {recalled}"
@@ -280,6 +301,7 @@ fn controller_workflow(compact: bool) {
     let _serial = PROCESS_ENVIRONMENT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let deadline = Instant::now() + LIVE_WORKFLOW_BUDGET;
     let key = std::env::var("ANTHROPIC_API_KEY").expect("live API key");
     let base_url = std::env::var("ANTHROPIC_BASE_URL").expect("live API base URL");
     let model = std::env::var("SUDOCODE_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".into());
@@ -378,7 +400,7 @@ fn controller_workflow(compact: bool) {
         ),
     );
     if compact {
-        run_live_compaction(&mailbox, &fs, sid, &model);
+        run_live_compaction(&mailbox, &fs, sid, &model, deadline);
         assert_request_context(&capture_dir, started["session_id"].as_str().unwrap());
         return;
     }
@@ -406,16 +428,15 @@ fn controller_workflow(compact: bool) {
         "params":{"sessionId":sid,"prompt":[{"type":"text","text":
             "Read inventory.json in the current workspace. For each item compute max(required - available, 0). Write restock.json with exactly the keys batch (copied from the input) and total_to_order (the sum of those deficits). Use the file tools to read and write the actual files, then confirm briefly."}]}}),
     );
-    let deadline = Instant::now() + Duration::from_secs(120);
     let mut permissions = 0;
     let mut completed_tools = 0;
     let mut text = String::new();
     let mut finished = false;
     let mut pending_permission = None;
     let mut status_queries = 0;
-    while Instant::now() < deadline {
-        match mailbox.receive(100).unwrap() {
-            Some(SessionPayload::Rpc { message }) => {
+    while let Some(payload) = receive_before(&mailbox, deadline) {
+        match payload {
+            SessionPayload::Rpc { message } => {
                 eprintln!("[mailbox] {message}");
                 if message["id"] == "live-runtime-status" {
                     assert!(message.get("error").is_none(), "{message}");
@@ -506,8 +527,7 @@ fn controller_workflow(compact: bool) {
                     }
                 }
             }
-            Some(SessionPayload::Closed { reason }) => panic!("closed: {reason}"),
-            None => {}
+            SessionPayload::Closed { reason } => panic!("closed: {reason}"),
         }
     }
     // Close before assertions too: a failed live assertion must release its agent.
@@ -530,7 +550,10 @@ fn controller_workflow(compact: bool) {
             reason: "live acceptance complete".into(),
         })
         .unwrap();
-    assert!(finished, "live turn timed out: {text}");
+    assert!(
+        finished,
+        "live workflow exceeded {LIVE_WORKFLOW_BUDGET:?}: {text}"
+    );
     assert_eq!(status_queries, permissions);
     assert!(
         permissions > 0,
@@ -557,4 +580,59 @@ fn controller_workflow(compact: bool) {
     );
     assert_request_context(&capture_dir, started["session_id"].as_str().unwrap());
     eprintln!("LIVE MAILBOX PASS: permissions={permissions}, completed_tools={completed_tools}, persisted total=21");
+}
+
+#[test]
+fn mailbox_activity_cannot_reset_an_expired_workflow_budget() {
+    let _serial = PROCESS_ENVIRONMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let kernel = Arc::new(Kernel::new());
+    common::mount_agent_world(&kernel);
+    a2a::install_a2a_stamp_hook(&kernel, true).unwrap();
+    let endpoint = SessionEndpoint::new(
+        "stock-worker".into(),
+        "operator".into(),
+        "budget-check".into(),
+    );
+    common::provision_stream_transcript(&kernel, &endpoint.transcript);
+    let controller = SessionMailbox::open(
+        Arc::clone(&kernel),
+        OperationContext::new("test-owner", "root", false, Some("operator"), false),
+        endpoint.clone(),
+        SessionSide::Controller,
+    )
+    .unwrap();
+    let _close = CloseSession(&controller);
+    let agent = SessionMailbox::open(
+        Arc::clone(&kernel),
+        OperationContext::new("test-owner", "root", false, Some("stock-worker"), false),
+        endpoint,
+        SessionSide::Agent,
+    )
+    .unwrap();
+    let progress = json!({"jsonrpc":"2.0","method":"session/update","params":{
+        "sessionId":"budget-session", "update":{"sessionUpdate":"agent_message_chunk",
+        "content":{"type":"text","text":"working"}}}});
+    agent
+        .send(SessionPayload::Rpc {
+            message: progress.clone(),
+        })
+        .unwrap();
+    assert!(
+        matches!(receive_before(&controller, Instant::now() + Duration::from_secs(30)),
+        Some(SessionPayload::Rpc { message }) if message == progress)
+    );
+    agent
+        .send(SessionPayload::Rpc {
+            message: progress.clone(),
+        })
+        .unwrap();
+    let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    assert!(receive_before(&controller, expired).is_none());
+    assert!(
+        matches!(receive_before(&controller, Instant::now() + Duration::from_secs(30)),
+        Some(SessionPayload::Rpc { message }) if message == progress),
+        "an expired budget must leave later mailbox traffic unread"
+    );
 }

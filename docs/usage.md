@@ -612,18 +612,18 @@ tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
 over cache advice. While a turn runs, only urgent tips are shown.
 
-Below the tips, the slot depends only on whether you are typing. Typing, it
-says what the keys do: `Enter send · Shift+Enter newline · Tab queue`, `Tab
-completes · Enter runs` for a `/command`, or `Enter steer · Tab queue · …`
-while a turn runs. Not typing, it shows where the workspace is followed by the
-one key that matters now, idle or running alike: `sudocode ⎇ main · /help`,
-`· Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C cancel` when
-input is queued. The repository is named by its shared git directory, so every
-worktree of one repository shows the same name; a detached HEAD names the
-branch tip it sits on, `sudocode ⎇ origin/main@4d3c4ad4`, or just the commit.
-The position is state rather than advice, so every tip takes the slot from it;
-it is read at startup and refreshed when each turn ends, and the per-turn
-status line no longer repeats it.
+Below the tips, the slot shows where the workspace is, then the keys for the
+current turn and queue state: `sudocode ⎇ main · /help` when idle, `· Enter
+steer · Tab queue · Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C
+cancel` in place of the cancel keys when input is queued, and `· Enter send ·
+Esc flush · ↑ edit queued` for queued input when idle. Typing never changes it,
+so keystrokes never redraw the footer; it changes when a turn starts or ends,
+as the rest of the screen does. The repository is named by its shared git
+directory, so every worktree of one repository shows the same name; a detached
+HEAD names the branch tip it sits on, `sudocode ⎇ origin/main@4d3c4ad4`, or
+just the commit. The position is state rather than advice, so every tip takes
+the slot from it; it is read at startup and refreshed when each turn ends, and
+the per-turn status line no longer repeats it.
 
 The model has an always-loaded, read-only `set_tip` tool:
 

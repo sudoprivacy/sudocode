@@ -283,13 +283,14 @@ fn footer_names_the_workspace_branch_and_yields_it_to_any_tip() {
     exit(&mut session);
 }
 
-/// Typing, the footer says what the keys do; not typing, where the workspace
-/// is and the one key that matters now — idle and while a turn runs alike.
+/// The position and the keys for the current state; typing never changes it,
+/// so keystrokes never redraw the footer. It changes when a turn starts and
+/// ends, as the rest of the screen does.
 #[test]
-fn footer_shows_key_hints_while_typing_and_the_position_otherwise() {
-    let env = TestEnv::new_mock("footer-typing");
+fn footer_keeps_position_and_state_keys_while_typing_and_switches_with_the_turn() {
+    let env = TestEnv::new_mock("footer-turn-state");
     let root = env.workspace_root();
-    git(root, &["init", "-q", "-b", "feat/typing"]);
+    git(root, &["init", "-q", "-b", "feat/turn-state"]);
     git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
     std::fs::write(
         root.join("wait.sh"),
@@ -302,22 +303,23 @@ fn footer_shows_key_hints_while_typing_and_the_position_otherwise() {
     );
     session.resize(30, 180).unwrap();
     common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "initial input");
-    let position = "⎇ feat/typing";
-    wait_footer(&session, &format!("{position} · Type /help for commands"));
+    let idle = "⎇ feat/turn-state · Type /help for commands";
+    wait_footer(&session, idle);
 
-    // Idle and typing: send, newline and queue keys replace the position.
-    session.send("draft").unwrap();
-    wait_footer(&session, "Enter send · Shift+Enter newline · Tab queue");
-    assert!(!footer(&session).contains(position), "{}", footer(&session));
-    // A slash command gets its own keys.
-    session.send("\x15/he").unwrap();
-    wait_footer(&session, "Tab completes · Enter runs");
-    // Cleared again: back to the position.
-    session.send("\x15").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "cleared");
-    wait_footer(&session, position);
+    // Typing a message or a command leaves the footer as it was.
+    for draft in ["draft", "/he"] {
+        session.send(draft).unwrap();
+        common::expect_input_line(&session, draft, common::DEFAULT_TIMEOUT, "draft shown");
+        assert!(
+            footer(&session).contains(idle),
+            "typing redrew the footer: {}",
+            footer(&session)
+        );
+        session.send("\x15").unwrap();
+        common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "cleared");
+    }
 
-    // A turn held open by a real shell.
+    // A turn held open by a real shell: the position stays, with the steering keys.
     let call =
         json!({"id":"hold","name":"Bash","input":{"command":"sh wait.sh","timeout":120_000}});
     let prompt = format!(
@@ -340,17 +342,23 @@ fn footer_shows_key_hints_while_typing_and_the_position_otherwise() {
         common::DEFAULT_TIMEOUT,
         "turn running",
     );
-    // Running, not typing: the position stays, with the cancel key.
-    wait_footer(&session, &format!("{position} · Esc/Ctrl+C cancel"));
-    // Running and typing: the steering keys.
+    let running = "⎇ feat/turn-state · Enter steer · Tab queue · Esc/Ctrl+C cancel";
+    wait_footer(&session, running);
     session.send("steer").unwrap();
-    wait_footer(&session, "Enter steer · Tab queue · Esc/Ctrl+C cancel");
-    assert!(!footer(&session).contains(position), "{}", footer(&session));
+    common::expect_input_line(
+        &session,
+        "steer",
+        common::DEFAULT_TIMEOUT,
+        "typed during turn",
+    );
+    assert!(
+        footer(&session).contains(running),
+        "typing redrew the footer: {}",
+        footer(&session)
+    );
     session.send("\x15").unwrap();
-    wait_footer(&session, &format!("{position} · Esc/Ctrl+C cancel"));
 
     std::fs::write(root.join("release-tool"), "release").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "turn done");
-    wait_footer(&session, &format!("{position} · /help"));
+    wait_footer(&session, "⎇ feat/turn-state · /help");
     exit(&mut session);
 }

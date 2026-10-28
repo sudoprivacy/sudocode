@@ -83,9 +83,7 @@ fn expect_controls(session: &PtySession, text: &str) {
 fn finish(session: &mut PtySession) {
     common::expect_screen(
         session,
-        // Idle footer: `/help` when the input is empty, the send keys when a
-        // draft is kept. A running turn shows neither (it offers `Enter steer`).
-        |view| view.contains("ctx ") && (view.contains("/help") || view.contains("Enter send ·")),
+        |view| view.contains("ctx ") && view.contains("/help"),
         common::LIVE_TURN_BUDGET,
         "turn complete",
     );
@@ -395,8 +393,7 @@ fn tab_queues_for_the_next_turn_without_affecting_the_current_tool_continuation(
 #[test]
 fn escape_flushes_every_queued_input_without_cancellation() {
     let (env, mut session, _release) = start("escape-flush", true);
-    // Not typing, the footer keeps only the key that matters now.
-    expect_controls(&session, "Esc/Ctrl+C cancel");
+    expect_controls(&session, "Enter steer · Tab queue · Esc/Ctrl+C cancel");
     submit(&mut session, "FLUSH_FIRST", "\t");
     submit(&mut session, "FLUSH_SECOND", "\t");
     common::expect_screen(
@@ -405,18 +402,16 @@ fn escape_flushes_every_queued_input_without_cancellation() {
         common::DEFAULT_TIMEOUT,
         "both messages queued",
     );
-    // With queued input Esc flushes rather than cancels, typing or not.
-    expect_controls(&session, "Esc flush · Ctrl+C cancel");
+    expect_controls(
+        &session,
+        "Enter steer · Tab queue · Esc flush · Ctrl+C cancel",
+    );
     session.send("UNSENT_DRAFT").unwrap();
     common::expect_input_line(
         &session,
         "UNSENT_DRAFT",
         common::DEFAULT_TIMEOUT,
         "draft before flush",
-    );
-    expect_controls(
-        &session,
-        "Enter steer · Tab queue · Esc flush · Ctrl+C cancel",
     );
     session.send("\x1b").unwrap();
     common::expect_screen(

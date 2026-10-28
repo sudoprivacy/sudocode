@@ -2180,29 +2180,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    // Typing, the footer says what the keys do; not typing, where the workspace
-    // is and the one key that matters now. Only the draft's kind feeds this,
-    // never its text, so keystrokes within a kind leave the footer cached.
-    let (typing, command) = {
-        let draft = input_value.read();
-        (!draft.is_empty(), draft.starts_with('/'))
-    };
-    let controls = if typing && turn_active {
-        Some(running_input_controls(pending_input))
-    } else if command {
-        Some("Tab completes · Enter runs")
-    } else if typing {
-        Some("Enter send · Shift+Enter newline · Tab queue")
+    // The keys for the current state follow the workspace position. Only turn
+    // and queue state choose them — never typing — so the footer changes when
+    // a turn starts or ends, as the rest of the screen does, and keystrokes
+    // never redraw it. While queued input exists, Esc flushes it.
+    let keys = if turn_active {
+        running_input_controls(pending_input)
+    } else if pending_input {
+        "Enter send · Esc flush · ↑ edit queued"
+    } else if submitted {
+        "/help"
     } else {
-        None
-    };
-    // While queued input exists, Esc flushes it rather than cancelling.
-    let ambient = match (turn_active, pending_input) {
-        (true, true) => "Esc flush · Ctrl+C cancel",
-        (true, false) => "Esc/Ctrl+C cancel",
-        (false, true) => "Enter send · Esc flush · ↑ edit queued",
-        (false, false) if submitted => "/help",
-        (false, false) => "Type /help for commands",
+        "Type /help for commands"
     };
     let explicit_hint = footer_hint.read().clone();
     let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
@@ -2212,8 +2201,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tips = footer_tips.read();
         let hints = FooterHints {
             transient: native_hint,
-            controls,
-            ambient,
+            keys,
         };
         hooks.use_memo(
             || {

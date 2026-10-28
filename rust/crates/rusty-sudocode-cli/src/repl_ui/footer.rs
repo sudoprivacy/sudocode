@@ -12,10 +12,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Hash)]
 pub(super) struct FooterHints<'a> {
     pub transient: Option<&'a str>,
-    /// What the keys do while typing; `None` when the input is empty.
-    pub controls: Option<&'a str>,
-    /// The one key that matters while not typing, after the workspace position.
-    pub ambient: &'a str,
+    /// The keys for the current turn and queue state, after the position.
+    pub keys: &'a str,
 }
 
 #[derive(Clone, Default, Hash)]
@@ -23,7 +21,7 @@ pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
     cache: Option<Tip>,
     /// Where the workspace is, `repo ⎇ branch`. State rather than advice, so it
-    /// is not a `Tip`: it leads the not-typing filler and yields to every tip.
+    /// is not a `Tip`: it leads the filler and yields to every tip.
     position: Option<String>,
 }
 
@@ -62,17 +60,13 @@ impl FooterTips {
                 .text
                 .replace(['\n', '\r', '\t'], " "),
         });
-        let control = hints.controls.map(|message| Tip {
-            priority: TipPriority::Normal,
-            message: message.to_string(),
-        });
-        // Not typing: where the workspace is, then the key that matters now.
-        // The position leads so truncation trims the key hint first.
-        let ambient = Tip {
+        // Where the workspace is, then the keys for the current state. The
+        // position leads so truncation trims the keys first.
+        let filler = Tip {
             priority: TipPriority::Normal,
             message: match &self.position {
-                Some(position) => format!("{position} · {}", hints.ambient),
-                None => hints.ambient.into(),
+                Some(position) => format!("{position} · {}", hints.keys),
+                None => hints.keys.into(),
             },
         };
         // A focused cache tip is the footer's selection and says how to act on it.
@@ -92,8 +86,7 @@ impl FooterTips {
                 }
             })
             .filter(|tip| !active || tip.priority == TipPriority::Urgent)
-            .or(control.as_ref())
-            .or(Some(&ambient))
+            .or(Some(&filler))
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
         let selected = focused.as_ref().or(selected);
 

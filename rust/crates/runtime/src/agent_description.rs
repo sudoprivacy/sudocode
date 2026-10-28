@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::fs_backend::{FsBackend, VersionToken, WriteOutcome};
+use crate::mailbox::MailboxBackend;
 
 pub const DESCRIPTION_FILE: &str = "description.json";
 pub const MAX_DESCRIPTION_CHARS: usize = 160;
@@ -23,7 +24,7 @@ pub struct AgentDescription {
 /// Storage selected by the actual mailbox, independently of the shell workspace.
 #[derive(Clone)]
 pub struct DescriptionStore {
-    fs: Arc<dyn FsBackend>,
+    fs: MailboxBackend,
     path: String,
 }
 
@@ -45,12 +46,19 @@ pub struct DescriptionUpdate {
 
 impl DescriptionStore {
     #[must_use]
-    pub(crate) fn new(fs: Arc<dyn FsBackend>, path: String) -> Self {
+    #[inline]
+    pub(crate) fn new(fs: MailboxBackend, path: String) -> Self {
         Self { fs, path }
     }
 
-    fn read_bytes(&self) -> io::Result<Option<Vec<u8>>> {
-        match self.fs.stat(&self.path) {
+    /// Share the mailbox's pending binding; construction never requires a bundle.
+    #[inline]
+    fn backend(&self) -> io::Result<Arc<dyn FsBackend>> {
+        self.fs.resolve().map_err(io::Error::other)
+    }
+
+    fn read_bytes(&self, fs: &dyn FsBackend) -> io::Result<Option<Vec<u8>>> {
+        match fs.stat(&self.path) {
             Ok(meta) if meta.len > MAX_DESCRIPTION_BYTES => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -61,7 +69,7 @@ impl DescriptionStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         }
-        let bytes = self.fs.read(&self.path)?;
+        let bytes = fs.read(&self.path)?;
         if bytes.len() as u64 > MAX_DESCRIPTION_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -72,7 +80,7 @@ impl DescriptionStore {
     }
 
     pub fn read(&self) -> io::Result<Option<AgentDescription>> {
-        self.read_bytes()?
+        self.read_bytes(self.backend()?.as_ref())?
             .map(|bytes| {
                 let value: AgentDescription =
                     serde_json::from_slice(&bytes).map_err(io::Error::other)?;
@@ -91,14 +99,15 @@ impl DescriptionStore {
     }
 
     pub fn snapshot(&self, source_session_id: &str) -> io::Result<DescriptionSnapshot> {
-        let (previous, version, conditional) = match self.fs.read_versioned(&self.path) {
+        let fs = self.backend()?;
+        let (previous, version, conditional) = match fs.read_versioned(&self.path) {
             Ok(value) => {
                 let (bytes, token) =
                     value.map_or((None, None), |(bytes, token)| (Some(bytes), Some(token)));
                 (bytes, token, true)
             }
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                (self.read_bytes()?, None, false)
+                (self.read_bytes(fs.as_ref())?, None, false)
             }
             Err(error) => return Err(error),
         };
@@ -123,10 +132,11 @@ impl DescriptionStore {
     /// compaction that started from its predecessor. Lease-only backends retain
     /// their existing advisory-lock guarantee; conditional stores fence writes.
     pub fn publish(&self, update: &DescriptionUpdate) -> io::Result<bool> {
+        let fs = self.backend()?;
         let parent = std::path::Path::new(&self.path)
             .parent()
             .ok_or_else(|| io::Error::other("peer description has no agent directory"))?;
-        self.fs.create_dir_all(&parent.to_string_lossy())?;
+        fs.create_dir_all(&parent.to_string_lossy())?;
         let value = AgentDescription {
             description: update.description.clone(),
             updated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -134,7 +144,7 @@ impl DescriptionStore {
         };
         let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
         if update.snapshot.conditional {
-            return match self.fs.write_if_version(
+            return match fs.write_if_version(
                 &self.path,
                 update.snapshot.version.as_ref(),
                 &bytes,
@@ -146,13 +156,13 @@ impl DescriptionStore {
                 )),
             };
         }
-        let Some(lock) = self.fs.try_lock(&format!("{}.lock", self.path), 30_000)? else {
+        let Some(lock) = fs.try_lock(&format!("{}.lock", self.path), 30_000)? else {
             return Ok(false);
         };
-        if self.read_bytes()? != update.snapshot.previous || !lock.renew()? {
+        if self.read_bytes(fs.as_ref())? != update.snapshot.previous || !lock.renew()? {
             return Ok(false);
         }
-        self.fs.write_atomic(&self.path, &bytes)?;
+        fs.write_atomic(&self.path, &bytes)?;
         Ok(true)
     }
 }

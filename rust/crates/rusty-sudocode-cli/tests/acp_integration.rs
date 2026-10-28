@@ -14,6 +14,8 @@
 mod acp_direct_fences;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[path = "support/acp_node_binding.rs"]
+mod node_binding;
 #[path = "support/node_home.rs"]
 mod node_home;
 #[path = "common/openai_compat_mock.rs"]
@@ -8462,6 +8464,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     const FIRST: &str = "acp-pair-first";
     const SECOND: &str = "acp-pair-second";
     const PEER: &str = "acp-pair-peer";
+    const SUMMARY: &str = "摘要 \"ready\" & <checked>\nSECOND-SUMMARY-LINE";
     let server = MockAnthropicService::spawn()
         .await
         .expect("mock service should start");
@@ -8507,7 +8510,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
             from: PEER.to_string(),
             to: (*agent).to_string(),
             body: format!("for {agent} PARITY_SCENARIO:single_turn_text"),
-            summary: None,
+            summary: (*agent == FIRST).then(|| SUMMARY.to_string()),
             timestamp: 0,
             color: None,
             kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
@@ -8544,6 +8547,21 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
             text.contains(&format!("for {agent} ")),
             "{agent}'s session got another agent's message: {text}"
         );
+        if *agent == FIRST {
+            assert_eq!(
+                update["params"]["_meta"]["sudocode"]["a2a"]["summary"],
+                SUMMARY
+            );
+            assert!(text.contains(&format!("Summary: {SUMMARY}")), "{text}");
+        } else {
+            assert!(update["params"]["_meta"]["sudocode"]["a2a"]
+                .get("summary")
+                .is_none());
+            assert!(
+                !text.contains("Summary:"),
+                "legacy messages have no summary: {text}"
+            );
+        }
     }
 
     for (agent, _) in &sessions {
@@ -8565,6 +8583,35 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
         }
     }
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = server.captured_requests().await;
+        if requests.iter().any(|request| {
+            request.raw_body.contains("Summary: 摘要")
+                && request.raw_body.contains("SECOND-SUMMARY-LINE")
+                && request.raw_body.contains("for acp-pair-first")
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summary never reached the provider"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let saved = runtime::SessionStore::from_cwd(&workspace.root)
+        .unwrap()
+        .load_session("latest")
+        .unwrap()
+        .session;
+    assert!(saved
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .any(|block| {
+            matches!(block, runtime::ContentBlock::Text { text }
+            if text.contains(&format!("Summary: {SUMMARY}")) && text.contains("for acp-pair-first"))
+        }));
     client.shutdown().await;
     workspace.cleanup();
 }

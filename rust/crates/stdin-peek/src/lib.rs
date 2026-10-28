@@ -9,6 +9,7 @@
 //!
 //! - [`stdin_is_readable`]: whether stdin has data waiting, consuming nothing.
 //! - [`decode_console_bytes`]: what bytes in the console's code page spell.
+//! - On Windows, the owned stderr swap used by the terminal capture owner.
 //! - [`prevent_standard_handle_inheritance`]: keep launcher pipes out of a
 //!   background process on Windows.
 //!
@@ -32,6 +33,49 @@
 //! knows every code page the system can be set to.
 
 use std::time::Duration;
+
+/// Replace stderr for the existing terminal owner, without querying a pipe's
+/// type while synchronous IO may be blocked on it. The caller serializes
+/// standard-stream replacement. A handle still installed on stdin or stdout
+/// remains borrowed; only an exclusively displaced handle is returned owned.
+#[cfg(windows)]
+#[inline]
+pub fn replace_stderr_handle(
+    source: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<Option<std::os::windows::io::OwnedHandle>> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let replacement = source.try_clone_to_owned()?;
+    // SAFETY: these calls read the process's standard handle slots, not buffers.
+    let (previous, input, output) = unsafe {
+        (
+            GetStdHandle(STD_ERROR_HANDLE),
+            GetStdHandle(STD_INPUT_HANDLE),
+            GetStdHandle(STD_OUTPUT_HANDLE),
+        )
+    };
+    // SAFETY: the owned duplicate is valid and remains alive during the call.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, replacement.as_raw_handle()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The successful slot replacement now owns this duplicate. A failed swap
+    // above instead drops it normally and leaves the old slot untouched.
+    let _ = replacement.into_raw_handle();
+    if previous.is_null()
+        || previous == INVALID_HANDLE_VALUE
+        || previous == input
+        || previous == output
+    {
+        return Ok(None);
+    }
+    // SAFETY: this valid handle was removed from stderr and is not installed
+    // on either other standard stream. No owner was constructed before success.
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(previous) }))
+}
 
 /// Keep this process's standard handles out of subsequently spawned children.
 ///

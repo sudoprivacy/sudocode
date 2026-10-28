@@ -164,7 +164,23 @@ pub(crate) fn startup_prompt(allow_onboarding: bool) -> Result<()> {
     }
     if let Some(preference) = preference()? {
         if preference.mode == RuntimeMode::Shared {
-            activate(preference.mode, preference.owner_root.as_deref())?;
+            let configured = runtime::nexus_mailbox::node_record_present();
+            if let Err(error) = activate(preference.mode, preference.owner_root.as_deref()) {
+                if !configured {
+                    return Err(error);
+                }
+                // The mailbox keeps this selected namespace and its actual
+                // error. Automatic preparation must not block ordinary work;
+                // explicit `setup`/`--check` still report their failures.
+                telemetry::RetryDiagnostics::new(
+                    "nexus-setup",
+                    "configured Box",
+                    "preparation unavailable",
+                    "ready",
+                )
+                .with_notices(telemetry::RetryNotices::LogOnly)
+                .failed("automatic_shared_setup", &error.to_string());
+            }
         }
     } else if allow_onboarding && !runtime::config::default_config_home().exists() {
         run(None, None, false, CliOutputFormat::Text)?;

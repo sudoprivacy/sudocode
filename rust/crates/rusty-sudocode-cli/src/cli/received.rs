@@ -11,10 +11,16 @@ use crate::render::{
     TerminalRenderer, RESET,
 };
 
-struct ReceivedMessage<'a> {
+struct EnvelopeHeader {
     sender: String,
-    body: &'a str,
+    summary: Option<String>,
+    tag: &'static str,
     kind: &'static str,
+}
+
+struct ReceivedMessage<'a> {
+    header: EnvelopeHeader,
+    body: &'a str,
 }
 
 enum PromptPart<'a> {
@@ -22,7 +28,7 @@ enum PromptPart<'a> {
     Peer(ReceivedMessage<'a>),
 }
 
-fn envelope_header(line: &str) -> Option<(String, &'static str, &'static str)> {
+fn envelope_header(line: &str) -> Option<EnvelopeHeader> {
     let (tag, attributes) = line.strip_prefix('<')?.strip_suffix('>')?.split_once(' ')?;
     let (tag, kind) = match tag {
         "mailbox-message" => ("mailbox-message", ""),
@@ -31,24 +37,44 @@ fn envelope_header(line: &str) -> Option<(String, &'static str, &'static str)> {
         "plan-approval-response" => ("plan-approval-response", "plan approval response"),
         _ => return None,
     };
-    let (sender, rest) = attributes.strip_prefix("from=\"")?.split_once('"')?;
+    let (sender, mut rest) = attributes.strip_prefix("from=\"")?.split_once('"')?;
     if sender.is_empty() || sender.contains(['<', '>']) {
         return None;
     }
-    if !rest.is_empty() {
-        let request_id = rest.strip_prefix(" request-id=\"")?.strip_suffix('"')?;
-        if request_id.contains(['"', '<', '>']) {
+    let mut has_request_id = false;
+    let mut summary = None;
+    while !rest.is_empty() {
+        let (name, value) = rest.strip_prefix(' ')?.split_once("=\"")?;
+        let (value, remaining) = value.split_once('"')?;
+        if value.contains(['<', '>']) {
             return None;
         }
+        match name {
+            "request-id" if !has_request_id => has_request_id = true,
+            "summary" if summary.is_none() => summary = Some(decode_attribute(value)),
+            _ => return None,
+        }
+        rest = remaining;
     }
+    Some(EnvelopeHeader {
+        sender: decode_attribute(sender),
+        summary,
+        tag,
+        kind,
+    })
+}
+
+fn decode_attribute(value: &str) -> String {
     // Decode just the attribute escaping performed by the prompt composer.
     // Body entities belong to Markdown and are left to that renderer.
-    let sender = sender
+    value
+        .replace("&#10;", "\n")
+        .replace("&#13;", "\r")
+        .replace("&#9;", "\t")
         .replace("&quot;", "\"")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .replace("&amp;", "&");
-    Some((sender, tag, kind))
+        .replace("&amp;", "&")
 }
 
 fn prompt_parts(text: &str) -> Vec<PromptPart<'_>> {
@@ -75,10 +101,10 @@ fn prompt_parts(text: &str) -> Vec<PromptPart<'_>> {
         {
             continue;
         }
-        let Some((sender, tag, kind)) = envelope_header(line.trim_end_matches('\n')) else {
+        let Some(header) = envelope_header(line.trim_end_matches('\n')) else {
             continue;
         };
-        let closing = format!("\n</{tag}>");
+        let closing = format!("\n</{}>", header.tag);
         let Some(body_len) = text[offset..].find(&closing) else {
             continue;
         };
@@ -91,9 +117,8 @@ fn prompt_parts(text: &str) -> Vec<PromptPart<'_>> {
             parts.push(PromptPart::Human(human));
         }
         parts.push(PromptPart::Peer(ReceivedMessage {
-            sender,
+            header,
             body: &text[offset..offset + body_len],
-            kind,
         }));
         consumed = end;
     }
@@ -105,14 +130,14 @@ fn prompt_parts(text: &str) -> Vec<PromptPart<'_>> {
 }
 
 impl ReceivedMessage<'_> {
-    fn header(&self) -> String {
-        let sender = StyledText::from_ansi(&self.sender)
+    fn title(&self) -> String {
+        let sender = StyledText::from_ansi(&self.header.sender)
             .text
             .replace(['\r', '\n', '\t'], " ");
-        let suffix = if self.kind.is_empty() {
+        let suffix = if self.header.kind.is_empty() {
             String::new()
         } else {
-            format!(" · {}", self.kind)
+            format!(" · {}", self.header.kind)
         };
         format!(
             "{RESET}{}Message from {RESET}{}{sender}{RESET}{}{suffix}{RESET}",
@@ -124,9 +149,18 @@ impl ReceivedMessage<'_> {
 
     fn render(&self, width: usize, renderer: &TerminalRenderer) -> String {
         let body = renderer.render_markdown_with_width(self.body, left_frame::body_width(width));
+        let summary = self
+            .header
+            .summary
+            .as_deref()
+            .filter(|summary| !summary.trim().is_empty())
+            .map(super::format::summary_preview);
         let output = left_frame::render(
-            &self.header(),
-            [body.trim_end_matches('\n')],
+            &self.title(),
+            summary
+                .as_deref()
+                .into_iter()
+                .chain(std::iter::once(body.trim_end_matches('\n'))),
             width,
             theme().muted,
             false,
@@ -160,12 +194,16 @@ pub(crate) fn queued_preview(prompt: &str) -> String {
         return String::new();
     };
     let first = message
-        .body
+        .header
+        .summary
+        .as_deref()
+        .filter(|summary| !summary.trim().is_empty())
+        .unwrap_or(message.body)
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
     let first = StyledText::from_ansi(first).text.replace(['\r', '\t'], " ");
-    let preview = truncate_to_width(&format!("{}: {first}", message.header()), 512);
+    let preview = truncate_to_width(&format!("{}: {first}", message.title()), 512);
     if ColorSupport::detect() == ColorSupport::NoColor {
         StyledText::from_ansi(&preview).text
     } else {

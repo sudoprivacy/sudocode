@@ -10,10 +10,12 @@ use serde_json::{Map, Value};
 
 mod jsonl_file;
 mod response_capture;
+mod retry_diagnostics;
 use jsonl_file::{JsonlFile, Rotation};
 pub use response_capture::{
     ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder,
 };
+pub use retry_diagnostics::{RetryDiagnostics, RetryNotices};
 
 const SUDOCLAW_LOG_ROTATE_AFTER_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 const SUDOCLAW_LOG_MAX_ROTATED_FILES: usize = 3;
@@ -444,9 +446,18 @@ impl SudoclawLogSink {
     }
 }
 
+impl SudoclawLogSink {
+    /// Write through the same local serializer/rotation path, letting a caller
+    /// with an existing diagnostic policy report IO failures without recursion.
+    #[inline]
+    pub fn try_record(&self, event: TelemetryEvent) -> Result<(), std::io::Error> {
+        self.file.append_json(&format_log_entry(&event))
+    }
+}
+
 impl TelemetrySink for SudoclawLogSink {
     fn record(&self, event: TelemetryEvent) {
-        if let Err(error) = self.file.append_json(&format_log_entry(&event)) {
+        if let Err(error) = self.try_record(event) {
             eprintln!("[scode telemetry] Failed to write log: {error}");
         }
     }

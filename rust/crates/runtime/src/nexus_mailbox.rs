@@ -32,6 +32,17 @@ pub fn node_record_path() -> Option<PathBuf> {
     crate::user_paths::home_dir().map(|home| home.join(".nexus").join("run").join("node.json"))
 }
 
+/// Presence reserves the node namespace even for a dangling or unreadable path.
+/// It does not establish valid configuration, credentials or a live connection.
+#[must_use]
+#[inline]
+pub fn node_record_present() -> bool {
+    node_record_path().is_some_and(|path| {
+        !std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// The fields of the node record `scode` reads. The record also names the
 /// node's deployment role and zone, which are the node owner's concern.
 #[derive(Debug, serde::Deserialize)]
@@ -53,7 +64,11 @@ impl NodeRecord {
         };
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && !node_record_present() =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(format!("read node record {}: {error}", path.display())),
         };
         let record: Self = serde_json::from_str(&raw)
@@ -218,10 +233,10 @@ impl Config {
             tls: credential.tls,
         }))
     }
-    /// Dial the daemon, returning a shared client. mTLS with the credential's
-    /// material when [`Config::tls`] is set (the cert is the whole
-    /// authorization - the node derives identity from its SAN, so no token is
-    /// sent).
+    /// Construct a shared lazy client using this agent's mTLS material.
+    /// Construction does not establish node reachability or authentication;
+    /// actual IO reports those failures. The node derives the authenticated
+    /// identity from the certificate's SAN, so no request token is substituted.
     ///
     /// # Errors
     /// Returns a message if a PEM file cannot be read or the channel fails
@@ -245,12 +260,18 @@ impl Config {
     /// receive path renders) and prepends the nexus-specific network note.
     #[must_use]
     pub fn peer_system_prompt(&self) -> String {
-        let base = crate::agent_mailbox::repl_a2a_prompt_section(&self.agent);
-        format!(
-            "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
-             be on another machine; addressing it by name still reaches it."
-        )
+        peer_system_prompt(&self.agent)
     }
+}
+
+/// Stable node-namespace identity text, even before this agent has a credential.
+#[must_use]
+pub fn peer_system_prompt(agent: &str) -> String {
+    let base = crate::agent_mailbox::repl_a2a_prompt_section(agent);
+    format!(
+        "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
+         be on another machine; addressing it by name still reaches it."
+    )
 }
 
 #[cfg(test)]

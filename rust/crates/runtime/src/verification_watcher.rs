@@ -78,7 +78,7 @@ pub fn record_completions(n: usize) {
 /// already been counted for the CURRENT streak. Cleared on
 /// [`reset_streak`]. Persisting the counted set in-memory
 /// prevents re-counting a task whose completion is reported
-/// multiple times (e.g. re-sending the same completed todo via TodoWrite).
+/// multiple times (e.g. re-sending the same completed todo via `TodoWrite`).
 fn counted_ids() -> &'static Mutex<BTreeSet<String>> {
     static SEEN: std::sync::OnceLock<Mutex<BTreeSet<String>>> = std::sync::OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -90,8 +90,11 @@ fn counted_ids() -> &'static Mutex<BTreeSet<String>> {
 /// bumped, `false` when the id was a duplicate.
 ///
 /// The task's subject string is the natural key for deduplication.
+#[must_use]
 pub fn record_completion_by_id(id: &str) -> bool {
-    let mut set = counted_ids().lock().unwrap_or_else(|e| e.into_inner());
+    let mut set = counted_ids()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if set.contains(id) {
         return false;
     }
@@ -168,7 +171,8 @@ mod tests {
     static LOCK: Mutex<()> = Mutex::new(());
 
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn reset_env() {

@@ -152,6 +152,7 @@ impl TodoStore {
     /// Replace the entire list with `todos`, persist, and report which items
     /// transitioned *into* `completed` by this write (by content string) so the
     /// verification watcher can count newly-finished work. Returns the new list.
+    #[must_use]
     pub fn set(&self, todos: Vec<Todo>) -> Vec<Todo> {
         let mut inner = self.inner.lock().expect("todo store lock poisoned");
         inner.todos = todos;
@@ -218,14 +219,14 @@ mod tests {
     #[test]
     fn set_replaces_the_whole_list() {
         let store = TodoStore::new();
-        store.set(vec![
+        let _ = store.set(vec![
             todo("a", TodoStatus::Pending),
             todo("b", TodoStatus::Pending),
         ]);
         assert_eq!(store.len(), 2);
 
         // A second write replaces, not appends.
-        store.set(vec![todo("c", TodoStatus::InProgress)]);
+        let _ = store.set(vec![todo("c", TodoStatus::InProgress)]);
         let list = store.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].content, "c");
@@ -235,8 +236,8 @@ mod tests {
     #[test]
     fn set_empty_wipes_the_list() {
         let store = TodoStore::new();
-        store.set(vec![todo("a", TodoStatus::Completed)]);
-        store.set(Vec::new());
+        let _ = store.set(vec![todo("a", TodoStatus::Completed)]);
+        let _ = store.set(Vec::new());
         assert!(store.is_empty());
         assert!(store.list().is_empty());
     }
@@ -263,7 +264,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let store = TodoStore::load(&path, Arc::new(crate::fs_backend::StdFsBackend));
-        store.set(vec![
+        let _ = store.set(vec![
             todo("first", TodoStatus::Completed),
             todo("second", TodoStatus::InProgress),
         ]);

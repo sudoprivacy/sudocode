@@ -45,7 +45,7 @@ enum CommitBackend {
 pub struct SessionWriteGuard<'a> {
     _operation: MutexGuard<'a, ()>,
     _storage: Option<Arc<dyn FsLock>>,
-    _owners: Vec<Arc<dyn FsLock>>,
+    owners: Vec<Arc<dyn FsLock>>,
 }
 
 pub(crate) struct SessionPurgeGuard {
@@ -469,7 +469,7 @@ impl SessionWriter {
             {
                 return Err("session_storage_lost".into())
             }
-            _ => {}
+            CommitBackend::Stream(_) => {}
         }
         Ok(())
     }
@@ -491,14 +491,14 @@ impl SessionWriter {
         Ok(SessionWriteGuard {
             _operation: guard,
             _storage: storage,
-            _owners: Vec::new(),
+            owners: Vec::new(),
         })
     }
 
     pub(crate) fn purge_write(&self) -> Result<SessionWriteGuard<'_>, String> {
         let mut guard = self.write()?;
         if let CommitBackend::Native(fs) = &self.backend {
-            guard._owners = Self::exclude_writers(
+            guard.owners = Self::exclude_writers(
                 fs.as_ref(),
                 &self.transcript,
                 self.presence

@@ -84,7 +84,7 @@ fn explicit_collection_before_publication_suppresses_even_before_finished_event(
         ] {
             let store = Store::new();
             let journal = store.open(true);
-            store.source(&journal);
+            Store::seed_source(&journal);
             if terminal_first {
                 journal
                     .lifecycle(&lifecycle(SubagentPhase::Finished))
@@ -110,7 +110,7 @@ fn explicit_collection_before_publication_suppresses_even_before_finished_event(
 fn unrelated_tool_output_cannot_consume_completion() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     journal
         .tool_result(
             None,
@@ -151,7 +151,7 @@ impl Store {
     fn open(&self, create: bool) -> Arc<CompletionJournal> {
         CompletionJournal::open(&self.session, &self.dir, create).unwrap()
     }
-    fn source(&self, journal: &CompletionJournal) {
+    fn seed_source(journal: &CompletionJournal) {
         journal.begin("run:1", None).unwrap();
         journal
             .register(lifecycle(SubagentPhase::Started), "child.json".into())
@@ -171,7 +171,7 @@ impl Drop for Store {
 fn frozen_delivery_replays_identically_until_ack_is_committed() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     journal
         .lifecycle(&lifecycle(SubagentPhase::Finished))
         .unwrap();
@@ -204,7 +204,7 @@ fn frozen_delivery_replays_identically_until_ack_is_committed() {
 fn late_earlier_spawn_cannot_overtake_unacknowledged_completion() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     let mut second = lifecycle(SubagentPhase::Started);
     second.tool_call_id = "spawn-2".into();
     second.agent.agent_id = "agent-2".into();
@@ -239,7 +239,7 @@ fn late_earlier_spawn_cannot_overtake_unacknowledged_completion() {
 fn terminal_manifest_recovers_a_lost_finished_event_without_an_engine() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     let context = journal.commit("run:1").unwrap();
     drop(journal);
     let journal = store.open(false);
@@ -258,7 +258,7 @@ fn terminal_manifest_recovers_a_lost_finished_event_without_an_engine() {
 fn crash_before_parent_commit_is_blocked_even_with_terminal_manifest() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     drop(journal);
     let journal = store.open(false);
     let status = journal
@@ -276,7 +276,7 @@ fn crash_before_parent_commit_is_blocked_even_with_terminal_manifest() {
 fn missing_terminal_is_unknown_and_does_not_restart_work() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     journal.commit("run:1").unwrap();
     let status = journal.reconcile(|_, _| Ok(None)).unwrap();
     assert_eq!(status.blocked, vec!["execution_unconfirmed"]);
@@ -343,7 +343,7 @@ fn transcript_change_and_wrong_journal_identity_are_rejected() {
 fn failed_ack_write_does_not_remove_pending_delivery() {
     let store = Store::new();
     let journal = store.open(true);
-    store.source(&journal);
+    Store::seed_source(&journal);
     journal
         .lifecycle(&lifecycle(SubagentPhase::Finished))
         .unwrap();

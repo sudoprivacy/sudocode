@@ -141,17 +141,18 @@ fn simple_hash(s: &str) -> String {
             .wrapping_sub(hash)
             .wrapping_add(c as i32);
     }
-    let abs = (hash as i64).unsigned_abs();
+    let abs = i64::from(hash).unsigned_abs();
     format_radix_36(abs)
 }
 
 /// Format an unsigned 64-bit integer in base 36 (digits 0–9, a–z),
 /// matching JavaScript's `Number.prototype.toString(36)`.
 fn format_radix_36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
     if n == 0 {
         return "0".to_string();
     }
-    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut buf = Vec::new();
     while n > 0 {
         buf.push(DIGITS[(n % 36) as usize]);

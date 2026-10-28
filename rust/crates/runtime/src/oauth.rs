@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -387,15 +387,11 @@ fn generate_random_token(bytes: usize) -> io::Result<String> {
     // `Os { code: 3, kind: NotFound, message: "The system cannot
     // find the path specified." }` and broke every PKCE flow there.
     let mut buffer = vec![0_u8; bytes];
-    getrandom::getrandom(&mut buffer)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    getrandom::getrandom(&mut buffer).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(base64url_encode(&buffer))
 }
 
-fn read_credentials_root_with(
-    path: &PathBuf,
-    fs: &dyn FsBackend,
-) -> io::Result<Map<String, Value>> {
+fn read_credentials_root_with(path: &Path, fs: &dyn FsBackend) -> io::Result<Map<String, Value>> {
     match fs.read_to_string(&path.to_string_lossy()) {
         Ok(contents) => {
             if contents.trim().is_empty() {
@@ -418,7 +414,7 @@ fn read_credentials_root_with(
 }
 
 fn write_credentials_root_with(
-    path: &PathBuf,
+    path: &Path,
     root: &Map<String, Value>,
     fs: &dyn FsBackend,
 ) -> io::Result<()> {

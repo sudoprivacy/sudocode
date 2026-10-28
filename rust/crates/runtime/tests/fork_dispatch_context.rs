@@ -192,7 +192,7 @@ fn boilerplate_in_any_prior_user_message_is_detected() {
 // ── parent_assistant_message ────────────────────────────────────────
 
 /// When the parent's just-emitted assistant message is available, the
-/// fork spawn path clones its tool_use blocks into the child's
+/// fork spawn path clones its `tool_use` blocks into the child's
 /// inherited-messages prefix. Assert the accessor returns exactly
 /// what the runtime tool loop stuffed into it.
 #[test]

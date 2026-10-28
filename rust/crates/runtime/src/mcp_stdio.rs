@@ -1712,8 +1712,8 @@ mod tests {
 
     /// Reproduces the production e2e finding: a plugin MCP server that exits
     /// immediately after spawn used to trigger 4–8 fork()s during initial
-    /// discovery. With MCP_SPAWN_ATTEMPT_LIMIT in place, spawn must be capped
-    /// at 2, and a follow-up tool call must short-circuit to PermanentlyFailed.
+    /// discovery. With `MCP_SPAWN_ATTEMPT_LIMIT` in place, spawn must be capped
+    /// at 2, and a follow-up tool call must short-circuit to `PermanentlyFailed`.
     #[test]
     fn manager_caps_spawn_attempts_when_server_exits_immediately() {
         let runtime = Builder::new_current_thread()

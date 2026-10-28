@@ -515,6 +515,79 @@ fn live_independent_runtimes_preserve_tools_and_outputs_in_one_session() {
     let env = TestEnv::new("shared-sid-live-concurrent-tools");
     enable_shared_history(&env);
     run_two_context_tools(&env, true);
+    reclaim_live_session_and_its_backup(&env);
+}
+
+fn reclaim_live_session_and_its_backup(env: &TestEnv) {
+    let root = env.workspace_root();
+    let transcript = root.join("shared.jsonl");
+    let session = Session::load_from_path(&transcript).unwrap();
+    let sid = &session.session_id;
+    let outputs = Session::tool_results_dir_for(&transcript, sid).unwrap();
+    let responses = Session::response_captures_dir_for(&transcript, sid).unwrap();
+    assert!(outputs.is_dir());
+    assert!(responses.is_dir());
+    let mut clear = env.spawn_with_env(&["--resume", "shared.jsonl", "/clear", "--confirm"], &[]);
+    clear.expect("Session cleared").unwrap();
+    assert_eq!(clear.expect_eof().unwrap(), 0);
+    let backup = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("shared.jsonl.before-clear-")
+                && path.extension().is_some_and(|extension| extension == "bak")
+        })
+        .expect("the real clear command backed up the funded conversation");
+    let backup_name = backup.file_name().unwrap().to_str().unwrap();
+    let mut primary = env.spawn_with_env(&["--resume", "shared.jsonl"], &[]);
+    common::expect_input_line_cleared(&primary, env.timeout(), "funded source restored");
+    let mut restored = env.spawn_with_env(&["--resume", backup_name], &[]);
+    common::expect_input_line_cleared(&restored, env.timeout(), "funded backup restored");
+    let controller = Session::new().with_workspace_root(root);
+    save_seed(
+        &controller,
+        &managed_session_path(env, &controller.session_id),
+    );
+    let mut deleter = env.spawn_with_env(&["--resume", &controller.session_id], &[]);
+    common::expect_input_line_cleared(&deleter, env.timeout(), "funded deletion controller ready");
+    deleter
+        .send("/session delete shared.jsonl --force\r")
+        .unwrap();
+    deleter.expect("Session deleted").unwrap();
+    let before = fs::read(&backup).unwrap();
+    restored
+        .send("DELETED_FUNDED_BACKUP_MUST_NOT_WRITE\r")
+        .unwrap();
+    restored.expect("session_deleted").unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), before);
+    exit_cli(env, &mut primary);
+    assert!(transcript.exists() && backup.exists());
+    assert!(outputs.is_dir() && responses.is_dir());
+    exit_cli(env, &mut restored);
+    wait_for_reclamation(&transcript, env.timeout());
+    assert!(!backup.exists() && !outputs.exists() && !responses.exists());
+    for reference in ["shared.jsonl", backup_name] {
+        assert_eq!(
+            Session::load_from_path(root.join(reference))
+                .unwrap_err()
+                .to_string(),
+            "session_deleted"
+        );
+        let mut refused = env.spawn_with_env(&["--resume", reference], &[]);
+        refused.expect("session not found:").unwrap();
+        assert_ne!(refused.expect_eof().unwrap(), 0);
+    }
+    for label in ["A", "B"] {
+        assert_eq!(
+            fs::read_to_string(root.join(format!("{label}.effect"))).unwrap(),
+            format!("{label} durable effect")
+        );
+    }
+    assert!(transcript.with_extension("completions.json").is_file());
+    exit_cli(env, &mut deleter);
 }
 
 fn run_two_context_tools(env: &TestEnv, is_second_started_late: bool) {

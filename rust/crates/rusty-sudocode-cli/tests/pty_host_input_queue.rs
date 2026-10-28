@@ -36,11 +36,13 @@ impl Host {
         };
         let init = host.request("initialize", json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
+        assert_eq!(init["_meta"]["sudocode"]["runtimeStatus"]["version"], 1);
         let created = host.request(
             "session/new",
             json!({"cwd":env.workspace_root(),"mcpServers":[]}),
         );
         host.session = created["sessionId"].as_str().unwrap().to_owned();
+        assert_eq!(host.runtime_status()["foreground"], json!({"state":"idle"}));
         host
     }
 
@@ -94,6 +96,13 @@ impl Host {
 
     fn snapshot(&mut self) -> Value {
         self.input(json!({"action":"snapshot"}))["state"].clone()
+    }
+
+    fn runtime_status(&mut self) -> Value {
+        self.request(
+            "_sudocode/session/status",
+            json!({"sessionId":self.session}),
+        )
     }
 
     fn idle(&mut self) -> Value {
@@ -156,6 +165,10 @@ fn working_with_mode(env: &TestEnv, background: bool) -> (Host, Release) {
 fn host_flush_preserves_the_running_tool_and_all_recalled_attachments() {
     let env = TestEnv::new("host-input-flush");
     let (mut host, _release) = working(&env);
+    assert_eq!(
+        host.runtime_status()["foreground"],
+        json!({"state":"running"})
+    );
     host.submit(
         "first",
         "HOST_INPUT_FIRST: FYI only; continue the original task.",
@@ -231,6 +244,7 @@ fn host_cancel_keeps_queued_input_until_an_explicit_flush() {
     let paused = host.idle();
     assert_eq!(paused["paused"], true, "{paused}");
     assert_eq!(paused["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(host.runtime_status()["foreground"], json!({"state":"idle"}));
     assert!(!env.workspace_root().join("input-tool-finished").exists());
     if env.is_mock() {
         assert_eq!(
@@ -320,6 +334,10 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
         .find(|value| value["method"] == "session/request_permission")
         .expect("permission request");
     assert_eq!(request["params"]["sessionId"], host.session);
+    assert_eq!(
+        host.runtime_status()["foreground"],
+        json!({"state":"awaiting_input","waiting_for":"permission"})
+    );
     assert!(!env
         .workspace_root()
         .join("host-permission-proof.txt")
@@ -331,6 +349,7 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
         fs::read_to_string(env.workspace_root().join("host-permission-proof.txt")).unwrap(),
         "HOST_PERMISSION_GRANTED"
     );
+    assert_eq!(host.runtime_status()["foreground"], json!({"state":"idle"}));
     host.close();
 }
 
@@ -339,6 +358,9 @@ fn native_host_background_completion_wakes_an_idle_model_without_human_input() {
     let env = TestEnv::new("host-background-wake");
     let (mut host, _release) = working_with_mode(&env, true);
     host.idle();
+    let status = host.runtime_status();
+    assert_eq!(status["foreground"], json!({"state":"idle"}));
+    assert_eq!(status["background"]["terminals"], 1, "{status}");
     fs::write(env.workspace_root().join("release-input-tool"), "release").unwrap();
     host.terminal
         .expect(r#""kind":"committed"[^\r\n]*"source":"background""#)

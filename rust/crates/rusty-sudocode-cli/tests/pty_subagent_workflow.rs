@@ -95,7 +95,7 @@ fn parallel_agents_preserve_active_staging_and_publish_results() {
     common::expect_turn_complete_after(
         &parent,
         &before,
-        Duration::from_secs(180),
+        Duration::from_mins(3),
         "parallel children completed",
     );
     parent.send("/exit\r").unwrap();

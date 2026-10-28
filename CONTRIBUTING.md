@@ -386,7 +386,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
@@ -665,7 +665,7 @@ Before opening a PR:
 
 - [ ] Branch off the latest `main`.
 - [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings` is clean.
 - [ ] `cargo test --workspace` passes locally.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).

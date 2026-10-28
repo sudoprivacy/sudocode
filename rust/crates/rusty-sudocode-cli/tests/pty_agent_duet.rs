@@ -192,27 +192,7 @@ fn run_duet(transport: &Transport, offline: bool) {
         (receiver_home_var.0, receiver_home_var.1.as_str()),
         (receiver_profile_var.0, receiver_profile_var.1.as_str()),
     ];
-    let greeting_task = format!(
-        "When another agent sends a greeting, write exactly {GREETING_RECEIPT} \
-         in your own conversation. Do not call tools or send another message \
-         for that greeting."
-    );
-    let start_receiver = || {
-        let mut receiver = env.spawn_with_env(
-            &[
-                "--permission-mode",
-                "read-only",
-                "--append-system-prompt",
-                &greeting_task,
-            ],
-            &receiver_env_vars,
-        );
-        receiver.set_default_timeout(BUDGET);
-        receiver
-            .expect("❯")
-            .expect("the receiver's REPL should start");
-        receiver
-    };
+    let start_receiver = || spawn_duet_receiver(&env, &receiver_env_vars);
     let mut receiver = if offline {
         None
     } else {
@@ -300,7 +280,15 @@ fn run_duet(transport: &Transport, offline: bool) {
     // cursor, this one is the receiver's, and a receiver that surfaces a message
     // without recording it re-delivers the same message forever — which is how
     // a re-reply storm starts.
-    assert_duet_receiver_receipt(&inbox, &expected_from, tail, transport, &env);
+    assert_duet_receiver_receipt(
+        &inbox,
+        &expected_from,
+        tail,
+        transport,
+        &env,
+        &receiver,
+        &sending,
+    );
 
     // Both journeys reuse the signed identity. PtySession::drop kills the
     // receiver, leaving its remote reader lease alive for 30 seconds — the
@@ -318,6 +306,31 @@ fn run_duet(transport: &Transport, offline: bool) {
         if env.is_mock() { "mock" } else { "live" },
     );
 }
+fn spawn_duet_receiver(
+    env: &TestEnv,
+    receiver_env_vars: &[(&str, &str)],
+) -> pty_expect::PtySession {
+    let greeting_task = format!(
+        "When another agent sends a greeting, write exactly {GREETING_RECEIPT} \
+         in your own conversation. Do not call tools or send another message \
+         for that greeting."
+    );
+    let mut receiver = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "read-only",
+            "--append-system-prompt",
+            &greeting_task,
+        ],
+        receiver_env_vars,
+    );
+    receiver.set_default_timeout(BUDGET);
+    receiver
+        .expect("❯")
+        .expect("the receiver's REPL should start");
+    receiver
+}
+
 fn duet_sender_identity() -> (String, String) {
     let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
         .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
@@ -419,6 +432,8 @@ fn assert_duet_receiver_receipt(
     tail: u64,
     transport: &Transport,
     env: &TestEnv,
+    receiver: &pty_expect::PtySession,
+    sending: &pty_expect::PtySession,
 ) {
     let deadline = Instant::now() + BUDGET;
     loop {
@@ -427,7 +442,7 @@ fn assert_duet_receiver_receipt(
             .expect("read the receiver's position")
             .unwrap_or(0);
         let confirmed =
-            !env.is_live() || common::screen_tail(&receiver, 8000).contains(GREETING_RECEIPT);
+            !env.is_live() || common::screen_tail(receiver, 8000).contains(GREETING_RECEIPT);
         if recorded > tail && confirmed {
             break;
         }
@@ -437,8 +452,8 @@ fn assert_duet_receiver_receipt(
              position past {tail} in {} (recorded={recorded})\nreceiver:\n{}\nsender:\n{}",
             transport.label(),
             inbox.transcript_path(expected_from),
-            common::screen_tail(&receiver, 8000),
-            common::screen_tail(&sending, 3000)
+            common::screen_tail(receiver, 8000),
+            common::screen_tail(sending, 3000)
         );
         std::thread::sleep(Duration::from_millis(100));
     }

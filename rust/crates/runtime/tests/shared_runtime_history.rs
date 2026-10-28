@@ -116,7 +116,31 @@ impl Drop for Fixture {
         if std::thread::panicking() {
             eprintln!("Retained runtime history evidence: {}", self.0.display());
         } else {
-            std::fs::remove_dir_all(&self.0).unwrap();
+            // Still a failure, never retried or ignored: something writing
+            // here after every handle was dropped means a runtime did not shut
+            // down cleanly. Name what was left so the writer can be found.
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                let mut left = Vec::new();
+                let mut pending = vec![self.0.clone()];
+                while let Some(dir) = pending.pop() {
+                    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            pending.push(path.clone());
+                        }
+                        left.push(
+                            path.strip_prefix(&self.0)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string(),
+                        );
+                    }
+                }
+                panic!(
+                    "removing {} failed: {error}; still present after every handle was dropped: {left:?}",
+                    self.0.display()
+                );
+            }
         }
     }
 }
@@ -476,6 +500,26 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
+    // Deleted while writer `a` was alive, so reclaiming the Session was left to
+    // the process-wide session-cleanup worker, which retries every second and
+    // takes file locks (creating lock files) inside this fixture. Now that the
+    // last writer has retired, the reclaim must finish: it removes the durable
+    // reference and the transcript. Removing the fixture before then raced the
+    // worker's retry (ENOTEMPTY on Linux).
+    let references = store_root.join(".cleanup");
+    let deadline = Instant::now() + WAIT;
+    while std::fs::read_dir(&references)
+        .map(|entries| entries.flatten().next().is_some())
+        .unwrap_or(false)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the deleted Session was never reclaimed after its last writer retired: {}",
+            references.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!path.exists(), "reclaim removes the deleted transcript");
     drop(fixture);
 }
 

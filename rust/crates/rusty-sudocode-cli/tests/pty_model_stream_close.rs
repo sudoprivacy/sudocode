@@ -345,10 +345,13 @@ fn assert_raw_capture_files(directory: &std::path::Path, expected: usize, log: &
             &std::fs::read(path.with_extension("").with_extension("json")).unwrap(),
         )
         .unwrap();
-        assert!(matches!(
-            metadata["end_reason"].as_str(),
-            Some("http_eof" | "body_reader_dropped")
-        ));
+        assert!(
+            matches!(
+                metadata["end_reason"].as_str(),
+                Some("http_eof" | "body_reader_dropped")
+            ),
+            "response capture was not finalized: {metadata}"
+        );
         assert_eq!(metadata["gzip_complete"], true);
         assert_eq!(metadata["saved_all_observed_bytes"], true);
         assert!(events.iter().any(|event| event["event"] == "request_debug"
@@ -391,6 +394,7 @@ fn raw_stream_capture_preserves_signed_content_through_resume() {
 
     let mut resumed = env.spawn_with_env(&["--resume"], &variables);
     common::expect_input_line_cleared(&resumed, env.timeout(), "resumed capture prompt");
+    let marker = common::turn_status_marker(&resumed);
     resumed.send("Continue the stream result\r").unwrap();
     common::expect_screen(
         &resumed,
@@ -407,7 +411,12 @@ fn raw_stream_capture_preserves_signed_content_through_resume() {
         env.timeout(),
         "resumed response persisted",
     );
-    common::expect_input_line_cleared(&resumed, env.timeout(), "resumed response complete");
+    common::expect_turn_complete_after(
+        &resumed,
+        &marker,
+        env.timeout(),
+        "resumed response complete",
+    );
     resumed.send("/exit\r").unwrap();
     assert_eq!(resumed.expect_eof().unwrap(), 0);
     assert_capture_session(&path, 2);
@@ -1611,6 +1620,7 @@ impl ResponseCheck<'_> {
         // add a fully allocated response, and recover its context anchor.
         let mut resumed = env.spawn_with_env(&["--permission-mode", "read-only", "--resume"], &[]);
         common::expect_input_line_cleared(&resumed, env.timeout(), "resumed usage prompt");
+        let marker = common::turn_status_marker(&resumed);
         resumed.send("Continue the stream result").unwrap();
         common::expect_input_line(
             &resumed,
@@ -1634,7 +1644,12 @@ impl ResponseCheck<'_> {
             env.timeout(),
             "persist the resumed response",
         );
-        common::expect_input_line_cleared(&resumed, env.timeout(), "resumed turn complete");
+        common::expect_turn_complete_after(
+            &resumed,
+            &marker,
+            env.timeout(),
+            "resumed turn complete",
+        );
         resumed.send("/exit").unwrap();
         common::expect_input_line(&resumed, "/exit", env.timeout(), "exit input");
         resumed.send("\r").unwrap();

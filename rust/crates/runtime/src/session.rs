@@ -156,6 +156,7 @@ impl SessionMode {
 #[derive(Clone)]
 struct SessionPersistence {
     path: PathBuf,
+    store_root: Option<PathBuf>,
     fs: Arc<dyn FsBackend>,
     writer: Arc<std::sync::Mutex<SessionWriterState>>,
     committed_messages: Arc<std::sync::Mutex<BTreeSet<String>>>,
@@ -578,6 +579,7 @@ impl Session {
         }
         self.persistence = Some(SessionPersistence {
             path,
+            store_root: None,
             fs: Arc::new(StdFsBackend),
             writer: Arc::default(),
             committed_messages: Arc::default(),
@@ -600,6 +602,30 @@ impl Session {
             persistence.fs = fs;
         }
         self
+    }
+
+    /// Keep the resolving store's namespace when a host reattaches persistence.
+    #[must_use]
+    pub fn with_session_store_root(mut self, root: &Path) -> Self {
+        if let Some(persistence) = self.persistence.as_mut() {
+            persistence.store_root = Some(root.to_path_buf());
+        }
+        self
+    }
+
+    /// The store that resolved this transcript, including an explicit data dir.
+    /// An independently opened transcript has no associated store namespace.
+    #[must_use]
+    pub fn session_store_root(&self) -> Option<&Path> {
+        self.persistence.as_ref()?.store_root.as_deref()
+    }
+
+    /// Read the deletion authority when a failed refresh disables persistence.
+    pub(crate) fn persistence_deleted(&self) -> Result<bool, SessionError> {
+        self.persistence.as_ref().map_or(Ok(false), |persistence| {
+            crate::subagent_completion::deleted_storage(persistence.fs.as_ref(), &persistence.path)
+                .map_err(SessionError::Format)
+        })
     }
 
     /// Bind this session to the workspace root it was created in.
@@ -1278,6 +1304,9 @@ impl Session {
         path: impl AsRef<Path>,
     ) -> Result<Self, SessionError> {
         let path = path.as_ref();
+        if crate::subagent_completion::deleted_storage(fs, path).map_err(SessionError::Format)? {
+            return Err(SessionError::Format("session_deleted".into()));
+        }
         let bytes = fs.read_snapshot(&path.to_string_lossy())?;
         let contents = crate::session_history::decode(&bytes)?;
         let session =
@@ -1320,21 +1349,22 @@ impl Session {
             .transpose()?
             .flatten();
         let mut restored = match history {
-            Some(session) => session.with_persistence_path(&persistence.path),
+            Some(session) => session,
             None => Self::load_from_path_with(persistence.fs.as_ref(), &persistence.path)?,
-        }
-        .with_fs_backend(Arc::clone(&persistence.fs));
+        };
         if restored.session_id != self.session_id
             || restored.workspace_root != self.workspace_root
             || restored.identity != self.identity
         {
             return Err(SessionError::SourceChanged);
         }
-        let restored_persistence = restored
-            .persistence
-            .as_mut()
-            .expect("restored path attached");
-        restored_persistence.writer = Arc::clone(&persistence.writer);
+        // Keep the entire storage binding and admitted writer together. Only
+        // the replayed view's commit/checkpoint caches start fresh.
+        restored.persistence = Some(SessionPersistence {
+            committed_messages: Arc::default(),
+            checkpoint: Arc::default(),
+            ..persistence.clone()
+        });
         Ok(restored)
     }
 

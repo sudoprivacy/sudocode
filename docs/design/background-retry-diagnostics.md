@@ -35,6 +35,14 @@ period. The message describes receive checks recovering; it does not prove a
 peer is online, a send was delivered or every message was acknowledged. Abort,
 standby and process exit are not successful delivery.
 
+`outage()` exposes the same rule read-only: when the unrecovered outage began,
+and each scope still failing with its latest detail. It is `None` once recovery
+is confirmed. The start is set when the first failure turns the outage on and
+cleared when recovery turns it off, so a change of scope or error text never
+moves it. The mailbox receiver registers its instance with its agent's receiver
+state, and peer `health` derives from it. That way the footer and `/status`
+apply this rule instead of a second one.
+
 ## Repository audit
 
 The audit inspected tracked Rust, TypeScript/JavaScript and shell sources,

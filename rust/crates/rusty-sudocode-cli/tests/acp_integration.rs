@@ -6868,6 +6868,13 @@ async fn initialize_task_completions(client: &mut AcpTestClient) {
         .is_none());
 }
 
+fn completion_gate_calls(node: &str, label: &str) -> Value {
+    let shell = if cfg!(windows) { "PowerShell" } else { "Bash" };
+    json!([{"id":"call_1","name":shell,"input":{
+        "command":format!("{node} completion-gate.cjs {label}"),"run_in_background":true
+    }}])
+}
+
 /// Independent ACP processes retain completion ownership while they append to
 /// one SID, including a provider call ID reused within the first process.
 #[tokio::test]
@@ -6878,6 +6885,8 @@ async fn acp_shared_sid_scopes_background_results_and_protects_live_contexts() {
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
     seed_completion_gate(&workspace);
+    let _releases = ["A1", "B1", "A2", "B3"]
+        .map(|label| CompletionFixtureRelease(workspace.root.join(format!("{label}.release"))));
     let spawn = || spawn_shared_history_client(&workspace);
     let mut producer = spawn();
     initialize_task_completions(&mut producer).await;
@@ -6929,20 +6938,6 @@ async fn acp_shared_sid_scopes_background_results_and_protects_live_contexts() {
     let storage = loaded["result"]["_meta"]["sudocode"]["storageRef"].clone();
     assert!(storage.is_string(), "{loaded}");
     start_shared_sid_background_tasks(&mut first, &mut second, &workspace, &sid, &node).await;
-    let (_, rejected) = first
-        .send_request(
-            "_sudocode/task/purge",
-            json!({
-                "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"live-peer"
-            }),
-        )
-        .await;
-    assert!(
-        rejected["error"]
-            .to_string()
-            .contains("session_writer_busy"),
-        "{rejected}"
-    );
     release_shared_sid_background_tasks(&mut first, &mut second, &workspace, &sid).await;
     for (client, expected) in [(&mut first, 2), (&mut second, 1)] {
         let (_, status) = client
@@ -6958,7 +6953,7 @@ async fn acp_shared_sid_scopes_background_results_and_protects_live_contexts() {
     }
     first.shutdown().await;
     second.shutdown().await;
-    assert_restored_shared_sid_completions(&workspace, &sid, &storage).await;
+    assert_restored_shared_sid_completions(&workspace, &sid, &storage, &node).await;
     workspace.cleanup();
 }
 
@@ -9030,10 +9025,7 @@ async fn start_shared_sid_background_tasks(
         } else {
             &mut *first
         };
-        let shell = if cfg!(windows) { "PowerShell" } else { "Bash" };
-        let calls = json!([{"id":"call_1","name":shell,"input":{
-            "command":format!("{node} completion-gate.cjs {label}"),"run_in_background":true
-        }}]);
+        let calls = completion_gate_calls(node, label);
         let (events, response) = client
             .send_request(
                 "session/prompt",
@@ -9130,6 +9122,7 @@ async fn assert_restored_shared_sid_completions(
     workspace: &TestWorkspace,
     sid: &str,
     storage: &Value,
+    node: &str,
 ) {
     let mut restored = spawn_shared_history_client(workspace);
     initialize_task_completions(&mut restored).await;
@@ -9154,11 +9147,174 @@ async fn assert_restored_shared_sid_completions(
         status["result"]["settled"], 2,
         "latest context restores A's journal: {status}"
     );
+    let pending = open_pending_shared_completion(workspace, sid, node).await;
+    assert_shared_completion_deletion(workspace, sid, storage, restored, pending).await;
+}
+
+struct PendingSharedCompletion {
+    client: AcpTestClient,
+    notification: Value,
+    transcript: PathBuf,
+    journal: PathBuf,
+}
+
+async fn open_pending_shared_completion(
+    workspace: &TestWorkspace,
+    sid: &str,
+    node: &str,
+) -> PendingSharedCompletion {
+    let mut stale = spawn_shared_history_client(workspace);
+    initialize_task_completions(&mut stale).await;
+    let (_, loaded) = stale
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let calls = completion_gate_calls(node, "B3");
+    let (_, response) = stale
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId":sid,"_meta":{"traceId":"B3"},"prompt":[{"type":"text",
+                "text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]
+            }),
+        )
+        .await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    fs::write(workspace.root.join("B3.release"), "release").unwrap();
+    let (_, unacknowledged) = stale
+        .recv_until(SUBAGENT_EVENTS_WAIT, |event| {
+            event["method"] == "_sudocode/task/completed"
+        })
+        .await
+        .expect("real B3 completion before deletion");
+    assert_eq!(unacknowledged["params"]["originTraceId"], "B3");
+    let transcript = find_session_transcript(&workspace.root, sid);
+    let stale_journal = fs::read_dir(transcript.with_extension("completions"))
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            saved["sources"]
+                .as_object()
+                .is_some_and(|sources| {
+                    sources
+                        .values()
+                        .any(|source| source["trace_id"] == "B3" && source["ack"].is_null())
+                })
+                .then_some(path)
+        })
+        .expect("durable B3 source still awaits its real ACK");
+    PendingSharedCompletion {
+        client: stale,
+        notification: unacknowledged,
+        transcript,
+        journal: stale_journal,
+    }
+}
+
+async fn assert_shared_completion_deletion(
+    workspace: &TestWorkspace,
+    sid: &str,
+    storage: &Value,
+    mut restored: AcpTestClient,
+    pending: PendingSharedCompletion,
+) {
+    let PendingSharedCompletion {
+        client: mut stale,
+        notification: unacknowledged,
+        transcript,
+        journal: stale_journal,
+    } = pending;
     let (_,purged) = restored.send_request("_sudocode/task/purge",json!({
         "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"finished-contexts"
     })).await;
     assert_eq!(purged["result"]["disposition"], "purged", "{purged}");
+    assert!(
+        transcript.is_file(),
+        "live runtime clients must retire before physical cleanup"
+    );
+    let history_after_delete = fs::read(&transcript).unwrap();
+    let journal_after_delete = fs::read(&stale_journal).unwrap();
+    stale
+        .send_raw(&json!({"jsonrpc":"2.0","id":unacknowledged["id"],"result":{
+            "completionId":unacknowledged["params"]["completionId"],"disposition":"stored"
+        }}))
+        .await;
+    let (_, refused) = stale
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId":sid,"_meta":{"traceId":"stale-after-delete"},
+                "prompt":[{"type":"text","text":"STALE_CONTEXT_MUST_NOT_WRITE"}]
+            }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("session_deleted"),
+        "{refused}"
+    );
+    stale.shutdown().await;
+    assert_eq!(
+        fs::read(&stale_journal).unwrap(),
+        journal_after_delete,
+        "a real old ACK must not settle or replace the deleted Session's journal"
+    );
+    assert_eq!(
+        fs::read(&transcript).unwrap(),
+        history_after_delete,
+        "the old runtime must not append to a deleted Session"
+    );
+    let mut observer = spawn_shared_history_client(workspace);
+    initialize_task_completions(&mut observer).await;
+    let (_, refused) = observer
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("session_deleted"),
+        "{refused}"
+    );
     restored.shutdown().await;
+    timeout(Duration::from_secs(10), async {
+        while transcript.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ordinary process startup resumes final cleanup without a cleanup RPC");
+    assert_eq!(
+        fs::read_to_string(workspace.root.join("B3.effect")).unwrap(),
+        "B3 durable effect"
+    );
+    let binding: Value =
+        serde_json::from_slice(&fs::read(transcript.with_extension("completions.json")).unwrap())
+            .unwrap();
+    assert_eq!(binding["deleted"], "finished-contexts");
+    let (_, refused) = observer
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(
+        refused.get("error").is_some(),
+        "physical cleanup must not permit SID recreation: {refused}"
+    );
+    observer.shutdown().await;
 }
 
 #[cfg(unix)]

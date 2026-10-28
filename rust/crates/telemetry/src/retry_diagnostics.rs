@@ -23,6 +23,15 @@ pub enum RetryNotices {
     LogOnly,
 }
 
+/// An unrecovered outage: when it began, and each scope still failing with its
+/// latest detail. Empty scopes mean all have succeeded but recovery is not yet
+/// confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outage {
+    pub since: Instant,
+    pub scopes: Vec<(String, String)>,
+}
+
 /// Aggregated local file records with optional, rate-limited terminal notices.
 ///
 /// A scope identifies one independently failing operation, such as a receiver
@@ -43,6 +52,9 @@ pub struct RetryDiagnostics {
 struct State {
     failures: HashMap<String, Failure>,
     active: bool,
+    /// When the current outage began: set as `active` turns on, cleared as it
+    /// turns off, so a change of scope or error text never moves it.
+    since: Option<Instant>,
     last_failure: Option<Instant>,
     last_notice: Option<Instant>,
     log_error: Option<String>,
@@ -106,6 +118,25 @@ impl RetryDiagnostics {
         self.update(scope, None);
     }
 
+    /// The outage this instance has not yet seen recover, by the same rule its
+    /// recovery notice uses: it lasts until every failed scope has succeeded
+    /// again and a later check follows the quiet period. `None` while healthy.
+    #[must_use]
+    pub fn outage(&self) -> Option<Outage> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let since = state.since.filter(|_| state.active)?;
+        let mut scopes: Vec<_> = state
+            .failures
+            .iter()
+            .map(|(scope, failure)| (scope.clone(), failure.detail.clone()))
+            .collect();
+        scopes.sort();
+        Some(Outage { since, scopes })
+    }
+
     /// The caller's existing diagnostic label (also used for worker names).
     #[inline]
     #[must_use]
@@ -120,6 +151,9 @@ impl RetryDiagnostics {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((error, context)) = error {
+            if !state.active {
+                state.since = Some(now);
+            }
             state.active = true;
             state.last_failure = Some(now);
             let suppressed = if let Some(failure) = state.failures.get_mut(scope) {
@@ -206,6 +240,7 @@ impl RetryDiagnostics {
             {
                 self.notice(scope, format_args!("{}", self.recovered));
                 state.active = false;
+                state.since = None;
                 state.last_notice = None;
             }
         }

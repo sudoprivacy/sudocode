@@ -193,7 +193,11 @@ fn resume_pairs_reused_tool_ids_with_their_own_assistant_chain() {
 }
 
 fn wait_for_file(path: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    wait_for_file_with_budget(path, Duration::from_secs(20));
+}
+
+fn wait_for_file_with_budget(path: &std::path::Path, budget: Duration) {
+    let deadline = Instant::now() + budget;
     while !path.exists() {
         assert!(
             Instant::now() < deadline,
@@ -486,7 +490,12 @@ fn begin_gate(env: &TestEnv, cli: &mut PtySession, label: &str) {
         "tool batch entered",
     );
     cli.send("\r").unwrap();
-    wait_for_file(&env.workspace_root().join(format!("{label}.ready")));
+    // This barrier includes the provider's response, unlike later local-file
+    // effects. Reuse the same budget as the other waits for this backend.
+    wait_for_file_with_budget(
+        &env.workspace_root().join(format!("{label}.ready")),
+        env.timeout(),
+    );
 }
 
 #[test]

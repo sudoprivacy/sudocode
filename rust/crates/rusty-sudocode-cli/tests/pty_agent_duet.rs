@@ -30,6 +30,7 @@ use runtime::mailbox::Mailbox;
 /// fixed name. Over nexus the receiver could carry any name, and carrying this
 /// one keeps a single recipient across the table above.
 const RECEIVER: &str = UNIFIED_SEND_RECIPIENT;
+const GREETING_RECEIPT: &str = "GREETING_RECEIVED";
 
 /// Long enough for a transport hop and a REPL turn under CI load, short enough
 /// that a genuine failure is not mistaken for slowness.
@@ -191,9 +192,21 @@ fn run_duet(transport: &Transport, offline: bool) {
         (receiver_home_var.0, receiver_home_var.1.as_str()),
         (receiver_profile_var.0, receiver_profile_var.1.as_str()),
     ];
+    let greeting_task = format!(
+        "When another agent sends a greeting, write exactly {GREETING_RECEIPT} \
+         in your own conversation. Do not call tools or send another message \
+         for that greeting."
+    );
     let start_receiver = || {
-        let mut receiver =
-            env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env_vars);
+        let mut receiver = env.spawn_with_env(
+            &[
+                "--permission-mode",
+                "read-only",
+                "--append-system-prompt",
+                &greeting_task,
+            ],
+            &receiver_env_vars,
+        );
         receiver.set_default_timeout(BUDGET);
         receiver
             .expect("❯")
@@ -413,14 +426,19 @@ fn assert_duet_receiver_receipt(
             .read_position(expected_from)
             .expect("read the receiver's position")
             .unwrap_or(0);
-        if recorded > tail {
+        let confirmed =
+            !env.is_live() || common::screen_tail(&receiver, 8000).contains(GREETING_RECEIPT);
+        if recorded > tail && confirmed {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "[{}] the receiver surfaced the message but never advanced its own read              position past {tail} in {}",
+            "[{}] the receiver did not finish the greeting and advance its read \
+             position past {tail} in {} (recorded={recorded})\nreceiver:\n{}\nsender:\n{}",
             transport.label(),
-            inbox.transcript_path(expected_from)
+            inbox.transcript_path(expected_from),
+            common::screen_tail(&receiver, 8000),
+            common::screen_tail(&sending, 3000)
         );
         std::thread::sleep(Duration::from_millis(100));
     }

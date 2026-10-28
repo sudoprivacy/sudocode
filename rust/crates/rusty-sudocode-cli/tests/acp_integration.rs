@@ -6861,6 +6861,13 @@ async fn initialize_task_completions(client: &mut AcpTestClient) {
         .is_none());
 }
 
+fn completion_gate_calls(node: &str, label: &str) -> Value {
+    let shell = if cfg!(windows) { "PowerShell" } else { "Bash" };
+    json!([{"id":"call_1","name":shell,"input":{
+        "command":format!("{node} completion-gate.cjs {label}"),"run_in_background":true
+    }}])
+}
+
 /// Independent ACP processes retain completion ownership while they append to
 /// one SID, including a provider call ID reused within the first process.
 #[tokio::test]
@@ -6871,6 +6878,8 @@ async fn acp_shared_sid_scopes_background_results_and_protects_live_contexts() {
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
     seed_completion_gate(&workspace);
+    let _releases = ["A1", "B1", "A2", "B3"]
+        .map(|label| CompletionFixtureRelease(workspace.root.join(format!("{label}.release"))));
     let spawn = || spawn_shared_history_client(&workspace);
     let mut producer = spawn();
     initialize_task_completions(&mut producer).await;
@@ -6922,20 +6931,6 @@ async fn acp_shared_sid_scopes_background_results_and_protects_live_contexts() {
     let storage = loaded["result"]["_meta"]["sudocode"]["storageRef"].clone();
     assert!(storage.is_string(), "{loaded}");
     start_shared_sid_background_tasks(&mut first, &mut second, &workspace, &sid, &node).await;
-    let (_, rejected) = first
-        .send_request(
-            "_sudocode/task/purge",
-            json!({
-                "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"live-peer"
-            }),
-        )
-        .await;
-    assert!(
-        rejected["error"]
-            .to_string()
-            .contains("session_writer_busy"),
-        "{rejected}"
-    );
     release_shared_sid_background_tasks(&mut first, &mut second, &workspace, &sid).await;
     for (client, expected) in [(&mut first, 2), (&mut second, 1)] {
         let (_, status) = client

@@ -1553,6 +1553,59 @@ pub struct PeerStatus {
     /// Most recent background receiver failure in this process. Historical:
     /// receiving can recover while this diagnostic remains inspectable.
     pub last_receiver_error: Option<String>,
+    /// Whether receiving works now, unlike the historical error above.
+    pub health: ReceiverHealth,
+}
+
+/// The current condition of an agent's receivers, read from the same
+/// [`telemetry::RetryDiagnostics`] that observes their failures.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReceiverHealth {
+    /// `"fail"` when the node binding cannot be used, `"warn"` when an outage
+    /// has outlasted the grace period, otherwise `"ok"`. A shorter outage is
+    /// reported below but stays `"ok"`: most recover on the next retry.
+    pub level: &'static str,
+    /// Whole seconds since the unrecovered outage began.
+    pub outage_secs: Option<u64>,
+    /// Each scope still failing, with its latest detail.
+    pub failing: Vec<(String, String)>,
+}
+
+/// How long an outage may last before it is reported as `"warn"`.
+fn degraded_grace() -> std::time::Duration {
+    std::env::var("SUDOCODE_A2A_DEGRADED_GRACE_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis,
+        )
+}
+
+/// `agent`'s receiver health in this process. `binding_failed` is the node
+/// binding's own error, which no retry here can repair.
+#[must_use]
+pub fn receiver_health(agent: &str, binding_failed: bool) -> ReceiverHealth {
+    let outage = receiver_states().get(agent).and_then(|observed| {
+        observed
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostics| diagnostics.outage())
+            .min_by_key(|outage| outage.since)
+    });
+    let elapsed = outage.as_ref().map(|outage| outage.since.elapsed());
+    let level = if binding_failed {
+        "fail"
+    } else if elapsed.is_some_and(|elapsed| elapsed >= degraded_grace()) {
+        "warn"
+    } else {
+        "ok"
+    };
+    ReceiverHealth {
+        level,
+        outage_secs: elapsed.map(|elapsed| elapsed.as_secs()),
+        failing: outage.map(|outage| outage.scopes).unwrap_or_default(),
+    }
 }
 
 /// The cursor guarantee each agent's readers got in this process, as decided
@@ -1584,6 +1637,8 @@ pub fn cursor_guarantee(agent: &str) -> Option<crate::cursor_fence::CursorGuaran
 #[derive(Default)]
 struct ReceiverObservation {
     last_error: Option<String>,
+    /// Each running receiver's failure observer, for [`receiver_health`].
+    diagnostics: Vec<Arc<telemetry::RetryDiagnostics>>,
     unavailable: usize,
     standby: usize,
     receiving: usize,
@@ -1665,9 +1720,23 @@ fn observe_receiver_failure(
 struct ReceiverStateEntry {
     agent: String,
     state: Option<ReceiverState>,
+    diagnostics: Arc<telemetry::RetryDiagnostics>,
 }
 
 impl ReceiverStateEntry {
+    fn new(agent: String, diagnostics: Arc<telemetry::RetryDiagnostics>) -> Self {
+        receiver_states()
+            .entry(agent.clone())
+            .or_default()
+            .diagnostics
+            .push(Arc::clone(&diagnostics));
+        Self {
+            agent,
+            state: None,
+            diagnostics,
+        }
+    }
+
     fn set(&mut self, state: ReceiverState) {
         if self.state == Some(state) {
             return;
@@ -1688,7 +1757,14 @@ impl Drop for ReceiverStateEntry {
             if let Some(previous) = self.state {
                 *counts.count_mut(previous) -= 1;
             }
-            if counts.unavailable == 0 && counts.standby == 0 && counts.receiving == 0 {
+            counts
+                .diagnostics
+                .retain(|diagnostics| !Arc::ptr_eq(diagnostics, &self.diagnostics));
+            if counts.unavailable == 0
+                && counts.standby == 0
+                && counts.receiving == 0
+                && counts.diagnostics.is_empty()
+            {
                 states.remove(&self.agent);
             }
         }
@@ -1776,10 +1852,6 @@ pub fn spawn_inbox_poller_with_notices(
             // retrying the same mailbox, including its presence announcement,
             // before claiming the receiver seat. No second receiver is needed.
             let mut announced = false;
-            let mut state = ReceiverStateEntry {
-                agent: mailbox.self_id().to_string(),
-                state: None,
-            };
             let diagnostics = Arc::new(
                 telemetry::RetryDiagnostics::new(
                     label,
@@ -1789,6 +1861,8 @@ pub fn spawn_inbox_poller_with_notices(
                 )
                 .with_notices(notices),
             );
+            let mut state =
+                ReceiverStateEntry::new(mailbox.self_id().to_string(), Arc::clone(&diagnostics));
             while !abort.is_aborted() {
                 state.set(ReceiverState::Unavailable);
                 if !announced {

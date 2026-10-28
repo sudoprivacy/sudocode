@@ -23,6 +23,16 @@ pub(super) struct Binding {
     pub cwd: Option<PathBuf>,
     pub storage_ref: Option<String>,
     pub deleted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_reference: Option<PathBuf>,
+}
+
+pub(super) struct Deletion<'a> {
+    pub session_id: &'a str,
+    pub cwd: &'a Path,
+    pub storage_ref: &'a str,
+    pub cleanup_id: &'a str,
+    pub store_root: Option<&'a Path>,
 }
 
 fn binding_path(transcript: &Path) -> PathBuf {
@@ -115,14 +125,11 @@ pub(super) fn probe(
 pub(super) fn purge(
     fs: &dyn FsBackend,
     transcript: &Path,
-    session_id: &str,
-    cwd: &Path,
-    storage_ref: &str,
-    cleanup_id: &str,
+    deletion: &Deletion<'_>,
     own_context: Option<&str>,
 ) -> Result<(), String> {
-    let current = probe(fs, transcript, session_id, cwd)?;
-    if current["storageRef"] != storage_ref {
+    let current = probe(fs, transcript, deletion.session_id, deletion.cwd)?;
+    if current["storageRef"] != deletion.storage_ref {
         return Err("completion_storage_mismatch".into());
     }
     if current["deleted"] == true {
@@ -153,23 +160,225 @@ pub(super) fn purge(
             );
         }
     }
+    mark_deleted(fs, transcript, deletion)
+}
+
+/// The caller holds the native SID commit barrier. Record-history clients all
+/// check this binding inside that barrier before protocol writes and ACKs.
+pub(super) fn mark_deleted(
+    fs: &dyn FsBackend,
+    transcript: &Path,
+    deletion: &Deletion<'_>,
+) -> Result<(), String> {
+    let current = probe(fs, transcript, deletion.session_id, deletion.cwd)?;
+    if current["storageRef"] != deletion.storage_ref {
+        return Err("completion_storage_mismatch".into());
+    }
+    if current["deleted"] == true {
+        return Ok(());
+    }
+    let owner = crate::session_backup::owner(transcript);
+    let backups = crate::session_backup::paths(fs, &owner)?;
+    let mut guards = Vec::new();
+    let mut locked = std::collections::BTreeSet::from([
+        owner.with_extension("writer.lock"),
+        transcript.with_extension("writer.lock"),
+    ]);
+    for backup in &backups {
+        if locked.insert(backup.with_extension("writer.lock")) {
+            guards.push(crate::session_writer::SessionWriter::backup_commit_lock(
+                fs, backup,
+            )?);
+        }
+    }
+    let storage_ref = if owner == transcript {
+        deletion.storage_ref.to_string()
+    } else {
+        probe(fs, &owner, deletion.session_id, deletion.cwd)?["storageRef"]
+            .as_str()
+            .ok_or("missing source Session storage identity")?
+            .to_string()
+    };
+    let reference =
+        crate::session_cleanup::remember(fs, &owner, deletion.cwd, deletion.store_root)?;
+    // Publish compatibility fences while every old per-backup commit barrier
+    // is held. The source binding remains the one authoritative decision and
+    // is committed last; a partial failure never reclaims any Session data.
+    for backup in &backups {
+        let fence = Binding {
+            version: SHARED_VERSION,
+            session_id: Some(deletion.session_id.into()),
+            cwd: Some(deletion.cwd.into()),
+            storage_ref: Some(checksum(
+                &serde_json::to_vec(&(1, deletion.session_id, backup))
+                    .map_err(|error| error.to_string())?,
+            )),
+            deleted: Some(deletion.cleanup_id.into()),
+            cleanup_reference: None,
+        };
+        fs.write_atomic(
+            &binding_path(backup).to_string_lossy(),
+            &serde_json::to_vec(&fence).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let binding = Binding {
         version: SHARED_VERSION,
-        session_id: Some(session_id.into()),
-        cwd: Some(cwd.into()),
-        storage_ref: Some(storage_ref.into()),
-        deleted: Some(cleanup_id.into()),
+        session_id: Some(deletion.session_id.into()),
+        cwd: Some(deletion.cwd.into()),
+        storage_ref: Some(storage_ref),
+        deleted: Some(deletion.cleanup_id.into()),
+        cleanup_reference: Some(reference),
     };
     fs.write_atomic(
-        &binding_path(transcript).to_string_lossy(),
+        &binding_path(&owner).to_string_lossy(),
         &serde_json::to_vec(&binding).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())
 }
 
+pub(crate) fn deleted_storage(fs: &dyn FsBackend, transcript: &Path) -> Result<bool, String> {
+    let owner = crate::session_backup::owner(transcript);
+    if owner != transcript && deleted_storage(fs, &owner)? {
+        return Ok(true);
+    }
+    if !fs
+        .exists(&binding_path(transcript).to_string_lossy())
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
+    let binding = read_binding(fs, transcript)?;
+    Ok(matches!(binding.version, 2 | SHARED_VERSION) && binding.deleted.is_some())
+}
+
+/// A true result means no cleanup remains. Native OS locks, rather than a lease
+/// expiry or a PID lookup, prove every admitted writer and recorder has retired.
+pub(crate) fn reclaim_deleted(fs: &dyn FsBackend, transcript: &Path) -> Result<bool, String> {
+    let owner = crate::session_backup::owner(transcript);
+    let transcript = owner.as_path();
+    if !fs.fenced_locks() {
+        return Err("completion_storage_exclusion_unavailable".into());
+    }
+    if !deleted_storage(fs, transcript)? {
+        return Ok(true);
+    }
+    let Some(_writers) = crate::session_writer::SessionWriter::try_purge_lock(fs, transcript)?
+    else {
+        return Ok(false);
+    };
+    let binding = read_binding(fs, transcript)?;
+    let session_id = binding
+        .session_id
+        .as_deref()
+        .ok_or("missing deleted Session identity")?;
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("invalid deleted Session identity".into());
+    }
+    let backups = crate::session_backup::paths(fs, transcript)?;
+    let mut backup_guards = Vec::new();
+    let mut locked = std::collections::BTreeSet::from([transcript.with_extension("writer.lock")]);
+    for backup in &backups {
+        if !locked.insert(backup.with_extension("writer.lock")) {
+            continue;
+        }
+        match crate::session_writer::SessionWriter::backup_retirement_lock(fs, backup) {
+            Ok(guard) => backup_guards.push(guard),
+            Err(error) if error == "session_writer_busy" || error == "session_commit_busy" => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let transcripts: Vec<_> = backups
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(transcript))
+        .collect();
+    let mut owners = Vec::new();
+    for path in &transcripts {
+        let response_path = crate::response_archive::ResponseArchiveWriter::lock_path(path);
+        if locked.insert(response_path.clone()) {
+            let Some(response) = fs
+                .try_lock(&response_path.to_string_lossy(), 30_000)
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(false);
+            };
+            owners.push(response);
+        }
+        let directory = context_dir(path);
+        if fs
+            .exists(&directory.to_string_lossy())
+            .map_err(|e| e.to_string())?
+        {
+            for entry in fs
+                .readdir(&directory.to_string_lossy())
+                .map_err(|e| e.to_string())?
+            {
+                if !is_context_entry(&entry) {
+                    continue;
+                }
+                let path = directory.join(entry.name);
+                if !locked.insert(path.with_extension("owner.lock")) {
+                    continue;
+                }
+                let Some(owner) = fs
+                    .try_lock(&path.with_extension("owner.lock").to_string_lossy(), 30_000)
+                    .map_err(|error| error.to_string())?
+                else {
+                    return Ok(false);
+                };
+                owners.push(owner);
+            }
+        }
+    }
+    for transcript in &transcripts {
+        remove_payloads(fs, transcript, session_id)?;
+        // Remove each log only after its owned payloads. The source log is
+        // last, leaving startup discovery available after a partial cleanup.
+        match fs.delete(&transcript.to_string_lossy()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    if let Some(reference) = binding.cleanup_reference {
+        crate::session_cleanup::forget(fs, transcript, &reference)?;
+    }
+    Ok(true)
+}
+
+fn remove_payloads(fs: &dyn FsBackend, transcript: &Path, session_id: &str) -> Result<(), String> {
+    for path in [
+        Session::tool_results_dir_for(transcript, session_id),
+        Session::response_captures_dir_for(transcript, session_id),
+        Some(context_dir(transcript)),
+        Some(transcript.with_extension("writers")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        match fs.remove_dir_all(&path.to_string_lossy()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
 /// Response evidence supports both released completion bindings without
 /// converting or replacing the transcript's journal.
 pub(crate) fn check_response_storage(fs: &dyn FsBackend, transcript: &Path) -> Result<(), String> {
+    let owner = crate::session_backup::owner(transcript);
+    if owner != transcript && deleted_storage(fs, &owner)? {
+        return Err("session_deleted".into());
+    }
     let path = binding_path(transcript);
     if !fs
         .exists(&path.to_string_lossy())
@@ -195,6 +404,10 @@ pub(crate) fn check_response_storage(fs: &dyn FsBackend, transcript: &Path) -> R
 }
 
 pub(crate) fn check_shared_storage(fs: &dyn FsBackend, transcript: &Path) -> Result<(), String> {
+    let owner = crate::session_backup::owner(transcript);
+    if owner != transcript && deleted_storage(fs, &owner)? {
+        return Err("session_deleted".into());
+    }
     let binding = read_binding(fs, transcript)?;
     if binding.version != SHARED_VERSION {
         return Err("completion_storage_protocol_mismatch".into());
@@ -208,6 +421,9 @@ pub(crate) fn check_shared_storage(fs: &dyn FsBackend, transcript: &Path) -> Res
 /// The caller holds the legacy SID writer lock. Publish the protocol barrier
 /// only after preserving every durable fact from its previous completion file.
 pub(crate) fn prepare_shared_storage(fs: &dyn FsBackend, transcript: &Path) -> Result<(), String> {
+    if deleted_storage(fs, transcript)? {
+        return Err("session_deleted".into());
+    }
     let path = binding_path(transcript);
     let binding = if fs
         .exists(&path.to_string_lossy())
@@ -270,6 +486,7 @@ pub(crate) fn prepare_shared_storage(fs: &dyn FsBackend, transcript: &Path) -> R
             cwd: None,
             storage_ref: None,
             deleted: None,
+            cleanup_reference: None,
         }
     };
     fs.write_atomic(

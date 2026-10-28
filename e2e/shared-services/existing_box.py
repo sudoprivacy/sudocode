@@ -129,8 +129,17 @@ def run(args, root):
         before = wait_until(membership)
         assert all(item['nodeId'] == before['root']['nodeId'] for item in before.values())
         marker = base64.b64encode('original durable Box body 中文\x00'.encode()).decode()
+
+        def durable_body_is_readable():
+            # Authenticated transport can precede the restored zone's Raft read
+            # barrier. Retry read-only availability errors under wait_until's
+            # existing startup deadline; a wrong successful body fails at once.
+            response = grpc('Read', {'path': '/agents/lifecycle-proof'})
+            assert response.get('content') == marker, response
+            return True
+
         grpc('Write', {'path': '/agents/lifecycle-proof', 'content': marker})
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
+        wait_until(durable_body_is_readable)
         profile = {'schemaVersion': 1, 'boxEndpoint': endpoint, 'binary': str(args.daemon),
             'binarySha256': sha(args.daemon), 'dataDir': str(data), 'identityDir': str(identity),
             'nodeId': str(int.from_bytes((data / '.node_id').read_bytes(), 'big')), 'caSha256': sha(data / 'tls/ca.pem'),
@@ -202,8 +211,8 @@ def run(args, root):
             assert 'error' in broker(method), method
         assert not (root / 'wrong-data').exists()
         assert not (services / 'runtimes').exists(), 'Recovery downloaded another native version'
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
-        after = membership()
+        wait_until(durable_body_is_readable)
+        after = wait_until(membership)
         for zone, old in before.items():
             assert after[zone]['nodeId'] == old['nodeId']
             assert after[zone]['config'] == old['config'], (zone, old, after[zone])
@@ -228,7 +237,7 @@ def run(args, root):
         children.append(discovery)
         assert restarted['instance'] != old_instance
         assert restarted['persistedNodeId'] == profile['nodeId']
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
+        wait_until(durable_body_is_readable)
         print('PASS: acknowledged exact-target operator termination and recovery preserve state', flush=True)
         receipt.update(nodeId=profile['nodeId'], before=before, after=after,
             ownerPid=discovery['supervisor_pid'], nexusPid=discovery['nexus_pid'], status='PASS')

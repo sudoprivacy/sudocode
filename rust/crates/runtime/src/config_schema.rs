@@ -16,6 +16,7 @@ pub enum FieldType {
 
 impl FieldType {
     /// Human-readable label for error messages.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::String => "a string",
@@ -27,6 +28,7 @@ impl FieldType {
     }
 
     /// Check whether a JSON value conforms to this type.
+    #[must_use]
     pub fn matches(self, value: &crate::json::JsonValue) -> bool {
         match self {
             Self::String => value.as_str().is_some(),
@@ -389,6 +391,11 @@ const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 /// there would validate and then fail to load.
 const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
+        "promptViewport",
+        FieldType::Bool,
+        "Experimental bounded transcript viewport with a pinned composer",
+    ),
+    FieldSchema::leaf(
         "peerDescriptions",
         FieldType::Bool,
         "Publish persistent peer descriptions with existing compaction calls",
@@ -428,7 +435,7 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
     FieldSchema::leaf(
         "cache_ttl_1h",
         FieldType::Bool,
-        "Hold Anthropic prompt caches for 1h instead of 5m, for any auth mode. Unset follows the auth mode: 1h on a subscription, 5m on an API key. Switching to 1h mid-conversation rewrites the cached prefix once at the 1h write price; scode applies it at the next cold point (idle past the TTL, compaction, resume). Switching to 5m keeps the cache",
+        "Pin Anthropic prompt caches to 1h (true) or 5m (false), for any auth mode. Unset is automatic: with the cacheTtlAdvisor experiment on, each session picks the cheaper TTL from its own cache history; otherwise the auth mode decides (1h on a subscription, 5m on an API key). Switching to 1h mid-conversation rewrites the cached prefix once at the 1h write price, so scode applies it at the next cold point (idle past the TTL, compaction, resume); switching to 5m keeps the cache",
     ),
     FieldSchema::object(
         "web_search",
@@ -444,11 +451,13 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
 // ── lookup helpers ──────────────────────────────────────────────────
 
 /// Find a field schema by key in a flat schema slice.
+#[must_use]
 pub fn find_field<'a>(schema: &'a [FieldSchema], key: &str) -> Option<&'a FieldSchema> {
     schema.iter().find(|f| f.key == key)
 }
 
 /// Collect all non-deprecated key names from a schema slice.
+#[must_use]
 pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
     schema
         .iter()
@@ -458,6 +467,7 @@ pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
 }
 
 /// Collect deprecated field entries from a schema slice.
+#[must_use]
 pub fn deprecated_fields(schema: &[FieldSchema]) -> Vec<&FieldSchema> {
     schema.iter().filter(|f| f.is_deprecated).collect()
 }
@@ -467,19 +477,20 @@ pub fn deprecated_fields(schema: &[FieldSchema]) -> Vec<&FieldSchema> {
 pub enum ConfigInputKind {
     /// Toggle immediately, no UI needed.
     BoolToggle,
-    /// Show DialPad with the given static options.
+    /// Show `DialPad` with the given static options.
     Enum(Vec<String>),
-    /// Show FuzzySelect — options fetched dynamically at runtime.
+    /// Show `FuzzySelect` — options fetched dynamically at runtime.
     DynamicList,
-    /// Show TextInput.
+    /// Show `TextInput`.
     Text,
-    /// Show TextInput for number entry.
+    /// Show `TextInput` for number entry.
     NumberInput,
     /// Open in $EDITOR (complex object/array).
     Editor,
 }
 
 /// Resolve the appropriate input kind for a field schema.
+#[must_use]
 pub fn resolve_input_kind(schema: &FieldSchema) -> ConfigInputKind {
     if schema.field_type == FieldType::Bool {
         return ConfigInputKind::BoolToggle;

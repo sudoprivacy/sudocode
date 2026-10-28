@@ -68,7 +68,7 @@ impl Transport {
             (Some(receiver), Some(sender)) => transports.push(Self::TwoNodes { receiver, sender }),
             (Some(endpoint), None) => transports.push(Self::OneNode { endpoint }),
             (None, _) => {
-                eprintln!("SKIP(nexus): set NEXUS_A2A_TEST_ENDPOINT — e2e/nexus-a2a/run.sh does")
+                eprintln!("SKIP(nexus): set NEXUS_A2A_TEST_ENDPOINT — e2e/nexus-a2a/run.sh does");
             }
         }
         transports
@@ -83,10 +83,8 @@ impl Transport {
 
     /// The mock scenario the sender runs. The nexus cases leave `sender` out so
     /// the session's own A2A identity has to answer instead.
-    fn scenario(&self) -> &'static str {
-        match self {
-            _ => "unified_send_roundtrip",
-        }
+    fn scenario() -> &'static str {
+        "unified_send_roundtrip"
     }
 }
 
@@ -104,7 +102,7 @@ fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
             let credential = runtime::nexus_mailbox::AgentCredential::load(&credential)
                 .expect("load the receiver credential bundle");
             let client = runtime::nexus_mailbox::Config {
-                endpoint: endpoint.to_string(),
+                endpoint: endpoint.clone(),
                 agent: credential.agent.clone(),
                 tls: credential.tls,
             }
@@ -127,7 +125,7 @@ fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }
@@ -159,11 +157,7 @@ fn run_duet(transport: &Transport, offline: bool) {
     // Cert-only: the sender dials with its minted credential, so its A2A name -
     // the `from` the node stamps - is the credential's agent, not a name the
     // test invents. Reading it here keeps the assertion pinned to what shipped.
-    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
-        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
-    let sender_name = runtime::nexus_mailbox::AgentCredential::load(&sender_credential)
-        .expect("load the sender credential bundle")
-        .agent;
+    let (sender_credential, sender_name) = duet_sender_identity();
     let expected_from = sender_name.clone();
 
     // ── 2. The RECEIVER: a real scode REPL ─────────────────────────────────
@@ -190,23 +184,7 @@ fn run_duet(transport: &Transport, offline: bool) {
 
     // Cert-only: the receiver dials with its minted credential; its A2A name
     // comes from the cert, so RECEIVER is the name that bundle must carry.
-    let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
-        .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
-    let receiver_endpoint = match transport {
-        Transport::OneNode { endpoint }
-        | Transport::TwoNodes {
-            receiver: endpoint, ..
-        } => endpoint,
-    };
-    // The receiver attaches the way a machine does: a node record in its home
-    // and a session named for the credential the node minted.
-    let receiver_home = node_home::NodeHome::new(
-        "duet-receiver",
-        receiver_endpoint,
-        RECEIVER,
-        Path::new(&receiver_credential),
-    );
-    node_home::pin_agent_name(&workspace, RECEIVER);
+    let receiver_home = prepare_duet_receiver(transport, &workspace);
     let [receiver_home_var, receiver_profile_var] = receiver_home.env();
     let receiver_env_vars = vec![
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
@@ -237,14 +215,14 @@ fn run_duet(transport: &Transport, offline: bool) {
     // ── 3. The SENDER: another real scode, whose model calls `send` ────────
     // Its own workspace and home: on a node a session's identity is its own
     // name, so two sessions sharing a workspace would be one agent.
-    let sender_env = TestEnv::new("duet-sender");
+    let sender_env = env.peer("duet-sender");
     let prompt = sender_env.prompt(
         &format!(
             "Use send to message {RECEIVER}. The message body must be exactly \
              \"hello from unified send\" (lowercase, without a period). \
              Use summary exactly \"greeting test\".",
         ),
-        transport.scenario(),
+        Transport::scenario(),
     );
     let sender_endpoint = match transport {
         Transport::OneNode { endpoint }
@@ -274,57 +252,17 @@ fn run_duet(transport: &Transport, offline: bool) {
         &sender_env_vars,
     );
     sending.set_default_timeout(BUDGET);
-    let exit = match sending.expect_eof() {
-        Ok(code) => code,
-        Err(error) => {
-            // A gateway that will not route this model says nothing about
-            // `send`, and a live test that reports that as a product failure is
-            // worse than one that says it could not run. Mock mode never
-            // reaches here.
-            let tail = common::screen_tail(&sending, 1200);
-            assert!(
-                common::model_unavailable_in_screen(&tail),
-                "[{}] the sender did not exit: {error}\nscreen tail:\n{tail}",
-                transport.label()
-            );
-            eprintln!(
-                "SKIP({}): the proxy could not serve the model",
-                transport.label()
-            );
-            return;
-        }
-    };
-    assert_eq!(
-        exit,
-        0,
-        "[{}] the sender should exit 0 after sending:\n{}",
-        transport.label(),
-        common::screen_tail(&sending, 1600)
-    );
+    if !assert_duet_sender_exit(&mut sending, transport) {
+        return;
+    }
     if offline {
-        assert_eq!(
-            inbox.read_position(&expected_from).unwrap().unwrap_or(0),
-            initial_position
-        );
-        // Append acknowledges Raft commit; the receiver's node can still be
-        // applying it. Use the existing delivery budget and blocking tail.
-        let (stored, _) = inbox
-            .poll_conversation(
-                &expected_from,
-                tail,
-                u64::try_from(BUDGET.as_millis()).unwrap(),
-            )
-            .unwrap();
-        assert!(
-            stored.iter().any(|message| message.from == expected_from),
-            "[{}] no durable envelope from {expected_from}: {stored:?}\nsender:\n{}",
-            transport.label(),
-            common::screen_tail(&sending, 6000)
-        );
-        assert_eq!(
-            inbox.read_position(&expected_from).unwrap().unwrap_or(0),
+        assert_offline_duet_delivery(
+            &inbox,
+            &expected_from,
+            tail,
             initial_position,
-            "inspecting durable delivery must not acknowledge it for the offline receiver"
+            transport,
+            &sending,
         );
         receiver = Some(start_receiver());
     }
@@ -334,14 +272,7 @@ fn run_duet(transport: &Transport, offline: bool) {
     // failure being guarded is the ambient fallback writing a local file while
     // the tool still answers "sent". "Arrived" has to mean it arrived at the
     // daemon and nowhere else.
-    let workspace_inbox =
-        runtime::agent_mailbox::inbox_path_under(sender_env.workspace_root(), RECEIVER);
-    assert!(
-        !workspace_inbox.exists(),
-        "[{}] the sender is on nexus, so nothing may be written to {}",
-        transport.label(),
-        workspace_inbox.display()
-    );
+    assert_no_local_duet_inbox(sender_env.workspace_root(), transport);
 
     // ── 4. The receiver surfaces it ────────────────────────────────────────
     // The REPL frames a peer message under `Message from <name>`. Seeing
@@ -356,10 +287,130 @@ fn run_duet(transport: &Transport, offline: bool) {
     // cursor, this one is the receiver's, and a receiver that surfaces a message
     // without recording it re-delivers the same message forever — which is how
     // a re-reply storm starts.
+    assert_duet_receiver_receipt(&inbox, &expected_from, tail, transport, &env);
+
+    // Both journeys reuse the signed identity. PtySession::drop kills the
+    // receiver, leaving its remote reader lease alive for 30 seconds — the
+    // next journey's entire delivery budget. Exit through the real REPL path
+    // so it joins the pollers and releases the seat before this fixture ends.
+    receiver.send("/exit\r").expect("exit receiver normally");
+    assert_eq!(
+        receiver.expect_eof().expect("receiver released its reader"),
+        0
+    );
+
+    eprintln!(
+        "[{}] {expected_from} -> {RECEIVER}, surfaced in the receiver's REPL [{}]",
+        transport.label(),
+        if env.is_mock() { "mock" } else { "live" },
+    );
+}
+fn duet_sender_identity() -> (String, String) {
+    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
+    let sender_name = runtime::nexus_mailbox::AgentCredential::load(&sender_credential)
+        .expect("load the sender credential bundle")
+        .agent;
+    (sender_credential, sender_name)
+}
+
+fn prepare_duet_receiver(transport: &Transport, workspace: &Path) -> node_home::NodeHome {
+    let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
+    let receiver_endpoint = match transport {
+        Transport::OneNode { endpoint }
+        | Transport::TwoNodes {
+            receiver: endpoint, ..
+        } => endpoint,
+    };
+    // The receiver attaches the way a machine does: a node record in its home
+    // and a session named for the credential the node minted.
+    let receiver_home = node_home::NodeHome::new(
+        "duet-receiver",
+        receiver_endpoint,
+        RECEIVER,
+        Path::new(&receiver_credential),
+    );
+    node_home::pin_agent_name(workspace, RECEIVER);
+    receiver_home
+}
+
+fn assert_duet_sender_exit(sending: &mut pty_expect::PtySession, transport: &Transport) -> bool {
+    let exit = match sending.expect_eof() {
+        Ok(code) => code,
+        Err(error) => {
+            // A gateway that will not route this model says nothing about
+            // `send`, and a live test that reports that as a product failure is
+            // worse than one that says it could not run. Mock mode never
+            // reaches here.
+            let tail = common::screen_tail(sending, 1200);
+            assert!(
+                common::model_unavailable_in_screen(&tail),
+                "[{}] the sender did not exit: {error}\nscreen tail:\n{tail}",
+                transport.label()
+            );
+            eprintln!(
+                "SKIP({}): the proxy could not serve the model",
+                transport.label()
+            );
+            return false;
+        }
+    };
+    assert_eq!(
+        exit,
+        0,
+        "[{}] the sender should exit 0 after sending:\n{}",
+        transport.label(),
+        common::screen_tail(sending, 1600)
+    );
+    true
+}
+
+fn assert_offline_duet_delivery(
+    inbox: &Mailbox,
+    expected_from: &str,
+    tail: u64,
+    initial_position: u64,
+    transport: &Transport,
+    sending: &pty_expect::PtySession,
+) {
+    assert_eq!(
+        inbox.read_position(expected_from).unwrap().unwrap_or(0),
+        initial_position
+    );
+    // Append acknowledges Raft commit; the receiver's node can still be
+    // applying it. Use the existing delivery budget and blocking tail.
+    let (stored, _) = inbox
+        .poll_conversation(
+            expected_from,
+            tail,
+            u64::try_from(BUDGET.as_millis()).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        stored.iter().any(|message| message.from == expected_from),
+        "[{}] no durable envelope from {expected_from}: {stored:?}\nsender:\n{}",
+        transport.label(),
+        common::screen_tail(sending, 6000)
+    );
+    assert_eq!(
+        inbox.read_position(expected_from).unwrap().unwrap_or(0),
+        initial_position,
+        "inspecting durable delivery must not acknowledge it for the offline receiver"
+    );
+}
+
+fn assert_duet_receiver_receipt(
+    inbox: &Mailbox,
+    expected_from: &str,
+    tail: u64,
+    transport: &Transport,
+    env: &TestEnv,
+) {
     let deadline = Instant::now() + BUDGET;
     loop {
         let recorded = inbox
-            .read_position(&expected_from)
+            .read_position(expected_from)
             .expect("read the receiver's position")
             .unwrap_or(0);
         if recorded > tail {
@@ -369,7 +420,7 @@ fn run_duet(transport: &Transport, offline: bool) {
             Instant::now() < deadline,
             "[{}] the receiver surfaced the message but never advanced its own read              position past {tail} in {}",
             transport.label(),
-            inbox.transcript_path(&expected_from)
+            inbox.transcript_path(expected_from)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -378,7 +429,7 @@ fn run_duet(transport: &Transport, offline: bool) {
     // The screen proves delivery; the mailbox proves the contents. Read from
     // the tail snapshot so this is about this run.
     let (envelopes, next) = inbox
-        .poll_conversation(&expected_from, tail, 0)
+        .poll_conversation(expected_from, tail, 0)
         .expect("read the conversation");
     let delivered = envelopes
         .iter()
@@ -412,20 +463,14 @@ fn run_duet(transport: &Transport, offline: bool) {
         "[{}] a summary the tool accepted must survive the crossing: {delivered:?}",
         transport.label()
     );
+}
 
-    // Both journeys reuse the signed identity. PtySession::drop kills the
-    // receiver, leaving its remote reader lease alive for 30 seconds — the
-    // next journey's entire delivery budget. Exit through the real REPL path
-    // so it joins the pollers and releases the seat before this fixture ends.
-    receiver.send("/exit\r").expect("exit receiver normally");
-    assert_eq!(
-        receiver.expect_eof().expect("receiver released its reader"),
-        0
-    );
-
-    eprintln!(
-        "[{}] {expected_from} -> {RECEIVER}, surfaced in the receiver's REPL [{}]",
+fn assert_no_local_duet_inbox(workspace: &Path, transport: &Transport) {
+    let workspace_inbox = runtime::agent_mailbox::inbox_path_under(workspace, RECEIVER);
+    assert!(
+        !workspace_inbox.exists(),
+        "[{}] the sender is on nexus, so nothing may be written to {}",
         transport.label(),
-        if env.is_mock() { "mock" } else { "live" },
+        workspace_inbox.display()
     );
 }

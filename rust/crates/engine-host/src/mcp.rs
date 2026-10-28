@@ -677,6 +677,10 @@ pub(crate) fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
 /// down. A poisoned lock or a failed shutdown is swallowed: teardown must not
 /// abort the surrounding cleanup path.
 pub fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
+    shutdown_mcp_ref_best_effort(mcp_state.as_deref());
+}
+
+pub(crate) fn shutdown_mcp_ref_best_effort(mcp_state: Option<&Mutex<RuntimeMcpState>>) {
     if let Some(state) = mcp_state {
         let _ = state
             .lock()
@@ -753,7 +757,7 @@ mod tests {
     #[test]
     fn startup_degraded_report_preserves_spawn_failure_metadata() {
         let root = temp_dir("spawn-failure");
-        let runtime_config = runtime::ConfigLoader::new(&root, &root.join("home"))
+        let runtime_config = runtime::ConfigLoader::new(&root, root.join("home"))
             .load()
             .unwrap();
         let outcome = PluginLoadOutcome {

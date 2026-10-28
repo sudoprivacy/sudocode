@@ -95,49 +95,7 @@ fn resume_pairs_reused_tool_ids_with_their_own_assistant_chain() {
     let path = root.join("interleaved.jsonl");
     let dump = root.join("requests");
     fs::create_dir_all(&dump).unwrap();
-    let metadata: Value = serde_json::from_str(
-        &Session::new()
-            .with_workspace_root(root)
-            .to_json()
-            .unwrap()
-            .render(),
-    )
-    .unwrap();
-    fs::write(&path, format!("{}\n", json!({"type":"history_checkpoint","history_version":1,"id":"seed","parent_id":null,"meta":metadata,"messages":[]}))).unwrap();
-    let messages = [
-        identified(
-            ConversationMessage::user_text("Read A"),
-            "a-user",
-            Some("seed"),
-            None,
-        ),
-        identified(
-            ConversationMessage::user_text("Read B"),
-            "b-user",
-            Some("seed"),
-            None,
-        ),
-        identified(tool_call(), "a-assistant", Some("a-user"), None),
-        identified(tool_call(), "b-assistant", Some("b-user"), None),
-        identified(
-            ConversationMessage::tool_result("call_1", "read_file", "A_PRIVATE_RESULT", false),
-            "a-result",
-            Some("a-assistant"),
-            Some("a-assistant"),
-        ),
-        identified(
-            ConversationMessage::tool_result("call_1", "read_file", "B_SELECTED_RESULT", false),
-            "b-result",
-            Some("b-assistant"),
-            Some("b-assistant"),
-        ),
-    ];
-    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-    for message in &messages {
-        let payload: Value = serde_json::from_str(&message.to_json().render()).unwrap();
-        writeln!(file, "{}", json!({"type":"message","message":payload})).unwrap();
-    }
-    drop(file);
+    seed_interleaved_tool_history(&path, root);
     let selected = Session::load_from_path(&path).unwrap();
     assert_eq!(selected.messages().len(), 3);
     assert_eq!(
@@ -163,7 +121,12 @@ fn resume_pairs_reused_tool_ids_with_their_own_assistant_chain() {
         ],
         &[("SUDOCODE_DUMP_REQUESTS", dump.to_str().unwrap())],
     );
-    cli.expect("The answer is 4").expect("resumed model answer");
+    cli.expect("The answer is 4").unwrap_or_else(|error| {
+        panic!(
+            "resumed model answer: {error}\n{}",
+            cli.render(common::screen_contents)
+        )
+    });
     assert_eq!(cli.expect_eof().unwrap(), 0);
     let mut inspected = 0;
     for entry in fs::read_dir(&dump).unwrap() {
@@ -236,7 +199,7 @@ fn run_print_turn(env: &TestEnv, transcript: &std::path::Path, marker: &str) {
     cli.expect("The answer is 4").unwrap_or_else(|error| {
         panic!(
             "resumed model answer: {error:?}\n{}",
-            cli.render(|screen| screen.contents())
+            cli.render(common::screen_contents)
         )
     });
     assert_eq!(cli.expect_eof().unwrap(), 0);
@@ -248,7 +211,7 @@ fn independent_cli_processes_append_to_the_same_sid_while_both_turns_are_open() 
 }
 
 #[test]
-fn resuming_during_another_turn_inherits_its_written_prefix() {
+fn resuming_during_another_turn_inherits_the_latest_completed_turn() {
     run_two_cli_contexts(true, false);
 }
 
@@ -310,7 +273,7 @@ fn run_two_cli_contexts(is_second_started_late: bool, is_legacy_seed: bool) {
         common::expect_input_line_cleared(
             second,
             env.timeout(),
-            "late runtime restored the written prefix",
+            "late runtime restored the completed prefix",
         );
     }
     // The first response remains blocked while a separate process submits the
@@ -326,7 +289,7 @@ fn run_two_cli_contexts(is_second_started_late: bool, is_legacy_seed: bool) {
     let prompt = format!("SECOND_CONTEXT_PROMPT {prompt}");
     second.send(&prompt).unwrap();
     common::expect_input_line(
-        &second,
+        second,
         "SECOND_CONTEXT_PROMPT",
         env.timeout(),
         "second prompt entered",
@@ -420,8 +383,8 @@ fn assert_two_cli_contexts(
         let messages = request["messages"].to_string();
         if is_second_started_late && messages.contains("SECOND_CONTEXT_PROMPT") {
             assert!(
-                messages.contains("FIRST_CONTEXT_PROMPT"),
-                "a later resume must inherit the already written user message"
+                !messages.contains("FIRST_CONTEXT_PROMPT"),
+                "a later resume must exclude the sibling's unfinished user message"
             );
             assert!(
                 !messages.contains("FIRST_CONTEXT_DONE"),
@@ -445,7 +408,7 @@ fn assert_two_cli_contexts(
 fn write_gate(root: &std::path::Path) {
     fs::write(
         root.join("gate.cjs"),
-        r#"
+        r"
 const fs = require('fs');
 const label = process.argv[2];
 fs.writeFileSync(label + '.ready', 'tool running');
@@ -455,7 +418,7 @@ const timer = setInterval(() => {
   fs.appendFileSync(label + '.effect', label + ' durable effect');
   process.stdout.write((label + '_OUTPUT_').repeat(6000));
 }, 10);
-"#,
+",
     )
     .unwrap();
 }
@@ -492,7 +455,13 @@ fn begin_gate(env: &TestEnv, cli: &mut PtySession, label: &str) {
 #[test]
 fn concurrent_tools_with_the_same_provider_id_keep_both_effects_and_full_outputs() {
     let env = shared_mock("shared-sid-concurrent-tools");
-    run_two_context_tools(&env);
+    run_two_context_tools(&env, false);
+}
+
+#[test]
+fn restoring_during_a_native_tool_uses_the_completed_turn_and_retains_both_branches() {
+    let env = shared_mock("shared-sid-completed-turn-restore");
+    run_two_context_tools(&env, true);
 }
 
 #[test]
@@ -501,17 +470,22 @@ fn live_independent_runtimes_preserve_tools_and_outputs_in_one_session() {
     assert_eq!(std::env::var("SCODE_TEST_BACKEND").as_deref(), Ok("live"));
     let env = TestEnv::new("shared-sid-live-concurrent-tools");
     enable_shared_history(&env);
-    run_two_context_tools(&env);
+    run_two_context_tools(&env, true);
 }
 
-fn run_two_context_tools(env: &TestEnv) {
+fn run_two_context_tools(env: &TestEnv, is_second_started_late: bool) {
     let root = env.workspace_root();
     let transcript = root.join("shared.jsonl");
     let seed = Session::new().with_workspace_root(root);
     let sid = seed.session_id.clone();
     save_seed(&seed, &transcript);
     write_gate(root);
-    let variables = [];
+    if is_second_started_late {
+        run_print_turn(env, &transcript, "SHARED_COMPLETED_PREFIX");
+    }
+    let dump = root.join("requests");
+    fs::create_dir_all(&dump).unwrap();
+    let variables = [("SUDOCODE_DUMP_REQUESTS", dump.to_str().unwrap())];
     let args = [
         "--resume",
         transcript.to_str().unwrap(),
@@ -520,11 +494,14 @@ fn run_two_context_tools(env: &TestEnv) {
     ];
     let mut first = env.spawn_with_env(&args, &variables);
     common::expect_input_line_cleared(&first, env.timeout(), "first tool runtime ready");
-    let mut second = env.spawn_with_env(&args, &variables);
-    common::expect_input_line_cleared(&second, env.timeout(), "second tool runtime ready");
-    for (cli, label) in [(&mut first, "A"), (&mut second, "B")] {
-        begin_gate(env, cli, label);
+    let mut second = (!is_second_started_late).then(|| env.spawn_with_env(&args, &variables));
+    if let Some(second) = &second {
+        common::expect_input_line_cleared(second, env.timeout(), "second tool runtime ready");
     }
+    begin_gate(env, &mut first, "A");
+    let second = second.get_or_insert_with(|| env.spawn_with_env(&args, &variables));
+    common::expect_input_line_cleared(second, env.timeout(), "second tool runtime ready");
+    begin_gate(env, second, "B");
     assert!(!root.join("A.effect").exists() && !root.join("B.effect").exists());
     // Finish B while A still owns an unfinished tool with the same call ID.
     fs::write(root.join("B.release"), "release B").unwrap();
@@ -537,6 +514,13 @@ fn run_two_context_tools(env: &TestEnv) {
         "B durable effect"
     );
     assert!(!root.join("A.effect").exists());
+    if is_second_started_late {
+        common::expect_input_line_cleared(second, env.timeout(), "B accepts input after its turn");
+        wait_for_completed_gate(env, &transcript, "B");
+        run_print_turn(env, &transcript, "FRESH_WHILE_A_TOOL_OPEN");
+        assert!(!root.join("A.effect").exists());
+        assert_completed_tool_restore_requests(&dump);
+    }
     fs::write(root.join("A.release"), "release A").unwrap();
     wait_for_file(&root.join("A.effect"));
     first
@@ -546,10 +530,73 @@ fn run_two_context_tools(env: &TestEnv) {
         fs::read_to_string(root.join("A.effect")).unwrap(),
         "A durable effect"
     );
-    for cli in [&mut first, &mut second] {
+    for cli in [&mut first, second] {
         exit_cli(env, cli);
     }
     assert_gate_outputs(&transcript, &sid, env.is_mock().then_some("call_1"));
+}
+
+fn wait_for_completed_gate(env: &TestEnv, transcript: &std::path::Path, label: &str) {
+    let deadline = Instant::now() + env.timeout();
+    loop {
+        let graph = HistoryGraph::decode(&fs::read(transcript).unwrap()).unwrap();
+        let session = graph.completed_session(None).unwrap();
+        let completed = session.to_json().unwrap().render();
+        if completed.contains(&format!("node gate.cjs {label}"))
+            && completed.contains("Concurrency batch done.")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}'s turn was not durably committed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_completed_tool_restore_requests(dump: &std::path::Path) {
+    let mut sibling_requests = 0;
+    let mut fresh_requests = 0;
+    for entry in fs::read_dir(dump).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if ![
+            "-messages.json",
+            "-chat-completions.json",
+            "-responses.json",
+        ]
+        .iter()
+        .any(|suffix| name.to_string_lossy().ends_with(suffix))
+        {
+            continue;
+        }
+        let request: Value = serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+        let wire = request
+            .get("messages")
+            .or_else(|| request.get("input"))
+            .expect("provider request carries its conversation")
+            .to_string();
+        if wire.contains("node gate.cjs B") || wire.contains("FRESH_WHILE_A_TOOL_OPEN") {
+            assert!(wire.contains("SHARED_COMPLETED_PREFIX"));
+            assert!(
+                !wire.contains("node gate.cjs A"),
+                "a new context inherited the source's running tool: {wire}"
+            );
+            assert!(!wire.contains("Side effects may already have occurred"));
+            sibling_requests += 1;
+        }
+        if wire.contains("FRESH_WHILE_A_TOOL_OPEN") {
+            assert!(wire.contains("node gate.cjs B"));
+            assert!(wire.contains("Concurrency batch done."));
+            fresh_requests += 1;
+        }
+    }
+    assert!(
+        sibling_requests >= 3,
+        "inspect both B requests and the fresh restore"
+    );
+    assert_eq!(fresh_requests, 1);
 }
 
 #[test]
@@ -592,7 +639,7 @@ fn idle_runtime_preserves_continuation_and_prevents_session_deletion() {
         .unwrap_or_else(|error| {
             panic!(
                 "live runtime deletion: {error}\n{}",
-                rejected.render(|s| s.contents())
+                rejected.render(common::screen_contents)
             )
         });
     exit_cli(&env, &mut rejected);
@@ -865,10 +912,10 @@ fn interrupted_final_records_recover_without_changing_committed_history() {
         let mut interrupted = committed.clone();
         match mode {
             "partial-json" => {
-                interrupted.extend_from_slice(br#"{"type":"message","message":{"blocks":["#)
+                interrupted.extend_from_slice(br#"{"type":"message","message":{"blocks":["#);
             }
             "partial-utf8" => {
-                interrupted.extend_from_slice(b"{\"type\":\"message\",\"text\":\"\xe4")
+                interrupted.extend_from_slice(b"{\"type\":\"message\",\"text\":\"\xe4");
             }
             _ => {
                 assert_eq!(interrupted.pop(), Some(b'\n'));
@@ -876,7 +923,7 @@ fn interrupted_final_records_recover_without_changing_committed_history() {
         }
         fs::write(&transcript, &interrupted).unwrap();
         let inspected = Session::load_from_path(&transcript).unwrap();
-        assert!(!inspected.messages().is_empty());
+        assert_ne!(inspected.messages(), []);
         assert_eq!(
             fs::read(&transcript).unwrap(),
             interrupted,
@@ -990,4 +1037,50 @@ fn automatic_pruning_records_a_new_view_and_preserves_the_full_source_result() {
         !source_ids.contains(&pruned.history.as_ref().unwrap().id),
         "derived payload reused the source identity"
     );
+}
+
+fn seed_interleaved_tool_history(path: &std::path::Path, root: &std::path::Path) {
+    let metadata: Value = serde_json::from_str(
+        &Session::new()
+            .with_workspace_root(root)
+            .to_json()
+            .unwrap()
+            .render(),
+    )
+    .unwrap();
+    fs::write(path, format!("{}\n", json!({"type":"history_checkpoint","history_version":1,"id":"seed","parent_id":null,"meta":metadata,"messages":[]}))).unwrap();
+    let messages = [
+        identified(
+            ConversationMessage::user_text("Read A"),
+            "a-user",
+            Some("seed"),
+            None,
+        ),
+        identified(
+            ConversationMessage::user_text("Read B"),
+            "b-user",
+            Some("seed"),
+            None,
+        ),
+        identified(tool_call(), "a-assistant", Some("a-user"), None),
+        identified(tool_call(), "b-assistant", Some("b-user"), None),
+        identified(
+            ConversationMessage::tool_result("call_1", "read_file", "A_PRIVATE_RESULT", false),
+            "a-result",
+            Some("a-assistant"),
+            Some("a-assistant"),
+        ),
+        identified(
+            ConversationMessage::tool_result("call_1", "read_file", "B_SELECTED_RESULT", false),
+            "b-result",
+            Some("b-assistant"),
+            Some("b-assistant"),
+        ),
+    ];
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    for message in &messages {
+        let payload: Value = serde_json::from_str(&message.to_json().render()).unwrap();
+        writeln!(file, "{}", json!({"type":"message","message":payload})).unwrap();
+    }
+    drop(file);
 }

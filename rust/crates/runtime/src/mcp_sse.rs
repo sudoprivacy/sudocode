@@ -51,6 +51,48 @@ pub struct McpSseConnection {
     read_task: tokio::task::JoinHandle<()>,
 }
 
+async fn receive_endpoint(
+    base_url: &Url,
+    receiver: &mut mpsc::Receiver<SseEvent>,
+) -> io::Result<Url> {
+    let endpoint_event = receiver.recv().await.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "MCP SSE stream closed before endpoint event",
+        )
+    })?;
+    if endpoint_event.event.as_deref() != Some("endpoint") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "MCP SSE first event was not an `endpoint` event",
+        ));
+    }
+    let endpoint_path = endpoint_event.data.trim();
+    let endpoint = base_url.join(endpoint_path).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("MCP SSE endpoint `{endpoint_path}` is not a valid URL: {error}"),
+        )
+    })?;
+    // Same-origin guard: the `endpoint` event is server-controlled, so
+    // without this a malicious server could redirect our credentialed
+    // POSTs to an arbitrary host (e.g. endpoint data "//attacker/x", which
+    // `Url::join` resolves to the attacker's host). Only same host:port as
+    // the SSE base URL is allowed; a legitimate server emits a same-origin
+    // path like "/message".
+    if endpoint.host_str() != base_url.host_str()
+        || endpoint.port_or_known_default() != base_url.port_or_known_default()
+        || endpoint.scheme() != base_url.scheme()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("MCP SSE endpoint `{endpoint_path}` must be same-origin as `{base_url}`"),
+        ));
+    }
+
+    Ok(endpoint)
+}
+
 impl McpSseConnection {
     /// Open the SSE stream at `transport.url`, await the `endpoint` event, and
     /// return a ready-to-use connection. Static `headers` are merged with the
@@ -71,7 +113,7 @@ impl McpSseConnection {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(reqwest_error_to_io)?;
+            .map_err(|error| reqwest_error_to_io(&error))?;
         let headers = resolve_headers(transport, server_name).await;
 
         let base_url = Url::parse(&transport.url).map_err(|error| {
@@ -88,7 +130,7 @@ impl McpSseConnection {
             .header(ACCEPT, "text/event-stream")
             .send()
             .await
-            .map_err(reqwest_error_to_io)?;
+            .map_err(|error| reqwest_error_to_io(&error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(io::Error::other(format!(
@@ -138,40 +180,7 @@ impl McpSseConnection {
             closed_task.store(true, Ordering::Relaxed);
         })));
 
-        let endpoint_event = receiver.recv().await.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "MCP SSE stream closed before endpoint event",
-            )
-        })?;
-        if endpoint_event.event.as_deref() != Some("endpoint") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "MCP SSE first event was not an `endpoint` event",
-            ));
-        }
-        let endpoint_path = endpoint_event.data.trim();
-        let endpoint = base_url.join(endpoint_path).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("MCP SSE endpoint `{endpoint_path}` is not a valid URL: {error}"),
-            )
-        })?;
-        // Same-origin guard: the `endpoint` event is server-controlled, so
-        // without this a malicious server could redirect our credentialed
-        // POSTs to an arbitrary host (e.g. endpoint data "//attacker/x", which
-        // `Url::join` resolves to the attacker's host). Only same host:port as
-        // the SSE base URL is allowed; a legitimate server emits a same-origin
-        // path like "/message".
-        if endpoint.host_str() != base_url.host_str()
-            || endpoint.port_or_known_default() != base_url.port_or_known_default()
-            || endpoint.scheme() != base_url.scheme()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("MCP SSE endpoint `{endpoint_path}` must be same-origin as `{base_url}`"),
-            ));
-        }
+        let endpoint = receive_endpoint(&base_url, &mut receiver).await?;
 
         // Disengage the abort-on-drop guard: the read task now belongs to the
         // connection and is aborted only on shutdown.
@@ -217,7 +226,7 @@ impl McpSseConnection {
             .body(body)
             .send()
             .await
-            .map_err(reqwest_error_to_io)?;
+            .map_err(|error| reqwest_error_to_io(&error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(io::Error::other(format!(
@@ -233,24 +242,23 @@ impl McpSseConnection {
                     "MCP SSE stream closed before response",
                 )
             })?;
-            let response: JsonRpcResponse<TResult> = match serde_json::from_str(&event.data) {
-                Ok(response) => response,
-                Err(_) => {
-                    if let Ok(notification) =
-                        serde_json::from_str::<JsonRpcNotification>(&event.data)
-                    {
-                        if notification.method == "notifications/progress" {
-                            if let Some(params) = notification.params {
-                                if let Ok(progress) =
-                                    serde_json::from_value::<McpProgressNotification>(params)
-                                {
-                                    crate::mcp_server_manager::emit_mcp_progress(progress);
-                                }
+            let response: JsonRpcResponse<TResult> = if let Ok(response) =
+                serde_json::from_str(&event.data)
+            {
+                response
+            } else {
+                if let Ok(notification) = serde_json::from_str::<JsonRpcNotification>(&event.data) {
+                    if notification.method == "notifications/progress" {
+                        if let Some(params) = notification.params {
+                            if let Ok(progress) =
+                                serde_json::from_value::<McpProgressNotification>(params)
+                            {
+                                crate::mcp_server_manager::emit_mcp_progress(progress);
                             }
                         }
                     }
-                    continue;
                 }
+                continue;
             };
             if response.id == id {
                 return Ok(response);
@@ -365,7 +373,7 @@ fn build_header_map(headers: &BTreeMap<String, String>) -> io::Result<HeaderMap>
     Ok(map)
 }
 
-fn reqwest_error_to_io(error: reqwest::Error) -> io::Error {
+fn reqwest_error_to_io(error: &reqwest::Error) -> io::Error {
     io::Error::other(format!("MCP SSE HTTP error: {error}"))
 }
 

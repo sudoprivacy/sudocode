@@ -437,11 +437,10 @@ impl ApiError {
             // ApiError variant only requires updating categorize().
             _ => match self.categorize() {
                 ErrorCategory::Transport => "provider_transport",
-                ErrorCategory::Auth => "provider_auth",
+                ErrorCategory::Auth | ErrorCategory::Configuration => "provider_auth",
                 ErrorCategory::ContextWindow => "context_window",
                 ErrorCategory::RequestSize => "request_size",
                 ErrorCategory::RuntimeIo => "runtime_io",
-                ErrorCategory::Configuration => "provider_auth",
                 // Structured (Http/Api/RetriesExhausted) already handled above.
                 ErrorCategory::Structured => "provider_error",
             },

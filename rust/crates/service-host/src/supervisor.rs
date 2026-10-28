@@ -553,6 +553,28 @@ pub fn ensure_local_box(endpoint: &str, owner_root: Option<&Path>) -> Result<Opt
     .map(Some)
 }
 
+async fn forward_stdio_request(
+    http: &reqwest::Client,
+    discovery: &Discovery,
+    request: &Request,
+) -> Result<Response> {
+    let endpoint: reqwest::Url = discovery.endpoint.parse()?;
+    validate_endpoint(&endpoint)?;
+    let response = http
+        .post(endpoint)
+        .bearer_auth(&discovery.token)
+        .json(&json!({"id": request.id, "method": request.method, "params": request.params}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Response>()
+        .await?;
+    if response.id != request.id {
+        return Err("service response does not match the request".into());
+    }
+    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
+}
+
 async fn dispatch_stdio(
     root: Arc<PathBuf>,
     http: &reqwest::Client,
@@ -616,24 +638,7 @@ async fn dispatch_stdio(
             Ok(json!({"running": false, "version": artifacts::version()})),
         );
     };
-    let result = async {
-        let endpoint: reqwest::Url = discovery.endpoint.parse()?;
-        validate_endpoint(&endpoint)?;
-        let response = http
-            .post(endpoint)
-            .bearer_auth(&discovery.token)
-            .json(&json!({"id": request.id, "method": request.method, "params": request.params}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Response>()
-            .await?;
-        if response.id != request.id {
-            return Err("service response does not match the request".into());
-        }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
-    }
-    .await;
+    let result = forward_stdio_request(http, &discovery, &request).await;
     if result.is_err() || request.method == "service.shutdown" {
         let mut current = connected.lock().await;
         if current
@@ -647,8 +652,8 @@ async fn dispatch_stdio(
         Ok(response) => response,
         Err(_)
             if request.method == "service.shutdown"
-                && !read_discovery(&root)
-                    .is_some_and(|value| value.instance == discovery.instance) =>
+                && read_discovery(&root)
+                    .is_none_or(|value| value.instance != discovery.instance) =>
         {
             Response::from_result(request.id, Ok(json!(true)))
         }
@@ -756,6 +761,67 @@ async fn handle(
 }
 
 /// One supervisor per OS-user service root. File locks are retained for its lifetime.
+fn standalone_command(root: &Path) -> Result<(Command, NexusVfsClient)> {
+    install(root)?;
+    let nexus_listener = TcpListener::bind("127.0.0.1:0")?;
+    let nexus_port = nexus_listener.local_addr()?.port();
+    drop(nexus_listener);
+    let mut command = Command::new(artifacts::binary(root));
+    command
+        .args([
+            "serve-local",
+            "--port",
+            &nexus_port.to_string(),
+            "--hostname",
+            "localhost",
+            "--data-dir",
+        ])
+        .arg(root.join("data"))
+        .arg("--identity-dir")
+        .arg(root.join("identity"))
+        .arg("--plugin-dir")
+        .arg(artifacts::plugins(root))
+        .env("NEXUS_DATA_DIR", root.join("data"));
+    Ok((
+        command,
+        NexusVfsClient::connect(&format!("http://127.0.0.1:{nexus_port}"))?,
+    ))
+}
+
+fn await_runtime_ready(
+    runtime: &Runtime,
+    client: &NexusVfsClient,
+    is_local_box: bool,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = runtime
+            .child
+            .lock()
+            .map_err(|_| "runtime child lock poisoned")?
+            .try_wait()?
+        {
+            return Err(format!("Nexus exited during startup: {status}").into());
+        }
+        if client.stat("/", "").is_ok()
+            && (is_local_box
+                || capabilities::dispatch(
+                    client,
+                    "vault.list",
+                    &json!({"namespace": "service:scode-readiness"}),
+                )
+                .is_ok())
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Nexus or Vault did not become ready".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
 pub fn run_daemon() -> Result<()> {
     let root = artifacts::root()?;
     let lock = lock_file(&root, "service.lock")?;
@@ -780,30 +846,7 @@ pub fn run_daemon() -> Result<()> {
         node_lock = Some(file);
         (profile.command()?, profile.client()?)
     } else {
-        install(&root)?;
-        let nexus_listener = TcpListener::bind("127.0.0.1:0")?;
-        let nexus_port = nexus_listener.local_addr()?.port();
-        drop(nexus_listener);
-        let mut command = Command::new(artifacts::binary(&root));
-        command
-            .args([
-                "serve-local",
-                "--port",
-                &nexus_port.to_string(),
-                "--hostname",
-                "localhost",
-                "--data-dir",
-            ])
-            .arg(root.join("data"))
-            .arg("--identity-dir")
-            .arg(root.join("identity"))
-            .arg("--plugin-dir")
-            .arg(artifacts::plugins(&root))
-            .env("NEXUS_DATA_DIR", root.join("data"));
-        (
-            command,
-            NexusVfsClient::connect(&format!("http://127.0.0.1:{nexus_port}"))?,
-        )
+        standalone_command(&root)?
     };
     let client = Arc::new(client);
     command
@@ -843,32 +886,7 @@ pub fn run_daemon() -> Result<()> {
         _lock: lock,
         _node_lock: node_lock,
     };
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Some(status) = runtime
-            .child
-            .lock()
-            .map_err(|_| "runtime child lock poisoned")?
-            .try_wait()?
-        {
-            return Err(format!("Nexus exited during startup: {status}").into());
-        }
-        if client.stat("/", "").is_ok()
-            && (profile.is_some()
-                || capabilities::dispatch(
-                    &client,
-                    "vault.list",
-                    &json!({"namespace": "service:scode-readiness"}),
-                )
-                .is_ok())
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err("Nexus or Vault did not become ready".into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    await_runtime_ready(&runtime, &client, profile.is_some())?;
     artifacts::atomic_write(
         &runtime.root.join("run").join("service.json"),
         &serde_json::to_vec(&discovery)?,
@@ -882,7 +900,7 @@ pub fn run_daemon() -> Result<()> {
         let (shutdown, mut stopping) = tokio::sync::watch::channel(false);
         let state = ServiceState { client, discovery, shutdown, admission: Arc::new(tokio::sync::RwLock::new(false)), local_box: profile };
         let app = Router::new().route("/rpc", post(handle))
-            .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES as usize)).with_state(state);
+            .layer(DefaultBodyLimit::max(usize::try_from(MAX_REQUEST_BYTES).expect("request limit fits usize"))).with_state(state);
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let stop = async move {
             let stopped_child = async {
@@ -892,7 +910,7 @@ pub fn run_daemon() -> Result<()> {
                     if child.lock().is_ok_and(|mut child| !matches!(child.try_wait(), Ok(None))) { break; }
                 }
             };
-            tokio::select! { _ = shutdown_signal() => {}, _ = stopping.changed() => {}, _ = stopped_child => {} }
+            tokio::select! { _ = shutdown_signal() => {}, _ = stopping.changed() => {}, () = stopped_child => {} }
         };
         axum::serve(listener, app).with_graceful_shutdown(stop).await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())

@@ -131,7 +131,7 @@ pub enum InputAction {
         draft: Option<serde_json::Value>,
         input: TurnInput,
         delivery: InputDelivery,
-        context: Option<PromptContext>,
+        context: Option<Box<PromptContext>>,
     },
     Flush,
     FlushOrCancel,
@@ -334,7 +334,7 @@ pub enum EngineEvent {
         input: String,
     },
     /// An authorized invocation acquired an execution slot. Input includes
-    /// any hook rewrite; merely receiving ToolCall does not mean it is running.
+    /// any hook rewrite; merely receiving `ToolCall` does not mean it is running.
     ToolStarted {
         id: String,
         name: String,
@@ -361,8 +361,8 @@ pub enum EngineEvent {
     /// the CLI `ToolExecutor`'s progress callbacks. Structured; the renderer
     /// formats it.
     ToolProgress(ToolProgressEvent),
-    /// Live progress from a running plugin hook (the PreToolUse / PostToolUse /
-    /// PostToolUseFailure lifecycle) — was the build-time
+    /// Live progress from a running plugin hook (the `PreToolUse` / `PostToolUse` /
+    /// `PostToolUseFailure` lifecycle) — was the build-time
     /// `CliHookProgressReporter` stderr sink in the REPL, now surfaced through
     /// the seam. Structured; the renderer formats it.
     HookProgress(HookProgressEvent),

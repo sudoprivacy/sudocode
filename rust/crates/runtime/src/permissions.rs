@@ -197,6 +197,7 @@ pub enum QuestionKind {
 }
 
 impl QuestionKind {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             QuestionKind::SingleSelect => "single_select",
@@ -205,14 +206,18 @@ impl QuestionKind {
             QuestionKind::Boolean => "boolean",
         }
     }
+}
 
-    pub fn from_str(value: &str) -> Option<Self> {
+impl std::str::FromStr for QuestionKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "single_select" => Some(QuestionKind::SingleSelect),
-            "multi_select" => Some(QuestionKind::MultiSelect),
-            "text" => Some(QuestionKind::Text),
-            "boolean" => Some(QuestionKind::Boolean),
-            _ => None,
+            "single_select" => Ok(Self::SingleSelect),
+            "multi_select" => Ok(Self::MultiSelect),
+            "text" => Ok(Self::Text),
+            "boolean" => Ok(Self::Boolean),
+            _ => Err(format!("unknown question kind: {value}")),
         }
     }
 }

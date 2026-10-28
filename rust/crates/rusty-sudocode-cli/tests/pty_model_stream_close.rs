@@ -138,37 +138,14 @@ impl StreamProvider {
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let captured = bodies.clone();
         let worker = thread::spawn(move || {
-            'connections: while !stop.load(Ordering::SeqCst) {
+            while !stop.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 };
-                socket.set_nonblocking(false).unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut input = BufReader::new(socket.try_clone().unwrap());
-                let mut first = String::new();
-                if input.read_line(&mut first).unwrap_or(0) == 0 {
+                let Some((first, body)) = read_stream_request(&mut socket) else {
                     continue;
-                }
-                let mut length = 0;
-                loop {
-                    let mut line = String::new();
-                    if input.read_line(&mut line).unwrap_or(0) == 0 {
-                        continue 'connections;
-                    }
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some((key, value)) = line.split_once(':') {
-                        if key.eq_ignore_ascii_case("content-length") {
-                            length = value.trim().parse().unwrap();
-                        }
-                    }
-                }
-                let mut body = vec![0; length];
-                input.read_exact(&mut body).unwrap();
+                };
                 if !first.starts_with("POST ") {
                     let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}");
                     continue;
@@ -186,100 +163,7 @@ impl StreamProvider {
                     let _ = socket.write_all(response.as_bytes());
                     continue;
                 }
-                let empty = matches!(
-                    kind,
-                    ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
-                ) || (matches!(
-                    kind,
-                    ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
-                ) && index == 0)
-                    || (matches!(kind, ResponseKind::ToolThenEmptyThenComplete) && index == 1);
-                let mut body = refusal_body(kind).unwrap_or_else(|| {
-                    response_body(!matches!(kind, ResponseKind::Interrupted), empty)
-                });
-                match kind {
-                    ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete => {
-                        let fixture: Value = serde_json::from_str(include_str!(
-                            "../../../test-fixtures/retry_usage_stream.json"
-                        )).unwrap();
-                        let mut events = fixture["events"].as_array().unwrap().clone();
-                        if matches!(kind, ResponseKind::RetryUsageComplete) {
-                            events.remove(0);
-                        } else {
-                            // Partial progress from A must remain visible, but
-                            // must never be silently joined to response B.
-                            events.splice(1..1, [
-                                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-                                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"FAILED_ATTEMPT_PARTIAL"}}),
-                                json!({"type":"content_block_stop","index":0}),
-                            ]);
-                        }
-                        body = events.iter().map(|event| format!(
-                            "event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()
-                        )).collect();
-                    }
-                    ResponseKind::GeminiCapture => body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"STREAM_BODY_VERIFIED\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":8}}\n\n".to_string(),
-                    ResponseKind::SignedCapture => body = signed_capture_body(),
-                    ResponseKind::CapturePaced => {
-                        body = padded_capture_body("SSE_LOG_ONLY_PADDING", 512);
-                    }
-                    ResponseKind::CaptureBurst => {
-                        body = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
-                    }
-                    ResponseKind::UsageAtStart => {
-                        body = body.replace(
-                            "\"input_tokens\":12,\"output_tokens\":0",
-                            "\"input_tokens\":12,\"output_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"cost_units\":17,\"cost_currency\":\"sudo_point\"",
-                        ).replace("\"output_tokens\":8", "\"output_tokens\":0");
-                    }
-                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly => {
-                        body = concat!(
-                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{\"content\":\"STREAM_BODY_VERIFIED\"}}]}\n\n",
-                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                            "data: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
-                            "data: [DONE]\n\n",
-                        ).into();
-                        if matches!(kind, ResponseKind::ChatTotalOnly) && index == 0 {
-                            body = body.replace(
-                                "\"prompt_tokens\":12,\"completion_tokens\":8",
-                                "\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":25",
-                            );
-                        }
-                        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
-                            body = body.replace(
-                                "\"prompt_tokens\":12,\"completion_tokens\":8",
-                                "\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":5}",
-                            );
-                        }
-                    }
-                    ResponseKind::ResponsesDoneKeepAlive => {
-                        body = concat!(
-                            "event: response.created\ndata: {\"id\":\"response\",\"model\":\"sonnet\"}\n\n",
-                            "event: response.output_text.delta\ndata: {\"delta\":\"STREAM_BODY_VERIFIED\"}\n\n",
-                            "event: response.output_text.done\ndata: {}\n\n",
-                            "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n\n",
-                        ).into();
-                    }
-                    _ => {}
-                }
-                if empty
-                    && matches!(
-                        kind,
-                        ResponseKind::AlwaysEmptyThinking | ResponseKind::EmptyThinkingThenComplete
-                    )
-                {
-                    let boundary = body.find("event: message_delta").unwrap();
-                    body.insert_str(boundary, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
-                }
-                if matches!(
-                    kind,
-                    ResponseKind::StopReasonOnly | ResponseKind::StopReasonKeepAlive
-                ) {
-                    // The provider adapter stops reading after stop_reason. A
-                    // message_stop in a later packet is therefore never seen.
-                    let end = body.find("event: message_stop").unwrap();
-                    body.truncate(end);
-                }
+                let body = stream_body_for(kind, index);
                 // Promise bytes that never arrive: reqwest must raise a body
                 // read error, instead of accepting ordinary clean HTTP EOF.
                 let missing = if matches!(
@@ -296,72 +180,7 @@ impl StreamProvider {
                     0
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + missing);
-                if matches!(kind, ResponseKind::CapturePaced) {
-                    socket.set_nodelay(true).unwrap();
-                    for bytes in response.as_bytes().chunks(1024) {
-                        if socket.write_all(bytes).is_err() {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                    continue;
-                }
-                if matches!(kind, ResponseKind::SignedCapture) {
-                    // Split a UTF-8 code point and the terminal frame across
-                    // separate packets; capture must preserve their raw bytes.
-                    let split = response.find("诊断").unwrap() + 1;
-                    let tail = response.find("event: message_stop").unwrap();
-                    let bytes = response.as_bytes();
-                    socket.write_all(&bytes[..split]).unwrap();
-                    thread::sleep(Duration::from_millis(20));
-                    socket.write_all(&bytes[split..tail]).unwrap();
-                    thread::sleep(Duration::from_millis(20));
-                    let _ = socket.write_all(&bytes[tail..]);
-                    continue;
-                }
-                if matches!(kind, ResponseKind::DelayedTerminal) {
-                    let split = response.find("event: message_stop").unwrap();
-                    socket.write_all(response[..split].as_bytes()).unwrap();
-                    socket
-                        .set_read_timeout(Some(Duration::from_millis(250)))
-                        .unwrap();
-                    let closed = peer_closed(&socket);
-                    terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
-                    let _ = socket.write_all(response[split..].as_bytes());
-                    continue;
-                }
-                if matches!(
-                    kind,
-                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly
-                ) {
-                    let split = response
-                        .find("data: {\"id\":\"chat\",\"choices\":[],\"usage\"")
-                        .unwrap();
-                    socket.write_all(response[..split].as_bytes()).unwrap();
-                    // Observe that the client stays connected after the
-                    // logical stop, before sending the separate usage tail.
-                    socket
-                        .set_read_timeout(Some(Duration::from_millis(250)))
-                        .unwrap();
-                    let closed = peer_closed(&socket);
-                    terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
-                    let _ = socket.write_all(response[split..].as_bytes());
-                } else {
-                    let _ = socket.write_all(response.as_bytes());
-                }
-                if matches!(
-                    kind,
-                    ResponseKind::StopReasonKeepAlive
-                        | ResponseKind::ChatDoneKeepAlive
-                        | ResponseKind::ChatTotalOnly
-                        | ResponseKind::ResponsesDoneKeepAlive
-                ) {
-                    // Keep the HTTP body open after a logical/protocol stop.
-                    socket
-                        .set_read_timeout(Some(Duration::from_millis(100)))
-                        .unwrap();
-                    while !stop.load(Ordering::SeqCst) && !peer_closed(&socket) {}
-                }
+                write_stream_response(&mut socket, kind, &response, &terminal_state, &stop);
             }
         });
         Self {
@@ -725,16 +544,7 @@ fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
         let directory =
             runtime::Session::response_captures_dir_for(&path, &seed.session_id).unwrap();
         drop(seed);
-        if old_logs > 0 {
-            std::fs::create_dir_all(&directory).unwrap();
-            let mut encoder =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-            encoder.write_all(&vec![b'x'; 64 * 1024]).unwrap();
-            let old_body = encoder.finish().unwrap();
-            for index in 0..old_logs {
-                std::fs::write(directory.join(format!("old-{index}.sse.gz")), &old_body).unwrap();
-            }
-        }
+        seed_old_response_logs(&directory, old_logs);
         let started = Instant::now();
         let mut cli = env.spawn(&["--resume", &session_id]);
         common::expect_input_line_cleared(&cli, env.timeout(), "resume performance prompt");
@@ -1058,345 +868,15 @@ fn check_response(kind: ResponseKind) {
         env.timeout(),
         "complete process output",
     );
-    if matches!(
+    ResponseCheck {
         kind,
-        ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete
-    ) {
-        assert_eq!(
-            provider.requests.load(Ordering::SeqCst),
-            1,
-            "never replay a stream after partial progress escaped"
-        );
-        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
-        let path = store
-            .list_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| session.message_count > 0)
-            .unwrap()
-            .path;
-        let session = runtime::Session::load_from_path(&path).unwrap();
-        let assistant = session
-            .messages()
-            .iter()
-            .rev()
-            .find(|message| message.role == runtime::MessageRole::Assistant)
-            .unwrap();
-        let usage = assistant.usage.expect("retain the observed response usage");
-        assert_eq!(usage.input_tokens, 2);
-        if matches!(kind, ResponseKind::SplicedAttempts) {
-            assert_ne!(exit, 0, "a spliced stream must fail: {screen}");
-            assert!(
-                common::screen_contains(&screen, "multiple message_start"),
-                "{screen}"
-            );
-            let saved_text: String = assistant
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    runtime::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                saved_text.lines().next(),
-                Some("FAILED_ATTEMPT_PARTIAL"),
-                "retain A before the runtime's interruption annotation"
-            );
-            assert!(
-                !saved_text.contains("RETRY_USAGE_SUCCESS"),
-                "B must never enter saved history"
-            );
-            assert!(
-                !screen.contains("RETRY_USAGE_SUCCESS"),
-                "never present B as A: {screen}"
-            );
-            assert_eq!(usage.cache_creation_input_tokens, 5235);
-            assert_eq!(usage.cache_read_input_tokens, 124_730);
-            assert_eq!(usage.output_tokens, 0);
-        } else {
-            assert_eq!(exit, 0, "{screen}");
-            assert!(screen.contains("RETRY_USAGE_SUCCESS"), "{screen}");
-            assert_eq!(usage.cache_creation_input_tokens, 0);
-            assert_eq!(usage.cache_read_input_tokens, 129_965);
-            assert_eq!(usage.output_tokens, 1569);
-        }
-        return;
+        env: &env,
+        provider: &provider,
+        screen: &screen,
+        exit,
+        log_path: &log_path,
     }
-    if is_missing_model {
-        assert_ne!(exit, 0, "missing model must fail: {screen}");
-        assert_eq!(
-            provider.requests.load(Ordering::SeqCst),
-            1,
-            "never retry a configuration problem"
-        );
-        assert!(screen.contains("model_not_found"), "{screen}");
-        assert!(screen.contains("req_provider_error"), "{screen}");
-        assert!(
-            common::screen_contains(&screen, "selected model is not available"),
-            "{screen}"
-        );
-        assert!(!screen.contains("retry 1/8"), "{screen}");
-        return;
-    }
-    if matches!(
-        kind,
-        ResponseKind::UsageAtStart
-            | ResponseKind::ChatDoneKeepAlive
-            | ResponseKind::ChatTotalOnly
-            | ResponseKind::ResponsesDoneKeepAlive
-    ) {
-        assert_eq!(exit, 0, "{screen}");
-        assert_progress_trace(&log_path);
-        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
-        let path = store
-            .list_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| session.message_count > 0)
-            .unwrap()
-            .path;
-        let session = runtime::Session::load_from_path(&path).unwrap();
-        let usage = session
-            .messages()
-            .iter()
-            .rev()
-            .find(|message| message.role == runtime::MessageRole::Assistant)
-            .unwrap()
-            .usage
-            .expect("persist the provider's actual usage");
-        if matches!(kind, ResponseKind::ChatTotalOnly) {
-            assert_eq!(usage.input_tokens, 0, "never infer input allocation");
-            assert_eq!(usage.output_tokens, 0, "never infer output allocation");
-            assert_eq!(
-                usage.total_tokens(),
-                25,
-                "retain the provider's actual total"
-            );
-            assert_eq!(usage.reported_total_tokens, Some(25));
-            assert!(!usage.has_complete_token_breakdown());
-            assert!(runtime::UsageTracker::from_session(&session)
-                .current_context_usage()
-                .is_none());
-            assert!(usage
-                .estimate_cost_usd_with_pricing(runtime::ModelPricing::default_sonnet_tier())
-                .is_none());
-            assert!(
-                common::screen_contains(&screen, "\"total_tokens\":25"),
-                "{screen}"
-            );
-            assert!(
-                common::screen_contains(&screen, "\"token_breakdown_complete\":false"),
-                "{screen}"
-            );
-            assert!(
-                !common::screen_contains(&screen, "\"cost_units\":null"),
-                "unknown bills stay omitted"
-            );
-            assert!(
-                !common::screen_contains(&screen, "\"cost_currency\":null"),
-                "unknown currencies stay omitted"
-            );
-            assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
-            let events: Vec<Value> = std::fs::read_to_string(&log_path)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert!(events.iter().any(|event| event["event"] == "response_usage"
-                && event["attributes"]["reported_total_tokens"] == 25));
-
-            // A second real CLI process must restore the total-only receipt,
-            // add a fully allocated response, and recover its context anchor.
-            let mut resumed =
-                env.spawn_with_env(&["--permission-mode", "read-only", "--resume"], &[]);
-            common::expect_input_line_cleared(&resumed, env.timeout(), "resumed usage prompt");
-            resumed.send("Continue the stream result").unwrap();
-            common::expect_input_line(
-                &resumed,
-                "Continue the stream result",
-                env.timeout(),
-                "resume input",
-            );
-            resumed.send("\r").unwrap();
-            common::expect_screen(
-                &resumed,
-                |_| {
-                    runtime::Session::load_from_path(&path).is_ok_and(|session| {
-                        session
-                            .messages()
-                            .iter()
-                            .filter(|message| message.role == runtime::MessageRole::Assistant)
-                            .count()
-                            == 2
-                    })
-                },
-                env.timeout(),
-                "persist the resumed response",
-            );
-            common::expect_input_line_cleared(&resumed, env.timeout(), "resumed turn complete");
-            resumed.send("/exit").unwrap();
-            common::expect_input_line(&resumed, "/exit", env.timeout(), "exit input");
-            resumed.send("\r").unwrap();
-            assert_eq!(resumed.expect_eof().unwrap(), 0);
-            let restored = runtime::Session::load_from_path(&path).unwrap();
-            assert_eq!(
-                restored
-                    .messages()
-                    .iter()
-                    .filter(|message| message.role == runtime::MessageRole::Assistant)
-                    .count(),
-                2,
-                "resume must update the original transcript"
-            );
-            let tracker = runtime::UsageTracker::from_session(&restored);
-            assert_eq!(tracker.cumulative_usage().total_tokens(), 45);
-            assert_eq!(tracker.cumulative_usage().known_total_tokens(), 20);
-            assert!(!tracker.cumulative_usage().has_complete_token_breakdown());
-            assert_eq!(tracker.current_context_usage(), Some(12));
-            assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
-            return;
-        }
-        if matches!(
-            kind,
-            ResponseKind::ChatDoneKeepAlive | ResponseKind::ResponsesDoneKeepAlive
-        ) {
-            assert_eq!(usage.input_tokens, 7, "cached input is counted separately");
-            assert_eq!(usage.cache_read_input_tokens, 5);
-            assert_eq!(usage.context_tokens(), Some(12));
-            assert_eq!(usage.total_tokens(), 20, "never double-count cached tokens");
-            assert!(usage.has_complete_token_breakdown());
-        } else {
-            assert_eq!(usage.input_tokens, 12);
-        }
-        assert_eq!(
-            usage.output_tokens,
-            if matches!(kind, ResponseKind::UsageAtStart) {
-                7
-            } else {
-                8
-            }
-        );
-        if matches!(kind, ResponseKind::UsageAtStart) {
-            assert!(
-                common::screen_contains(&screen, "\"cost_units\":17"),
-                "{screen}"
-            );
-            assert!(
-                common::screen_contains(&screen, "\"cost_currency\":\"sudo_point\""),
-                "{screen}"
-            );
-            assert_eq!(usage.cache_creation_input_tokens, 3);
-            assert_eq!(usage.cache_read_input_tokens, 5);
-            assert_eq!(usage.cost_units, Some(17));
-            assert_eq!(
-                usage.cost_currency,
-                Some(runtime::UsageCostCurrency::SudoPoint)
-            );
-        }
-        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
-            assert_eq!(
-                provider.terminal_connection_state.load(Ordering::SeqCst),
-                1,
-                "read the independently framed usage tail after finish_reason"
-            );
-        }
-        assert_eq!(
-            provider.requests.load(Ordering::SeqCst),
-            1,
-            "never regenerate a completed response"
-        );
-        return;
-    }
-    if matches!(
-        kind,
-        ResponseKind::Complete
-            | ResponseKind::StopReasonOnly
-            | ResponseKind::DelayedTerminal
-            | ResponseKind::StopReasonKeepAlive
-            | ResponseKind::EmptyThenComplete
-            | ResponseKind::EmptyThinkingThenComplete
-            | ResponseKind::OverloadedThenComplete
-    ) {
-        assert_eq!(exit, 0, "{screen}");
-        assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
-        if matches!(kind, ResponseKind::DelayedTerminal) {
-            assert_eq!(provider.terminal_connection_state.load(Ordering::SeqCst), 1,
-                "client must read a separately framed message_stop, not close immediately on stop_reason");
-        }
-        assert_eq!(
-            provider.requests.load(Ordering::SeqCst),
-            if matches!(
-                kind,
-                ResponseKind::EmptyThenComplete
-                    | ResponseKind::EmptyThinkingThenComplete
-                    | ResponseKind::OverloadedThenComplete
-            ) {
-                2
-            } else {
-                1
-            },
-            "only a response with no usable content should be regenerated, once"
-        );
-        if matches!(
-            kind,
-            ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
-        ) {
-            let bodies = provider.bodies.lock().unwrap();
-            assert_eq!(
-                bodies[0], bodies[1],
-                "an empty response retries the original complete wire request"
-            );
-        }
-    } else if matches!(
-        kind,
-        ResponseKind::InvalidRequestWithStatusDigits | ResponseKind::MissingModel
-    ) {
-        assert_ne!(exit, 0, "provider error must fail the turn: {screen}");
-        let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(
-            squeezed.contains("apireturned"),
-            "the real provider error must reach the CLI: {screen}"
-        );
-        assert_eq!(
-            common::model_unavailable_in_screen(&screen),
-            matches!(kind, ResponseKind::MissingModel),
-            "availability must follow the HTTP status, not digits in a diagnostic ID: {screen}"
-        );
-        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
-    } else if kind.is_refused() {
-        assert_ne!(exit, 0, "a refused turn cannot succeed: {screen}");
-        assert_refusal_screen(&screen);
-        assert_eq!(
-            provider.requests.load(Ordering::SeqCst),
-            1,
-            "a refusal must never be retried"
-        );
-        assert_refusal_trace(&log_path);
-    } else if matches!(
-        kind,
-        ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
-    ) {
-        assert_ne!(
-            exit, 0,
-            "two empty responses cannot complete a turn: {screen}"
-        );
-        assert!(
-            screen.contains("assistant stream produced no content"),
-            "{screen}"
-        );
-        assert_eq!(
-            provider.requests.load(Ordering::SeqCst),
-            2,
-            "empty response recovery must be bounded"
-        );
-    } else {
-        assert_ne!(exit, 0, "a partial body cannot complete a turn: {screen}");
-        assert!(
-            screen.contains("incomplete") || screen.contains("truncated"),
-            "{screen}"
-        );
-    }
+    .assert_result();
 }
 
 fn assert_progress_trace(log_path: &std::path::Path) {
@@ -1601,28 +1081,7 @@ fn liveness_response(
     index: usize,
     stop: &AtomicBool,
 ) -> bool {
-    let is_live = matches!(
-        kind,
-        ResponseKind::NativeHeartbeat
-            | ResponseKind::ChatHeartbeat
-            | ResponseKind::ChatAnnotations
-            | ResponseKind::ResponsesHeartbeat
-            | ResponseKind::AlwaysHeartbeat
-            | ResponseKind::HeartbeatAfterOverload
-            | ResponseKind::ToolThenHeartbeat
-            | ResponseKind::ToolThenEmptyThenComplete
-            | ResponseKind::NativePartial
-            | ResponseKind::ChatPartial
-            | ResponseKind::ResponsesPartial
-            | ResponseKind::NativeDropThenContinue
-            | ResponseKind::ChatDropThenContinue
-            | ResponseKind::ResponsesDropThenContinue
-            | ResponseKind::ToolThenDrop
-            | ResponseKind::NativeSlow
-            | ResponseKind::ChatSlow
-            | ResponseKind::ResponsesSlow
-            | ResponseKind::FiniteHeartbeat
-    );
+    let is_live = kind.is_liveness_fixture();
     if !is_live {
         return false;
     }
@@ -1671,59 +1130,7 @@ fn liveness_response(
                 | ResponseKind::ChatAnnotations
                 | ResponseKind::ResponsesHeartbeat
         ) && index == 0);
-    let mut prefix = String::new();
-    let mut tail: String;
-    let mut deltas = Vec::new();
-    match kind.api_format() {
-        Some("openai-completions") => {
-            for text in texts {
-                deltas.push(format!(
-                    "data: {}\n\n",
-                    json!({"id":"chat","choices":[{"delta":{"content":text}}]})
-                ));
-            }
-            tail = "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\ndata: [DONE]\n\n".into();
-        }
-        Some("openai-responses") => {
-            prefix =
-                "event: response.created\ndata: {\"id\":\"live\",\"model\":\"sonnet\"}\n\n".into();
-            for text in texts {
-                deltas.push(format!(
-                    "event: response.output_text.delta\ndata: {}\n\n",
-                    json!({"delta":text})
-                ));
-            }
-            tail = "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}}\n\n".into();
-        }
-        _ => {
-            prefix = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"live\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sonnet\",\"content\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into();
-            for text in texts {
-                deltas.push(format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}})));
-            }
-            tail = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".into();
-        }
-    }
-    if tool_turn {
-        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
-        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
-        prefix.push_str(&format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"sleep 3; echo once >> once.txt"}).to_string()}})));
-        tail = tail.replace("end_turn", "tool_use");
-        deltas.clear();
-    }
-    if tool_then_drop {
-        // A complete tool call, then text that is cut off mid-response.
-        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
-        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
-        prefix.push_str(&format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"echo once >> once.txt"}).to_string()}})));
-        prefix.push_str(
-            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-        );
-        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n");
-        deltas = deltas
-            .iter()
-            .map(|delta| delta.replace("\"index\":0", "\"index\":1"))
-            .collect();
-    }
+    let (prefix, deltas, tail) = liveness_frames(kind, texts, tool_turn, tool_then_drop);
     let body = format!("{prefix}{}{tail}", deltas.join(""));
     let length = if heartbeat || partial {
         1_000_000
@@ -1838,48 +1245,7 @@ fn check_liveness(
     let diagnostic = if actual_requests == expected_requests {
         String::new()
     } else {
-        // Preserve the failing protocol and real retry events. A count alone
-        // cannot distinguish an HTTP retry from a safe stream replay.
-        let events: Vec<Value> = std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|event| {
-                event["event"].as_str().is_some_and(|name| {
-                    name.starts_with("request_")
-                        || name.contains("retry")
-                        || name.contains("stream")
-                })
-            })
-            .map(|event| {
-                let attrs = event["attributes"]
-                    .as_object()
-                    .map(|attrs| {
-                        attrs
-                            .iter()
-                            .filter(|(key, _)| {
-                                matches!(
-                                    key.as_str(),
-                                    "attempt"
-                                        | "status"
-                                        | "error"
-                                        | "reason"
-                                        | "elapsed_ms"
-                                        | "request_id"
-                                )
-                            })
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect::<serde_json::Map<_, _>>()
-                    })
-                    .unwrap_or_default();
-                json!({"event": event["event"], "attributes": attrs})
-            })
-            .take(64)
-            .collect();
-        format!(
-            "kind={kind:?}; events={events:?}\n{}",
-            common::screen_tail(&cli, 6000)
-        )
+        liveness_diagnostic(kind, &cli, &log)
     };
     assert_eq!(actual_requests, expected_requests, "{diagnostic}");
     let screen = common::expect_screen(
@@ -1901,119 +1267,17 @@ fn check_liveness(
         common::DEFAULT_TIMEOUT,
         "complete liveness result",
     );
+    let observed = ResponseCheck {
+        kind,
+        env: &env,
+        provider: &provider,
+        screen: &screen,
+        exit: code,
+        log_path: &log,
+    };
     let bodies = provider.bodies.lock().unwrap();
-    if matches!(kind, ResponseKind::ToolThenEmptyThenComplete) {
-        assert_eq!(bodies.len(), 3);
-        assert!(bodies[1]["tools"]
-            .as_array()
-            .is_some_and(|tools| !tools.is_empty()));
-        assert!(bodies[2]["tools"].is_null());
-        assert!(bodies[2]["tool_choice"].is_null());
-        let mut expected = bodies[1].clone();
-        expected.as_object_mut().unwrap().remove("tools");
-        expected.as_object_mut().unwrap().remove("tool_choice");
-        // With no tool prefix, the provider makes the static system block
-        // global; this is the same cache policy as the original fallback.
-        assert!(expected["system"][0]["cache_control"]
-            .get("scope")
-            .is_none());
-        expected["system"][0]["cache_control"]["scope"] = json!("global");
-        let history = expected["messages"].as_array_mut().unwrap();
-        let breakpoint = history.last_mut().unwrap()["content"]
-            .as_array_mut()
-            .unwrap()
-            .last_mut()
-            .unwrap()
-            .as_object_mut()
-            .unwrap()
-            .remove("cache_control")
-            .expect("the original final message has its cache breakpoint");
-        let messages = bodies[2]["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), history.len() + 1);
-        let final_prompt = messages.last().unwrap();
-        assert_eq!(final_prompt["role"], "user");
-        let blocks = final_prompt["content"].as_array().unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["cache_control"], breakpoint);
-        let text = blocks[0]["text"].as_str().unwrap();
-        assert!(text.starts_with("The previous tool execution is complete."));
-        assert!(text.contains("Do not call tools."));
-        history.push(final_prompt.clone());
-        assert_eq!(
-            expected, bodies[2],
-            "only tools, the appended final prompt and the existing cache-boundary policy change"
-        );
-    } else if continues {
-        // A continuation is a new request built from the saved partial
-        // reply, never a resend of the request whose stream dropped.
-        assert_ne!(bodies[0], bodies[1], "a continuation is never a resend");
-        let continued = bodies[1].to_string();
-        assert!(
-            continued.contains("STREAM_BODY_VERIFIED"),
-            "the continuation carries the partial reply: {continued}"
-        );
-        if !is_tool {
-            assert!(
-                continued.contains("cut off by a connection error"),
-                "the model is told to continue: {continued}"
-            );
-        }
-    } else if expected_requests > 1 {
-        let first = usize::from(is_tool);
-        assert!(
-            bodies[first..].iter().all(|body| body == &bodies[first]),
-            "safe replay must preserve the request bytes"
-        );
-    }
-    if is_tool {
-        assert_eq!(
-            std::fs::read_to_string(env.workspace_root().join("once.txt")).unwrap(),
-            "once\n",
-            "completed tools are never executed twice"
-        );
-        assert!(bodies[1]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["content"]
-                .as_array()
-                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))));
-    }
-    if always_drops {
-        assert!(
-            common::screen_contains(&screen, "continuing (3/3)"),
-            "{screen}"
-        );
-        assert!(common::screen_contains(
-            &screen,
-            "automatic replay disabled"
-        ));
-    }
-    if kind.drops_once() && interactive {
-        assert!(
-            common::screen_contains(&screen, "continuing (1/3)"),
-            "{screen}"
-        );
-        assert_eq!(
-            screen.matches("STREAM_BODY_VERIFIED").count(),
-            1,
-            "partial output is not repeated: {screen}"
-        );
-    }
-    if matches!(kind, ResponseKind::HeartbeatAfterOverload) {
-        assert!(
-            common::screen_contains(&screen, "retry 2/8"),
-            "one shared retry sequence: {screen}"
-        );
-        let attempts: Vec<_> = std::fs::read_to_string(log)
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|event| event["event"] == "request_started")
-            .map(|event| event["attributes"]["attempt"].as_u64().unwrap())
-            .collect();
-        assert_eq!(attempts, [1, 2, 3]);
-    }
+    observed.assert_liveness_replay(&bodies, expected_requests, is_tool, continues);
+    observed.assert_liveness_completion(&bodies, is_tool, always_drops, interactive);
 }
 
 #[test]
@@ -2091,4 +1355,914 @@ fn empty_stream_replay_is_bounded_once() {
 #[test]
 fn zero_read_timeout_preserves_a_long_empty_wait() {
     check_liveness(ResponseKind::FiniteHeartbeat, "0", 1, true);
+}
+struct ResponseCheck<'a> {
+    kind: ResponseKind,
+    env: &'a TestEnv,
+    provider: &'a StreamProvider,
+    screen: &'a str,
+    exit: u32,
+    log_path: &'a std::path::Path,
+}
+
+impl ResponseCheck<'_> {
+    fn assert_result(&self) {
+        if matches!(
+            self.kind,
+            ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete
+        ) {
+            self.assert_spliced_accounting();
+        } else if matches!(
+            self.kind,
+            ResponseKind::MissingModelUnavailable
+                | ResponseKind::MissingModelCodeUnavailable
+                | ResponseKind::MissingModelCodeOnlyUnavailable
+        ) {
+            self.assert_missing_model();
+        } else if matches!(
+            self.kind,
+            ResponseKind::UsageAtStart
+                | ResponseKind::ChatDoneKeepAlive
+                | ResponseKind::ChatTotalOnly
+                | ResponseKind::ResponsesDoneKeepAlive
+        ) {
+            self.assert_usage_accounting();
+        } else {
+            self.assert_regular_response();
+        }
+    }
+    fn assert_spliced_accounting(&self) {
+        let kind = self.kind;
+        let env = self.env;
+        let provider = self.provider;
+        let screen = self.screen;
+        let exit = self.exit;
+
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never replay a stream after partial progress escaped"
+        );
+        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+        let path = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.message_count > 0)
+            .unwrap()
+            .path;
+        let session = runtime::Session::load_from_path(&path).unwrap();
+        let assistant = session
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == runtime::MessageRole::Assistant)
+            .unwrap();
+        let usage = assistant.usage.expect("retain the observed response usage");
+        assert_eq!(usage.input_tokens, 2);
+        if matches!(kind, ResponseKind::SplicedAttempts) {
+            assert_ne!(exit, 0, "a spliced stream must fail: {screen}");
+            assert!(
+                common::screen_contains(screen, "multiple message_start"),
+                "{screen}"
+            );
+            let saved_text: String = assistant
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    runtime::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                saved_text.lines().next(),
+                Some("FAILED_ATTEMPT_PARTIAL"),
+                "retain A before the runtime's interruption annotation"
+            );
+            assert!(
+                !saved_text.contains("RETRY_USAGE_SUCCESS"),
+                "B must never enter saved history"
+            );
+            assert!(
+                !screen.contains("RETRY_USAGE_SUCCESS"),
+                "never present B as A: {screen}"
+            );
+            assert_eq!(usage.cache_creation_input_tokens, 5235);
+            assert_eq!(usage.cache_read_input_tokens, 124_730);
+            assert_eq!(usage.output_tokens, 0);
+        } else {
+            assert_eq!(exit, 0, "{screen}");
+            assert!(screen.contains("RETRY_USAGE_SUCCESS"), "{screen}");
+            assert_eq!(usage.cache_creation_input_tokens, 0);
+            assert_eq!(usage.cache_read_input_tokens, 129_965);
+            assert_eq!(usage.output_tokens, 1569);
+        }
+    }
+    fn assert_missing_model(&self) {
+        let provider = self.provider;
+        let screen = self.screen;
+        let exit = self.exit;
+
+        assert_ne!(exit, 0, "missing model must fail: {screen}");
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never retry a configuration problem"
+        );
+        assert!(screen.contains("model_not_found"), "{screen}");
+        assert!(screen.contains("req_provider_error"), "{screen}");
+        assert!(
+            common::screen_contains(screen, "selected model is not available"),
+            "{screen}"
+        );
+        assert!(!screen.contains("retry 1/8"), "{screen}");
+    }
+    fn assert_usage_accounting(&self) {
+        let kind = self.kind;
+        let env = self.env;
+        let provider = self.provider;
+        let screen = self.screen;
+        let exit = self.exit;
+        let log_path = self.log_path;
+
+        assert_eq!(exit, 0, "{screen}");
+        assert_progress_trace(log_path);
+        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+        let path = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.message_count > 0)
+            .unwrap()
+            .path;
+        let session = runtime::Session::load_from_path(&path).unwrap();
+        let usage = session
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == runtime::MessageRole::Assistant)
+            .unwrap()
+            .usage
+            .expect("persist the provider's actual usage");
+        if matches!(kind, ResponseKind::ChatTotalOnly) {
+            self.assert_total_only_bill(&session, &usage);
+            self.assert_total_only_resume(&path);
+            return;
+        }
+        if matches!(
+            kind,
+            ResponseKind::ChatDoneKeepAlive | ResponseKind::ResponsesDoneKeepAlive
+        ) {
+            assert_eq!(usage.input_tokens, 7, "cached input is counted separately");
+            assert_eq!(usage.cache_read_input_tokens, 5);
+            assert_eq!(usage.context_tokens(), Some(12));
+            assert_eq!(usage.total_tokens(), 20, "never double-count cached tokens");
+            assert!(usage.has_complete_token_breakdown());
+        } else {
+            assert_eq!(usage.input_tokens, 12);
+        }
+        assert_eq!(
+            usage.output_tokens,
+            if matches!(kind, ResponseKind::UsageAtStart) {
+                7
+            } else {
+                8
+            }
+        );
+        if matches!(kind, ResponseKind::UsageAtStart) {
+            assert!(
+                common::screen_contains(screen, "\"cost_units\":17"),
+                "{screen}"
+            );
+            assert!(
+                common::screen_contains(screen, "\"cost_currency\":\"sudo_point\""),
+                "{screen}"
+            );
+            assert_eq!(usage.cache_creation_input_tokens, 3);
+            assert_eq!(usage.cache_read_input_tokens, 5);
+            assert_eq!(usage.cost_units, Some(17));
+            assert_eq!(
+                usage.cost_currency,
+                Some(runtime::UsageCostCurrency::SudoPoint)
+            );
+        }
+        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+            assert_eq!(
+                provider.terminal_connection_state.load(Ordering::SeqCst),
+                1,
+                "read the independently framed usage tail after finish_reason"
+            );
+        }
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never regenerate a completed response"
+        );
+    }
+    fn assert_total_only_bill(&self, session: &runtime::Session, usage: &runtime::TokenUsage) {
+        let provider = self.provider;
+        let screen = self.screen;
+        let log_path = self.log_path;
+
+        assert_eq!(usage.input_tokens, 0, "never infer input allocation");
+        assert_eq!(usage.output_tokens, 0, "never infer output allocation");
+        assert_eq!(
+            usage.total_tokens(),
+            25,
+            "retain the provider's actual total"
+        );
+        assert_eq!(usage.reported_total_tokens, Some(25));
+        assert!(!usage.has_complete_token_breakdown());
+        assert!(runtime::UsageTracker::from_session(session)
+            .current_context_usage()
+            .is_none());
+        assert!(usage
+            .estimate_cost_usd_with_pricing(runtime::ModelPricing::default_sonnet_tier())
+            .is_none());
+        assert!(
+            common::screen_contains(screen, "\"total_tokens\":25"),
+            "{screen}"
+        );
+        assert!(
+            common::screen_contains(screen, "\"token_breakdown_complete\":false"),
+            "{screen}"
+        );
+        assert!(
+            !common::screen_contains(screen, "\"cost_units\":null"),
+            "unknown bills stay omitted"
+        );
+        assert!(
+            !common::screen_contains(screen, "\"cost_currency\":null"),
+            "unknown currencies stay omitted"
+        );
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+        let events: Vec<Value> = std::fs::read_to_string(log_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(events.iter().any(|event| event["event"] == "response_usage"
+            && event["attributes"]["reported_total_tokens"] == 25));
+    }
+    fn assert_total_only_resume(&self, path: &std::path::Path) {
+        let env = self.env;
+        let provider = self.provider;
+        // A second real CLI process must restore the total-only receipt,
+        // add a fully allocated response, and recover its context anchor.
+        let mut resumed = env.spawn_with_env(&["--permission-mode", "read-only", "--resume"], &[]);
+        common::expect_input_line_cleared(&resumed, env.timeout(), "resumed usage prompt");
+        resumed.send("Continue the stream result").unwrap();
+        common::expect_input_line(
+            &resumed,
+            "Continue the stream result",
+            env.timeout(),
+            "resume input",
+        );
+        resumed.send("\r").unwrap();
+        common::expect_screen(
+            &resumed,
+            |_| {
+                runtime::Session::load_from_path(path).is_ok_and(|session| {
+                    session
+                        .messages()
+                        .iter()
+                        .filter(|message| message.role == runtime::MessageRole::Assistant)
+                        .count()
+                        == 2
+                })
+            },
+            env.timeout(),
+            "persist the resumed response",
+        );
+        common::expect_input_line_cleared(&resumed, env.timeout(), "resumed turn complete");
+        resumed.send("/exit").unwrap();
+        common::expect_input_line(&resumed, "/exit", env.timeout(), "exit input");
+        resumed.send("\r").unwrap();
+        assert_eq!(resumed.expect_eof().unwrap(), 0);
+        let restored = runtime::Session::load_from_path(path).unwrap();
+        assert_eq!(
+            restored
+                .messages()
+                .iter()
+                .filter(|message| message.role == runtime::MessageRole::Assistant)
+                .count(),
+            2,
+            "resume must update the original transcript"
+        );
+        let tracker = runtime::UsageTracker::from_session(&restored);
+        assert_eq!(tracker.cumulative_usage().total_tokens(), 45);
+        assert_eq!(tracker.cumulative_usage().known_total_tokens(), 20);
+        assert!(!tracker.cumulative_usage().has_complete_token_breakdown());
+        assert_eq!(tracker.current_context_usage(), Some(12));
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    }
+    fn assert_completed_response(&self) {
+        let kind = self.kind;
+        let provider = self.provider;
+        let screen = self.screen;
+        let exit = self.exit;
+
+        assert_eq!(exit, 0, "{screen}");
+        assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
+        if matches!(kind, ResponseKind::DelayedTerminal) {
+            assert_eq!(provider.terminal_connection_state.load(Ordering::SeqCst), 1,
+                "client must read a separately framed message_stop, not close immediately on stop_reason");
+        }
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            if matches!(
+                kind,
+                ResponseKind::EmptyThenComplete
+                    | ResponseKind::EmptyThinkingThenComplete
+                    | ResponseKind::OverloadedThenComplete
+            ) {
+                2
+            } else {
+                1
+            },
+            "only a response with no usable content should be regenerated, once"
+        );
+        if matches!(
+            kind,
+            ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+        ) {
+            let bodies = provider.bodies.lock().unwrap();
+            assert_eq!(
+                bodies[0], bodies[1],
+                "an empty response retries the original complete wire request"
+            );
+        }
+    }
+    fn assert_regular_response(&self) {
+        let kind = self.kind;
+        let provider = self.provider;
+        let screen = self.screen;
+        let exit = self.exit;
+        let log_path = self.log_path;
+        if matches!(
+            kind,
+            ResponseKind::Complete
+                | ResponseKind::StopReasonOnly
+                | ResponseKind::DelayedTerminal
+                | ResponseKind::StopReasonKeepAlive
+                | ResponseKind::EmptyThenComplete
+                | ResponseKind::EmptyThinkingThenComplete
+                | ResponseKind::OverloadedThenComplete
+        ) {
+            self.assert_completed_response();
+        } else if matches!(
+            kind,
+            ResponseKind::InvalidRequestWithStatusDigits | ResponseKind::MissingModel
+        ) {
+            assert_ne!(exit, 0, "provider error must fail the turn: {screen}");
+            let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                squeezed.contains("apireturned"),
+                "the real provider error must reach the CLI: {screen}"
+            );
+            assert_eq!(
+                common::model_unavailable_in_screen(screen),
+                matches!(kind, ResponseKind::MissingModel),
+                "availability must follow the HTTP status, not digits in a diagnostic ID: {screen}"
+            );
+            assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+        } else if kind.is_refused() {
+            assert_ne!(exit, 0, "a refused turn cannot succeed: {screen}");
+            assert_refusal_screen(screen);
+            assert_eq!(
+                provider.requests.load(Ordering::SeqCst),
+                1,
+                "a refusal must never be retried"
+            );
+            assert_refusal_trace(log_path);
+        } else if matches!(
+            kind,
+            ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+        ) {
+            assert_ne!(
+                exit, 0,
+                "two empty responses cannot complete a turn: {screen}"
+            );
+            assert!(
+                screen.contains("assistant stream produced no content"),
+                "{screen}"
+            );
+            assert_eq!(
+                provider.requests.load(Ordering::SeqCst),
+                2,
+                "empty response recovery must be bounded"
+            );
+        } else {
+            assert_ne!(exit, 0, "a partial body cannot complete a turn: {screen}");
+            assert!(
+                screen.contains("incomplete") || screen.contains("truncated"),
+                "{screen}"
+            );
+        }
+    }
+}
+
+fn read_stream_request(socket: &mut TcpStream) -> Option<(String, Vec<u8>)> {
+    socket.set_nonblocking(false).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut input = BufReader::new(socket.try_clone().unwrap());
+    let mut first = String::new();
+    if input.read_line(&mut first).unwrap_or(0) == 0 {
+        return None;
+    }
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if input.read_line(&mut line).unwrap_or(0) == 0 {
+            return None;
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap();
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    input.read_exact(&mut body).unwrap();
+
+    Some((first, body))
+}
+
+fn stream_body_for(kind: ResponseKind, index: usize) -> String {
+    let empty = matches!(
+        kind,
+        ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+    ) || (matches!(
+        kind,
+        ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+    ) && index == 0)
+        || (matches!(kind, ResponseKind::ToolThenEmptyThenComplete) && index == 1);
+    let mut body = refusal_body(kind)
+        .unwrap_or_else(|| response_body(!matches!(kind, ResponseKind::Interrupted), empty));
+    body = adjust_stream_body(kind, index, body);
+    if empty
+        && matches!(
+            kind,
+            ResponseKind::AlwaysEmptyThinking | ResponseKind::EmptyThinkingThenComplete
+        )
+    {
+        let boundary = body.find("event: message_delta").unwrap();
+        body.insert_str(boundary, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
+    }
+    if matches!(
+        kind,
+        ResponseKind::StopReasonOnly | ResponseKind::StopReasonKeepAlive
+    ) {
+        // The provider adapter stops reading after stop_reason. A
+        // message_stop in a later packet is therefore never seen.
+        let end = body.find("event: message_stop").unwrap();
+        body.truncate(end);
+    }
+
+    body
+}
+
+fn adjust_stream_body(kind: ResponseKind, index: usize, mut body: String) -> String {
+    match kind {
+                    ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete => {
+                        let fixture: Value = serde_json::from_str(include_str!(
+                            "../../../test-fixtures/retry_usage_stream.json"
+                        )).unwrap();
+                        let mut events = fixture["events"].as_array().unwrap().clone();
+                        if matches!(kind, ResponseKind::RetryUsageComplete) {
+                            events.remove(0);
+                        } else {
+                            // Partial progress from A must remain visible, but
+                            // must never be silently joined to response B.
+                            events.splice(1..1, [
+                                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"FAILED_ATTEMPT_PARTIAL"}}),
+                                json!({"type":"content_block_stop","index":0}),
+                            ]);
+                        }
+                        body = events.iter().fold(String::new(), |mut fixture_text, event| {
+mock_anthropic_service::append_sse(&mut fixture_text, event["type"].as_str().unwrap(), event);
+fixture_text
+});
+                    }
+                    ResponseKind::GeminiCapture => body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"STREAM_BODY_VERIFIED\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":8}}\n\n".to_string(),
+                    ResponseKind::SignedCapture => body = signed_capture_body(),
+                    ResponseKind::CapturePaced => {
+                        body = padded_capture_body("SSE_LOG_ONLY_PADDING", 512);
+                    }
+                    ResponseKind::CaptureBurst => {
+                        body = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
+                    }
+                    ResponseKind::UsageAtStart => {
+                        body = body.replace(
+                            "\"input_tokens\":12,\"output_tokens\":0",
+                            "\"input_tokens\":12,\"output_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"cost_units\":17,\"cost_currency\":\"sudo_point\"",
+                        ).replace("\"output_tokens\":8", "\"output_tokens\":0");
+                    }
+                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly => {
+                        body = concat!(
+                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{\"content\":\"STREAM_BODY_VERIFIED\"}}]}\n\n",
+                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                            "data: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
+                            "data: [DONE]\n\n",
+                        ).into();
+                        if matches!(kind, ResponseKind::ChatTotalOnly) && index == 0 {
+                            body = body.replace(
+                                "\"prompt_tokens\":12,\"completion_tokens\":8",
+                                "\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":25",
+                            );
+                        }
+                        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+                            body = body.replace(
+                                "\"prompt_tokens\":12,\"completion_tokens\":8",
+                                "\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":5}",
+                            );
+                        }
+                    }
+                    ResponseKind::ResponsesDoneKeepAlive => {
+                        body = concat!(
+                            "event: response.created\ndata: {\"id\":\"response\",\"model\":\"sonnet\"}\n\n",
+                            "event: response.output_text.delta\ndata: {\"delta\":\"STREAM_BODY_VERIFIED\"}\n\n",
+                            "event: response.output_text.done\ndata: {}\n\n",
+                            "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n\n",
+                        ).into();
+                    }
+                    _ => {}
+                }
+
+    body
+}
+
+fn write_stream_response(
+    socket: &mut TcpStream,
+    kind: ResponseKind,
+    response: &str,
+    terminal_state: &AtomicUsize,
+    stop: &AtomicBool,
+) {
+    if matches!(kind, ResponseKind::CapturePaced) {
+        socket.set_nodelay(true).unwrap();
+        for bytes in response.as_bytes().chunks(1024) {
+            if socket.write_all(bytes).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        return;
+    }
+    if matches!(kind, ResponseKind::SignedCapture) {
+        // Split a UTF-8 code point and the terminal frame across
+        // separate packets; capture must preserve their raw bytes.
+        let split = response.find("诊断").unwrap() + 1;
+        let tail = response.find("event: message_stop").unwrap();
+        let bytes = response.as_bytes();
+        socket.write_all(&bytes[..split]).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        socket.write_all(&bytes[split..tail]).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let _ = socket.write_all(&bytes[tail..]);
+        return;
+    }
+    if matches!(kind, ResponseKind::DelayedTerminal) {
+        let split = response.find("event: message_stop").unwrap();
+        socket.write_all(&response.as_bytes()[..split]).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        let closed = peer_closed(socket);
+        terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
+        let _ = socket.write_all(&response.as_bytes()[split..]);
+        return;
+    }
+    if matches!(
+        kind,
+        ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly
+    ) {
+        let split = response
+            .find("data: {\"id\":\"chat\",\"choices\":[],\"usage\"")
+            .unwrap();
+        socket.write_all(&response.as_bytes()[..split]).unwrap();
+        // Observe that the client stays connected after the
+        // logical stop, before sending the separate usage tail.
+        socket
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        let closed = peer_closed(socket);
+        terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
+        let _ = socket.write_all(&response.as_bytes()[split..]);
+    } else {
+        let _ = socket.write_all(response.as_bytes());
+    }
+    if matches!(
+        kind,
+        ResponseKind::StopReasonKeepAlive
+            | ResponseKind::ChatDoneKeepAlive
+            | ResponseKind::ChatTotalOnly
+            | ResponseKind::ResponsesDoneKeepAlive
+    ) {
+        // Keep the HTTP body open after a logical/protocol stop.
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        while !stop.load(Ordering::SeqCst) && !peer_closed(socket) {}
+    }
+}
+
+impl ResponseKind {
+    fn is_liveness_fixture(self) -> bool {
+        matches!(
+            self,
+            ResponseKind::NativeHeartbeat
+                | ResponseKind::ChatHeartbeat
+                | ResponseKind::ChatAnnotations
+                | ResponseKind::ResponsesHeartbeat
+                | ResponseKind::AlwaysHeartbeat
+                | ResponseKind::HeartbeatAfterOverload
+                | ResponseKind::ToolThenHeartbeat
+                | ResponseKind::ToolThenEmptyThenComplete
+                | ResponseKind::NativePartial
+                | ResponseKind::ChatPartial
+                | ResponseKind::ResponsesPartial
+                | ResponseKind::NativeDropThenContinue
+                | ResponseKind::ChatDropThenContinue
+                | ResponseKind::ResponsesDropThenContinue
+                | ResponseKind::ToolThenDrop
+                | ResponseKind::NativeSlow
+                | ResponseKind::ChatSlow
+                | ResponseKind::ResponsesSlow
+                | ResponseKind::FiniteHeartbeat
+        )
+    }
+}
+
+fn liveness_frames(
+    kind: ResponseKind,
+    texts: [&str; 3],
+    tool_turn: bool,
+    tool_then_drop: bool,
+) -> (String, Vec<String>, String) {
+    let mut prefix = String::new();
+    let mut tail: String;
+    let mut deltas = Vec::new();
+    match kind.api_format() {
+        Some("openai-completions") => {
+            for text in texts {
+                deltas.push(format!(
+                    "data: {}\n\n",
+                    json!({"id":"chat","choices":[{"delta":{"content":text}}]})
+                ));
+            }
+            tail = "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\ndata: [DONE]\n\n".into();
+        }
+        Some("openai-responses") => {
+            prefix =
+                "event: response.created\ndata: {\"id\":\"live\",\"model\":\"sonnet\"}\n\n".into();
+            for text in texts {
+                deltas.push(format!(
+                    "event: response.output_text.delta\ndata: {}\n\n",
+                    json!({"delta":text})
+                ));
+            }
+            tail = "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}}\n\n".into();
+        }
+        _ => {
+            prefix = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"live\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sonnet\",\"content\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into();
+            for text in texts {
+                deltas.push(format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}})));
+            }
+            tail = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".into();
+        }
+    }
+    if tool_turn {
+        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
+        let _ = std::fmt::Write::write_fmt(
+            &mut prefix,
+            format_args!(
+                "event: content_block_delta\ndata: {}\n\n",
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"sleep 3; echo once >> once.txt"}).to_string()}})
+            ),
+        );
+        tail = tail.replace("end_turn", "tool_use");
+        deltas.clear();
+    }
+    if tool_then_drop {
+        // A complete tool call, then text that is cut off mid-response.
+        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
+        let _ = std::fmt::Write::write_fmt(
+            &mut prefix,
+            format_args!(
+                "event: content_block_delta\ndata: {}\n\n",
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"echo once >> once.txt"}).to_string()}})
+            ),
+        );
+        prefix.push_str(
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        );
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n");
+        deltas = deltas
+            .iter()
+            .map(|delta| delta.replace("\"index\":0", "\"index\":1"))
+            .collect();
+    }
+
+    (prefix, deltas, tail)
+}
+
+fn liveness_diagnostic(
+    kind: ResponseKind,
+    cli: &pty_expect::PtySession,
+    log: &std::path::Path,
+) -> String {
+    // Preserve the failing protocol and real retry events. A count alone
+    // cannot distinguish an HTTP retry from a safe stream replay.
+    let events: Vec<Value> = std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["event"].as_str().is_some_and(|name| {
+                name.starts_with("request_") || name.contains("retry") || name.contains("stream")
+            })
+        })
+        .map(|event| {
+            let attrs = event["attributes"]
+                .as_object()
+                .map(|attrs| {
+                    attrs
+                        .iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "attempt"
+                                    | "status"
+                                    | "error"
+                                    | "reason"
+                                    | "elapsed_ms"
+                                    | "request_id"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<serde_json::Map<_, _>>()
+                })
+                .unwrap_or_default();
+            json!({"event": event["event"], "attributes": attrs})
+        })
+        .take(64)
+        .collect();
+    format!(
+        "kind={kind:?}; events={events:?}\n{}",
+        common::screen_tail(cli, 6000)
+    )
+}
+
+impl ResponseCheck<'_> {
+    fn assert_liveness_replay(
+        &self,
+        bodies: &[Value],
+        expected_requests: usize,
+        is_tool: bool,
+        continues: bool,
+    ) {
+        let kind = self.kind;
+        if matches!(kind, ResponseKind::ToolThenEmptyThenComplete) {
+            assert_eq!(bodies.len(), 3);
+            assert!(bodies[1]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()));
+            assert!(bodies[2]["tools"].is_null());
+            assert!(bodies[2]["tool_choice"].is_null());
+            let mut expected = bodies[1].clone();
+            expected.as_object_mut().unwrap().remove("tools");
+            expected.as_object_mut().unwrap().remove("tool_choice");
+            // With no tool prefix, the provider makes the static system block
+            // global; this is the same cache policy as the original fallback.
+            assert!(expected["system"][0]["cache_control"]
+                .get("scope")
+                .is_none());
+            expected["system"][0]["cache_control"]["scope"] = json!("global");
+            let history = expected["messages"].as_array_mut().unwrap();
+            let breakpoint = history.last_mut().unwrap()["content"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("cache_control")
+                .expect("the original final message has its cache breakpoint");
+            let messages = bodies[2]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), history.len() + 1);
+            let final_prompt = messages.last().unwrap();
+            assert_eq!(final_prompt["role"], "user");
+            let blocks = final_prompt["content"].as_array().unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0]["cache_control"], breakpoint);
+            let text = blocks[0]["text"].as_str().unwrap();
+            assert!(text.starts_with("The previous tool execution is complete."));
+            assert!(text.contains("Do not call tools."));
+            history.push(final_prompt.clone());
+            assert_eq!(
+            expected, bodies[2],
+            "only tools, the appended final prompt and the existing cache-boundary policy change"
+        );
+        } else if continues {
+            // A continuation is a new request built from the saved partial
+            // reply, never a resend of the request whose stream dropped.
+            assert_ne!(bodies[0], bodies[1], "a continuation is never a resend");
+            let continuation_body = bodies[1].to_string();
+            assert!(
+                continuation_body.contains("STREAM_BODY_VERIFIED"),
+                "the continuation carries the partial reply: {continuation_body}"
+            );
+            if !is_tool {
+                assert!(
+                    continuation_body.contains("cut off by a connection error"),
+                    "the model is told to continue: {continuation_body}"
+                );
+            }
+        } else if expected_requests > 1 {
+            let first = usize::from(is_tool);
+            assert!(
+                bodies[first..].iter().all(|body| body == &bodies[first]),
+                "safe replay must preserve the request bytes"
+            );
+        }
+    }
+    fn assert_liveness_completion(
+        &self,
+        bodies: &[Value],
+        is_tool: bool,
+        always_drops: bool,
+        interactive: bool,
+    ) {
+        let kind = self.kind;
+        let env = self.env;
+        let screen = self.screen;
+        let log_path = self.log_path;
+        if is_tool {
+            assert_eq!(
+                std::fs::read_to_string(env.workspace_root().join("once.txt")).unwrap(),
+                "once\n",
+                "completed tools are never executed twice"
+            );
+            assert!(bodies[1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))));
+        }
+        if always_drops {
+            assert!(
+                common::screen_contains(screen, "continuing (3/3)"),
+                "{screen}"
+            );
+            assert!(common::screen_contains(screen, "automatic replay disabled"));
+        }
+        if kind.drops_once() && interactive {
+            assert!(
+                common::screen_contains(screen, "continuing (1/3)"),
+                "{screen}"
+            );
+            assert_eq!(
+                screen.matches("STREAM_BODY_VERIFIED").count(),
+                1,
+                "partial output is not repeated: {screen}"
+            );
+        }
+        if matches!(kind, ResponseKind::HeartbeatAfterOverload) {
+            assert!(
+                common::screen_contains(screen, "retry 2/8"),
+                "one shared retry sequence: {screen}"
+            );
+            let attempts: Vec<_> = std::fs::read_to_string(log_path)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|event| event["event"] == "request_started")
+                .map(|event| event["attributes"]["attempt"].as_u64().unwrap())
+                .collect();
+            assert_eq!(attempts, [1, 2, 3]);
+        }
+    }
+}
+
+fn seed_old_response_logs(directory: &std::path::Path, old_logs: usize) {
+    if old_logs > 0 {
+        std::fs::create_dir_all(directory).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&vec![b'x'; 64 * 1024]).unwrap();
+        let old_body = encoder.finish().unwrap();
+        for index in 0..old_logs {
+            std::fs::write(directory.join(format!("old-{index}.sse.gz")), &old_body).unwrap();
+        }
+    }
 }

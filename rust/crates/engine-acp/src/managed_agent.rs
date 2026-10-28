@@ -19,6 +19,20 @@ use crate::acp_sdk_server::{
 
 type StateObserver = Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>;
 
+fn managed_session_config(prepared: &PreparedManagedAgent) -> SdkAcpConfig {
+    SdkAcpConfig {
+        agent_version: env!("CARGO_PKG_VERSION").into(),
+        model: prepared.model().to_string(),
+        model_flag_raw: Some(prepared.model().to_string()),
+        permission_mode_override: Some(runtime::PermissionMode::Prompt),
+        reasoning_effort: None,
+        allowed_tools: None,
+        auth_mode: None,
+        git_sha: None,
+        build_target: None,
+    }
+}
+
 struct Factory {
     prepared: Mutex<Option<PreparedManagedAgent>>,
     session_id: String,
@@ -109,17 +123,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
         // This signal terminates the HOST. Turn cancellation belongs to each
         // SessionEngine and is reset only when that engine starts another turn.
         let stopped = prepared.abort_signal();
-        let config = SdkAcpConfig {
-            agent_version: env!("CARGO_PKG_VERSION").into(),
-            model: prepared.model().to_string(),
-            model_flag_raw: Some(prepared.model().to_string()),
-            permission_mode_override: Some(runtime::PermissionMode::Prompt),
-            reasoning_effort: None,
-            allowed_tools: None,
-            auth_mode: None,
-            git_sha: None,
-            build_target: None,
-        };
+        let config = managed_session_config(&prepared);
         let ctx = agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
         let mailbox = Arc::new(SessionMailbox::open(
             kernel,
@@ -165,7 +169,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
                                     stop.abort();
                                     registry.cancel_all();
                                     let error = match result {
-                                        Ok(Ok(Some(SessionPayload::Closed { reason }))) | Ok(Err(reason)) => reason,
+                                        Ok(Ok(Some(SessionPayload::Closed { reason })) | Err(reason)) => reason,
                                         Err(error) => error.to_string(),
                                         _ => unreachable!(),
                                     };

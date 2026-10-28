@@ -53,11 +53,11 @@ fn writer(env: &TestEnv, name: &str, sess: &PtySession) -> File {
             Err(error)
                 if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
             {
-                std::thread::sleep(Duration::from_millis(10))
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!(
                 "reader did not start for {name}: {error}\n{}",
-                sess.render(|s| s.contents())
+                sess.render(common::screen_contents)
             ),
         }
     }
@@ -98,7 +98,7 @@ fn send_batch(env: &TestEnv, sess: &mut PtySession, calls: &[Value]) {
     };
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
-        &sess,
+        sess,
         |s| s.contains("Pasted") || s.contains("TOOL_BATCH:") || s.contains("In one assistant"),
         common::DEFAULT_TIMEOUT,
         "batch input",
@@ -301,7 +301,14 @@ fn concurrency_limit_is_enforced_before_tool_started() {
             .iter()
             .enumerate()
             .filter(|(_, r)| r.starts_with("╭─ Bash("))
-            .map(|(i, _)| format!("{:?}", raw.cell(i as u16, 0).unwrap().fgcolor()))
+            .map(|(i, _)| {
+                format!(
+                    "{:?}",
+                    raw.cell(u16::try_from(i).expect("terminal row fits u16"), 0)
+                        .unwrap()
+                        .fgcolor()
+                )
+            })
             .collect();
         assert_eq!(colors.len(), 2, "{rows:#?}");
         assert_ne!(
@@ -323,12 +330,12 @@ fn pre_hook_rewrite_to_writer_is_a_barrier_and_runs_once() {
     fifo(&env, "three.fifo");
     let dir = env.workspace_root().join(".nexus/sudocode");
     std::fs::create_dir_all(&dir).unwrap();
-    let script = r#"import json,os
+    let script = r"import json,os
 p=json.loads(os.environ['HOOK_TOOL_INPUT'])
 if p.get('command')=='cat rewrite.txt':
     with open('hook-count.txt','a') as f: f.write('once\n')
     print(json.dumps({'hookSpecificOutput':{'updatedInput':{'command':'printf HOOK_WRITE > rewritten.txt'}}}))
-"#;
+";
     std::fs::write(env.workspace_root().join("rewrite.py"), script).unwrap();
     std::fs::write(
         dir.join("settings.json"),
@@ -608,7 +615,7 @@ fn cancelled_mcp_requests_notify_server_and_late_replies_do_not_poison_next_turn
     std::fs::write(env.workspace_root().join("fresh.release"), "").unwrap();
     done(&sess);
     assert_result_order(&env, &["one", "two", "fresh"]);
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(screen.contains("MCP_RESULT_fresh"));
     assert!(!screen.contains("MCP_RESULT_one") && !screen.contains("MCP_RESULT_two"));
     finish(sess);
@@ -687,7 +694,9 @@ fn prose_preview_preserves_markdown_context_during_tool_completion() {
             "open text consumed",
         );
         if is_fence {
-            assert!(!sess.render(|s| s.contents()).contains("PendingFenceBody"));
+            assert!(!sess
+                .render(common::screen_contents)
+                .contains("PendingFenceBody"));
         } else {
             common::expect_screen(
                 &sess,
@@ -708,7 +717,9 @@ fn prose_preview_preserves_markdown_context_during_tool_completion() {
         );
         if is_fence {
             assert!(
-                !sess.render(|s| s.contents()).contains("PendingFenceBody"),
+                !sess
+                    .render(common::screen_contents)
+                    .contains("PendingFenceBody"),
                 "tool progress must not flush an open code fence"
             );
         } else {
@@ -779,7 +790,7 @@ fn pre_and_post_hooks_overlap_without_holding_the_tool_event_loop() {
     }
     std::fs::write(
         env.workspace_root().join("gate.py"),
-        r#"import json,os,sys,time
+        r"import json,os,sys,time
 from pathlib import Path
 command=json.loads(os.environ['HOOK_TOOL_INPUT']).get('command','')
 if command in ('cat one.txt','cat two.txt'):
@@ -790,7 +801,7 @@ if command in ('cat one.txt','cat two.txt'):
     while not Path('release-'+phase).exists():
         if time.monotonic()>deadline: raise RuntimeError('hook peers did not overlap')
         time.sleep(.01)
-"#,
+",
     )
     .unwrap();
     std::fs::write(dir.join("settings.json"), json!({"hooks":{"PreToolUse":["python3 gate.py pre"],"PostToolUse":["python3 gate.py post"]}}).to_string()).unwrap();
@@ -805,7 +816,7 @@ if command in ('cat one.txt','cat two.txt'):
         std::fs::write(env.workspace_root().join(format!("release-{phase}")), "go").unwrap();
     }
     done(&sess);
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(screen.contains("HOOK_one_RESULT") && screen.contains("HOOK_two_RESULT"));
     finish(sess);
 }
@@ -955,11 +966,11 @@ fn permission_and_question_share_input_while_independent_reads_continue() {
         "INDEPENDENT_READ_RESULT",
     )
     .unwrap();
-    std::fs::write(env.workspace_root().join("ask.py"), r#"import json,os
+    std::fs::write(env.workspace_root().join("ask.py"), r"import json,os
 p=json.loads(os.environ['HOOK_TOOL_INPUT'])
 if p.get('command')=='cat protected.txt':
     print(json.dumps({'hookSpecificOutput':{'permissionDecision':'ask','permissionDecisionReason':'Approve the protected fixture'}}))
-"#).unwrap();
+").unwrap();
     std::fs::write(
         dir.join("settings.json"),
         json!({"hooks":{"PreToolUse":["python3 ask.py"]}}).to_string(),
@@ -1018,7 +1029,7 @@ if p.get('command')=='cat protected.txt':
     .unwrap();
     done(&sess);
     assert!(sess
-        .render(|s| s.contents())
+        .render(common::screen_contents)
         .contains("APPROVED_READ_RESULT"));
     assert_result_order(&env, &["question", "protected", "free"]);
     finish(sess);

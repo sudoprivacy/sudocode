@@ -21,8 +21,8 @@ use tools::GlobalToolRegistry;
 
 use crate::config::AllowedToolSet;
 use crate::mcp::{
-    build_runtime_mcp_state, session_mcp_tool_names, shutdown_mcp_state_best_effort,
-    RuntimeMcpState,
+    build_runtime_mcp_state, session_mcp_tool_names, shutdown_mcp_ref_best_effort,
+    shutdown_mcp_state_best_effort, RuntimeMcpState,
 };
 use crate::tool_executor::{permission_policy, CliToolExecutor};
 
@@ -327,6 +327,7 @@ impl BuiltRuntime {
         }
     }
 
+    #[must_use]
     pub fn with_hook_abort_signal(mut self, hook_abort_signal: runtime::HookAbortSignal) -> Self {
         let runtime = self
             .runtime
@@ -336,6 +337,7 @@ impl BuiltRuntime {
         self
     }
 
+    #[must_use]
     pub fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
         let runtime = self
             .runtime
@@ -345,6 +347,7 @@ impl BuiltRuntime {
         self
     }
 
+    #[must_use]
     pub fn with_session_known_model(mut self, model: impl Into<String>) -> Self {
         let runtime = self
             .runtime
@@ -490,6 +493,7 @@ pub fn build_runtime_plugin_state_with_loader(
     })
 }
 
+#[must_use]
 pub fn build_plugin_manager(
     cwd: &Path,
     loader: &ConfigLoader,
@@ -581,6 +585,166 @@ pub fn build_runtime_for_host(
     )
 }
 
+fn runtime_prompt_snapshot(
+    host: &HostContext,
+    session: &Session,
+    mut desired: runtime::SessionPromptSnapshot,
+    tool_registry: &GlobalToolRegistry,
+    plugin_load_outcome: &PluginLoadOutcome,
+    peer: Option<&crate::peer::Peer>,
+) -> runtime::SessionPromptSnapshot {
+    let deferred_section = tool_registry.deferred_tools_prompt_section();
+    let system_prompt = if let Some(snapshot) = session.prompt_snapshot().filter(|snapshot| {
+        snapshot.compatible_with(
+            &desired.prompt,
+            desired.memory_enabled,
+            &desired.workspace_root,
+            &desired.agent_name,
+        ) && snapshot
+            .prompt
+            .dynamic_sections()
+            .iter()
+            .find(|section| section.starts_with("<available-deferred-tools>"))
+            .map(String::as_str)
+            == (!deferred_section.is_empty()).then_some(deferred_section.as_str())
+    }) {
+        snapshot.prompt.clone()
+    } else {
+        let mut system_prompt = desired.prompt.clone();
+        // The cwd-derived sections — the skills listing (so the model can name and
+        // load a skill without the user knowing it exists, plugin-provided roots
+        // included via `plugin_load_outcome`) and the `<available-agent-types>`
+        // catalog (so it knows what to pass as `agent_spawn`'s `agent`). Shared
+        // with the `scode system-prompt` preview via `commands::cwd_prompt_sections`
+        // so the two cannot drift.
+        //
+        // The catalog lives here and NOT in `agent_spawn`'s description because
+        // that description sits in the cached tools block while this list changes
+        // whenever a `.md` agent is added — see `runtime::agent_types` for the
+        // cache measurement behind the split.
+        //
+        // This runs for the REPL, `--print`, and ACP sessions alike: they all land
+        // in this function via `build_runtime_for_host`.
+        //
+        // Discover resources where commands and the Skill tool resolve them.
+        // Trusted daemon credentials continue to use config_root; a project's
+        // installed skills belong to the session's actual project directory.
+        system_prompt.extend_dynamic_sections(cwd_prompt_sections(
+            &host.shell_root,
+            Some(plugin_load_outcome),
+        ));
+        // Deferred tools listing: inject `<available-deferred-tools>` so the
+        // model knows which tools exist beyond the core set visible in the API
+        // `tools` array. Discovery via ToolSearch, direct execution by name.
+        if !deferred_section.is_empty() {
+            system_prompt.append_dynamic_section(deferred_section);
+        }
+        // A2A: teach the model its identity and that only `send` reaches a peer.
+        // A host that supplied its own mailbox adds the same section itself.
+        if let Some(peer) = peer {
+            system_prompt.append_dynamic_section(peer.prompt_section());
+        }
+        system_prompt
+    };
+    desired.prompt = system_prompt;
+    desired
+}
+
+fn configure_response_archive(
+    mut client: EngineApiClient,
+    session: &Session,
+    feature_config: &runtime::RuntimeFeatureConfig,
+) -> EngineApiClient {
+    match runtime::response_archive::SessionResponseArchive::for_session(
+        session,
+        feature_config.response_recording(),
+    ) {
+        Ok(Some(archive)) => client = client.with_response_archive(archive),
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(tracer) = client.session_tracer() {
+                tracer.record(
+                    "response_capture_unavailable",
+                    serde_json::Map::from_iter([(
+                        "reason".into(),
+                        serde_json::Value::String(error.to_string()),
+                    )]),
+                );
+            }
+        }
+    }
+    client
+}
+
+fn extend_session_tools(
+    config: &mut RuntimeConfig,
+    mcp_state: Option<&Mutex<RuntimeMcpState>>,
+    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    peer: Option<&crate::peer::Peer>,
+) {
+    // per-session injected MCP tools bypass the global --allowed-tools gate:
+    // they are explicitly requested for this session and their names are only
+    // known at runtime, so add their qualified names to the allow-list when
+    // one is active. The prefix uses `runtime::mcp_tool_prefix`, which
+    // normalizes server names the same way the tool index does (e.g.
+    // `github.com` -> `mcp__github_com__`), so non-alphanumeric server names
+    // are matched correctly.
+    if let Some(allowed) = config.allowed_tools.as_mut() {
+        if let Some(mcp_state) = mcp_state {
+            let tools = mcp_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .tools_with_server();
+            allowed.extend(session_mcp_tool_names(tools, session_mcp));
+        }
+    }
+    // nexus A2A: when configured, keep the peer-reply tool available even under
+    // an explicit --allowedTools restriction (absent a restriction it is
+    // already advertised). Its network handler is the CliToolExecutor intercept
+    // wired below; the co-host advertises the same tool the same way. The tool
+    // exists either way — absent A2A it delivers to the workspace mailbox — so
+    // this line controls reachability under a restriction, nothing more.
+    if peer.is_some_and(crate::peer::Peer::is_node) {
+        if let Some(allowed) = config.allowed_tools.as_mut() {
+            allowed.extend(["send".to_string()]);
+        }
+    }
+}
+
+fn cleanup_mcp_on_error<T, E>(
+    result: Result<T, E>,
+    mcp_state: Option<&Mutex<RuntimeMcpState>>,
+) -> Result<T, E> {
+    result.inspect_err(|_| shutdown_mcp_ref_best_effort(mcp_state))
+}
+
+fn session_api_client(
+    host: &HostContext,
+    session_id: &str,
+    config: &RuntimeConfig,
+    tool_registry: &GlobalToolRegistry,
+    peer: Option<&crate::peer::Peer>,
+) -> Result<EngineApiClient, Box<dyn std::error::Error>> {
+    EngineApiClient::new_with_access(
+        session_id,
+        &config.sudocode_config,
+        &config.model,
+        config.auth_mode,
+        tool_registry.clone(),
+        config.enable_tools,
+        config.allowed_tools.clone(),
+        |uses_mount| {
+            Ok(engine_core::ModelAccess {
+                fs: match (peer, uses_mount) {
+                    (Some(crate::peer::Peer::Node(node)), true) => node.fs()?,
+                    _ => Arc::clone(&host.fs),
+                },
+                require_mount: host.require_model_mount,
+            })
+        },
+    )
+}
+
 pub(crate) fn build_runtime_with_plugin_state(
     host: &HostContext,
     mut session: Session,
@@ -612,153 +776,45 @@ pub(crate) fn build_runtime_with_plugin_state(
     } else {
         Some(crate::peer::attach(&host.resolved_agent_name()))
     };
-    // per-session injected MCP tools bypass the global --allowed-tools gate:
-    // they are explicitly requested for this session and their names are only
-    // known at runtime, so add their qualified names to the allow-list when
-    // one is active. The prefix uses `runtime::mcp_tool_prefix`, which
-    // normalizes server names the same way the tool index does (e.g.
-    // `github.com` -> `mcp__github_com__`), so non-alphanumeric server names
-    // are matched correctly.
-    if let Some(allowed) = config.allowed_tools.as_mut() {
-        if let Some(mcp_state) = &mcp_state {
-            let tools = mcp_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .tools_with_server();
-            allowed.extend(session_mcp_tool_names(tools, session_mcp));
-        }
-    }
-    // nexus A2A: when configured, keep the peer-reply tool available even under
-    // an explicit --allowedTools restriction (absent a restriction it is
-    // already advertised). Its network handler is the CliToolExecutor intercept
-    // wired below; the co-host advertises the same tool the same way. The tool
-    // exists either way — absent A2A it delivers to the workspace mailbox — so
-    // this line controls reachability under a restriction, nothing more.
-    if peer.as_ref().is_some_and(crate::peer::Peer::is_node) {
-        if let Some(allowed) = config.allowed_tools.as_mut() {
-            allowed.extend(["send".to_string()]);
-        }
-    }
-    let policy = match permission_policy(
-        config.permission_mode,
-        &feature_config,
-        &tool_registry,
-        &host.config_root,
-        config.memory,
-    ) {
-        Ok(policy) => policy,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(Box::new(std::io::Error::other(error)));
-        }
-    };
+    extend_session_tools(
+        &mut config,
+        mcp_state.as_deref(),
+        session_mcp,
+        peer.as_ref(),
+    );
+    let policy = cleanup_mcp_on_error(
+        permission_policy(
+            config.permission_mode,
+            &feature_config,
+            &tool_registry,
+            &host.config_root,
+            config.memory,
+        ),
+        mcp_state.as_deref(),
+    )
+    .map_err(std::io::Error::other)?;
     let workspace_root = host.fs.working_root()?;
     let agent_name = host.resolved_agent_name();
-    let deferred_section = tool_registry.deferred_tools_prompt_section();
-    let system_prompt = if let Some(snapshot) = session.prompt_snapshot().filter(|snapshot| {
-        snapshot.compatible_with(
-            &config.system_prompt,
-            config.memory.is_enabled(),
-            &workspace_root,
-            &agent_name,
-        ) && snapshot
-            .prompt
-            .dynamic_sections()
-            .iter()
-            .find(|section| section.starts_with("<available-deferred-tools>"))
-            .map(String::as_str)
-            == (!deferred_section.is_empty()).then_some(deferred_section.as_str())
-    }) {
-        snapshot.prompt.clone()
-    } else {
-        let mut system_prompt = config.system_prompt.clone();
-        // The cwd-derived sections — the skills listing (so the model can name and
-        // load a skill without the user knowing it exists, plugin-provided roots
-        // included via `plugin_load_outcome`) and the `<available-agent-types>`
-        // catalog (so it knows what to pass as `agent_spawn`'s `agent`). Shared
-        // with the `scode system-prompt` preview via `commands::cwd_prompt_sections`
-        // so the two cannot drift.
-        //
-        // The catalog lives here and NOT in `agent_spawn`'s description because
-        // that description sits in the cached tools block while this list changes
-        // whenever a `.md` agent is added — see `runtime::agent_types` for the
-        // cache measurement behind the split.
-        //
-        // This runs for the REPL, `--print`, and ACP sessions alike: they all land
-        // in this function via `build_runtime_for_host`.
-        //
-        // Discover resources where commands and the Skill tool resolve them.
-        // Trusted daemon credentials continue to use config_root; a project's
-        // installed skills belong to the session's actual project directory.
-        system_prompt.extend_dynamic_sections(cwd_prompt_sections(
-            &host.shell_root,
-            Some(&plugin_load_outcome),
-        ));
-        // Deferred tools listing: inject `<available-deferred-tools>` so the
-        // model knows which tools exist beyond the core set visible in the API
-        // `tools` array. Discovery via ToolSearch, direct execution by name.
-        if !deferred_section.is_empty() {
-            system_prompt.append_dynamic_section(deferred_section);
-        }
-        // A2A: teach the model its identity + how to reply, so a receiving loop
-        // knows it can `send` back to a named peer and doesn't echo the message
-        // framing. A host that supplied its own mailbox also drives delivery, and
-        // the prose describing that framing travels with the driver rather than
-        // being guessed here — the co-host's messages arrive wrapped in
-        // `[message from <sender>]`, which only its loop knows to emit.
-        if let Some(peer) = &peer {
-            system_prompt.append_dynamic_section(peer.prompt_section());
-        }
-        system_prompt
-    };
-    session.set_prompt_snapshot(runtime::SessionPromptSnapshot {
-        prompt: system_prompt.clone(),
-        memory_enabled: config.memory.is_enabled(),
-        workspace_root,
-        agent_name,
-    });
-    let mut client = match EngineApiClient::new_with_access(
-        session_id,
-        &config.sudocode_config,
-        &config.model,
-        config.auth_mode,
-        tool_registry.clone(),
-        config.enable_tools,
-        config.allowed_tools.clone(),
-        |uses_mount| {
-            Ok(engine_core::ModelAccess {
-                fs: match (&peer, uses_mount) {
-                    (Some(crate::peer::Peer::Node(node)), true) => node.fs()?,
-                    _ => Arc::clone(&host.fs),
-                },
-                require_mount: host.require_model_mount,
-            })
-        },
-    ) {
-        Ok(client) => client,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(error);
-        }
-    };
-    match runtime::response_archive::SessionResponseArchive::for_session(
+    let snapshot = runtime_prompt_snapshot(
+        host,
         &session,
-        feature_config.response_recording(),
-    ) {
-        Ok(Some(archive)) => client = client.with_response_archive(archive),
-        Ok(None) => {}
-        Err(error) => {
-            if let Some(tracer) = client.session_tracer() {
-                tracer.record(
-                    "response_capture_unavailable",
-                    serde_json::Map::from_iter([(
-                        "reason".into(),
-                        serde_json::Value::String(error.to_string()),
-                    )]),
-                );
-            }
-        }
-    }
+        runtime::SessionPromptSnapshot {
+            prompt: config.system_prompt.clone(),
+            memory_enabled: config.memory.is_enabled(),
+            workspace_root,
+            agent_name,
+        },
+        &tool_registry,
+        &plugin_load_outcome,
+        peer.as_ref(),
+    );
+    let system_prompt = snapshot.prompt.clone();
+    session.set_prompt_snapshot(snapshot);
+    let mut client = cleanup_mcp_on_error(
+        session_api_client(host, session_id, &config, &tool_registry, peer.as_ref()),
+        mcp_state.as_deref(),
+    )?;
+    client = configure_response_archive(client, &session, &feature_config);
     let mut tool_executor = CliToolExecutor::new(
         config.allowed_tools,
         tool_registry.clone(),
@@ -804,10 +860,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     // `engine-core` adapter) installs its `HookProgressSink` as the runtime's
     // `hook_progress_reporter` at the start of each turn, so no reporter is
     // injected here.
-    if let Err(error) = plugin_registry.initialize() {
-        shutdown_mcp_state_best_effort(&mcp_state);
-        return Err(Box::new(error));
-    }
+    cleanup_mcp_on_error(plugin_registry.initialize(), mcp_state.as_deref())?;
     Ok(BuiltRuntime::new(
         runtime,
         plugin_registry,

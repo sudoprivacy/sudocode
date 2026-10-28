@@ -450,14 +450,14 @@ impl SudoclawLogSink {
     /// Write through the same local serializer/rotation path, letting a caller
     /// with an existing diagnostic policy report IO failures without recursion.
     #[inline]
-    pub fn try_record(&self, event: TelemetryEvent) -> Result<(), std::io::Error> {
-        self.file.append_json(&format_log_entry(&event))
+    pub fn try_record(&self, event: &TelemetryEvent) -> Result<(), std::io::Error> {
+        self.file.append_json(&format_log_entry(event))
     }
 }
 
 impl TelemetrySink for SudoclawLogSink {
     fn record(&self, event: TelemetryEvent) {
-        if let Err(error) = self.try_record(event) {
+        if let Err(error) = self.try_record(&event) {
             eprintln!("[scode telemetry] Failed to write log: {error}");
         }
     }
@@ -625,6 +625,7 @@ impl SessionTracer {
         self.response_archive.is_some()
     }
 
+    #[must_use]
     pub fn begin_response_capture(
         &self,
         metadata: ResponseCaptureMetadata,

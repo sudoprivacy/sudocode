@@ -10,21 +10,16 @@ use std::collections::HashSet;
 use std::path::Path;
 
 /// File intent classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileIntent {
     /// Final product - user will directly use this file.
     /// Keep in workspace root.
+    #[default]
     Final,
 
     /// Draft/intermediate file - auxiliary file during execution.
     /// Move to .drafts/ directory.
     Draft,
-}
-
-impl Default for FileIntent {
-    fn default() -> Self {
-        Self::Final // Conservative default
-    }
 }
 
 /// File operation type.
@@ -52,6 +47,7 @@ pub struct UserRequestIntent {
 
 impl UserRequestIntent {
     /// Analyze user request to extract file intent.
+    #[must_use]
     pub fn analyze(user_request: &str) -> Self {
         let mut result = Self::default();
 
@@ -60,23 +56,17 @@ impl UserRequestIntent {
         // 1. Extract explicitly mentioned file names
         // Patterns: "创建 xxx.py", "写一个 xxx.sh", "create xxx.ts"
         let file_patterns = [
-            (r"创建?\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", true),
-            (r"写一个\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", true),
-            (r"生成\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", true),
-            (r"新建\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", true),
-            (r"create\s+([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", false),
-            (r"write\s+([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", false),
-            (r"add\s+([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", false),
+            r"创建?\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
+            r"写一个\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
+            r"生成\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
+            r"新建\s*([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
+            r"create\s+([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
+            r"write\s+([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
+            r"add\s+([a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)",
         ];
 
-        for (pattern, is_chinese) in &file_patterns {
-            let regex_pattern = if *is_chinese {
-                pattern.to_string()
-            } else {
-                pattern.to_string()
-            };
-
-            if let Ok(re) = regex::Regex::new(&regex_pattern) {
+        for pattern in file_patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
                 for cap in re.captures_iter(&lower) {
                     if let Some(file) = cap.get(1) {
                         result.requested_files.insert(file.as_str().to_string());
@@ -143,11 +133,12 @@ impl UserRequestIntent {
     }
 
     /// Check if a file is requested by user.
+    #[must_use]
     pub fn is_requested_file(&self, file_path: &str) -> bool {
         let file_name = Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.to_lowercase())
+            .map(str::to_lowercase)
             .unwrap_or_default();
 
         // 1. Direct file name match
@@ -159,7 +150,7 @@ impl UserRequestIntent {
         let ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
+            .map(str::to_lowercase)
             .unwrap_or_default();
 
         let ext_to_type: std::collections::HashMap<&str, &str> = [
@@ -175,7 +166,7 @@ impl UserRequestIntent {
             ("go", "go"),
         ]
         .iter()
-        .cloned()
+        .copied()
         .collect();
 
         if let Some(type_name) = ext_to_type.get(ext.as_str()) {
@@ -229,7 +220,7 @@ fn detect_intent_marker(content: &str) -> Option<IntentMarker> {
         let trimmed = line.trim();
 
         for prefix in comment_prefixes {
-            if trimmed.starts_with(prefix) {
+            if let Some(unprefixed) = trimmed.strip_prefix(prefix) {
                 let comment_content = if *prefix == "<!--" {
                     // HTML comment: <!-- @final -->
                     if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
@@ -238,7 +229,7 @@ fn detect_intent_marker(content: &str) -> Option<IntentMarker> {
                         continue;
                     }
                 } else {
-                    trimmed[prefix.len()..].trim()
+                    unprefixed.trim()
                 };
 
                 // Check for markers
@@ -370,6 +361,7 @@ fn matches_final_pattern(file_path: &str) -> bool {
 /// 4. Draft patterns
 /// 5. Extension rules
 /// 6. Default - Final (conservative)
+#[must_use]
 pub fn detect_file_intent(
     file_path: &str,
     content: &str,

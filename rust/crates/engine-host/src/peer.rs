@@ -126,12 +126,12 @@ impl Peer {
     }
 
     /// The system-prompt section that teaches the model its identity and how
-    /// to reply on this namespace.
+    /// to reach peers: the same one on every host.
     #[must_use]
     pub fn prompt_section(&self) -> String {
         match self {
-            Self::Node(node) => runtime::nexus_mailbox::peer_system_prompt(&node.binding.agent),
-            Self::Disk(name) => runtime::agent_mailbox::repl_a2a_prompt_section(name),
+            Self::Node(node) => runtime::agent_mailbox::a2a_prompt_section(&node.binding.agent),
+            Self::Disk(name) => runtime::agent_mailbox::a2a_prompt_section(name),
         }
     }
 
@@ -161,7 +161,7 @@ impl Peer {
                 sink,
             ),
             Self::Disk(name) => runtime::mailbox::spawn_local_poller(
-                runtime::mailbox::local_pair_root(),
+                &runtime::mailbox::local_pair_root(),
                 name.clone(),
                 abort,
                 sink,

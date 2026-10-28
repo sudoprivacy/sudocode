@@ -552,9 +552,40 @@ pub fn glob_search(
     })
 }
 
+/// Append the original lines around each match, preserving overlapping context.
+fn append_grep_context(
+    output: &mut Vec<String>,
+    file_path: &str,
+    lines: &[&str],
+    matched_lines: &[usize],
+    input: &GrepSearchInput,
+) {
+    let context = input.context.or(input.context_short).unwrap_or(0);
+    for &index in matched_lines {
+        let start = index.saturating_sub(input.before.unwrap_or(context));
+        let end = (index + input.after.unwrap_or(context) + 1).min(lines.len());
+        for (current, line) in lines.iter().enumerate().take(end).skip(start) {
+            let prefix = if input.line_numbers.unwrap_or(true) {
+                format!("{file_path}:{}:", current + 1)
+            } else {
+                format!("{file_path}:")
+            };
+            output.push(format!("{prefix}{line}"));
+        }
+    }
+}
+
 /// Runs a regex search over workspace files with optional context lines.
 pub fn grep_search(fs: &dyn FsBackend, input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     grep_search_with_abort(fs, input, None)
+}
+
+fn compile_grep_pattern(input: &GrepSearchInput) -> io::Result<regex::Regex> {
+    RegexBuilder::new(&input.pattern)
+        .case_insensitive(input.case_insensitive.unwrap_or(false))
+        .dot_matches_new_line(input.multiline.unwrap_or(false))
+        .build()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
 }
 
 /// Runs [`grep_search`] while observing the turn's cancellation signal.
@@ -568,11 +599,7 @@ pub fn grep_search_with_abort(
         None => fs.working_root()?,
     };
 
-    let regex = RegexBuilder::new(&input.pattern)
-        .case_insensitive(input.case_insensitive.unwrap_or(false))
-        .dot_matches_new_line(input.multiline.unwrap_or(false))
-        .build()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    let regex = compile_grep_pattern(input)?;
 
     let glob_filter = input
         .glob
@@ -585,7 +612,6 @@ pub fn grep_search_with_abort(
         .output_mode
         .clone()
         .unwrap_or_else(|| String::from("files_with_matches"));
-    let context = input.context.or(input.context_short).unwrap_or(0);
 
     let mut filenames = Vec::new();
     let mut content_lines = Vec::new();
@@ -639,18 +665,13 @@ pub fn grep_search_with_abort(
 
         filenames.push(file_path.clone());
         if output_mode == "content" {
-            for index in matched_lines {
-                let start = index.saturating_sub(input.before.unwrap_or(context));
-                let end = (index + input.after.unwrap_or(context) + 1).min(lines.len());
-                for (current, line) in lines.iter().enumerate().take(end).skip(start) {
-                    let prefix = if input.line_numbers.unwrap_or(true) {
-                        format!("{file_path}:{}:", current + 1)
-                    } else {
-                        format!("{file_path}:")
-                    };
-                    content_lines.push(format!("{prefix}{line}"));
-                }
-            }
+            append_grep_context(
+                &mut content_lines,
+                &file_path,
+                &lines,
+                &matched_lines,
+                input,
+            );
         }
     }
 
@@ -950,8 +971,7 @@ pub fn is_symlink_escape_with(
     let resolved = fs.canonicalize(&path_str).map(PathBuf::from)?;
     let canonical_root = fs
         .canonicalize(&workspace_root.to_string_lossy())
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
+        .map_or_else(|_| workspace_root.to_path_buf(), PathBuf::from);
     Ok(!resolved.starts_with(&canonical_root))
 }
 

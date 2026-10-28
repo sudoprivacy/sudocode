@@ -54,7 +54,7 @@ pub trait AsyncCommandGroup {
 
 	/// Converts the implementor into a [`CommandGroupBuilder`](crate::CommandGroupBuilder), which can be used to
 	/// set flags that are not available on the `Command` type.
-	fn group(&mut self) -> crate::builder::CommandGroupBuilder<tokio::process::Command>;
+	fn group(&mut self) -> crate::builder::CommandGroupBuilder<'_, tokio::process::Command>;
 
 	/// Executes the command as a child process group, waiting for it to finish and
 	/// collecting all of its output.

@@ -1475,7 +1475,7 @@ mod tests {
             cache_ttl_1h: None,
             auth_modes: BTreeMap::new(),
             models,
-            web_search: Default::default(),
+            web_search: runtime::WebSearchConfig::default(),
             selected_account: None,
             auth_profile_conflicts: Vec::new(),
         };

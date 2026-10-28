@@ -80,13 +80,7 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession, queue: bool) {
     };
     common::expect_screen(
         sess,
-        |screen| {
-            if env.is_live() && !queue {
-                common::input_line_of(screen) == expected_input
-            } else {
-                common::input_line_of(screen) == expected_input
-            }
-        },
+        |screen| common::input_line_of(screen) == expected_input,
         env.timeout(),
         "complete plan prompt pasted into current input",
     );
@@ -262,32 +256,7 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
                 })
         })
         .expect("approval must reach a provider request without another user prompt");
-    for field in [
-        "system",
-        "tools",
-        "model",
-        "thinking",
-        "tool_choice",
-        "metadata",
-        "output_config",
-    ] {
-        assert_eq!(
-            requests[0][field], resumed[field],
-            "stable provider prefix: {field}"
-        );
-    }
-    assert_eq!(
-        resumed["messages"]
-            .to_string()
-            .contains("Earlier I considered editing the sample application."),
-        !clear
-    );
-    if clear {
-        assert!(
-            resumed["messages"].to_string().contains("carryforwardtodo"),
-            "todos survive clearing exploration history"
-        );
-    }
+    assert_plan_context_options(resumed, clear, &requests[0]);
     let blocks: Vec<_> = resumed["messages"]
         .as_array()
         .unwrap()
@@ -303,10 +272,8 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
                     .contains("The user APPROVED the plan")
         })
         .unwrap();
-    let text = result["content"]
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
+    let text = result["content"].as_str().map_or_else(
+        || {
             result["content"]
                 .as_array()
                 .unwrap()
@@ -314,7 +281,9 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
                 .filter_map(|block| block["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n")
-        });
+        },
+        str::to_owned,
+    );
     let review: runtime::plan_store::PlanReviewResult = serde_json::from_str(&text).unwrap();
     assert_eq!(
         review.status,
@@ -582,4 +551,33 @@ fn one_shot_saves_a_draft_without_inventing_user_approval() {
             .unwrap();
     assert!(!format!("{:?}", persisted.messages()).contains("The user APPROVED the plan"));
     assert!(persisted.compaction.is_none());
+}
+
+fn assert_plan_context_options(resumed: &Value, clear: bool, initial: &Value) {
+    for field in [
+        "system",
+        "tools",
+        "model",
+        "thinking",
+        "tool_choice",
+        "metadata",
+        "output_config",
+    ] {
+        assert_eq!(
+            initial[field], resumed[field],
+            "stable provider prefix: {field}"
+        );
+    }
+    assert_eq!(
+        resumed["messages"]
+            .to_string()
+            .contains("Earlier I considered editing the sample application."),
+        !clear
+    );
+    if clear {
+        assert!(
+            resumed["messages"].to_string().contains("carryforwardtodo"),
+            "todos survive clearing exploration history"
+        );
+    }
 }

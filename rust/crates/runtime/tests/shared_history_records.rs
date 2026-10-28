@@ -242,43 +242,14 @@ fn completed_forks_survive_live_tools_compaction_and_restart() {
         payloads(prefix.messages())
     );
     assert_eq!(b.graph().message_ids(context).unwrap(), prefix_ids);
-    append(
+    let (compacted, b_commit) = complete_compacted_branch(
         &mut b,
         context,
-        &ConversationMessage::user_text("B_PRIVATE_TURN"),
+        "B_PRIVATE_TURN",
+        "B_FINISHED",
+        "B_COMPACTED",
+        "trace-b",
     );
-    let discarded_answer = append(&mut b, context, &text("B_FINISHED"));
-    let b_answer = append(&mut b, context, &text("B_FINISHED"));
-    finish_turn(&mut b, context, "trace-b");
-    let mut compacted = b.graph().context_session(context).unwrap();
-    compacted = with_selected_messages(
-        compacted,
-        vec![
-            ConversationMessage::user_text("B_COMPACTED"),
-            text("B_FINISHED"),
-        ],
-    );
-    compacted.record_compaction("B summary", 3);
-    let candidate = b
-        .graph()
-        .prepare_projection(
-            context,
-            b.graph().revision(context).unwrap(),
-            &compacted,
-            &[None, Some(&b_answer)],
-        )
-        .unwrap();
-    commit(&mut b, &candidate);
-    assert_eq!(
-        b.graph().message_ids(context).unwrap().last(),
-        Some(&b_answer)
-    );
-    assert!(!b
-        .graph()
-        .message_ids(context)
-        .unwrap()
-        .contains(&discarded_answer));
-    let b_commit = candidate.id().to_owned();
     let mut cold = HistoryLog::new(fixture.log(RecordLogMode::Existing));
     let after_compaction = HistoryRecord::branch_latest();
     commit(&mut cold, &after_compaction);
@@ -323,52 +294,7 @@ fn completed_forks_survive_live_tools_compaction_and_restart() {
     let mut restored = HistoryLog::new(fixture.log(RecordLogMode::Existing));
     restored.refresh().unwrap();
     let graph = restored.graph();
-    assert_eq!(
-        payloads(graph.completed_session(Some(&b_commit)).unwrap().messages()),
-        payloads(compacted.messages())
-    );
-    let a = graph.completed_session(None).unwrap();
-    assert_ne!(a.model.as_deref(), Some("B_IDLE_METADATA"));
-    assert_eq!(a.session_id, prefix.session_id);
-    assert_eq!(payloads(&a.messages()[..2]), payloads(prefix.messages()));
-    let projected_ids: Vec<_> = a
-        .messages()
-        .iter()
-        .map(|message| {
-            message
-                .history
-                .as_ref()
-                .expect("restored message identity")
-                .id
-                .clone()
-        })
-        .collect();
-    assert_eq!(
-        projected_ids,
-        graph
-            .message_ids(receipt["context"].as_str().unwrap())
-            .unwrap()
-    );
-    let result_identity = a
-        .messages()
-        .iter()
-        .filter_map(|message| message.history.as_ref())
-        .find(|identity| identity.id == receipt["result"].as_str().unwrap())
-        .expect("restored tool result identity");
-    assert_eq!(
-        result_identity
-            .tool_origins
-            .get("call-a")
-            .map(String::as_str),
-        receipt["assistant"].as_str()
-    );
-    assert!(a.to_json().unwrap().render().contains("REAL_TOOL_A_RESULT"));
-    assert!(!a.to_json().unwrap().render().contains("B_PRIVATE_TURN"));
-    assert_eq!(
-        graph.tool_origin(receipt["result"].as_str().unwrap(), "call-a"),
-        receipt["assistant"].as_str()
-    );
-    assert_eq!(graph.latest_commit(), receipt["commit"].as_str());
+    let a = assert_restored_completed_branch(graph, &receipt, &prefix, &compacted, &b_commit);
 
     let stale = HistoryRecord::new(
         receipt["context"].as_str().unwrap().into(),
@@ -536,8 +462,14 @@ fn stale_reader_opens_latest_completed_turn_at_its_own_commit_position() {
     commit(&mut a, &branch_a);
     append(&mut a, branch_a.context_id(), &text("NEW_COMPLETED_PREFIX"));
     let a_commit = finish_turn(&mut a, branch_a.context_id(), "new-completed-turn");
+    let completed_ids = a.graph().message_ids(branch_a.context_id()).unwrap();
+    append(
+        &mut a,
+        branch_a.context_id(),
+        &ConversationMessage::user_text("UNFINISHED_AFTER_COMPLETION"),
+    );
     assert_ne!(b.graph().latest_commit(), Some(a_commit.as_str()));
-    let branch_b = HistoryRecord::branch_latest();
+    let branch_b = HistoryRecord::branch_latest_completed();
     commit(&mut b, &branch_b);
     assert_eq!(
         b.graph()
@@ -551,6 +483,106 @@ fn stale_reader_opens_latest_completed_turn_at_its_own_commit_position() {
     );
     assert_eq!(
         b.graph().message_ids(branch_b.context_id()).unwrap(),
-        a.graph().message_ids(branch_a.context_id()).unwrap()
+        completed_ids
     );
+}
+
+fn complete_compacted_branch(
+    log: &mut HistoryLog,
+    context: &str,
+    private_turn: &str,
+    answer_text: &str,
+    compacted_turn: &str,
+    trace: &str,
+) -> (Session, String) {
+    append(log, context, &ConversationMessage::user_text(private_turn));
+    let discarded = append(log, context, &text(answer_text));
+    let answer = append(log, context, &text(answer_text));
+    finish_turn(log, context, trace);
+    let compacted = with_selected_messages(
+        log.graph().context_session(context).unwrap(),
+        vec![
+            ConversationMessage::user_text(compacted_turn),
+            text(answer_text),
+        ],
+    );
+    let mut compacted = compacted;
+    compacted.record_compaction("B summary", 3);
+    let candidate = log
+        .graph()
+        .prepare_projection(
+            context,
+            log.graph().revision(context).unwrap(),
+            &compacted,
+            &[None, Some(&answer)],
+        )
+        .unwrap();
+    commit(log, &candidate);
+    assert_eq!(
+        log.graph().message_ids(context).unwrap().last(),
+        Some(&answer)
+    );
+    assert!(!log
+        .graph()
+        .message_ids(context)
+        .unwrap()
+        .contains(&discarded));
+    (compacted, candidate.id().to_owned())
+}
+
+fn assert_restored_completed_branch(
+    graph: &runtime::history::HistoryGraph,
+    receipt: &Value,
+    prefix: &Session,
+    compacted: &Session,
+    b_commit: &str,
+) -> Session {
+    assert_eq!(
+        payloads(graph.completed_session(Some(b_commit)).unwrap().messages()),
+        payloads(compacted.messages())
+    );
+    let a = graph.completed_session(None).unwrap();
+    assert_ne!(a.model.as_deref(), Some("B_IDLE_METADATA"));
+    assert_eq!(a.session_id, prefix.session_id);
+    assert_eq!(payloads(&a.messages()[..2]), payloads(prefix.messages()));
+    let projected_ids: Vec<_> = a
+        .messages()
+        .iter()
+        .map(|message| {
+            message
+                .history
+                .as_ref()
+                .expect("restored message identity")
+                .id
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        projected_ids,
+        graph
+            .message_ids(receipt["context"].as_str().unwrap())
+            .unwrap()
+    );
+    let result_identity = a
+        .messages()
+        .iter()
+        .filter_map(|message| message.history.as_ref())
+        .find(|identity| identity.id == receipt["result"].as_str().unwrap())
+        .expect("restored tool result identity");
+    assert_eq!(
+        result_identity
+            .tool_origins
+            .get("call-a")
+            .map(String::as_str),
+        receipt["assistant"].as_str()
+    );
+    assert!(a.to_json().unwrap().render().contains("REAL_TOOL_A_RESULT"));
+    assert!(!a.to_json().unwrap().render().contains("B_PRIVATE_TURN"));
+    assert_eq!(
+        graph.tool_origin(receipt["result"].as_str().unwrap(), "call-a"),
+        receipt["assistant"].as_str()
+    );
+    assert_eq!(graph.latest_commit(), receipt["commit"].as_str());
+
+    a
 }

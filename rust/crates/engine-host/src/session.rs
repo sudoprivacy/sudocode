@@ -153,6 +153,7 @@ pub fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, String> {
 /// The user-facing message shown when a turn's context still overflows the
 /// model limit after (or without) compaction — distinguishing a too-long
 /// history from a single oversized request so the advice fits the cause.
+#[must_use]
 pub fn context_overflow_user_message(
     session: &Session,
     estimated_tokens: usize,
@@ -182,6 +183,27 @@ pub fn context_overflow_user_message(
             3. 使用支持更大上下文的模型"
         )
     }
+}
+
+/// Compose a durable control session without constructing a model runtime.
+pub fn completion_engine(
+    session: &runtime::Session,
+    cwd: &Path,
+    create: bool,
+) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
+    Ok(engine_core::EngineSession::deferred(
+        engine_core::subagent_completion::CompletionState::open(session, cwd, create)?,
+    ))
+}
+
+/// Compose a read-only storage probe; journal ownership is acquired on replay.
+pub fn stored_completion_engine(
+    session_id: &str,
+    cwd: &Path,
+) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
+    Ok(engine_core::EngineSession::deferred(
+        engine_core::subagent_completion::CompletionState::stored(session_id, cwd)?,
+    ))
 }
 
 #[cfg(test)]
@@ -220,25 +242,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&sessions_dir);
     }
-}
-
-/// Compose a durable control session without constructing a model runtime.
-pub fn completion_engine(
-    session: &runtime::Session,
-    cwd: &Path,
-    create: bool,
-) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
-    Ok(engine_core::EngineSession::deferred(
-        engine_core::subagent_completion::CompletionState::open(session, cwd, create)?,
-    ))
-}
-
-/// Compose a read-only storage probe; journal ownership is acquired on replay.
-pub fn stored_completion_engine(
-    session_id: &str,
-    cwd: &Path,
-) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
-    Ok(engine_core::EngineSession::deferred(
-        engine_core::subagent_completion::CompletionState::stored(session_id, cwd)?,
-    ))
 }

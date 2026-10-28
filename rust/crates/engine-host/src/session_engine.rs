@@ -274,8 +274,8 @@ impl SessionEngine {
         prompt_overrides: runtime::SystemPromptOverrides,
         memory: runtime::memory::MemoryMode,
         system_prompt: SystemPrompt,
-        model: String,
-        model_flag_raw: Option<String>,
+        model: &str,
+        model_flag_raw: Option<&str>,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode_override: Option<PermissionMode>,
         reasoning_effort: Option<String>,
@@ -284,9 +284,9 @@ impl SessionEngine {
         let cwd = canonical_session_cwd(cwd)?;
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let resolved_model = if model_flag_raw.is_some() {
-            model.clone()
+            model.to_owned()
         } else {
-            resolve_repl_model(model.clone())
+            resolve_repl_model(model.to_owned())
         };
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let session_state =
@@ -361,13 +361,13 @@ impl SessionEngine {
     pub fn open_persisted(
         cwd: &Path,
         handle: SessionHandle,
-        session: runtime::Session,
+        mut session: runtime::Session,
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
         memory: runtime::memory::MemoryMode,
         system_prompt: SystemPrompt,
-        model: String,
-        model_flag_raw: Option<String>,
+        model: &str,
+        model_flag_raw: Option<&str>,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode_override: Option<PermissionMode>,
         reasoning_effort: Option<String>,
@@ -377,7 +377,8 @@ impl SessionEngine {
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         // Model resolution on resume follows Claude Code: the config is the
         // single source of truth. See [`resume_model_from_config_ssot`].
-        let resolved_model = resume_model_from_config_ssot(model_flag_raw.as_deref(), &model);
+        let resolved_model = resume_model_from_config_ssot(model_flag_raw, model);
+        session.model = Some(resolved_model.clone());
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
@@ -505,7 +506,9 @@ impl SessionEngine {
         // not carried — a rebuild is where it legitimately changes.
         let inherited_known_date = session.runtime.prompt_known_date().map(str::to_string);
         if new_session.model.is_none() {
-            new_session.model = session.runtime.session().model.clone();
+            new_session
+                .model
+                .clone_from(&session.runtime.session().model);
         }
         let model = new_session.model.clone().unwrap_or_default();
         let permission_mode = self.locked_permission_mode();
@@ -1780,7 +1783,7 @@ impl SessionLifecycle for SessionEngine {
         loaded.mode = runtime::SessionMode::Interactive;
         // Keep the current effective model (REPL parity: the runtime model is
         // config-driven, not adopted from the resumed session).
-        loaded.model = session.runtime.session().model.clone();
+        loaded.model.clone_from(&session.runtime.session().model);
         self.rebuild_locked(&mut session, loaded, handle.clone())?;
         Ok((handle, message_count))
     }

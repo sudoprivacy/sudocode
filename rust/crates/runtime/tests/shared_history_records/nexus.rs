@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use super::live_nexus::backend as live_backend;
 use super::{
-    append, assistant, commit, finish_turn, payloads, start_native_tool, text, wait_for,
-    with_selected_messages, Fixture,
+    append, assistant, commit, complete_compacted_branch, finish_turn, payloads,
+    start_native_tool, text, wait_for, Fixture,
 };
 
 fn seed(log: &mut HistoryLog) -> Session {
@@ -30,7 +30,6 @@ fn live_shared_history_preserves_contexts_while_sibling_tool_runs() {
     let path = format!("{directory}/events");
     let mut a = HistoryLog::new(fs.record_log(&path, RecordLogMode::CreateNew).unwrap());
     let prefix = seed(&mut a);
-    let completed_prefix = a.graph().latest_commit().unwrap().to_string();
     let branch_a = HistoryRecord::branch_latest();
     commit(&mut a, &branch_a);
     let context_a = branch_a.context_id();
@@ -56,50 +55,21 @@ fn live_shared_history_preserves_contexts_while_sibling_tool_runs() {
             .record_log(&path, RecordLogMode::Existing)
             .unwrap(),
     );
-    let branch_b = HistoryRecord::branch(completed_prefix);
+    let branch_b = HistoryRecord::branch_latest_completed();
     commit(&mut b, &branch_b);
     let context_b = branch_b.context_id();
     assert_eq!(
         payloads(b.graph().context_session(context_b).unwrap().messages()),
         payloads(prefix.messages())
     );
-    append(
+    let (compacted, b_commit) = complete_compacted_branch(
         &mut b,
         context_b,
-        &ConversationMessage::user_text("NEXUS_B_PRIVATE"),
+        "NEXUS_B_PRIVATE",
+        "NEXUS_B_FINISHED",
+        "NEXUS_B_COMPACTED",
+        "nexus-b-trace",
     );
-    let discarded = append(&mut b, context_b, &text("NEXUS_B_FINISHED"));
-    let answer = append(&mut b, context_b, &text("NEXUS_B_FINISHED"));
-    finish_turn(&mut b, context_b, "nexus-b-trace");
-    let mut compacted = b.graph().context_session(context_b).unwrap();
-    compacted = with_selected_messages(
-        compacted,
-        vec![
-            ConversationMessage::user_text("NEXUS_B_COMPACTED"),
-            text("NEXUS_B_FINISHED"),
-        ],
-    );
-    compacted.record_compaction("B summary", 3);
-    let candidate = b
-        .graph()
-        .prepare_projection(
-            context_b,
-            b.graph().revision(context_b).unwrap(),
-            &compacted,
-            &[None, Some(&answer)],
-        )
-        .unwrap();
-    commit(&mut b, &candidate);
-    assert_eq!(
-        b.graph().message_ids(context_b).unwrap().last(),
-        Some(&answer)
-    );
-    assert!(!b
-        .graph()
-        .message_ids(context_b)
-        .unwrap()
-        .contains(&discarded));
-    let b_commit = candidate.id().to_owned();
     let mut cold = HistoryLog::new(
         live_backend()
             .record_log(&path, RecordLogMode::Existing)

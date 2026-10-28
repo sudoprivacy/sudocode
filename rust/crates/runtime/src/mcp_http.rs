@@ -79,7 +79,7 @@ impl McpHttpConnection {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(reqwest_error_to_io)?;
+            .map_err(|error| reqwest_error_to_io(&error))?;
         let headers = resolve_headers(transport, server_name).await;
         let endpoint = Url::parse(&transport.url).map_err(|error| {
             io::Error::new(
@@ -134,7 +134,7 @@ impl McpHttpConnection {
             .body(body)
             .send()
             .await
-            .map_err(reqwest_error_to_io)?;
+            .map_err(|error| reqwest_error_to_io(&error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(io::Error::other(format!(
@@ -227,7 +227,7 @@ async fn read_sse_stream<TResult: DeserializeOwned>(
                     }
                 }
             }
-            Some(Err(error)) => return Err(reqwest_error_to_io(error)),
+            Some(Err(error)) => return Err(reqwest_error_to_io(&error)),
             None => {
                 for event in parser.finish() {
                     if let Ok(response) =
@@ -265,7 +265,7 @@ async fn read_limited(response: reqwest::Response, max_bytes: usize) -> io::Resu
     let mut stream = response.bytes_stream();
     let mut buf = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(reqwest_error_to_io)?;
+        let chunk = chunk.map_err(|error| reqwest_error_to_io(&error))?;
         if buf.len() + chunk.len() > max_bytes {
             return Err(io::Error::other(format!(
                 "MCP HTTP response exceeded {max_bytes} bytes"
@@ -368,7 +368,7 @@ fn build_header_map(headers: &BTreeMap<String, String>) -> io::Result<HeaderMap>
     Ok(map)
 }
 
-fn reqwest_error_to_io(error: reqwest::Error) -> io::Error {
+fn reqwest_error_to_io(error: &reqwest::Error) -> io::Error {
     io::Error::other(format!("MCP HTTP error: {error}"))
 }
 
@@ -506,24 +506,25 @@ mod tests {
         assert_eq!(tools.result.expect("list result").tools.len(), 1);
 
         // The 2nd request must echo Mcp-Session-Id and advertise both Accept types.
-        let request_headers = state.request_headers.lock().expect("headers lock");
-        assert_eq!(
-            request_headers[1]
-                .get("mcp-session-id")
-                .expect("session id sent")
-                .to_str()
-                .expect("ascii"),
-            "sess-abc"
-        );
-        assert_eq!(
-            request_headers[1]
-                .get("accept")
-                .expect("accept sent")
-                .to_str()
-                .expect("ascii"),
-            "application/json, text/event-stream"
-        );
-        drop(request_headers);
+        {
+            let request_headers = state.request_headers.lock().expect("headers lock");
+            assert_eq!(
+                request_headers[1]
+                    .get("mcp-session-id")
+                    .expect("session id sent")
+                    .to_str()
+                    .expect("ascii"),
+                "sess-abc"
+            );
+            assert_eq!(
+                request_headers[1]
+                    .get("accept")
+                    .expect("accept sent")
+                    .to_str()
+                    .expect("ascii"),
+                "application/json, text/event-stream"
+            );
+        }
 
         let call_result = connection
             .call_tool(

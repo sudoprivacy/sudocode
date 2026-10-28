@@ -329,6 +329,45 @@ enum ShutdownReason {
     Disconnected,
 }
 
+fn forward_engine_commands(
+    cmd_rx: std_mpsc::Receiver<EngineCommand>,
+) -> tokio_mpsc::UnboundedReceiver<EngineCommand> {
+    let (tcmd_tx, tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
+    std::thread::Builder::new()
+        .name("engine-cmd-forward".into())
+        .spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv() {
+                if tcmd_tx.send(cmd).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn engine-cmd-forward thread");
+
+    tcmd_rx
+}
+
+async fn next_session_command(
+    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    evt_tx: &EventSink,
+) -> Option<EngineCommand> {
+    loop {
+        // A control already in the channel precedes an automatically resumed batch.
+        if let Ok(command) = tcmd_rx.try_recv() {
+            return Some(command);
+        }
+        if let Some((command, state)) = evt_tx.inputs.next_prompt() {
+            let _ = evt_tx.send(EngineEvent::InputState(state));
+            return Some(command);
+        }
+        tokio::select! {
+            command = tcmd_rx.recv() => return command,
+            () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
+            () = evt_tx.inputs.changed() => {}
+        }
+    }
+}
+
 /// The command loop. Runs on the engine thread's Tokio runtime.
 async fn drive(
     delegate: Arc<dyn EngineDelegate>,
@@ -342,35 +381,12 @@ async fn drive(
     let next_request_id = Arc::new(AtomicU64::new(0));
     // Bridge the std command receiver into a Tokio channel so the per-turn pump
     // can `select!` on it. A tiny forwarder thread does the blocking `recv`.
-    let (tcmd_tx, mut tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
-    std::thread::Builder::new()
-        .name("engine-cmd-forward".into())
-        .spawn(move || {
-            while let Ok(cmd) = cmd_rx.recv() {
-                if tcmd_tx.send(cmd).is_err() {
-                    break;
-                }
-            }
-        })
-        .expect("spawn engine-cmd-forward thread");
+    let mut tcmd_rx = forward_engine_commands(cmd_rx);
 
     let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
 
     let mut shutdown = ShutdownReason::Disconnected;
-    loop {
-        // A control already in the channel precedes an automatically resumed batch.
-        let cmd = if let Ok(command) = tcmd_rx.try_recv() {
-            command
-        } else if let Some((command, state)) = evt_tx.inputs.next_prompt() {
-            let _ = evt_tx.send(EngineEvent::InputState(state));
-            command
-        } else {
-            tokio::select! {
-                cmd = tcmd_rx.recv() => { let Some(cmd) = cmd else { break; }; cmd },
-                () = evt_tx.completions.delivery_changed() => { evt_tx.completions.deliver(&evt_tx); continue; }
-                () = evt_tx.inputs.changed() => { continue; }
-            }
-        };
+    while let Some(cmd) = next_session_command(&mut tcmd_rx, &evt_tx).await {
         let tasks = delegate.background_tasks().unwrap_or_default();
         match cmd {
             EngineCommand::RuntimeStatus { request_id } => {
@@ -460,6 +476,10 @@ async fn drive(
             }
         }
     }
+    finish_engine_session(delegate.as_ref(), shutdown);
+}
+
+fn finish_engine_session(delegate: &dyn EngineDelegate, shutdown: ShutdownReason) {
     if let Some(tasks) = delegate.background_tasks() {
         tasks.shutdown();
     }
@@ -618,6 +638,56 @@ impl TurnInput {
     }
 }
 
+fn report_turn_worker_result(
+    evt_tx: &EventSink,
+    result: Result<Result<TurnComplete, RuntimeError>, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Ok(complete)) => {
+            let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
+        }
+        Ok(Err(error)) => {
+            let _ = evt_tx.send(EngineEvent::TurnFailed {
+                message: error.to_string(),
+                context_window: error.is_context_window_blocked(),
+            });
+        }
+        Err(join_error) => {
+            let _ = evt_tx.send(EngineEvent::TurnFailed {
+                message: format!("engine turn panicked: {join_error}"),
+                context_window: false,
+            });
+        }
+    }
+}
+
+fn spawn_turn_worker(
+    delegate: &Arc<dyn EngineDelegate>,
+    input: TurnInput,
+    evt_tx: &EventSink,
+    table: &RequestTable,
+    subagents: &SubagentRelay,
+    tasks: &runtime::background_tasks::BackgroundTasks,
+) -> tokio::task::JoinHandle<Result<TurnComplete, RuntimeError>> {
+    let worker = delegate.clone();
+    let turn_tx = evt_tx.clone();
+    let turn_table = table.clone();
+    let subagents = subagents.clone();
+    let turn_tasks = tasks.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut input = input;
+        let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
+            .with_subagent_relay(subagents)
+            .with_background_tasks(turn_tasks);
+        observer.initial_inputs = std::mem::take(&mut input.input_views);
+        let mut prompter = PrompterAdapter {
+            tx: turn_tx,
+            table: turn_table,
+        };
+        execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
+    })
+}
+
 /// Drive a single [`EngineCommand::Prompt`]: install the adapters, run the turn
 /// on a blocking task, and concurrently service answer/cancel commands until it
 /// finishes. Returns the shutdown reason if a close or disconnection arrived
@@ -657,23 +727,7 @@ async fn run_one_turn(
     let _ = evt_tx.send(EngineEvent::TurnStarted { label });
     let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
 
-    let worker = delegate.clone();
-    let turn_tx = evt_tx.clone();
-    let turn_table = table.clone();
-    let subagents = subagents.clone();
-    let turn_tasks = tasks.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
-        let mut input = input;
-        let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
-            .with_subagent_relay(subagents)
-            .with_background_tasks(turn_tasks);
-        observer.initial_inputs = std::mem::take(&mut input.input_views);
-        let mut prompter = PrompterAdapter {
-            tx: turn_tx,
-            table: turn_table,
-        };
-        execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
-    });
+    let mut handle = spawn_turn_worker(delegate, input, evt_tx, &table, subagents, tasks);
 
     let mut shutdown = None;
     loop {
@@ -740,23 +794,7 @@ async fn run_one_turn(
                     let unapplied = inbox.finish();
                     if !unapplied.is_empty() { let _ = evt_tx.send(EngineEvent::InputDeferred(unapplied)); }
                 }
-                match result {
-                    Ok(Ok(complete)) => {
-                        let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
-                    }
-                    Ok(Err(error)) => {
-                        let _ = evt_tx.send(EngineEvent::TurnFailed {
-                            message: error.to_string(),
-                            context_window: error.is_context_window_blocked(),
-                        });
-                    }
-                    Err(join_error) => {
-                        let _ = evt_tx.send(EngineEvent::TurnFailed {
-                            message: format!("engine turn panicked: {join_error}"),
-                            context_window: false,
-                        });
-                    }
-                }
+                report_turn_worker_result(evt_tx, result);
                 let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
                 break;
             }

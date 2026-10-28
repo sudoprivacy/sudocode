@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use runtime::{Session, SessionStore};
-use serde_json;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -93,9 +92,9 @@ fn resume_latest_refuses_to_skip_a_newer_unreadable_session() {
     fs::create_dir_all(newer.path.parent().expect("session dir")).expect("session dir");
     fs::write(&newer.path, "{\"type\":\"record_from_a_newer_scode\"}\n")
         .expect("unreadable session should persist");
-    let base = SystemTime::now() - Duration::from_secs(3600);
+    let base = SystemTime::now() - Duration::from_hours(1);
     set_modified(&older.path, base);
-    set_modified(&newer.path, base + Duration::from_secs(60));
+    set_modified(&newer.path, base + Duration::from_mins(1));
     let older_bytes = fs::read(&older.path).expect("older session bytes");
 
     // when
@@ -135,7 +134,7 @@ fn resume_latest_refuses_to_skip_a_newer_unreadable_session() {
     assert_eq!(restored_session_id(&explicit), older_id);
 
     // and once the readable session is the newer one, `latest` resumes it
-    set_modified(&older.path, base + Duration::from_secs(120));
+    set_modified(&older.path, base + Duration::from_mins(2));
     let resumed = resume_latest_json(&temp_dir);
     assert_success(&resumed);
     assert_eq!(restored_session_id(&resumed), older_id);

@@ -111,7 +111,7 @@ impl ChildImp {
 			if Self::wait_imp(completion_port, 0)?.is_break() {
 				break;
 			} else if retry_attempt == MAX_RETRY_ATTEMPT {
-				spawn_blocking(move || Self::wait_imp(completion_port, INFINITE)).await??;
+				let _ = spawn_blocking(move || Self::wait_imp(completion_port, INFINITE)).await??;
 			}
 		}
 
@@ -119,7 +119,7 @@ impl ChildImp {
 	}
 
 	pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-		Self::wait_imp(ThreadSafeRawHandle(self.handles.completion_port), 0)?;
+		let _ = Self::wait_imp(ThreadSafeRawHandle(self.handles.completion_port), 0)?;
 		self.inner.try_wait()
 	}
 }

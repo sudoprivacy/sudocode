@@ -18,7 +18,7 @@ pub mod history;
 const SESSION_VERSION: u32 = 1;
 const UNANSWERED_TURN_TEXT: &str = "No response requested.";
 /// Cold-storage retention budget (bytes) for a transcript backed by a native
-/// append-log (nexus DT_STREAM). `0` = keep-forever: cold segments spill out
+/// append-log (nexus `DT_STREAM`). `0` = keep-forever: cold segments spill out
 /// of the hot tier but are never dropped, so the whole transcript stays
 /// readable. Ignored by regular-file backends.
 const TRANSCRIPT_RETENTION_BYTES: u64 = 0;
@@ -104,8 +104,8 @@ pub struct SessionCompaction {
     pub removed_message_count: usize,
     pub summary: String,
     pub usage: Option<TokenUsage>,
-    /// Tool names the model discovered (via ToolSearch) before compaction
-    /// removed the ToolSearch results from the message history. Carried
+    /// Tool names the model discovered (via `ToolSearch`) before compaction
+    /// removed the `ToolSearch` results from the message history. Carried
     /// forward so `extract_discovered_tool_names()` can restore them as
     /// `defer_loading: false` after compaction. Mirrors CC's
     /// `preCompactDiscoveredTools`.
@@ -129,16 +129,11 @@ pub struct SessionPromptEntry {
 /// The interface that created a managed session. One-shot prompts remain
 /// resumable by id, but must not displace the user's interactive `latest`
 /// session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionMode {
+    #[default]
     Interactive,
     NonInteractive,
-}
-
-impl Default for SessionMode {
-    fn default() -> Self {
-        Self::Interactive
-    }
 }
 
 impl SessionMode {
@@ -620,7 +615,7 @@ impl Session {
 
     /// Pre-seed this session with a conversation prefix. Used by the fork
     /// subagent path to hand a child runtime a copy of the parent's
-    /// in-flight assistant message + placeholder tool_results before the
+    /// in-flight assistant message + placeholder `tool_results` before the
     /// first API call, matching CC-fork's `buildForkedMessages`.
     ///
     /// The pre-seeded messages are NOT persisted here — persistence only
@@ -665,7 +660,7 @@ impl Session {
         let writer = self.writer_for(&persistence.path)?;
         if unopened {
             if let Some(mut restored) = writer.history_session().map_err(SessionError::Format)? {
-                restored.persistence = self.persistence.clone();
+                restored.persistence.clone_from(&self.persistence);
                 restored.view_revision = self.view_revision;
                 if self.prompt_snapshot_dirty {
                     restored.prompt_snapshot.clone_from(&self.prompt_snapshot);
@@ -942,7 +937,7 @@ impl Session {
             let graph = history::HistoryGraph::decode(contents.as_bytes())?;
             return match head {
                 Some(head) => graph.revision_session(&head),
-                None => graph.resume_session(),
+                None => graph.completed_session(None),
             }
             .map_err(SessionError::Io);
         }
@@ -992,10 +987,10 @@ impl Session {
     /// way in.
     #[must_use]
     pub fn fs_handle(&self) -> Arc<dyn FsBackend> {
-        self.persistence
-            .as_ref()
-            .map(|p| Arc::clone(&p.fs))
-            .unwrap_or_else(|| Arc::new(StdFsBackend))
+        self.persistence.as_ref().map_or_else(
+            || -> Arc<dyn FsBackend> { Arc::new(StdFsBackend) },
+            |p| Arc::clone(&p.fs),
+        )
     }
 
     /// Return the filesystem backend attached to the persistence layer,
@@ -1004,8 +999,7 @@ impl Session {
         static DEFAULT: StdFsBackend = StdFsBackend;
         self.persistence
             .as_ref()
-            .map(|p| p.fs.as_ref() as &dyn FsBackend)
-            .unwrap_or(&DEFAULT)
+            .map_or(&DEFAULT, |p| p.fs.as_ref() as &dyn FsBackend)
     }
 
     /// The offload dir for a given session file + id:
@@ -1023,7 +1017,7 @@ impl Session {
     /// shared sessions dir). `None` for an in-memory session. Namespacing by
     /// session-id is required, not cosmetic: managed session files live flat
     /// in one sessions dir (`<sessions>/<session-id>.jsonl`), so a plain
-    /// sibling dir would let one session's tool_use ids collide with another's
+    /// sibling dir would let one session's `tool_use` ids collide with another's
     /// and leave nothing to GC per session.
     #[must_use]
     pub fn tool_results_dir(&self) -> Option<PathBuf> {
@@ -1086,9 +1080,9 @@ impl Session {
     /// Offload a full tool-result blob to `<session-dir>/tool-results/<id>` via
     /// the session's `FsBackend` — backend-agnostic: it lands on the local FS
     /// under `StdFsBackend` and on the nexus VFS under `KernelFsBackend`, no
-    /// caller change. `id` is the (unique) tool_use id; it is sanitized to a
+    /// caller change. `id` is the (unique) `tool_use` id; it is sanitized to a
     /// safe filename. Written once. Returns the stored path and byte length.
-    /// Map an arbitrary tool_use id to a filesystem-safe filename: every
+    /// Map an arbitrary `tool_use` id to a filesystem-safe filename: every
     /// char outside `[A-Za-z0-9_-]` becomes `_`. Applied symmetrically by the
     /// offload write ([`Self::offload_tool_result`]) and the read-more path
     /// (`read_tool_output`) so both resolve the same file — and a hostile id
@@ -1107,9 +1101,9 @@ impl Session {
     }
 
     pub fn offload_tool_result(&self, id: &str, full: &[u8]) -> std::io::Result<(String, u64)> {
-        let dir = self.tool_results_dir().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "session has no persistence path")
-        })?;
+        let dir = self
+            .tool_results_dir()
+            .ok_or_else(|| std::io::Error::other("session has no persistence path"))?;
         let dir_str = dir.to_string_lossy().into_owned();
         let backend = self.backend();
         let writer = self
@@ -1228,7 +1222,6 @@ impl Session {
         expected_revision: Option<&str>,
         purpose: &str,
     ) -> Result<(), SessionError> {
-        let path = path.as_ref();
         let writer = self.writer_for(path)?;
         let _write = writer.write().map_err(SessionError::Format)?;
         let durable = match self.backend().read_snapshot(&path.to_string_lossy()) {
@@ -1270,7 +1263,7 @@ impl Session {
     /// A no-op for sessions without a persistence path.
     pub fn rewrite_persisted(&self) -> Result<(), SessionError> {
         match self.persistence_path() {
-            Some(path) => self.save_to_path(path.to_path_buf()),
+            Some(path) => self.save_to_path(path),
             None => Ok(()),
         }
     }
@@ -1349,7 +1342,7 @@ impl Session {
     pub(crate) fn from_persisted_contents(contents: &str) -> Result<Self, SessionError> {
         let is_record_history = history::is_record_history(contents.as_bytes());
         let mut session = if is_record_history {
-            history::HistoryGraph::decode(contents.as_bytes())?.resume_session()?
+            history::HistoryGraph::decode(contents.as_bytes())?.completed_session(None)?
         } else {
             match JsonValue::parse(contents) {
                 Ok(value) if Self::is_snapshot(&value) => Self::from_json(&value)?,
@@ -1862,18 +1855,14 @@ impl Session {
             let (line_number, value) = record?;
             let object = value.as_object().ok_or_else(|| {
                 SessionError::Format(format!(
-                    "JSONL record at line {} must be an object",
-                    line_number
+                    "JSONL record at line {line_number} must be an object"
                 ))
             })?;
             match object
                 .get("type")
                 .and_then(JsonValue::as_str)
                 .ok_or_else(|| {
-                    SessionError::Format(format!(
-                        "JSONL record at line {} missing type",
-                        line_number
-                    ))
+                    SessionError::Format(format!("JSONL record at line {line_number} missing type"))
                 })? {
                 "session_meta" => {
                     // Metadata only starts full snapshots, never incremental
@@ -1921,8 +1910,7 @@ impl Session {
                     }
                     let message_value = object.get("message").ok_or_else(|| {
                         SessionError::Format(format!(
-                            "JSONL record at line {} missing message",
-                            line_number
+                            "JSONL record at line {line_number} missing message"
                         ))
                     })?;
                     messages.push(ConversationMessage::from_json(message_value)?);
@@ -1960,8 +1948,7 @@ impl Session {
                 }
                 other => {
                     return Err(SessionError::Format(format!(
-                        "unsupported JSONL record type at line {}: {other}",
-                        line_number
+                        "unsupported JSONL record type at line {line_number}: {other}"
                     )))
                 }
             }
@@ -2143,7 +2130,7 @@ impl Session {
             && frame
                 .get("messages")
                 .and_then(JsonValue::as_array)
-                .is_some_and(|messages| messages.is_empty())
+                .is_some_and(<[JsonValue]>::is_empty)
             && frame.get("parent_id").and_then(JsonValue::as_str) == Some(receipt.head.as_str())
             && metadata_hash == receipt.metadata_hash)
     }
@@ -2286,8 +2273,8 @@ impl Session {
         let _write = writer.write().map_err(SessionError::Format)?;
         let path_str = path.to_string_lossy();
         let backend = self.backend();
-        let needs_bootstrap = !backend.exists(&path_str)?
-            || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
+        let needs_bootstrap =
+            !backend.exists(&path_str)? || backend.stat(&path_str).map_or(true, |m| m.len == 0);
         if needs_bootstrap {
             return self.save_snapshot(path, &writer);
         }
@@ -3265,7 +3252,7 @@ mod tests {
     use crate::usage::{TokenUsage, UsageCostCurrency, UsageTracker};
     use std::collections::BTreeSet;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3586,7 +3573,7 @@ mod tests {
             restored.messages[0].blocks,
             ConversationMessage::user_text("legacy").blocks
         );
-        assert!(!restored.session_id.is_empty());
+        assert_ne!(restored.session_id, "");
     }
 
     #[test]

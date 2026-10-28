@@ -1,13 +1,13 @@
-//! PTY regression test: the DialPad's built-in custom-input row accepts typed
+//! PTY regression test: the `DialPad`'s built-in custom-input row accepts typed
 //! text in-place (async/iocraft REPL, the default for a human).
 //!
 //! Regression: typing directly on the `[+]` row (without pressing Enter first)
 //! used to switch input slots mid-keystroke-burst and drop every char but the
 //! first — the reported "typing on `[+]` just submits one letter / exits". The
-//! DialPad now owns an in-place text buffer (like FuzzySelect's filter), so a
+//! `DialPad` now owns an in-place text buffer (like `FuzzySelect`'s filter), so a
 //! fast burst is captured whole.
 //!
-//! Runs in mock (deterministic write_plan dialog) and live.
+//! Runs in mock (deterministic `write_plan` dialog) and live.
 //!
 //! ```bash
 //! cargo test --test pty_dialpad_custom_input                          # mock (CI)
@@ -64,7 +64,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
 
     // The WHOLE comment must reach the model as feedback (not just the first
     // char). The mock echoes the tool result verbatim; live re-plans on it.
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     if env.is_mock() {
         sess.expect(marker)
             .expect("the full typed comment must reach the model, not a single char");
@@ -79,9 +79,9 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
     let _ = sess.expect_eof();
 }
 
-/// Bracketed paste into the DialPad `[+]` row must work — including multi-line
+/// Bracketed paste into the `DialPad` `[+]` row must work — including multi-line
 /// content (collapsed to a placeholder, expanded to the full text on submit).
-/// Regression: the DialPad path ignored `TerminalEvent::Paste` entirely.
+/// Regression: the `DialPad` path ignored `TerminalEvent::Paste` entirely.
 #[test]
 fn dialpad_custom_input_row_accepts_bracketed_paste() {
     let env = TestEnv::new("dialpad-paste");
@@ -127,7 +127,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
     std::thread::sleep(Duration::from_millis(400));
     sess.send("\r").expect("submit");
 
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     if env.is_mock() {
         // The tool result echoes the feedback verbatim — the full pasted text
         // (both marker lines) must be present, proving paste reached the buffer

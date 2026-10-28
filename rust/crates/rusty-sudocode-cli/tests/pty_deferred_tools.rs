@@ -2,7 +2,7 @@
 //!
 //! Verifies direct deferred tool dispatch: the mock LLM calls `CronList`
 //! directly (via `defer_loading` + `tool_reference` expansion), scode
-//! dispatches it through the GlobalToolRegistry, and the model sees the result.
+//! dispatches it through the `GlobalToolRegistry`, and the model sees the result.
 //!
 //! The second test verifies MCP tool dispatch: the mock LLM calls
 //! `mcp__parity__echo` directly, and the MCP echo response round-trips back.

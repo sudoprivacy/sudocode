@@ -131,7 +131,7 @@ fn windows_verbatim_paths_read_the_same_file() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Write a file, verify it exists on disk with correct content.
-/// Agent trigger: model must select write_file tool.
+/// Agent trigger: model must select `write_file` tool.
 #[test]
 fn write_then_read_back() {
     let env = TestEnv::new("write-read");
@@ -188,7 +188,7 @@ fn write_then_read_back() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Pre-create file → edit (alpha→omega) → verify on disk.
-/// Agent trigger: model must select edit_file tool.
+/// Agent trigger: model must select `edit_file` tool.
 #[test]
 fn edit_then_verify_on_disk() {
     let env = TestEnv::new("edit-verify");
@@ -253,7 +253,7 @@ fn edit_then_verify_on_disk() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Create files → glob to discover → grep to find content.
-/// Agent trigger: model must select grep_search (at minimum).
+/// Agent trigger: model must select `grep_search` (at minimum).
 #[test]
 fn glob_then_grep_discovery() {
     let env = TestEnv::new("glob-grep");
@@ -287,7 +287,7 @@ fn glob_then_grep_discovery() {
 
     sess.set_default_timeout(common::LIVE_TURN_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("glob-grep scode should exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "glob-grep should exit 0; got {exit}");

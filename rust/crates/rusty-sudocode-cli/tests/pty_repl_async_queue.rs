@@ -98,7 +98,7 @@ fn async_repl_processes_single_turn_and_exits() {
     // teardown even on a congested runner.
     sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "async REPL should exit cleanly after /exit; got error: {e:?}\nPTY screen:\n{screen}"
         )

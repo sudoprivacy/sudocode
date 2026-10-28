@@ -32,11 +32,11 @@ fn text_only_endpoint_rejects_agent_work_before_inference() {
     session.expect("tool calling").unwrap_or_else(|error| {
         panic!(
             "capability error missing: {error}; {}",
-            session.render(|screen| screen.contents())
+            session.render(common::screen_contents)
         )
     });
     assert_ne!(session.expect_eof().expect("failed turn exits"), 0);
-    let screen = session.render(|screen| screen.contents());
+    let screen = session.render(common::screen_contents);
     assert!(
         screen.contains("does not support") && screen.contains("tool calling"),
         "missing capability error in terminal: {screen}"
@@ -86,7 +86,7 @@ fn text_only_endpoint_rejects_agent_work_before_inference() {
 fn endpoint_catalog_reaches_the_running_model_picker() {
     let env = TestEnv::new("model-discovery");
     env.set_model_catalog(serde_json::json!({"data": [{
-        "id": "claude-unseen-2040", "context_window": 1234567,
+        "id": "claude-unseen-2040", "context_window": 1_234_567,
         "max_output_tokens": 98765, "vision_supported": true
     }]}));
     let mut session = env.spawn(&["--permission-mode", "read-only"]);
@@ -95,13 +95,12 @@ fn endpoint_catalog_reaches_the_running_model_picker() {
     // picker. Reading disk alone would miss the original immutable-cache bug.
     let deadline = Instant::now() + env.timeout();
     loop {
-        let loaded = std::fs::read_dir(env.config_home().join("cache/model-catalogs"))
-            .ok()
-            .is_some_and(|files| {
+        let loaded =
+            std::fs::read_dir(env.config_home().join("cache/model-catalogs")).is_ok_and(|files| {
                 files.filter_map(Result::ok).any(|file| {
-                    std::fs::read_to_string(file.path())
-                        .ok()
-                        .is_some_and(|body| !env.is_mock() || body.contains("claude-unseen-2040"))
+                    file.path().extension() == Some(std::ffi::OsStr::new("json"))
+                        && std::fs::read_to_string(file.path())
+                            .is_ok_and(|body| !env.is_mock() || body.contains("claude-unseen-2040"))
                 })
             });
         if loaded {
@@ -118,9 +117,38 @@ fn endpoint_catalog_reaches_the_running_model_picker() {
     session.send("\r").expect("open picker");
     session.expect("Select model").expect("model picker");
     if env.is_mock() {
-        session
-            .expect("claude-unseen-2040")
-            .expect("new upstream model in live picker");
+        // The endpoint model can follow more aliases than fit on one screen.
+        // A partial query cannot satisfy the full model assertion by echo alone.
+        let deadline = Instant::now() + env.timeout();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "new upstream model missing from running picker:\n{}",
+                session.render(common::screen_contents)
+            );
+            session.set_default_timeout(remaining);
+            session
+                .send("unseen-2040")
+                .expect("filter discovered model");
+            session
+                .expect("unseen-2040")
+                .expect("picker query rendered");
+            if session.render(|screen| screen.contains("claude-unseen-2040")) {
+                break;
+            }
+            // Atomic cache publication precedes the in-memory snapshot update.
+            // Reopen the real picker to observe its current catalog; each menu
+            // retains its opening snapshot. A permanently stale catalog still
+            // fails within the same model-visibility budget.
+            session.send("\x1b").expect("dismiss pending picker");
+            session.expect("\u{276f}").expect("return to REPL");
+            session.send("/model").expect("type model command");
+            common::expect_input_line(&session, "/model", remaining, "model command");
+            session.send("\r").expect("reopen picker");
+            session.expect("Select model").expect("model picker");
+        }
+        session.set_default_timeout(env.timeout());
     }
     session.send("\x1b").expect("dismiss picker");
     session.expect("\u{276f}").expect("return to REPL");

@@ -26,6 +26,50 @@ pub use color_theme::{theme, ColorTheme};
 mod styled_line;
 pub(crate) mod styled_text;
 pub(crate) mod text_layout;
+
+/// Shared prompt surfaces for live input, committed prompts and context headers.
+/// Resolve the terminal palette once, outside redraw and typing hot paths.
+pub(crate) fn prompt_style(live: bool) -> ContentStyle {
+    static STYLES: std::sync::OnceLock<[ContentStyle; 2]> = std::sync::OnceLock::new();
+    STYLES.get_or_init(|| {
+        let support = ColorSupport::detect();
+        if support == ColorSupport::NoColor {
+            return [ContentStyle::default(); 2];
+        }
+        let light = theme().light_background;
+        let fallback = if light { (255, 255, 255) } else { (24, 24, 24) };
+        let (r, g, b) = terminal_palette::background().unwrap_or(fallback);
+        [false, true].map(|live| {
+            let alpha: u16 = if light {
+                if live {
+                    8
+                } else {
+                    4
+                }
+            } else if live {
+                16
+            } else {
+                10
+            };
+            let target: u16 = if light { 0 } else { 255 };
+            let blend = |channel: u8| {
+                u8::try_from((u16::from(channel) * (100 - alpha) + target * alpha) / 100)
+                    .expect("blended channel")
+            };
+            ContentStyle {
+                // A fallback background must remain legible when the terminal
+                // cannot report its default foreground on Windows.
+                foreground_color: Some(if light { Color::Black } else { Color::White }),
+                background_color: Some(support.color(Color::Rgb {
+                    r: blend(r),
+                    g: blend(g),
+                    b: blend(b),
+                })),
+                ..ContentStyle::default()
+            }
+        })
+    })[usize::from(live)]
+}
 pub(crate) use styled_line::StyledLine;
 use text_layout::display_width as visible_width;
 
@@ -151,7 +195,7 @@ pub fn ansi_fg(color: Color) -> String {
         Color::White => "\x1b[97m".to_string(),
         Color::AnsiValue(n) => format!("\x1b[38;5;{n}m"),
         Color::Rgb { r, g, b } => format!("\x1b[38;2;{r};{g};{b}m"),
-        _ => String::new(),
+        Color::Reset => String::new(),
     }
 }
 
@@ -445,6 +489,11 @@ fn parse_budget_token(token: &str) -> Option<u32> {
         _ => return None,
     };
     let value: f64 = num_str.parse().ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Budget literals truncate fractional tokens and saturate at u32 bounds."
+    )]
     let result = (value * multiplier) as u32;
     (result > 0).then_some(result)
 }
@@ -1630,7 +1679,10 @@ impl ResponseGlyphState {
                             out.push_str("  ");
                         } else {
                             self.started = true;
-                            out.push_str(&format!("\r\x1b[2K{BOLD}•{RESET} "));
+                            let _ = std::fmt::Write::write_fmt(
+                                &mut out,
+                                format_args!("\r\x1b[2K{BOLD}•{RESET} "),
+                            );
                         }
                     }
                     row.write_ansi(0..row.text.len(), &mut out);
@@ -1649,9 +1701,7 @@ impl ResponseGlyphState {
 }
 
 pub(crate) fn query_terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80)
+    crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize)
 }
 
 #[cfg(test)]

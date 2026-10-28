@@ -40,7 +40,7 @@ fn planted(name: &str) -> AgentDescriptor {
     descriptor
 }
 
-fn call(kernel: &Kernel, method: &str, payload: Value) -> Value {
+fn call(kernel: &Kernel, method: &str, payload: &Value) -> Value {
     let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
     let bytes = kernel
         .dispatch_rust_call(
@@ -221,13 +221,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         .block_on(mock_anthropic_service::MockAnthropicService::spawn())
         .unwrap();
     let config_home = tempfile::tempdir().unwrap();
-    std::fs::write(config_home.path().join("sudocode.json"), json!({
-        "auth_modes":{"api-key":{"anthropic":{"baseUrl":"nexus:///model","apiKey":"test-cohost-key"}}},
-        "models":{
-            "scripted":{"alias":"scripted","name":"Scripted", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}},
-            "claude-sonnet":{"alias":"claude-sonnet","name":"Scripted child", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}}
-        }
-    }).to_string()).unwrap();
+    write_scripted_cohost_config(config_home.path());
     std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
     let kernel = Arc::new(Kernel::new());
     managed_agent::install_managed_agent_with_spawn(
@@ -247,31 +241,11 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     let started = call(
         &kernel,
         "start_session_v1",
-        json!({"agent_id":"worker","model":"scripted",
+        &json!({"agent_id":"worker","model":"scripted",
             "resume_session_id":seeded.resume_session_id}),
     );
-    let endpoint: SessionEndpoint =
-        serde_json::from_value(started["session_endpoint"].clone()).unwrap();
-    let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
-    let mailbox =
-        SessionMailbox::open(Arc::clone(&kernel), ctx, endpoint, SessionSide::Controller).unwrap();
-    send(
-        &mailbox,
-        json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
-    );
-    let (initialized, _) = until(&mailbox, |message| message["id"] == "init");
-    assert_eq!(
-        initialized["result"]["_meta"]["sudocode"]["runtimeStatus"]["version"], 1,
-        "{initialized}"
-    );
-    send(
-        &mailbox,
-        json!({"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/","mcpServers":[]}}),
-    );
-    let (created, _) = until(&mailbox, |message| message["id"] == "new");
-    assert!(created.get("error").is_none(), "{created}");
+    let (mailbox, created) = open_scripted_controller(&kernel, &started);
     let sid = created["result"]["sessionId"].as_str().unwrap();
-    assert_eq!(started["durable_session_id"], sid);
     assert_runtime_state(&kernel, &started["session_id"], "ready", None);
     assert_status(&mailbox, sid, "idle", None);
     send(
@@ -293,19 +267,6 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         "params":{"sessionId":sid,"permissionMode":"prompt"}}),
     );
     until(&mailbox, |message| message["id"] == "restore-mode");
-    assert_eq!(
-        created["result"]["_meta"]["sudocode"]["workspace"]["fileRoot"],
-        format!(
-            "/proc/{}/workspace",
-            started["session_id"].as_str().unwrap()
-        )
-    );
-    assert!(
-        created["result"]["_meta"]["sudocode"]["workspace"]["shellRoot"]
-            .as_str()
-            .unwrap()
-            .contains("worker")
-    );
     let fs = KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
         &AgentDescriptor {
@@ -320,12 +281,67 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             started["session_id"].as_str().unwrap()
         ),
     );
+    assert_cohost_permission_turns(&mailbox, &kernel, &started, &fs, sid);
+    let (peer_path, _peer) = exercise_cohost_peer_input(&mailbox, &kernel, &fs);
+    assert_cohost_question_turns(&mailbox, sid);
+    // Only `send` reaches a peer. The peer's turn above answered in prose and called
+    // no tool, and two complete turns have run since, so anything the session would
+    // ever deliver for it is in the conversation by now: nothing from the worker is.
+    let delivered = common::wait_for_agent_reply(
+        &kernel,
+        &peer_path,
+        &OperationContext::new("test-owner", "root", false, Some("peer"), false),
+        "worker",
+        Duration::from_millis(500),
+    );
+    assert!(
+        delivered.is_none(),
+        "a turn's prose was delivered to the peer: {delivered:?}"
+    );
+    assert_parallel_question_progress(&mailbox, &kernel, &started, &fs, sid);
+    assert_child_controller_permissions(&mailbox, &kernel, &started, &fs, sid, &rt, &service);
+    let failed = exercise_failed_peer_delivery(&kernel, fs, &rt, &service);
+
+    failed
+        .mailbox
+        .send(SessionPayload::Closed {
+            reason: "failed controller disconnected".into(),
+        })
+        .unwrap();
+    mailbox
+        .send(SessionPayload::Closed {
+            reason: "controller disconnected".into(),
+        })
+        .unwrap();
+    await_terminated_cohost_processes(
+        &kernel,
+        &[&started["session_id"], &failed.started["session_id"]],
+    );
+}
+
+fn write_scripted_cohost_config(config_home: &std::path::Path) {
+    std::fs::write(config_home.join("sudocode.json"), json!({
+        "auth_modes":{"api-key":{"anthropic":{"baseUrl":"nexus:///model","apiKey":"test-cohost-key"}}},
+        "models":{
+            "scripted":{"alias":"scripted","name":"Scripted", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}},
+            "claude-sonnet":{"alias":"claude-sonnet","name":"Scripted child", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}}
+        }
+    }).to_string()).unwrap();
+}
+
+fn assert_cohost_permission_turns(
+    mailbox: &SessionMailbox<Kernel>,
+    kernel: &Arc<Kernel>,
+    started: &Value,
+    fs: &KernelFsBackend<Kernel>,
+    sid: &str,
+) {
     for (turn, cancelled) in [("cancelled-turn", true), ("approved-turn", false)] {
         send(
-            &mailbox,
+            mailbox,
             json!({"jsonrpc":"2.0","id":turn,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"PARITY_SCENARIO:write_file_allowed"}]}}),
         );
-        let (approval, _) = until(&mailbox, |message| {
+        let (approval, _) = until(mailbox, |message| {
             message["method"] == "session/request_permission"
         });
         assert_eq!(approval["params"]["toolCall"]["title"], "write_file");
@@ -334,9 +350,9 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             "tool must wait for approval"
         );
         let state = call(
-            &kernel,
+            kernel,
             "get_session_v1",
-            json!({"session_id":started["session_id"]}),
+            &json!({"session_id":started["session_id"]}),
         );
         assert_eq!(state["state"], "awaiting_input");
         assert_runtime_state(
@@ -348,7 +364,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         assert_status(&mailbox, sid, "awaiting_input", Some("permission"));
         if cancelled {
             send(
-                &mailbox,
+                mailbox,
                 json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}),
             );
         } else {
@@ -360,12 +376,11 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
                 .unwrap()["optionId"]
                 .clone();
             send(
-                &mailbox,
+                mailbox,
                 json!({"jsonrpc":"2.0","id":approval["id"],"result":{"outcome":{"outcome":"selected","optionId":option}}}),
             );
         }
-        let (terminal, events) = until(&mailbox, |message| message["id"] == turn);
-        assert_runtime_state(&kernel, &started["session_id"], "ready", None);
+        let (terminal, events) = until(mailbox, |message| message["id"] == turn);
         assert_eq!(
             terminal["result"]["stopReason"],
             if cancelled { "cancelled" } else { "end_turn" },
@@ -399,11 +414,18 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         .read_to_string(&format!("/sessions/{sid}/transcript.jsonl"))
         .unwrap();
     assert!(persisted.contains("write_file succeeded"));
+}
+
+fn exercise_cohost_peer_input(
+    mailbox: &SessionMailbox<Kernel>,
+    kernel: &Arc<Kernel>,
+    fs: &KernelFsBackend<Kernel>,
+) -> (String, Arc<runtime::mailbox::Mailbox>) {
     // A peer text message enters the same driver and asks the bound controller.
     let peer_path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "peer"));
-    common::provision_stream_transcript(&kernel, &peer_path);
+    common::provision_stream_transcript(kernel, &peer_path);
     let peer_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
-        Arc::clone(&kernel),
+        Arc::clone(kernel),
         &AgentDescriptor {
             pid: "pid-peer".to_string(),
             name: "peer".to_string(),
@@ -418,12 +440,19 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         "peer".into(),
     ));
     peer.sender()("worker", "PARITY_SCENARIO:write_file_denied").unwrap();
-    let (approval, events) = until(&mailbox, |message| {
+    let (approval, events) = until(mailbox, |message| {
         message["method"] == "session/request_permission"
     });
-    assert!(events
-        .iter()
-        .any(|event| event["params"]["update"]["sessionUpdate"] == "user_message_chunk"));
+    assert!(
+        events.iter().any(|event| {
+            let update = &event["params"]["update"];
+            update["sessionUpdate"] == "user_message_chunk"
+                && update["content"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("<mailbox-message from=\"peer\">"))
+        }),
+        "a peer message reaches the session in the one wrapper every host uses: {events:?}"
+    );
     let deny = approval["params"]["options"]
         .as_array()
         .unwrap()
@@ -432,10 +461,10 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         .unwrap()["optionId"]
         .clone();
     send(
-        &mailbox,
+        mailbox,
         json!({"jsonrpc":"2.0","id":approval["id"],"result":{"outcome":{"outcome":"selected","optionId":deny}}}),
     );
-    let (_, events) = until(&mailbox, |message| {
+    let (_, events) = until(mailbox, |message| {
         message
             .to_string()
             .contains("write_file denied as expected")
@@ -444,27 +473,24 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         .iter()
         .any(|event| event["params"]["update"]["status"] == "failed"));
     assert!(fs.read_to_string("generated/denied.txt").is_err());
-    let reply = common::wait_for_agent_reply(
-        &kernel,
-        &peer_path,
-        &OperationContext::new("test-owner", "root", false, Some("peer"), false),
-        "worker",
-        Duration::from_secs(5),
-    )
-    .unwrap();
-    assert_eq!(reply["kind"], "auto_reply");
-    assert!(reply["body"]
-        .as_str()
-        .unwrap()
-        .contains("write_file denied as expected"));
+    // A peer's message is one more input: its turn ends like any other, and the
+    // session takes the next prompt only after that.
+    until(mailbox, |message| {
+        message["method"] == "_sudocode/session/input_update"
+            && message["params"]["update"]["kind"] == "turn_complete"
+    });
+    (peer_path, peer)
+}
+
+fn assert_cohost_question_turns(mailbox: &SessionMailbox<Kernel>, sid: &str) {
     // Reverse questions and cancellation travel on the same channel as permissions.
     for (turn, cancelled) in [("cancel-question", true), ("answer-question", false)] {
         send(
-            &mailbox,
+            mailbox,
             json!({"jsonrpc":"2.0","id":turn,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"PARITY_SCENARIO:ask_user_question_roundtrip"}]}}),
         );
         // Prompt mode also approves the question tool before it asks the user.
-        let (first, _) = until(&mailbox, |m| {
+        let (first, _) = until(mailbox, |m| {
             m["method"] == "session/request_permission" || m["method"] == "_scode/ask_user_question"
         });
         let question = if first["method"] == "session/request_permission" {
@@ -476,10 +502,10 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
                 .unwrap()["optionId"]
                 .clone();
             send(
-                &mailbox,
+                mailbox,
                 json!({"jsonrpc":"2.0","id":first["id"],"result":{"outcome":{"outcome":"selected","optionId":option}}}),
             );
-            until(&mailbox, |m| m["method"] == "_scode/ask_user_question").0
+            until(mailbox, |m| m["method"] == "_scode/ask_user_question").0
         } else {
             first
         };
@@ -493,16 +519,16 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         );
         if cancelled {
             send(
-                &mailbox,
+                mailbox,
                 json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}),
             );
         } else {
             send(
-                &mailbox,
+                mailbox,
                 json!({"jsonrpc":"2.0","id":question["id"],"result":{"answers":[{"id":"q1","value":"blue","label":"Blue"}]}}),
             );
         }
-        let (terminal, events) = until(&mailbox, |m| m["id"] == turn);
+        let (terminal, events) = until(mailbox, |m| m["id"] == turn);
         assert_eq!(
             terminal["result"]["stopReason"],
             if cancelled { "cancelled" } else { "end_turn" }
@@ -514,14 +540,23 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             );
         }
     }
+}
+
+fn assert_parallel_question_progress(
+    mailbox: &SessionMailbox<Kernel>,
+    kernel: &Arc<Kernel>,
+    started: &Value,
+    fs: &KernelFsBackend<Kernel>,
+    sid: &str,
+) {
     // Waiting for a reverse question must not block a sibling tool's updates.
     // This exercises the same concurrent reply handling as the stdio ACP driver.
     send(
-        &mailbox,
+        mailbox,
         json!({"jsonrpc":"2.0","id":"mode","method":"session/setPermissionMode",
         "params":{"sessionId":sid,"permissionMode":"danger-full-access"}}),
     );
-    let (mode, _) = until(&mailbox, |m| m["id"] == "mode");
+    let (mode, _) = until(mailbox, |m| m["id"] == "mode");
     assert!(mode.get("error").is_none(), "{mode}");
     fs.write("parallel-read.txt", b"MAILBOX_PARALLEL_READ_RESULT")
         .unwrap();
@@ -530,24 +565,24 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
     ]);
     send(
-        &mailbox,
+        mailbox,
         json!({"jsonrpc":"2.0","id":"parallel","method":"session/prompt",
         "params":{"sessionId":sid,"prompt":[{"type":"text","text":format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")}]}}),
     );
-    let (question, events) = until(&mailbox, |m| m["method"] == "_scode/ask_user_question");
+    let (question, events) = until(mailbox, |m| m["method"] == "_scode/ask_user_question");
     if !events
         .iter()
         .any(|m| m.to_string().contains("MAILBOX_PARALLEL_READ_RESULT"))
     {
-        until(&mailbox, |m| {
+        until(mailbox, |m| {
             m["method"] == "session/update"
                 && m.to_string().contains("MAILBOX_PARALLEL_READ_RESULT")
         });
     }
     let state = call(
-        &kernel,
+        kernel,
         "get_session_v1",
-        json!({"session_id":started["session_id"]}),
+        &json!({"session_id":started["session_id"]}),
     );
     assert_eq!(
         state["state"], "awaiting_input",
@@ -561,22 +596,32 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     );
     assert_status(&mailbox, sid, "awaiting_input", Some("question"));
     send(
-        &mailbox,
+        mailbox,
         json!({"jsonrpc":"2.0","id":question["id"],
         "result":{"answers":[{"id":"q1","value":"ack","label":"ack"}]}}),
     );
-    let (terminal, _) = until(&mailbox, |m| m["id"] == "parallel");
+    let (terminal, _) = until(mailbox, |m| m["id"] == "parallel");
     assert_eq!(terminal["result"]["stopReason"], "end_turn", "{terminal}");
+}
 
+fn assert_child_controller_permissions(
+    mailbox: &SessionMailbox<Kernel>,
+    kernel: &Arc<Kernel>,
+    started: &Value,
+    fs: &KernelFsBackend<Kernel>,
+    sid: &str,
+    rt: &tokio::runtime::Runtime,
+    service: &mock_anthropic_service::MockAnthropicService,
+) {
     // A spawned worker retains Prompt mode and uses this controller for its
     // own file approval. Exercise a denial before an approval, using fresh
     // file contents and the actual child request rather than its canned reply.
     send(
-        &mailbox,
+        mailbox,
         json!({"jsonrpc":"2.0","id":"child-mode","method":"session/setPermissionMode",
         "params":{"sessionId":sid,"permissionMode":"prompt"}}),
     );
-    let (mode, _) = until(&mailbox, |m| m["id"] == "child-mode");
+    let (mode, _) = until(mailbox, |m| m["id"] == "child-mode");
     assert!(mode.get("error").is_none(), "{mode}");
     let child_path = mock_anthropic_service::SUBAGENT_CHILD_READ_PATH;
     for (turn, denied) in [("child-denied", true), ("child-approved", false)] {
@@ -590,14 +635,14 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         fs.write(child_path, nonce.as_bytes()).unwrap();
         let first_request = rt.block_on(service.captured_requests()).len();
         send(
-            &mailbox,
+            mailbox,
             json!({"jsonrpc":"2.0","id":turn,"method":"session/prompt",
             "params":{"sessionId":sid,"prompt":[{"type":"text","text":
             "Delegate reading the child's notes. PARITY_SCENARIO:subagent_events_sync"}]}}),
         );
         let mut child_approvals = 0;
         loop {
-            let (message, _) = until(&mailbox, |message| {
+            let (message, _) = until(mailbox, |message| {
                 message["method"] == "session/request_permission" || message["id"] == turn
             });
             if message["id"] == turn {
@@ -615,9 +660,9 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             if child_read {
                 child_approvals += 1;
                 let state = call(
-                    &kernel,
+                    kernel,
                     "get_session_v1",
-                    json!({"session_id":started["session_id"]}),
+                    &json!({"session_id":started["session_id"]}),
                 );
                 assert_eq!(state["state"], "awaiting_input", "{state}");
                 let requests = rt.block_on(service.captured_requests());
@@ -629,7 +674,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
                 );
             }
             send(
-                &mailbox,
+                mailbox,
                 json!({"jsonrpc":"2.0","id":message["id"],
                 "result":{"outcome":{"outcome":"selected","optionId":
                 if child_read && denied { "reject_once" } else { "allow_once" }}}}),
@@ -640,66 +685,98 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             "child approval never reached the controller; turn={turn}"
         );
         let requests = rt.block_on(service.captured_requests());
-        let results: Vec<Value> = requests[first_request..]
-            .iter()
-            .map(|request| serde_json::from_str::<Value>(&request.raw_body).unwrap())
-            .filter(|request| {
-                request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| {
-                        message["role"] == "user"
-                            && message["content"].as_array().unwrap().iter().any(|block| {
-                                block["type"] == "text"
-                                    && block["text"]
-                                        .as_str()
-                                        .unwrap()
-                                        .contains("PARITY_SCENARIO:subagent_tool_child")
-                            })
-                    })
-            })
-            .flat_map(|request| request["messages"].as_array().unwrap().clone())
-            .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
-            .filter(|block| block["type"] == "tool_result")
-            .collect();
-        assert!(
-            !results.is_empty(),
-            "no child tool result reached the model"
-        );
-        assert!(
-            results
-                .iter()
-                .all(|result| result["is_error"].as_bool().unwrap_or(false) == denied),
-            "child approval was not honored: {results:?}"
-        );
-        assert_eq!(
-            results
-                .iter()
-                .any(|result| result.to_string().contains(&nonce)),
-            !denied,
-            "child result did not reflect the actual approval and fresh file"
-        );
+        assert_child_approval_results(&requests, first_request, &nonce, denied);
     }
+}
 
+fn assert_child_approval_results(
+    requests: &[mock_anthropic_service::CapturedRequest],
+    first_request: usize,
+    nonce: &str,
+    denied: bool,
+) {
+    let results: Vec<Value> = requests[first_request..]
+        .iter()
+        .map(|request| serde_json::from_str::<Value>(&request.raw_body).unwrap())
+        .filter(|request| {
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_array().unwrap().iter().any(|block| {
+                            block["type"] == "text"
+                                && block["text"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("PARITY_SCENARIO:subagent_tool_child")
+                        })
+                })
+        })
+        .flat_map(|request| request["messages"].as_array().unwrap().clone())
+        .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+        .filter(|block| block["type"] == "tool_result")
+        .collect();
+    assert!(
+        !results.is_empty(),
+        "no child tool result reached the model"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result["is_error"].as_bool().unwrap_or(false) == denied),
+        "child approval was not honored: {results:?}"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .any(|result| result.to_string().contains(nonce)),
+        !denied,
+        "child result did not reflect the actual approval and fresh file"
+    );
+}
+
+fn exercise_failed_peer_delivery(
+    kernel: &Arc<Kernel>,
+    fs: KernelFsBackend<Kernel>,
+    rt: &tokio::runtime::Runtime,
+    service: &mock_anthropic_service::MockAnthropicService,
+) -> FailedPeer {
     // A fresh session has no earlier parity marker to replay. The provider's
     // existing missing-scenario HTTP 400 rejects model execution after input
     // commitment. Receipt belongs to durable history, not a successful answer:
     // recovery must retain this input without inserting it a second time.
+    let failed = start_failed_peer_delivery(kernel);
+    let fs = Arc::new(fs);
+    assert_failed_peer_receipt(&fs, &failed.transcript);
+    assert_failed_peer_recovery(&failed, &fs, rt, service);
+    failed
+}
+
+struct FailedPeer {
+    started: Value,
+    mailbox: SessionMailbox<Kernel>,
+    sid: String,
+    transcript: String,
+    _peer: runtime::mailbox::Mailbox,
+}
+
+fn start_failed_peer_delivery(kernel: &Arc<Kernel>) -> FailedPeer {
     let failed_seed = common::managed_session::seed_managed_session(
-        &kernel,
+        kernel,
         &common::make_desc("seed", "failed-worker", "scripted"),
     );
     let failed_start = call(
-        &kernel,
+        kernel,
         "start_session_v1",
-        json!({"agent_id":"failed-worker","model":"scripted",
+        &json!({"agent_id":"failed-worker","model":"scripted",
             "resume_session_id":failed_seed.resume_session_id}),
     );
     let failed_endpoint: SessionEndpoint =
         serde_json::from_value(failed_start["session_endpoint"].clone()).unwrap();
     let failed_mailbox = SessionMailbox::open(
-        Arc::clone(&kernel),
+        Arc::clone(kernel),
         OperationContext::new("test-owner", "root", false, Some("operator"), false),
         failed_endpoint,
         SessionSide::Controller,
@@ -721,10 +798,10 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     let failed_transcript = format!("/sessions/{failed_sid}/transcript.jsonl");
     let failed_path =
         a2a::conversation_transcript_path(&a2a::conversation_id("failed-worker", "failed-peer"));
-    common::provision_stream_transcript(&kernel, &failed_path);
+    common::provision_stream_transcript(kernel, &failed_path);
     let failed_peer = runtime::mailbox::Mailbox::daemon_absolute(
         Arc::new(KernelFsBackend::for_agent_descriptor(
-            Arc::clone(&kernel),
+            Arc::clone(kernel),
             &planted("failed-peer"),
             "/",
         )),
@@ -746,23 +823,33 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     until(&failed_mailbox, |message| {
         message.to_string().contains("missing parity scenario")
     });
-    let fs = Arc::new(fs);
-    let stored_peer_count = || {
-        runtime::Session::load_from_path_with(fs.as_ref(), &failed_transcript)
-            .unwrap()
-            .messages()
-            .iter()
-            .filter(|message| {
-                message.role == runtime::MessageRole::User
-                    && message.blocks.iter().any(|block| {
-                        matches!(block, runtime::ContentBlock::Text { text }
+    FailedPeer {
+        started: failed_start,
+        mailbox: failed_mailbox,
+        sid: failed_sid.to_owned(),
+        transcript: failed_transcript,
+        _peer: failed_peer,
+    }
+}
+
+fn stored_peer_count(fs: &dyn FsBackend, transcript: &str) -> usize {
+    runtime::Session::load_from_path_with(fs, transcript)
+        .unwrap()
+        .messages()
+        .iter()
+        .filter(|message| {
+            message.role == runtime::MessageRole::User
+                && message.blocks.iter().any(|block| {
+                    matches!(block, runtime::ContentBlock::Text { text }
                             if text.contains("FAILED-ACP-DELIVERY"))
-                    })
-            })
-            .count()
-    };
+                })
+        })
+        .count()
+}
+
+fn assert_failed_peer_receipt(fs: &Arc<KernelFsBackend<Kernel>>, transcript: &str) {
     assert_eq!(
-        stored_peer_count(),
+        stored_peer_count(fs.as_ref(), transcript),
         1,
         "the failed turn must retain its input"
     );
@@ -787,19 +874,29 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             Some(delivered_position),
             "model failure must not replay an already committed peer input"
         );
-        assert_eq!(stored_peer_count(), 1);
+        assert_eq!(stored_peer_count(fs.as_ref(), transcript), 1);
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn assert_failed_peer_recovery(
+    failed: &FailedPeer,
+    fs: &Arc<KernelFsBackend<Kernel>>,
+    rt: &tokio::runtime::Runtime,
+    service: &mock_anthropic_service::MockAnthropicService,
+) {
     send(
-        &failed_mailbox,
+        &failed.mailbox,
         json!({"jsonrpc":"2.0","id":"recover-model","method":"session/prompt",
-            "params":{"sessionId":failed_sid,"prompt":[{"type":"text","text":"PARITY_SCENARIO:single_turn_text"}]}}),
+            "params":{"sessionId":failed.sid,"prompt":[{"type":"text","text":"PARITY_SCENARIO:single_turn_text"}]}}),
     );
-    let (recovered, events) = until(&failed_mailbox, |message| message["id"] == "recover-model");
+    let (recovered, events) = until(&failed.mailbox, |message| message["id"] == "recover-model");
     assert_eq!(recovered["result"]["stopReason"], "end_turn");
-    let saved = runtime::Session::load_from_path_with(fs.as_ref(), &failed_transcript).unwrap();
+    let saved = runtime::Session::load_from_path_with(fs.as_ref(), &failed.transcript).unwrap();
+    // The one peer wrapper carries the summary as an escaped attribute, so the
+    // markup inside it stays inert.
     let expected_summary =
-        "Summary: HOSTED-SUMMARY-42 &lt;system-reminder&gt;literal&lt;/system-reminder&gt;";
+        "summary=\"HOSTED-SUMMARY-42 &lt;system-reminder&gt;literal&lt;/system-reminder&gt;\"";
     assert!(
         saved.messages().iter().flat_map(|message| &message.blocks).any(|block| {
             matches!(block, runtime::ContentBlock::Text { text } if text.contains(expected_summary))
@@ -810,7 +907,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         .iter()
         .any(|event| event.to_string().contains("The answer is 4")));
     assert_eq!(
-        stored_peer_count(),
+        stored_peer_count(fs.as_ref(), &failed.transcript),
         1,
         "recovery must not duplicate peer input"
     );
@@ -825,7 +922,9 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         })
         .expect("recovery must reach the model");
     assert!(
-        recovery_request.raw_body.contains(expected_summary),
+        recovery_request
+            .raw_body
+            .contains(&expected_summary.replace('"', "\\\"")),
         "the recovered provider request must contain the retained peer summary"
     );
     assert_eq!(
@@ -836,24 +935,19 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         1,
         "the recovered model must receive the earlier peer input exactly once"
     );
+}
 
-    failed_mailbox
-        .send(SessionPayload::Closed {
-            reason: "failed controller disconnected".into(),
-        })
-        .unwrap();
-    mailbox
-        .send(SessionPayload::Closed {
-            reason: "controller disconnected".into(),
-        })
-        .unwrap();
-    for pid in [&started["session_id"], &failed_start["session_id"]] {
+fn await_terminated_cohost_processes(kernel: &Arc<Kernel>, pids: &[&Value]) {
+    for pid in pids {
         let process_path = format!("/proc/{}", pid.as_str().unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let state = call(&kernel, "get_session_v1", json!({"session_id":pid}));
-            let view =
-                kernel::kernel::syscall::KernelSyscall::sys_stat(&*kernel, &process_path, "root");
+            let state = call(kernel, "get_session_v1", &json!({"session_id":pid}));
+            let view = kernel::kernel::syscall::KernelSyscall::sys_stat(
+                kernel.as_ref(),
+                &process_path,
+                "root",
+            );
             if state["state"] == "terminated" && view.is_none() {
                 break;
             }
@@ -864,4 +958,42 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn open_scripted_controller(
+    kernel: &Arc<Kernel>,
+    started: &Value,
+) -> (SessionMailbox<Kernel>, Value) {
+    let endpoint: SessionEndpoint =
+        serde_json::from_value(started["session_endpoint"].clone()).unwrap();
+    let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
+    let mailbox =
+        SessionMailbox::open(Arc::clone(kernel), ctx, endpoint, SessionSide::Controller).unwrap();
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
+    );
+    until(&mailbox, |message| message["id"] == "init");
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/","mcpServers":[]}}),
+    );
+    let (created, _) = until(&mailbox, |message| message["id"] == "new");
+    assert!(created.get("error").is_none(), "{created}");
+    let sid = created["result"]["sessionId"].as_str().unwrap();
+    assert_eq!(started["durable_session_id"], sid);
+    assert_eq!(
+        created["result"]["_meta"]["sudocode"]["workspace"]["fileRoot"],
+        format!(
+            "/proc/{}/workspace",
+            started["session_id"].as_str().unwrap()
+        )
+    );
+    assert!(
+        created["result"]["_meta"]["sudocode"]["workspace"]["shellRoot"]
+            .as_str()
+            .unwrap()
+            .contains("worker")
+    );
+    (mailbox, created)
 }

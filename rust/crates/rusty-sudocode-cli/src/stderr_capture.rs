@@ -145,14 +145,11 @@ mod platform {
                     }
                 })
                 .ok()?;
-            let previous = match redirect(&writer) {
-                Ok(previous) => previous,
-                Err(_) => {
-                    drop(writer);
-                    drop(rx);
-                    let _ = reader.join();
-                    return None;
-                }
+            let Ok(previous) = redirect(&writer) else {
+                drop(writer);
+                drop(rx);
+                let _ = reader.join();
+                return None;
             };
             Some(Self {
                 original: previous.unwrap_or(original),

@@ -336,13 +336,13 @@ fn failed_background_shell_exposes_unread_result_and_exit_code() {
     open(&mut session);
     screen(&session, "  FAILURE_EVIDENCE");
     screen(&session, "exit 7");
-    let view = session.render(|s| s.contents());
+    let view = session.render(common::screen_contents);
     assert!(view.contains("failed"), "failure status:\n{view}");
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();
     expect_input_ready(&session, common::DEFAULT_TIMEOUT, "result read");
-    let view = session.render(|s| s.contents());
+    let view = session.render(common::screen_contents);
     assert!(
         !view.contains("new result"),
         "read result must hide footer:\n{view}"
@@ -410,7 +410,9 @@ fn inspecting_running_task_does_not_acknowledge_its_future_result() {
     )];
     let mut session = spawn_for_calls(&env, &calls);
     expect_input_ready(&session, Duration::from_secs(30), "ready");
-    assert!(!session.render(|s| s.contents()).contains("↓ to view"));
+    assert!(!session
+        .render(common::screen_contents)
+        .contains("↓ to view"));
     let before = common::turn_status_marker(&session);
     send_calls(&env, &mut session, &calls);
     // This transition includes a complete model tool call, before any local UI action.
@@ -614,15 +616,18 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
             .map(|block| {
                 assert_ne!(block["is_error"], true, "question failed: {block}");
                 let content = &block["content"];
-                let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
-                    content
-                        .as_array()
-                        .expect("question text blocks")
-                        .iter()
-                        .map(|part| part["text"].as_str().expect("question text"))
-                        .collect::<Vec<_>>()
-                        .join("")
-                });
+                let text = content.as_str().map_or_else(
+                    || {
+                        content
+                            .as_array()
+                            .expect("question text blocks")
+                            .iter()
+                            .map(|part| part["text"].as_str().expect("question text"))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    },
+                    str::to_owned,
+                );
                 serde_json::from_str(&text).expect("question result JSON")
             })
             .collect();

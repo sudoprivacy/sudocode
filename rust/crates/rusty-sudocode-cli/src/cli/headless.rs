@@ -273,18 +273,20 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
         stage = "startup_error";
         crate::run_stale_base_preflight(options.base_commit.as_deref());
         tools::declare_finite_task_mode();
+        let persisted = options
+            .resume
+            .as_deref()
+            .map(crate::load_session_reference)
+            .transpose()?;
         let cli = LiveCli::new(
-            options.model,
-            true,
+            &options.model,
             options.allowed_tools,
             options.permission_mode,
             options.reasoning_effort,
             options.auth_mode,
+            persisted,
         )?;
         let execution = (|| -> Result<(), Error> {
-            if let Some(reference) = options.resume {
-                cli.lifecycle.resume_session(&reference)?;
-            }
             // Keep one-shot transcripts resumable by id, while preventing a
             // `--print` run from displacing the interactive `latest` session.
             // This is deliberately after an optional resume: the headless

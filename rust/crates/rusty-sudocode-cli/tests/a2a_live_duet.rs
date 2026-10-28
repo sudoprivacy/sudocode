@@ -59,7 +59,7 @@ const SENDER: &str = "sudocloud-worker";
 /// binary cannot read an MSYS `/c/...` path.
 const CERTS: &str = r"C:\Users\songym\authon-certs";
 /// A live turn against a real gateway, plus a real raft commit.
-const BUDGET: Duration = Duration::from_secs(180);
+const BUDGET: Duration = Duration::from_mins(3);
 
 /// The minted credential bundle directory for one agent - the directory
 /// `nexusd-cluster auth mint` writes (ca.pem + agent.pem + agent-key.pem +
@@ -85,16 +85,17 @@ fn wait_for_cursor(sess: &mut pty_expect::PtySession, path: &Path, config_home: 
     let deadline = Instant::now() + BUDGET;
     while !path.exists() {
         if Instant::now() >= deadline {
-            let screen = sess.render(|s| s.contents());
-            let listing = std::fs::read_dir(config_home)
-                .map(|entries| {
+            let screen = sess.render(common::screen_contents);
+            let listing = std::fs::read_dir(config_home).map_or_else(
+                |e| format!("  <unreadable: {e}>"),
+                |entries| {
                     entries
                         .filter_map(Result::ok)
                         .map(|e| format!("  {}", e.file_name().to_string_lossy()))
                         .collect::<Vec<_>>()
                         .join("\n")
-                })
-                .unwrap_or_else(|e| format!("  <unreadable: {e}>"));
+                },
+            );
             panic!(
                 "the receiver never recorded a read position at {}\n\
                  — so either no A2A session was built, or the first inbox seek failed.\n\n\
@@ -112,7 +113,7 @@ fn wait_for_cursor(sess: &mut pty_expect::PtySession, path: &Path, config_home: 
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }
@@ -223,7 +224,7 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     // `message delivered to <peer>` (or a refusal, or a permission prompt) shows
     // up, so it is printed either way.
     let exit = sending.expect_eof();
-    let sender_screen = sending.render(|s| s.contents());
+    let sender_screen = sending.render(common::screen_contents);
     eprintln!(
         "=== SENDER screen ===\n{}\n=== end SENDER screen (exit: {exit:?}) ===",
         sender_screen.trim_end()
@@ -244,7 +245,7 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     // evidence nobody can read is evidence nobody checks.
     eprintln!(
         "=== RECEIVER screen ===\n{}\n=== end RECEIVER screen ===",
-        receiver.render(|s| s.contents()).trim_end()
+        receiver.render(common::screen_contents).trim_end()
     );
 
     // And the receiver recorded that it took the message: a receiver that

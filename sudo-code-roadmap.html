@@ -2030,6 +2030,37 @@ namespace for the new TUI work.</p>
 
 <h4>No alternate-screen / full-screen TUI mode — by rule</h4>
 
+<section id="prompt-viewport-experiment">
+<h5>Bounded inline prompt viewport experiment — 2026-10-27</h5>
+<p><strong>Experimental; not validated or enabled by default.</strong> Reviewing an
+earlier answer while composing a queued follow-up currently moves the editor out
+of view in native terminal scrollback. Evaluate an opt-in inline conversation
+viewport with a fixed composer, a
+contextual prompt header and shaded user messages. The normal REPL, pipes, ACP,
+classic input and worker attach/detach retain their existing behavior. This is
+not approval for dashboards, split panes, a new renderer dependency or a
+<code>--tui</code> command.</p>
+<ul>
+  <li>Use the existing iocraft renderer and engine boundary. Register the
+  temporary <code>promptViewport</code> experiment in the existing registry.
+  Stay in the main terminal buffer and reuse its cell-range damage writer;
+  do not enter alternate-screen mode.</li>
+  <li>Keep immutable rendered history in a disposable disk spool, with bounded
+  visible-row caches. Typing must not scan or rewrap accumulated history.</li>
+  <li>Anchor reading to content while new output arrives. Keep prompt headers
+  presentation-only and preserve the draft through scroll and resize.</li>
+  <li>Reuse semantic prompt styling and the existing Unicode/ANSI layout code;
+  do not introduce another conversation formatter or model request.</li>
+  <li>Verify wheel/keyboard navigation, selection/copy, Unicode, streaming,
+  terminal handoff, resume and shutdown through real PTYs. Preserve failed
+  measurements. Existing default-mode performance CI does not establish the
+  experiment's performance: compare explicit enabled/disabled workloads too.</li>
+  <li>Do not graduate or enable this viewport by default until terminal behavior,
+  memory and responsiveness meet the existing budgets. Back-to-bottom is a
+  secondary reading-state control.</li>
+</ul>
+</section>
+
 <p>Earlier drafts of this plan included a "Phase 6 — full-screen TUI"
 sub-goal: a <code>--tui</code> flag wired to <code>ratatui</code>
 behind a <code>full-tui</code> cargo feature, with split-pane layout,
@@ -2481,12 +2512,14 @@ branch. A second run resumed while the original instance executed a real tool:
 the new context received an interrupted-call result with an unknown outcome,
 and the original tool subsequently completed in its own context.</p>
 
-<p><b>Restore parity acceptance.</b> Verify the written-prefix and branch-local
-recovery contract in the
+<p><b>Restore decision and acceptance.</b> New runtimes branch from the most
+recently completed turn, as chosen for Q1. The CC observation above explains
+its written-prefix behavior; it does not change this product decision. Verify
+the completed-turn boundary in the
 <a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>
-against the isolated CC run above. Acceptance includes a pending model response,
-an executing native tool, a sibling's synthetic interrupted result, the source's
-actual result, and a fresh restore after both branches finish.</p>
+through a pending model response, an executing native tool, the source's actual
+result, and fresh restores while the source is running and after both branches
+finish. Inspect actual provider requests and retain both durable branches.</p>
 
 <p>The durable object and authorization contract lives in the
 <a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>.
@@ -2534,18 +2567,22 @@ Exercise cancellation, stale candidates, crash and restart.</td></tr>
 context, and a durable repair targets that specific call. Opening another context
 does not establish that a live call in its sibling has ended.</td><td>Resume while
 the sibling tool is still running; A receives its real result once, while B
-inherits the already written prefix and persists an unknown-outcome interrupted
-result in B's branch. A's live call and actual result retain their original
-identity. A fresh restore reuses the persisted repair without repeating effects.</td></tr>
+inherits the latest completed turn. A's pending call remains absent from B's
+context. A's live call and actual result retain their original identity. A fresh
+restore selects the latest completed branch without repeating tool effects.</td></tr>
 <tr><td>Completion delivery</td><td>Separate transcript append from completion
 ownership. The completion protocol binds active traces, context revisions,
 terminal sources, reservations and acknowledgements to the originating context.
 Opening a second context preserves the first context's active trace. Deletion
 uses the shared durable storage identity and is coordinated with every admitted
 writer. Completion ownership and cache behavior stay behind the existing engine
-boundary.</td><td>Two active prompts and independent task completions; reconnect
+boundary. The accepted immediate deletion and automatic cleanup contract is
+recorded in <a href="docs/design/agent-context-storage-matrix.html#q1-deletion-contract">Q1</a>;
+its remote implementation and backend acceptance remain open.</td><td>Two active prompts and independent task completions; reconnect
 and ACK retries; deletion racing with append; crash recovery with one sibling
-still alive. Verify the existing completion protocol's delivery guarantees.</td></tr>
+still alive. Verify old writers and ACKs are rejected, automatic cleanup resumes
+after restart, and physical removal waits for actual client retirement on Native
+OS FS and authenticated Nexus. Verify the existing completion protocol's delivery guarantees.</td></tr>
 <tr><td>Agent links and runtime routing</td><td><code>SessionStore</code> verifies
 the caller's authorized Agent link and target access. The service supplies the
 current execution identity and repository context. <code>agent_list</code>

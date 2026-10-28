@@ -33,6 +33,19 @@ impl StyledText {
         result
     }
 
+    /// Account retained allocations conservatively for bounded layout caches.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.text.capacity()
+            + self.runs.capacity() * std::mem::size_of::<Run>()
+            + self
+                .runs
+                .iter()
+                .filter_map(|run| run.hyperlink.as_ref())
+                .map(|link| link.len())
+                .sum::<usize>()
+    }
+
     pub(crate) fn from_ansi(input: &str) -> Self {
         Self::from_ansi_with_style(input, ContentStyle::default())
     }

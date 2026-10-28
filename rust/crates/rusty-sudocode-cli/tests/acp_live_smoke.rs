@@ -538,28 +538,31 @@ async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
 
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
     let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+    let tasks: Vec<_> = ["101 + 102", "201 + 202", "301 + 302"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            json!({
+                "model": model,
+                "description": format!("calc {}", index + 1),
+                "prompt": format!("What is {expression}? Reply with ONLY the number."),
+            })
+        })
+        .collect();
+    let prompt = format!(
+        "Use the Agent tool exactly three times, once for each complete argument object below.\n\
+         Do not answer the calculations yourself or reuse a different task's prompt.\n\
+         Omit auth_mode: every child must inherit this session's current credential path.\n\
+         No switch to subscription or api-key authentication is requested.\n\n{}\n\n\
+         After all three agents return, output only JSON with a results array in task order.",
+        serde_json::to_string_pretty(&tasks).unwrap()
+    );
     let (notifs, resp) = client
         .send_request(
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{ "type": "text", "text": concat!(
-                    "CRITICAL INSTRUCTION — you MUST use the Agent tool exactly 3 times.\n",
-                    "Do NOT answer the questions yourself. Do NOT skip the Agent tool.\n",
-                    "The entire purpose of this request is to test the Agent tool.\n\n",
-                    "For each calculation below, call Agent with:\n",
-                    "  model: <LIVE_MODEL>\n",
-                    "  description: \"calc <N>\"\n",
-                    "  prompt: \"What is <expr>? Reply with ONLY the number.\"\n\n",
-                    "Omit auth_mode entirely: all child agents must inherit this session's current credential path.\n",
-                    "No switch to subscription or api-key authentication is requested.\n\n",
-                    "Calculations:\n",
-                    "1. 101 + 102\n",
-                    "2. 201 + 202\n",
-                    "3. 301 + 302\n\n",
-                    "After all 3 agents return, output exactly this JSON and nothing else:\n",
-                    "{\"results\": [<agent1_answer>, <agent2_answer>, <agent3_answer>]}"
-                ).replace("<LIVE_MODEL>", &model)}]
+                "prompt": [{ "type": "text", "text": prompt }]
             }),
         )
         .await;
@@ -631,6 +634,13 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         eprintln!(
             "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
             update["title"], update["status"]
+        );
+    }
+    for start in &agent_starts {
+        let update = &start["params"]["update"];
+        eprintln!(
+            "  delegated[{}]: {}",
+            update["toolCallId"], update["rawInput"]
         );
     }
     for (i, u) in completed_updates.iter().enumerate() {
@@ -902,7 +912,7 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
                 assert!(update["content"]["text"]
                     .as_str()
                     .unwrap()
-                    .contains(&format!("Summary: {SUMMARY}")));
+                    .contains(&format!("summary=\"{SUMMARY}\"")));
                 saw_summary = true;
             }
             if update["sessionUpdate"] == "agent_message_chunk" {
@@ -934,7 +944,7 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         .iter()
         .flat_map(|message| &message.blocks)
         .any(|block| matches!(block, runtime::ContentBlock::Text { text }
-            if text.contains(&format!("Summary: {SUMMARY}")))));
+            if text.contains(&format!("summary=\"{SUMMARY}\"")))));
     client.shutdown().await;
     workspace.cleanup();
 }

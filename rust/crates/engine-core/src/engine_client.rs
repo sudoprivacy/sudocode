@@ -76,17 +76,29 @@ impl EngineApiClient {
         let Some(ttl) = self.client.cache_ttl() else {
             return;
         };
-        let ledger = self
-            .client
-            .cache_advisor_context()
+        let context = self.client.cache_advisor_context();
+        let directory = context
+            .as_ref()
             .map(|(cache, _, _)| cache.paths().session_dir);
+        let advisor =
+            context
+                .as_ref()
+                .zip(directory.as_deref())
+                .map(
+                    |((cache, route, _), directory)| crate::cache_ttl::AdvisorInput {
+                        directory,
+                        segment: cache.context_segment(),
+                        model: &self.model,
+                        route,
+                    },
+                );
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        crate::cache_ttl::before_request(&self.session_id, ttl, ledger.as_deref(), now_ms);
+        crate::cache_ttl::before_request(&self.session_id, ttl, advisor.as_ref(), now_ms);
     }
 
     #[must_use]
@@ -661,17 +673,20 @@ impl ApiClient for EngineApiClient {
     }
 
     fn cache_context_boundary(&mut self, segment: u64) {
-        crate::cache_ttl::context_boundary(&self.session_id, segment);
+        let pinned = self.client.cache_ttl().is_none_or(api::CacheTtl::pinned);
+        crate::cache_ttl::context_boundary(&self.session_id, segment, pinned);
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
             if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
                 cache.set_context_segment(segment);
-                crate::cache_advisor::context_boundary(
+                let (verdict, decided) = crate::cache_advisor::context_boundary(
                     &cache.paths().session_dir,
                     segment,
                     &self.model,
                     &route,
                     ttl,
+                    crate::cache_ttl::status(&self.session_id).auto,
                 );
+                crate::cache_ttl::advised(&self.session_id, verdict, decided);
             }
         }
     }

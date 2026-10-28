@@ -34,6 +34,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -649,8 +650,8 @@ static LIVE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct TestEnv {
     backend: Backend,
-    /// Holds the live serial lock for the duration of the test.
-    _live_guard: Option<std::sync::MutexGuard<'static, ()>>,
+    /// Retain one live-test permit until all of its participant fixtures close.
+    live_guard: Option<Rc<std::sync::MutexGuard<'static, ()>>>,
 }
 
 impl TestEnv {
@@ -678,7 +679,7 @@ impl TestEnv {
                 server,
                 workspace,
             },
-            _live_guard: None,
+            live_guard: None,
         }
     }
 
@@ -687,7 +688,10 @@ impl TestEnv {
         let guard = LIVE_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::new_live_with_guard(label, Rc::new(guard))
+    }
 
+    fn new_live_with_guard(label: &str, guard: Rc<std::sync::MutexGuard<'static, ()>>) -> Self {
         let real_config_home = default_config_home();
         assert!(
             real_config_home.join("sudocode.json").exists(),
@@ -698,7 +702,16 @@ impl TestEnv {
         copy_live_credentials(&real_config_home, &workspace.config_home);
         Self {
             backend: Backend::Live { workspace },
-            _live_guard: Some(guard),
+            live_guard: Some(guard),
+        }
+    }
+
+    /// Create an independent participant in this test without reacquiring its permit.
+    /// Each participant retains its own workspace, credentials and process state.
+    pub fn peer(&self, label: &str) -> Self {
+        match &self.live_guard {
+            Some(guard) => Self::new_live_with_guard(label, Rc::clone(guard)),
+            None => Self::new_mock(label),
         }
     }
 

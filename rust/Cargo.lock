@@ -2476,7 +2476,7 @@ dependencies = [
 [[package]]
 name = "iocraft"
 version = "0.8.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=4d11b67981ebc10e7b54d9c3175da728aaf4b4ba#4d11b67981ebc10e7b54d9c3175da728aaf4b4ba"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=e752ec29e5ab0db0a976cd50901373c779bb0ec1#e752ec29e5ab0db0a976cd50901373c779bb0ec1"
 dependencies = [
  "async-io",
  "bitflags 2.13.1",
@@ -2492,7 +2492,7 @@ dependencies = [
 [[package]]
 name = "iocraft-macros"
 version = "0.2.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=4d11b67981ebc10e7b54d9c3175da728aaf4b4ba#4d11b67981ebc10e7b54d9c3175da728aaf4b4ba"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=e752ec29e5ab0db0a976cd50901373c779bb0ec1#e752ec29e5ab0db0a976cd50901373c779bb0ec1"
 dependencies = [
  "proc-macro2",
  "quote",

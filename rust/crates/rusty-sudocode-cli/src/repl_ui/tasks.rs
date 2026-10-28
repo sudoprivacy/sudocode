@@ -6,7 +6,7 @@ use crate::render::{
     text_layout::{display_width, truncate_to_width, wrap_line},
     theme, RESET,
 };
-use engine_core::cache_advisor::{ttl_label, TtlAdvice};
+use engine_core::cache_advisor::{ttl_label, TtlAdvice, MIN_INTERVALS};
 use engine_core::cache_ttl::TtlChoice;
 use engine_events::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
@@ -302,12 +302,15 @@ impl TaskBrowser {
         }
     }
 
-    /// Open the cache-TTL panel on the suggested row.
+    /// Open the cache-TTL panel on the suggested row, or on `auto` while the
+    /// TTL follows the session's stats.
     pub fn open_ttl(&mut self) {
         let Some(advice) = &self.ttl_advice else {
             return;
         };
-        let suggested = if advice.suggested_seconds == 3600 {
+        let suggested = if advice.auto {
+            TtlChoice::Auto
+        } else if advice.suggested_seconds == 3600 {
             TtlChoice::OneHour
         } else {
             TtlChoice::FiveMinutes
@@ -584,14 +587,22 @@ impl TaskBrowser {
             return String::new();
         };
         let muted = theme().muted_fg();
+        let mode = if advice.auto {
+            let target = advice.auto_target();
+            if target == advice.effective_seconds {
+                " · auto".to_owned()
+            } else {
+                format!(" · auto, heading for {}", ttl_label(target))
+            }
+        } else {
+            advice.pending.map_or(" · pinned".to_owned(), |pending| {
+                format!(" · pinned, pending {}", choice_label(pending.choice))
+            })
+        };
         let mut lines = vec![format!(
-            "{}Prompt cache TTL{RESET}{muted} · now {}{}{RESET}",
+            "{}Prompt cache TTL{RESET}{muted} · now {}{mode}{RESET}",
             ansi_fg(theme().primary),
             ttl_label(advice.effective_seconds),
-            advice.pending.map_or(String::new(), |pending| format!(
-                " · pending {}",
-                choice_label(pending.choice)
-            )),
         )];
         if advice.has_saving {
             lines.push(format!(
@@ -607,8 +618,10 @@ impl TaskBrowser {
             let focused = row == self.ttl_row;
             let marker = ChoiceText::new(theme(), crate::render::ColorSupport::detect(), focused)
                 .prefix(if focused { "❯" } else { " " });
+            // While automatic, choosing 1h or 5m pins it.
+            let pin = if advice.auto { "pin · " } else { "" };
             let detail = match choice {
-                TtlChoice::OneHour if advice.effective_seconds == 3600 => "current".to_owned(),
+                TtlChoice::OneHour if advice.effective_seconds == 3600 => format!("{pin}current"),
                 TtlChoice::OneHour => {
                     let cost = match (advice.switch_now_usd, advice.switch_cold_usd) {
                         (Some(now), Some(cold)) if advice.cached_tokens > 0 => format!(
@@ -617,12 +630,22 @@ impl TaskBrowser {
                         ),
                         _ => String::new(),
                     };
-                    format!("at the next cold start (idle past the TTL, compact, resume){cost}")
+                    format!(
+                        "{pin}at the next cold start (idle past the TTL, compact, resume){cost}"
+                    )
                 }
-                TtlChoice::FiveMinutes if advice.effective_seconds == 300 => "current".to_owned(),
-                TtlChoice::FiveMinutes => "from the next request · keeps the cache".to_owned(),
+                TtlChoice::FiveMinutes if advice.effective_seconds == 300 => {
+                    format!("{pin}current")
+                }
+                TtlChoice::FiveMinutes => format!("{pin}from the next request · keeps the cache"),
+                TtlChoice::Auto if advice.auto => {
+                    format!(
+                        "current · follows this session's stats: {}",
+                        auto_verdict(advice)
+                    )
+                }
                 TtlChoice::Auto => {
-                    "the auth mode decides: 1h on a subscription, 5m on an API key".to_owned()
+                    format!("follow this session's stats: {}", auto_verdict(advice))
                 }
             };
             lines.push(format!(
@@ -638,6 +661,24 @@ impl TaskBrowser {
             .map(|line| truncate_to_width(&line, width))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// What the stats say, for the `auto` row.
+fn auto_verdict(advice: &TtlAdvice) -> String {
+    if !advice.has_evidence {
+        format!(
+            "collecting {}/{MIN_INTERVALS} reuse intervals, 5m meanwhile",
+            advice.intervals
+        )
+    } else if advice.has_saving {
+        format!(
+            "{} ≈{:.0}% cheaper here",
+            ttl_label(advice.suggested_seconds),
+            advice.saving_pct()
+        )
+    } else {
+        "5m and 1h within 10% here".to_owned()
     }
 }
 

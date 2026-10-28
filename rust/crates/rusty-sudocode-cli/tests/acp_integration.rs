@@ -7800,7 +7800,7 @@ async fn acp_task_completions_interrupted_shell_and_encoded_budget() {
 }
 
 /// Concurrent ACP contexts append to the same SID while retaining separate
-/// completion ownership. A continuation repairs only its frozen inherited tail.
+/// completion ownership. A continuation inherits only a completed turn.
 #[tokio::test]
 async fn acp_completions_keep_live_contexts_independent_during_replay_and_load() {
     let server = MockAnthropicService::spawn().await.unwrap();
@@ -7939,15 +7939,24 @@ async fn acp_completions_keep_live_contexts_independent_during_replay_and_load()
     let continued_transcript = read_transcript();
     assert!(
         String::from_utf8_lossy(&continued_transcript)
-            .contains("Side effects may already have occurred"),
-        "the continuation must retain its inherited tool's unknown outcome"
+            .contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")),
+        "the source's unfinished turn must remain in durable history"
     );
+    let selected = runtime::Session::load_from_path(&transcript)
+        .unwrap()
+        .to_json()
+        .unwrap()
+        .render();
+    assert!(!selected.contains("Side effects may already have occurred"));
+    assert!(!selected.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")));
+    assert!(selected.contains(&format!("{SCENARIO_PREFIX}streaming_text")));
     let requests = server.captured_requests().await;
     let request = &requests.last().unwrap().raw_body;
     assert!(
-        request.contains("Side effects may already have occurred")
-            && request.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")),
-        "the resumed model must inherit the written turn and its recovery result: {request}"
+        !request.contains("Side effects may already have occurred")
+            && !request.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip"))
+            && request.contains(&format!("{SCENARIO_PREFIX}streaming_text")),
+        "the resumed model must exclude the sibling's unfinished turn and synthetic result: {request}"
     );
     competitor.shutdown().await;
     assert_eq!(fs::read(&journal).unwrap(), before_journal);
@@ -8442,6 +8451,16 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     const SECOND: &str = "acp-pair-second";
     const PEER: &str = "acp-pair-peer";
     const SUMMARY: &str = "摘要 \"ready\" & <checked>\nSECOND-SUMMARY-LINE";
+    // The one peer wrapper carries the summary as an escaped attribute.
+    let summary_attr = format!(
+        "summary=\"{}\"",
+        SUMMARY
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('\n', "&#10;")
+    );
     let server = MockAnthropicService::spawn()
         .await
         .expect("mock service should start");
@@ -8529,13 +8548,13 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
                 update["params"]["_meta"]["sudocode"]["a2a"]["summary"],
                 SUMMARY
             );
-            assert!(text.contains(&format!("Summary: {SUMMARY}")), "{text}");
+            assert!(text.contains(&summary_attr), "{text}");
         } else {
             assert!(update["params"]["_meta"]["sudocode"]["a2a"]
                 .get("summary")
                 .is_none());
             assert!(
-                !text.contains("Summary:"),
+                !text.contains("summary="),
                 "legacy messages have no summary: {text}"
             );
         }
@@ -8564,7 +8583,9 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     loop {
         let requests = server.captured_requests().await;
         if requests.iter().any(|request| {
-            request.raw_body.contains("Summary: 摘要")
+            request
+                .raw_body
+                .contains(&summary_attr.replace('"', "\\\""))
                 && request.raw_body.contains("SECOND-SUMMARY-LINE")
                 && request.raw_body.contains("for acp-pair-first")
         }) {
@@ -8587,7 +8608,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
         .flat_map(|message| &message.blocks)
         .any(|block| {
             matches!(block, runtime::ContentBlock::Text { text }
-            if text.contains(&format!("Summary: {SUMMARY}")) && text.contains("for acp-pair-first"))
+            if text.contains(&summary_attr) && text.contains("for acp-pair-first"))
         }));
     client.shutdown().await;
     workspace.cleanup();

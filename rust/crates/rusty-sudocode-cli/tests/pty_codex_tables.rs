@@ -38,7 +38,10 @@ fn wide_grid_and_narrow_records_match_codex_snapshots() {
         );
         session.send(&format!("{prompt}\r")).unwrap();
         wait_file(&root.join("table-start-ready"));
-        let width = case["width"].as_u64().unwrap() as u16 + 2;
+        let width = u16::try_from(case["width"].as_u64().unwrap())
+            .expect("Codex fixture width fits u16")
+            .checked_add(2)
+            .expect("terminal width includes the prompt");
         session.resize(90, width).unwrap();
         std::fs::write(root.join("table-start-release"), "release").unwrap();
         let expected: Vec<_> = case["expected"]

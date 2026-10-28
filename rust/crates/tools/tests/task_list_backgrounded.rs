@@ -22,7 +22,7 @@
 //! 3. Each snapshot carries `agent_id`, `status`, `color`,
 //!    `subagent_type`, and `created_at` — the fields a switcher UI
 //!    needs to render its labels.
-//! 4. Order is created_at DESC — the most recent spawn comes first,
+//! 4. Order is `created_at` DESC — the most recent spawn comes first,
 //!    matching the "you probably want the one you just launched"
 //!    heuristic.
 
@@ -32,14 +32,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn unique_store(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     std::env::temp_dir().join(format!(
         "sudocode-tasklist-bg-{label}-{nanos}-{}",
         std::process::id()

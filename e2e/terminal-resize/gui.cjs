@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { performance } = require('node:perf_hooks');
-const { resources: processResource } = require('./resources.cjs');
+const { resources: processResource, createBrowserSampler } = require('./resources.cjs');
 const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
 const { WebSocketServer } = require('ws');
@@ -39,7 +39,7 @@ async function run(config) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const websocket = new WebSocketServer({ server });
   let child, exitCode, browser, page, cdp, wireBytes = 0;
-  const wire = [], processCpu = new Map();
+  const wire = [];
   websocket.on('connection', socket => {
     child = launch({ ...config, env: { TERM_PROGRAM: 'vscode', TMUX: '', STY: '', ...config.env } }, { cols: config.cols, rows: config.rows });
     child.onData(data => {
@@ -61,6 +61,7 @@ async function run(config) {
   try {
     browser = await chromium.launch({ headless: process.env.SCODE_GUI_HEADED !== '1' });
     cdp = await browser.newBrowserCDPSession();
+    const sampleBrowser = createBrowserSampler(cdp);
     page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1 });
     report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling };
     report.browser = await browser.version();
@@ -88,15 +89,11 @@ async function run(config) {
     const progress = label => fs.writeFileSync(path.join(config.logRoot, 'progress.txt'), label);
     const resources = async label => {
       progress(label);
-      const processes = (await cdp.send('SystemInfo.getProcessInfo')).processInfo;
-      const terminal = processes.map(p => {
-        try { return { id: p.id, type: p.type, ...processResource(p.id), cpu_ms: p.cpuTime * 1000 }; }
-        catch (error) { if (!fs.existsSync(`/proc/${p.id}`) && process.platform === 'linux') return null; throw error; }
-      }).filter(Boolean);
-      for (const p of terminal) processCpu.set(p.id, Math.max(processCpu.get(p.id) || 0, p.cpu_ms));
+      const sampled = await sampleBrowser(label);
+      const terminal = sampled.processes;
       const scode = processResource(child.pid);
-      const value = { label, scode, terminal, terminal_cpu_ms: [...processCpu.values()].reduce((sum, cpu) => sum + cpu, 0),
-        terminal_rss_mib: terminal.reduce((sum, p) => sum + p.rss_mib, 0) };
+      const value = { label, scode, terminal, terminal_cpu_ms: sampled.cpu_ms,
+        terminal_rss_mib: sampled.rss_mib, exited_processes: sampled.exited_processes };
       report.resources.push(value); return value;
     };
     const baseline = await resources('ready');

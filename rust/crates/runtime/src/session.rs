@@ -3573,7 +3573,7 @@ mod tests {
             restored.messages[0].blocks,
             ConversationMessage::user_text("legacy").blocks
         );
-        assert!(!restored.session_id.is_empty());
+        assert_ne!(restored.session_id, "");
     }
 
     #[test]

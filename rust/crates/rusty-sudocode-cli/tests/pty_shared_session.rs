@@ -923,7 +923,7 @@ fn interrupted_final_records_recover_without_changing_committed_history() {
         }
         fs::write(&transcript, &interrupted).unwrap();
         let inspected = Session::load_from_path(&transcript).unwrap();
-        assert!(!inspected.messages().is_empty());
+        assert_ne!(inspected.messages(), []);
         assert_eq!(
             fs::read(&transcript).unwrap(),
             interrupted,

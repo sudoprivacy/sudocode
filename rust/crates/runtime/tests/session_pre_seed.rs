@@ -135,7 +135,7 @@ fn with_messages_supports_empty_vec() {
     let session = Session::new().with_messages(Vec::new());
 
     // then — no messages, session usable
-    assert!(session.messages().is_empty());
+    assert_eq!(session.messages(), []);
 }
 
 // ── Fork subagent shape ─────────────────────────────────────────────

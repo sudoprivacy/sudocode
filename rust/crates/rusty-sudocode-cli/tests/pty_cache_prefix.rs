@@ -758,7 +758,7 @@ fn thinking_repair_preserves_a_concurrent_transcript_append() {
     cli.expect("Thinking repair preserved history").unwrap();
     common::expect_input_line_cleared(&cli, WAIT, "concurrent edit preserved");
     assert_eq!(capture.bodies().len(), 1);
-    assert!(repair_archives(&path).is_empty());
+    assert_eq!(repair_archives(&path), [] as [std::path::PathBuf; 0]);
     assert!(std::fs::read_to_string(&path)
         .unwrap()
         .contains("EXTERNAL_APPEND_MUST_SURVIVE"));
@@ -788,7 +788,7 @@ fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
         let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
         cli.expect(error).unwrap();
         assert_ne!(cli.expect_eof().unwrap(), 0);
-        assert!(capture.bodies().is_empty());
+        assert_eq!(capture.bodies(), [] as [serde_json::Value; 0]);
     }
     config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":[]});
     std::fs::write(config_path, config.to_string()).unwrap();
@@ -796,7 +796,10 @@ fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
     turn(&mut cli, "Continue after correcting the beta list.");
     exit(&mut cli);
     assert_eq!(capture.bodies().len(), 1);
-    assert!(capture.requests.lock().unwrap()[0].beta.is_empty());
+    assert_eq!(
+        capture.requests.lock().unwrap()[0].beta,
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -1054,7 +1057,7 @@ fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss(
             cli.expect("checkpoint changes an existing message")
                 .unwrap();
             cli.expect_eof().unwrap();
-            assert!(capture.bodies().is_empty());
+            assert_eq!(capture.bodies(), [] as [serde_json::Value; 0]);
             continue;
         }
         let mut cli = spawn(&env, &path);

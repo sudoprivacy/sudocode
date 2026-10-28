@@ -64,7 +64,7 @@ fn fresh_branch_does_not_trigger_stale_policy() {
     )]);
 
     let actions = engine.evaluate(&fresh_context);
-    assert!(actions.is_empty());
+    assert_eq!(actions, [] as [runtime::PolicyAction; 0]);
 }
 
 /// green_contract + policy_engine integration:
@@ -107,7 +107,7 @@ fn green_contract_unsatisfied_blocks_merge() {
     )]);
 
     let actions = engine.evaluate(&context);
-    assert!(actions.is_empty()); // level 1 < 3, so no merge
+    assert_eq!(actions, [] as [runtime::PolicyAction; 0]); // level 1 < 3, so no merge
 }
 
 /// reconciliation + policy_engine integration:

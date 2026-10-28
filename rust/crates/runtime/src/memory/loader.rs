@@ -382,6 +382,6 @@ mod tests {
         // Ensure it really doesn't exist.
         fs::remove_dir_all(&dir).ok();
         let entries = load_entries(&dir, &StdFsBackend).expect("missing dir is empty");
-        assert!(entries.is_empty());
+        assert_eq!(entries, [] as [crate::memory::entry::MemoryEntry; 0]);
     }
 }

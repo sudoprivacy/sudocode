@@ -6093,7 +6093,10 @@ mod tests {
             .await
             .expect_err("empty compacted session must not continue");
         assert!(error.to_string().contains("no active history"));
-        assert!(runtime.session().messages.is_empty());
+        assert_eq!(
+            runtime.session().messages,
+            [] as [crate::session::ConversationMessage; 0]
+        );
     }
 
     #[tokio::test]

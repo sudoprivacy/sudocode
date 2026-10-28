@@ -570,7 +570,7 @@ mod tests {
         );
 
         let actions = engine.evaluate(&context);
-        assert!(actions.is_empty());
+        assert_eq!(actions, [] as [crate::policy_engine::PolicyAction; 0]);
     }
 
     #[test]

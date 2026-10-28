@@ -99,9 +99,15 @@ fn explicit_collection_before_publication_suppresses_even_before_finished_event(
                     .unwrap();
             }
             journal.commit("run:1").unwrap();
-            assert!(journal.pending().is_empty());
+            assert_eq!(
+                journal.pending(),
+                [] as [runtime::subagent_completion::Completion; 0]
+            );
             drop(journal);
-            assert!(store.open(false).pending().is_empty());
+            assert_eq!(
+                store.open(false).pending(),
+                [] as [runtime::subagent_completion::Completion; 0]
+            );
         }
     }
 }
@@ -175,7 +181,10 @@ fn frozen_delivery_replays_identically_until_ack_is_committed() {
     journal
         .lifecycle(&lifecycle(SubagentPhase::Finished))
         .unwrap();
-    assert!(journal.pending().is_empty());
+    assert_eq!(
+        journal.pending(),
+        [] as [runtime::subagent_completion::Completion; 0]
+    );
     journal.commit("run:1").unwrap();
     let payload = journal.pending();
     assert_eq!(payload.len(), 1);
@@ -196,7 +205,10 @@ fn frozen_delivery_replays_identically_until_ack_is_committed() {
         .unwrap();
     drop(journal);
     let journal = store.open(false);
-    assert!(journal.pending().is_empty());
+    assert_eq!(
+        journal.pending(),
+        [] as [runtime::subagent_completion::Completion; 0]
+    );
     assert_eq!(journal.status().settled, 1);
 }
 
@@ -269,7 +281,10 @@ fn crash_before_parent_commit_is_blocked_even_with_terminal_manifest() {
     assert_eq!(journal.context().unwrap(), None);
     journal.begin("human:2", None).unwrap();
     journal.commit("human:2").unwrap();
-    assert!(journal.pending().is_empty());
+    assert_eq!(
+        journal.pending(),
+        [] as [runtime::subagent_completion::Completion; 0]
+    );
 }
 
 #[test]
@@ -280,7 +295,10 @@ fn missing_terminal_is_unknown_and_does_not_restart_work() {
     journal.commit("run:1").unwrap();
     let status = journal.reconcile(|_, _| Ok(None)).unwrap();
     assert_eq!(status.blocked, vec!["execution_unconfirmed"]);
-    assert!(journal.pending().is_empty());
+    assert_eq!(
+        journal.pending(),
+        [] as [runtime::subagent_completion::Completion; 0]
+    );
     journal
         .lifecycle(&lifecycle(SubagentPhase::Finished))
         .unwrap();

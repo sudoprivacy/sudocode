@@ -81,14 +81,14 @@ async fn discovery_refreshes_live_limits_and_isolates_endpoint_and_key() {
             ..source
         },
     );
-    assert!(first.model_ids().is_empty());
+    assert_eq!(first.model_ids(), [] as [std::string::String; 0]);
     first.refresh(true).await.unwrap();
     assert_eq!(
         same.model_ids(),
         vec!["claude-unseen-2040", "second-page-only"]
     );
-    assert!(other_endpoint.model_ids().is_empty());
-    assert!(second.model_ids().is_empty());
+    assert_eq!(other_endpoint.model_ids(), [] as [std::string::String; 0]);
+    assert_eq!(second.model_ids(), [] as [std::string::String; 0]);
     second.refresh(true).await.unwrap();
     assert_eq!(second.model_ids(), vec!["second-account-only"]);
     let calls = state.calls.lock().unwrap().clone();
@@ -133,7 +133,7 @@ async fn discovery_refreshes_live_limits_and_isolates_endpoint_and_key() {
     assert!(!disk.contains(&address.to_string()));
     *state.body.lock().unwrap() = json!({"data":[]});
     first.refresh(true).await.unwrap();
-    assert!(same.model_ids().is_empty());
+    assert_eq!(same.model_ids(), [] as [std::string::String; 0]);
     assert_eq!(second.model_ids(), vec!["second-account-only"]);
     server.abort();
     std::fs::remove_dir_all(&home).unwrap();

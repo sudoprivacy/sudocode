@@ -1048,7 +1048,10 @@ fn usage_preceding_a_malformed_stream_frame_is_billable_without_installing_text(
     let restored = Session::load_from_path(&path).unwrap();
     assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
-    assert!(!restored.maintenance_usage.is_empty());
+    assert_ne!(
+        restored.maintenance_usage,
+        [] as [runtime::MaintenanceUsageReceipt; 0]
+    );
     assert!(
         restored.maintenance_usage.iter().all(|receipt| {
             receipt
@@ -1146,7 +1149,10 @@ fn empty_history_cannot_skip_when_fixed_request_overhead_exceeds_the_window() {
     assert_eq!(report.safe_history_budget, 0);
     assert!(report.actual_fixed_overhead > 0);
     assert_eq!(report.attempts, 0);
-    assert!(restored.maintenance_usage.is_empty());
+    assert_eq!(
+        restored.maintenance_usage,
+        [] as [runtime::MaintenanceUsageReceipt; 0]
+    );
     assert!(provider.requests.lock().unwrap().is_empty());
 }
 
@@ -1196,7 +1202,10 @@ fn automatic_compaction_keeps_the_pending_prompt_once_in_the_task_request() {
         "the resumed task must include the pending prompt exactly once"
     );
     assert!(requests.iter().any(is_compaction_request));
-    assert!(!tasks[0]["tools"].as_array().unwrap().is_empty());
+    assert_ne!(
+        tasks[0]["tools"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -2561,10 +2570,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
         provider.requests.lock().unwrap().is_empty(),
         "damaged history must never reach the model"
     );
-    assert!(Session::load_from_path(&path)
-        .unwrap()
-        .messages()
-        .is_empty());
+    assert_eq!(Session::load_from_path(&path).unwrap().messages(), []);
 }
 
 // Drive both runtime clients through the real Agent tool. Two closed read

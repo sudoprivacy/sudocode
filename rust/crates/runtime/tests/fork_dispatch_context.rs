@@ -221,5 +221,8 @@ fn parent_assistant_message_is_preserved_verbatim() {
 fn default_context_has_no_parent_assistant_message() {
     let ctx = ToolDispatchContext::default();
     assert!(ctx.parent_assistant_message.is_none());
-    assert!(ctx.parent_session_messages.is_empty());
+    assert_eq!(
+        ctx.parent_session_messages,
+        [] as [runtime::ConversationMessage; 0]
+    );
 }

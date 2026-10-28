@@ -561,9 +561,9 @@ mod tests {
     fn generates_pkce_pair_and_state() {
         let pair = generate_pkce_pair().expect("pkce pair");
         let state = generate_state().expect("state");
-        assert!(!pair.verifier.is_empty());
-        assert!(!pair.challenge.is_empty());
-        assert!(!state.is_empty());
+        assert_ne!(pair.verifier, "");
+        assert_ne!(pair.challenge, "");
+        assert_ne!(state, "");
     }
 
     #[test]

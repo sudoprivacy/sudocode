@@ -600,7 +600,10 @@ mod tests {
         );
 
         let mut parser = SseParser::new().with_context("anthropic", "claude-sonnet-4-6");
-        assert!(parser.push(body.as_bytes()).expect("held back").is_empty());
+        assert_eq!(
+            parser.push(body.as_bytes()).expect("held back"),
+            [] as [crate::types::StreamEvent; 0]
+        );
 
         let error = parser.finish().expect_err("an error body is an error");
 
@@ -632,8 +635,14 @@ mod tests {
         let (head, tail) = body.split_at(40);
 
         let mut parser = SseParser::new();
-        assert!(parser.push(head.as_bytes()).expect("head").is_empty());
-        assert!(parser.push(tail.as_bytes()).expect("tail").is_empty());
+        assert_eq!(
+            parser.push(head.as_bytes()).expect("head"),
+            [] as [crate::types::StreamEvent; 0]
+        );
+        assert_eq!(
+            parser.push(tail.as_bytes()).expect("tail"),
+            [] as [crate::types::StreamEvent; 0]
+        );
         let events = parser.finish().expect("a complete body should parse");
 
         assert_eq!(events.len(), 3, "{events:?}");
@@ -742,10 +751,10 @@ mod tests {
         let first = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel";
         let second = b"lo\"}}\n\n";
 
-        assert!(parser
-            .push(first)
-            .expect("first chunk should buffer")
-            .is_empty());
+        assert_eq!(
+            parser.push(first).expect("first chunk should buffer"),
+            [] as [crate::types::StreamEvent; 0]
+        );
         let events = parser.push(second).expect("second chunk should parse");
 
         assert_eq!(
@@ -920,7 +929,10 @@ mod tests {
         // parse error "for model X" that blames the model.
         let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
         let partial = b"event: content_block_delta\ndata: {\"type\":\"content_block_del";
-        assert!(parser.push(partial).expect("partial buffers").is_empty());
+        assert_eq!(
+            parser.push(partial).expect("partial buffers"),
+            [] as [crate::types::StreamEvent; 0]
+        );
 
         let err = parser.finish().expect_err("truncated tail must error");
         assert!(
@@ -945,10 +957,10 @@ mod tests {
         // frame must still parse cleanly (not be misclassified as truncated).
         let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
         let whole = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{}}";
-        assert!(parser
-            .push(whole)
-            .expect("buffers, no terminator yet")
-            .is_empty());
+        assert_eq!(
+            parser.push(whole).expect("buffers, no terminator yet"),
+            [] as [crate::types::StreamEvent; 0]
+        );
 
         let events = parser
             .finish()
@@ -966,7 +978,10 @@ mod tests {
         // against a proxy that keeps truncating the same terminal frame).
         let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
         let partial = b"event: message_stop\ndata: {\"type\":\"m";
-        assert!(parser.push(partial).expect("partial buffers").is_empty());
+        assert_eq!(
+            parser.push(partial).expect("partial buffers"),
+            [] as [crate::types::StreamEvent; 0]
+        );
 
         let events = parser
             .finish()
@@ -984,10 +999,13 @@ mod tests {
         // alone must still be recognized as the terminal frame.
         let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
         let partial = b"data: {\"type\":\"message_stop\"";
-        assert!(parser.push(partial).expect("partial buffers").is_empty());
+        assert_eq!(
+            parser.push(partial).expect("partial buffers"),
+            [] as [crate::types::StreamEvent; 0]
+        );
 
         let events = parser.finish().expect("terminal frame is complete");
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [crate::types::StreamEvent; 0]);
     }
 
     #[test]
@@ -996,7 +1014,10 @@ mod tests {
         // failure and must remain a retryable IncompleteStream.
         let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
         let partial = b"event: content_block_delta\ndata: {\"type\":\"content_block_del";
-        assert!(parser.push(partial).expect("partial buffers").is_empty());
+        assert_eq!(
+            parser.push(partial).expect("partial buffers"),
+            [] as [crate::types::StreamEvent; 0]
+        );
 
         let err = parser
             .finish()

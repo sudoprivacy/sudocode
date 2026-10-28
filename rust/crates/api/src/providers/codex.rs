@@ -978,7 +978,7 @@ mod tests {
         let events = state
             .ingest_frame(&frame("response.completed", r"{}"))
             .unwrap();
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [crate::types::StreamEvent; 0]);
 
         let events = state.finish();
         assert_eq!(events.len(), 2);

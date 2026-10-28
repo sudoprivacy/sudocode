@@ -332,7 +332,7 @@ mod tests {
         let env = MailboxEnvelope::from_bytes(wire).expect("3-field wire compat");
         assert_eq!(env.from, "agent-a");
         assert_eq!(env.body, "hello");
-        assert!(env.kind.is_empty());
+        assert_eq!(env.kind, "");
         assert_eq!(env.timestamp, 0);
     }
 }

@@ -386,13 +386,13 @@ mod tests {
         // Create a tiny 2x2 RGBA image.
         let rgba = vec![255u8; 2 * 2 * 4];
         let registered = registry.register_rgba(2, 2, &rgba).unwrap();
-        assert!(!registered.hash.is_empty());
+        assert_ne!(registered.hash, "");
         assert_eq!(registered.mime_type, "image/png");
         assert!(registered.path.exists());
 
         let (b64, mime) = registry.load(&registered.hash).unwrap();
         assert_eq!(mime, "image/png");
-        assert!(!b64.is_empty());
+        assert_ne!(b64, "");
     }
 
     #[test]

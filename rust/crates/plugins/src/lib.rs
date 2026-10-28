@@ -3302,8 +3302,8 @@ mod tests {
 
         let manifest = load_plugin_from_directory(&root).expect("packaged manifest should load");
         assert_eq!(manifest.name, "packaged-demo");
-        assert!(manifest.tools.is_empty());
-        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.tools, [] as [PluginToolManifest; 0]);
+        assert_eq!(manifest.commands, [] as [PluginCommandManifest; 0]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3322,10 +3322,10 @@ mod tests {
         );
 
         let manifest = load_plugin_from_directory(&root).expect("minimal manifest should load");
-        assert!(manifest.permissions.is_empty());
+        assert_eq!(manifest.permissions, [] as [PluginPermission; 0]);
         assert!(manifest.hooks.is_empty());
-        assert!(manifest.tools.is_empty());
-        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.tools, [] as [PluginToolManifest; 0]);
+        assert_eq!(manifest.commands, [] as [PluginCommandManifest; 0]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4762,7 +4762,7 @@ mod tests {
         let report = PluginRegistryReport::new(PluginRegistry::new(Vec::new()), vec![failure]);
         let outcome = report.load_outcome();
 
-        assert!(outcome.loaded_plugins.is_empty());
+        assert_eq!(outcome.loaded_plugins, [] as [LoadedPlugin; 0]);
         assert_eq!(outcome.failures.len(), 1);
         assert_eq!(
             outcome.failures[0].plugin_root,

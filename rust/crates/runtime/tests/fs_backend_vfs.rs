@@ -1566,10 +1566,10 @@ fn glob_drops_a_path_revoked_after_directory_discovery() {
         .lock()
         .unwrap()
         .insert("/ws/revoked.txt".into());
-    assert!(glob_search(&fs, "**/*.txt", None)
-        .unwrap()
-        .filenames
-        .is_empty());
+    assert_eq!(
+        glob_search(&fs, "**/*.txt", None).unwrap().filenames,
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]

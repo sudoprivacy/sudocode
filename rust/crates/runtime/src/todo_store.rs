@@ -239,7 +239,7 @@ mod tests {
         let _ = store.set(vec![todo("a", TodoStatus::Completed)]);
         let _ = store.set(Vec::new());
         assert!(store.is_empty());
-        assert!(store.list().is_empty());
+        assert_eq!(store.list(), [] as [crate::todo_store::Todo; 0]);
     }
 
     #[test]

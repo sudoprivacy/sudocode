@@ -1902,7 +1902,10 @@ for line in sys.stdin:
             assert_eq!(error.context["method"], method);
             assert!(!error.recoverable);
             assert!(error.error.contains(method), "{}", error.error);
-            assert!(manager.tools_with_server().is_empty());
+            assert_eq!(
+                manager.tools_with_server(),
+                [] as [(std::string::String, std::string::String); 0]
+            );
             if failure.ends_with("-error") {
                 assert_eq!(error.context["jsonrpc_code"], "-32001");
                 assert!(error.error.contains("rejected"));
@@ -1917,7 +1920,10 @@ for line in sys.stdin:
         let mut manager = stdio_lifecycle_manager("initialize-disconnect");
         for _ in 0..3 {
             let report = manager.discover_tools_best_effort().await;
-            assert!(report.tools.is_empty());
+            assert_eq!(
+                report.tools,
+                [] as [crate::mcp_server_manager::ManagedMcpTool; 0]
+            );
             assert_eq!(report.failed_servers.len(), 1);
             let failure = &report.failed_servers[0];
             assert_eq!(failure.phase, McpLifecyclePhase::InitializeHandshake);

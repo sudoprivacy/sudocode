@@ -112,7 +112,10 @@ fn read_all_on_missing_inbox_is_empty_not_error() {
     let ws = temp_workspace("read-missing");
     // Never wrote anything for this recipient.
     let envelopes = agent_mailbox::read_all(&ws, "nobody").expect("missing inbox must not error");
-    assert!(envelopes.is_empty());
+    assert_eq!(
+        envelopes,
+        [] as [runtime::agent_mailbox::MailboxEnvelope; 0]
+    );
 }
 
 #[test]

@@ -134,7 +134,7 @@ mod tests {
         let first = parser.push_chunk(b"event: message\ndata: hel");
 
         // then
-        assert!(first.is_empty());
+        assert_eq!(first, [] as [crate::sse::SseEvent; 0]);
 
         let second = parser.push_chunk(b"lo\n\nid: 1\ndata: world\n\n");
         assert_eq!(

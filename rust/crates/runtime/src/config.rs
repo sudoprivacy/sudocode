@@ -2764,7 +2764,7 @@ mod tests {
             .load_sudocode_config()
             .expect("config should load");
         assert_eq!(config.selected_account.as_deref(), Some("global-acct"));
-        assert!(config.auth_profile_conflicts.is_empty());
+        assert_eq!(config.auth_profile_conflicts, [] as [std::path::PathBuf; 0]);
 
         // Project owner present → narrower scope wins.
         let local = cwd
@@ -2776,7 +2776,7 @@ mod tests {
             .load_sudocode_config()
             .expect("config should load");
         assert_eq!(config.selected_account.as_deref(), Some("project-acct"));
-        assert!(config.auth_profile_conflicts.is_empty());
+        assert_eq!(config.auth_profile_conflicts, [] as [std::path::PathBuf; 0]);
 
         // A non-owning layer file sets it → recorded as a conflict, and loading
         // still succeeds so `doctor` can run and say which line to delete.
@@ -2881,9 +2881,7 @@ mod tests {
         let loader = ConfigLoader::new(&cwd, &home);
         let before = loader.load_sudocode_config().expect("load");
         assert!(before.selected_account.is_none());
-        assert!(!before.models["claude-opus"].providers["proxy"]
-            .provider
-            .is_empty());
+        assert_ne!(before.models["claude-opus"].providers["proxy"].provider, "");
 
         let report = loader
             .migrate_legacy_config_shape(super::MigrationScope::Full)
@@ -3196,7 +3194,7 @@ mod tests {
         // then
         let chain = loaded.provider_fallbacks();
         assert_eq!(chain.primary(), None);
-        assert!(chain.fallbacks().is_empty());
+        assert_eq!(chain.fallbacks(), [] as [String; 0]);
         assert!(chain.is_empty());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

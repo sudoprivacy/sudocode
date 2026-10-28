@@ -21,7 +21,7 @@ use runtime::agent_color::{assign_agent_color, AGENT_COLOR_PALETTE};
 fn agent_color_palette_matches_runtime_and_tools_expectation() {
     assert_eq!(AGENT_COLOR_PALETTE.len(), 8);
     for name in AGENT_COLOR_PALETTE {
-        assert!(!name.is_empty());
+        assert_ne!(*name, "");
     }
 }
 

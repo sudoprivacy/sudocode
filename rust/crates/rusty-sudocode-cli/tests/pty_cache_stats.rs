@@ -597,8 +597,14 @@ fn untimed_observations_preserve_known_metadata_and_exact_repeats() {
     assert_eq!(advisor["coverage"]["duplicate_snapshots_ignored"], 2);
     assert_eq!(advisor["coverage"]["ineligible_rows"], 6);
     assert_eq!(advisor["coverage"]["legacy_or_malformed_rows"], 1);
-    assert!(advisor["decisions"].as_array().unwrap().is_empty());
-    assert!(advisor["forward_comparison"].as_array().unwrap().is_empty());
+    assert_eq!(
+        advisor["decisions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
+    assert_eq!(
+        advisor["forward_comparison"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -680,7 +686,10 @@ fn usage_fixture_ttl_switch_keeps_observations_explicit_and_claims_no_savings() 
         "hypothetical_not_causal_or_billed_savings"
     );
     assert_eq!(advisor["coverage"]["ineligible_rows"], 0);
-    assert!(advisor["decisions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        advisor["decisions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     assert!(
         advisor["forward_comparison"].as_array().unwrap().is_empty(),
         "observations alone must not produce a savings figure"

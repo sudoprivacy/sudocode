@@ -169,7 +169,10 @@ fn host_flush_preserves_the_running_tool_and_all_recalled_attachments() {
     assert_eq!(recalled["recalled"].as_array().unwrap().len(), 2);
     assert_eq!(recalled["recalled"][0]["clientId"], "first");
     assert_eq!(recalled["recalled"][1]["content"][1]["data"], PNG);
-    assert!(host.snapshot()["pending"].as_array().unwrap().is_empty());
+    assert_eq!(
+        host.snapshot()["pending"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     for item in recalled["recalled"].as_array().unwrap() {
         host.input(json!({"action":"submit","clientId":item["clientId"],"content":item["content"],"delivery":"queue"}));
     }

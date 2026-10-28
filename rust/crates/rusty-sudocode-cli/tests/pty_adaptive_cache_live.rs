@@ -256,7 +256,10 @@ fn effort_live_read_adjust_and_resume_use_persisted_preference() {
     if env.is_mock() {
         return;
     }
-    assert!(!runtime::effort::claude_levels(&common::live_model()).is_empty());
+    assert_ne!(
+        runtime::effort::claude_levels(&common::live_model()),
+        [] as [&str; 0]
+    );
     std::fs::write(
         env.config_home().join("settings.json"),
         r#"{"thinking":false,"effortLevel":"low"}"#,
@@ -450,7 +453,7 @@ fn assert_live_tool_input_objects(path: &std::path::Path) {
         .filter(|block| block["type"] == "tool_use")
         .map(|block| block["input"].clone())
         .collect();
-    assert!(!tool_inputs.is_empty());
+    assert_ne!(tool_inputs, [] as [serde_json::Value; 0]);
     assert!(
         tool_inputs.iter().all(Value::is_object),
         "real tool inputs must be journaled as JSON objects"

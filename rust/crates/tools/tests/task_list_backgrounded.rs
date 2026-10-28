@@ -143,7 +143,7 @@ fn pid_status_survives_missing_store_directory() {
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["count"].as_u64(), Some(0));
     let agents = json["agents"].as_array().expect("array");
-    assert!(agents.is_empty());
+    assert_eq!(agents.as_slice(), [] as [serde_json::Value; 0]);
 
     std::env::remove_var("SUDOCODE_AGENT_STORE");
 }

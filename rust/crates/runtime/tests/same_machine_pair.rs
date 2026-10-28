@@ -68,7 +68,10 @@ fn a_sends_to_b_over_shared_pair_root() {
 
     // A conversation nobody wrote to stays empty — no cross-talk between
     // pairs, which is the property per-pair transcripts buy.
-    assert!(bob.read_conversation("carol").unwrap().is_empty());
+    assert_eq!(
+        bob.read_conversation("carol").unwrap(),
+        [] as [runtime::agent_mailbox::MailboxEnvelope; 0]
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

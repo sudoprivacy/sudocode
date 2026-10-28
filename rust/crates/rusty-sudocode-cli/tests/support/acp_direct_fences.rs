@@ -122,7 +122,10 @@ async fn direct_a2a_pause_cancels_an_outstanding_approval() {
         .await;
     assert!(resumed.get("result").is_some(), "{resumed}");
     client.shutdown().await;
-    assert!(conversation_log(&root, "pending-approval-peer", "pending-approval-actor").is_empty());
+    assert_eq!(
+        conversation_log(&root, "pending-approval-peer", "pending-approval-actor"),
+        ""
+    );
     model.assert_unused();
     workspace.cleanup();
 }

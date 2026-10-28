@@ -809,7 +809,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     stop_session(&kernel, &first["session_id"]);
     first_controller.wait_closed();
     let before = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
-    assert!(!before.messages().is_empty());
+    assert_ne!(before.messages(), []);
     let before_bytes = fs.read_to_string(&path).unwrap();
     assert!(fs.is_append_stream(&path).unwrap());
 

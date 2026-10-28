@@ -503,7 +503,7 @@ mod tests {
     fn tokenize_plain_and_empty() {
         assert_eq!(tokenize("list"), vec!["list"]);
         assert_eq!(tokenize("   "), Vec::<String>::new());
-        assert!(tokenize("").is_empty());
+        assert_eq!(tokenize(""), [] as [std::string::String; 0]);
         // an explicitly empty quoted value is preserved as an empty arg.
         assert_eq!(tokenize("--prompt \"\""), vec!["--prompt", ""]);
     }

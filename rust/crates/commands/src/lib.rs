@@ -6607,7 +6607,10 @@ mod tests {
             "config_load_error should name the malformed field path: {err}"
         );
         assert_eq!(list["configured_servers"], 0);
-        assert!(list["servers"].as_array().unwrap().is_empty());
+        assert_eq!(
+            list["servers"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
 
         // show action: should also degrade (not hard-fail).
         let show = render_mcp_report_json_for(&loader, &workspace, Some("show everything"), None)

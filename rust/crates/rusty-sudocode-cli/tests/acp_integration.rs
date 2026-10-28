@@ -6999,7 +6999,10 @@ async fn acp_task_storage_and_workspace_metadata_coexist() {
         .await;
     assert_eq!(replay["result"]["storageRef"], storage, "{replay}");
     assert_eq!(replay["result"]["pending"], 0, "{replay}");
-    assert!(server.captured_requests().await.is_empty());
+    assert_eq!(
+        server.captured_requests().await,
+        [] as [mock_anthropic_service::CapturedRequest; 0]
+    );
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -8901,7 +8904,7 @@ async fn assert_rejected_completion_context(
         )
         .await;
     assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
-    assert!(updates.is_empty());
+    assert_eq!(updates, [] as [serde_json::Value; 0]);
     assert_eq!(
         server.captured_requests().await.len(),
         requests_before_rejection,

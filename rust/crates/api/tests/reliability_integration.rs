@@ -486,10 +486,12 @@ fn sse_parser_surfaces_non_sse_bodies_and_ignores_benign_frames() {
 
     // HTML without any separator errors on finish.
     let mut parser = SseParser::new().with_context("Anthropic", "claude-sonnet-4-6");
-    assert!(parser
-        .push(b"<!DOCTYPE html><html><body>504 Gateway Time-out</body></html>")
-        .expect("no full frame yet")
-        .is_empty());
+    assert_eq!(
+        parser
+            .push(b"<!DOCTYPE html><html><body>504 Gateway Time-out</body></html>")
+            .expect("no full frame yet"),
+        [] as [api::StreamEvent; 0]
+    );
     let error = parser
         .finish()
         .expect_err("trailing HTML must surface an error");
@@ -497,10 +499,12 @@ fn sse_parser_surfaces_non_sse_bodies_and_ignores_benign_frames() {
 
     // A bare JSON error envelope surfaces its type and message.
     let mut parser = SseParser::new().with_context("Anthropic", "claude-sonnet-4-6");
-    assert!(parser
-        .push(br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#)
-        .expect("no full frame yet")
-        .is_empty());
+    assert_eq!(
+        parser
+            .push(br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#)
+            .expect("no full frame yet"),
+        [] as [api::StreamEvent; 0]
+    );
     let error = parser
         .finish()
         .expect_err("bare JSON error must surface an error");
@@ -512,18 +516,24 @@ fn sse_parser_surfaces_non_sse_bodies_and_ignores_benign_frames() {
 
     // Benign inputs keep their previous behavior: no events, no errors.
     let mut parser = SseParser::new();
-    assert!(parser
-        .push(b": keepalive\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\ndata: [DONE]\n\n")
-        .expect("benign frames parse")
-        .is_empty());
-    assert!(parser
-        .push(b"{\"type\":\"message\"}")
-        .expect("JSON without an error member is not an error")
-        .is_empty());
-    assert!(parser
-        .finish()
-        .expect("JSON without an error member is not an error")
-        .is_empty());
+    assert_eq!(
+        parser
+            .push(b": keepalive\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\ndata: [DONE]\n\n")
+            .expect("benign frames parse"),
+        [] as [api::StreamEvent; 0]
+    );
+    assert_eq!(
+        parser
+            .push(b"{\"type\":\"message\"}")
+            .expect("JSON without an error member is not an error"),
+        [] as [api::StreamEvent; 0]
+    );
+    assert_eq!(
+        parser
+            .finish()
+            .expect("JSON without an error member is not an error"),
+        [] as [api::StreamEvent; 0]
+    );
 }
 
 /// Fix 3: a 200 response whose body is an HTML error page (instead of an SSE

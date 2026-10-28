@@ -12,6 +12,8 @@
 
 #[path = "support/acp_direct_fences.rs"]
 mod acp_direct_fences;
+#[path = "support/acp_host_context.rs"]
+mod acp_host_context;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
 #[path = "support/acp_node_binding.rs"]

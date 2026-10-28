@@ -69,6 +69,15 @@ use crate::subagent_completion::{CompletionState, EventSink};
 /// The driver never inspects engine internals — it only calls these methods and
 /// forwards the results as [`EngineEvent`]s.
 pub trait EngineDelegate: Send + Sync + 'static {
+    /// Whether this session requires fresh caller-owned context before each turn.
+    fn requires_host_context(&self) -> bool {
+        false
+    }
+
+    /// Replace only caller-owned appended context, retaining history and policy.
+    fn apply_host_context(&self, _text: String) -> Result<(), RuntimeError> {
+        Err(RuntimeError::new("host context is unsupported"))
+    }
     /// Run exactly one turn to completion (or cancellation), driving the
     /// model/tool loop.
     ///
@@ -273,6 +282,7 @@ impl EngineSession {
 /// the shared table so the pump can route the matching answer command back to
 /// the blocked prompter.
 enum PendingAnswer {
+    HostContext(oneshot::Sender<Result<String, String>>),
     Permission(oneshot::Sender<PermissionPromptDecision>),
     Question(oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>),
 }
@@ -447,7 +457,9 @@ async fn drive(
                 }
                 delegate.abort_signal().abort();
             }
-            EngineCommand::PermissionAnswer { .. } | EngineCommand::QuestionAnswer { .. } => {}
+            EngineCommand::PermissionAnswer { .. }
+            | EngineCommand::QuestionAnswer { .. }
+            | EngineCommand::HostContextAnswer { .. } => {}
             EngineCommand::Close => {
                 shutdown = ShutdownReason::ExplicitClose;
                 break;
@@ -656,6 +668,18 @@ async fn run_one_turn(
             tx: turn_tx,
             table: turn_table,
         };
+        if input.management.is_none() && worker.requires_host_context() {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let id = prompter.table.alloc();
+            prompter
+                .table
+                .insert(id, PendingAnswer::HostContext(answer_tx));
+            let _ = prompter.tx.send(EngineEvent::HostContextRequest { id });
+            let context = futures::executor::block_on(answer_rx)
+                .map_err(|_| RuntimeError::new("host context resolution was cancelled"))?
+                .map_err(RuntimeError::new)?;
+            worker.apply_host_context(context)?;
+        }
         execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
     });
 
@@ -686,6 +710,11 @@ async fn run_one_turn(
                 Some(EngineCommand::QuestionAnswer { id, answers }) => {
                     if let Some(PendingAnswer::Question(tx)) = table.take(id) {
                         let _ = tx.send(answers);
+                    }
+                }
+                Some(EngineCommand::HostContextAnswer { id, context }) => {
+                    if let Some(PendingAnswer::HostContext(tx)) = table.take(id) {
+                        let _ = tx.send(context);
                     }
                 }
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),

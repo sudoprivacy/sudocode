@@ -5301,6 +5301,17 @@ impl LiveCli {
                         "is_error": is_error,
                     }));
                 }
+                EngineEvent::HostContextRequest { id } => {
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::HostContextAnswer {
+                            id: *id,
+                            context: Err(
+                                "No host context provider is configured for the terminal renderer"
+                                    .into(),
+                            ),
+                        })?;
+                }
                 EngineEvent::PromptCache(event) => {
                     outcome.prompt_cache_events.push(serde_json::json!({
                         "unexpected": event.unexpected,

@@ -328,6 +328,30 @@ cleanup. The join includes the worker's lock-release attempts; a failed remote
 unlock can still require backend TTL recovery. This changes no lease, cursor,
 delivery acknowledgement or retry policy.
 
+### Execution-time host context
+
+`initialize` advertises `_meta.sudocode.hostContext = {"version":1}`. A trusted
+controller can require it for one session by supplying the same `hostContext`
+object in `session/new` or `session/load`. Absent means the existing fixed prompt
+behavior. Unsupported versions and malformed values are rejected.
+
+Before each actual model turn, including automatically resumed queued inputs,
+the engine emits a request over its existing command/event boundary. ACP maps it
+to `_sudocode/session/host_context` with `{"sessionId":"..."}`. The controller
+returns `{"appendSystemPrompt":"exact current context"}`. The controller owns
+source selection and authorization; the model cannot select a provider or grant
+access through this request. This interface performs no model summarization.
+
+The engine replaces only the caller's appended prompt and preserves the existing
+session, history, model, memory mode and execution policy. Byte-identical content
+does not rebuild the runtime. A failed, disconnected, malformed, empty or timed
+out response fails the turn before model work; it never falls back to a stale
+append. The provider has a 30-second response budget and cancellation releases
+its pending request. Slash and shell management commands do not call the provider.
+Context stays fixed during a turn, including in-turn steering. The following
+turn resolves anew. The provider mode is transport state, so controllers must
+negotiate it again when restoring a session.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

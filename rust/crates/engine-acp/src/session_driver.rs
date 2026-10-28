@@ -218,6 +218,33 @@ impl SessionDriver {
     }
 
     fn answer_interaction(self: &Arc<Self>, session_id: &str, event: &EngineEvent) -> bool {
+        if let EngineEvent::HostContextRequest { id } = event {
+            let id = *id;
+            let connection = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .connection
+                .clone();
+            let driver = Arc::clone(self);
+            let session_id = session_id.to_owned();
+            let task = tokio::spawn(async move {
+                let context = match connection {
+                    Some(connection) => {
+                        crate::acp_sdk_server::resolve_host_context(&session_id, connection).await
+                    }
+                    None => Err("No connected client can resolve session context".into()),
+                };
+                let _ = driver.send(EngineCommand::HostContextAnswer { id, context });
+            });
+            let mut interactive = self
+                .interactive
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            interactive.retain(|task| !task.is_finished());
+            interactive.push(task);
+            return true;
+        }
         // Requests belong to the session, including automatically resumed queued turns.
         // A request/response listener must never own permission delivery.
         if matches!(

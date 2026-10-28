@@ -183,6 +183,16 @@ receiver stops. Hosts can also subscribe to structured tracing. Ordinary
 receivers use this status and the local log without emitting terminal notices;
 retries continue without writing into the terminal's input area.
 
+The current condition is reported separately as `Health` in `/status` and
+`health` in the structured peer status. It reads the same retry diagnostics, so
+it clears when they confirm recovery: every failed check has succeeded again
+after a short quiet period. An outage younger than 30 seconds stays `ok`, and
+`/status` lists the scope being retried; most outages recover on the next
+attempt. A longer one is `degraded`, with each failing scope and its detail.
+The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
+receiving recovers. `failing` means the node binding itself cannot be used.
+`SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
+
 The connection record alone does not start Nexus or mint an agent credential.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
 can resume the same locally owned Box after shared selection. A missing record still

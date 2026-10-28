@@ -7852,7 +7852,7 @@ impl ProviderRuntimeClient {
             (allow_tools && !self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
         let chain = &self.chain;
-        let mut last_error: Option<ApiError> = None;
+        let mut last_error: Option<Box<ApiError>> = None;
         for (index, entry) in chain.iter().enumerate() {
             // The converted history and session fields survive provider retries.
             message_request.model.clone_from(&entry.model);
@@ -7885,7 +7885,7 @@ impl ProviderRuntimeClient {
 async fn stream_with_provider(
     client: &ProviderClient,
     message_request: &MessageRequest,
-) -> Result<Vec<AssistantEvent>, ApiError> {
+) -> Result<Vec<AssistantEvent>, Box<ApiError>> {
     let mut stream = client.stream_message(message_request, None).await?;
     let mut events = Vec::new();
     let mut pending_tools: BTreeMap<u32, (String, String, String, Option<String>)> =

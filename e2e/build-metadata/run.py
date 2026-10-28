@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+CLI_BINARY = "scode"
 
 
 class Fixture:
@@ -23,7 +24,9 @@ class Fixture:
             (root / "Cargo.toml").write_text('[workspace]\nmembers=["nested/cli"]\nresolver="2"\n', encoding="utf-8")
             (root / ".gitignore").write_text("target/\n*.stdout.log\n*.stderr.log\n", encoding="utf-8")
             (self.package / "Cargo.toml").write_text(
-                '[package]\nname="metadata-fixture"\nversion="0.0.0"\nedition="2021"\n', encoding="utf-8"
+                '[package]\nname="metadata-fixture"\nversion="0.0.0"\nedition="2021"\n'
+                # Keep the real binary target for bin-scoped production link flags.
+                f'\n[[bin]]\nname="{CLI_BINARY}"\npath="src/main.rs"\n', encoding="utf-8"
             )
             (self.package / "src/main.rs").write_text(
                 'fn main() { println!("{}|{}", env!("GIT_SHA"), env!("BUILD_DATE")); }\n', encoding="utf-8"
@@ -74,7 +77,7 @@ class Fixture:
                 path = Path(line.split("=", 1)[1])
                 path = path if path.is_absolute() else self.package / path
                 assert path.exists(), f"Build script watches missing path: {path}"
-        binary = self.root / "target/debug" / ("metadata-fixture.exe" if os.name == "nt" else "metadata-fixture")
+        binary = self.root / "target/debug" / (f"{CLI_BINARY}.exe" if os.name == "nt" else CLI_BINARY)
         assert self.command(str(binary)) == f"{expected_sha}|{self.env['BUILD_DATE']}"
 
 

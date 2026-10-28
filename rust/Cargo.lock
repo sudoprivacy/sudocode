@@ -4652,6 +4652,7 @@ dependencies = [
  "sha2 0.10.9",
  "shell-words",
  "smol",
+ "socket2 0.6.5",
  "stdin-peek",
  "syntect",
  "tar",

@@ -8281,12 +8281,12 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
         text.find(MARKER)
             .is_some_and(|at| text[at..].contains('\n'))
     };
+    let mut buf = vec![0u8; 65_536].into_boxed_slice();
     while !line_end(&drained) {
         assert!(
             std::time::Instant::now() < deadline,
             "the send never finished its write"
         );
-        let mut buf = [0u8; 65_536];
         match pipe.read(&mut buf) {
             Ok(n) => drained.extend_from_slice(&buf[..n]),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -8318,7 +8318,6 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
     assert_unknown(&sent, "a send the pause stopped after admission");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut buf = [0u8; 65_536];
     if let Ok(n) = pipe.read(&mut buf) {
         drained.extend_from_slice(&buf[..n]);
     }

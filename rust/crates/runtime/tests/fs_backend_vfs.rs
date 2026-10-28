@@ -1743,7 +1743,7 @@ fn remote_backend(
         match fs.stat("/ws/ready.txt") {
             Ok(_) => break,
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("VFS host did not become ready: {error}"),
         }
@@ -1770,9 +1770,8 @@ fn remote_existence_preserves_admission_and_policy_errors() {
     // remote_append and remote_stat below through the same transport.
     for key in ["invalid-key", "denied-key", "unavailable-key"] {
         let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
-        assert_eq!(
-            fs.exists("/ws/ready.txt").unwrap(),
-            false,
+        assert!(
+            !fs.exists("/ws/ready.txt").unwrap(),
             "{key}: an authentication refusal must read as absence, not leak existence"
         );
     }

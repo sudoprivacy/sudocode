@@ -3890,6 +3890,8 @@ fn dump_subagent_events(label: &str, notifs: &[Value]) {
 /// to finish so a late update would be caught too.
 /// Independent terminal tool updates may arrive in completion order; only
 /// contiguous runs of those updates are reordered for the comparison.
+/// Initialize records track later additive capability advertisements; the
+/// scenario event payloads remain the original baseline.
 ///
 /// Regenerate (only when an off-path change is intended) with
 /// `SUDOCODE_UPDATE_ACP_FIXTURES=1`.

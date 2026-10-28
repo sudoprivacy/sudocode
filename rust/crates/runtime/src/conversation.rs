@@ -3690,10 +3690,18 @@ impl StaticToolExecutor {
 }
 
 impl ToolExecutor for StaticToolExecutor {
-    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
-        self.handlers
-            .get(tool_name)
-            .ok_or_else(|| ToolError::new(format!("unknown tool: {tool_name}")))?(input)
+    fn execute(
+        &self,
+        tool_name: &str,
+        input: &str,
+    ) -> impl std::future::Future<Output = Result<String, ToolError>> {
+        futures::future::lazy(move |_| {
+            let handler = self
+                .handlers
+                .get(tool_name)
+                .ok_or_else(|| ToolError::new(format!("unknown tool: {tool_name}")))?;
+            handler(input)
+        })
     }
 }
 

@@ -712,18 +712,8 @@ fn deleted_session_is_hidden_and_reclaimed_after_its_last_runtime_retires() {
     assert!(selected.messages().iter().flat_map(|message| &message.blocks).any(|block| {
         matches!(block, ContentBlock::Text { text } if text.contains("LATEST_ACTIVE_CONTEXT"))
     }), "idle metadata changed the latest resume context");
-    let output_dir = Session::tool_results_dir_for(&transcript, &session.session_id).unwrap();
-    fs::create_dir_all(&output_dir).unwrap();
-    fs::write(output_dir.join("owned-payload"), "Session-owned payload").unwrap();
-    let external = env.workspace_root().join("independent-workspace");
-    fs::create_dir_all(&external).unwrap();
-    fs::write(external.join("keep.txt"), "independent object survives").unwrap();
-    StdFsBackend
-        .link(
-            &output_dir.join("workspace-link").to_string_lossy(),
-            &external.to_string_lossy(),
-        )
-        .unwrap();
+    let (output_dir, external) =
+        seed_owned_session_payload(env.workspace_root(), &transcript, &session.session_id);
     let mut deleter = delete();
     deleter
         .expect("Session deleted")
@@ -776,8 +766,38 @@ fn deleted_session_is_hidden_and_reclaimed_after_its_last_runtime_retires() {
         transcript.with_extension("completions.json").exists(),
         "retain the deletion identity"
     );
+    assert_damaged_session_picker(&env, &mut deleter, &survivor, &session);
+    exit_cli(&env, &mut deleter);
+}
+
+fn seed_owned_session_payload(
+    workspace: &std::path::Path,
+    transcript: &std::path::Path,
+    session_id: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let output_dir = Session::tool_results_dir_for(transcript, session_id).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+    fs::write(output_dir.join("owned-payload"), "Session-owned payload").unwrap();
+    let external = workspace.join("independent-workspace");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("keep.txt"), "independent object survives").unwrap();
+    StdFsBackend
+        .link(
+            &output_dir.join("workspace-link").to_string_lossy(),
+            &external.to_string_lossy(),
+        )
+        .unwrap();
+    (output_dir, external)
+}
+
+fn assert_damaged_session_picker(
+    env: &TestEnv,
+    deleter: &mut PtySession,
+    survivor: &Session,
+    session: &Session,
+) {
     let damaged = Session::new().with_workspace_root(env.workspace_root());
-    let damaged_path = managed_session_path(&env, &damaged.session_id);
+    let damaged_path = managed_session_path(env, &damaged.session_id);
     save_seed(&damaged, &damaged_path);
     fs::write(
         damaged_path.with_extension("completions.json"),
@@ -786,7 +806,7 @@ fn deleted_session_is_hidden_and_reclaimed_after_its_last_runtime_retires() {
     .unwrap();
     deleter.send("/session list\r").unwrap();
     common::expect_screen_settled(
-        &deleter,
+        deleter,
         |screen| {
             screen
                 .rsplit_once("Select a session")
@@ -800,8 +820,7 @@ fn deleted_session_is_hidden_and_reclaimed_after_its_last_runtime_retires() {
         "one damaged binding must not block the healthy Session picker",
     );
     deleter.send("\x1b").unwrap();
-    common::expect_input_line_cleared(&deleter, env.timeout(), "damaged Session picker cancelled");
-    exit_cli(&env, &mut deleter);
+    common::expect_input_line_cleared(deleter, env.timeout(), "damaged Session picker cancelled");
 }
 
 fn wait_for_reclamation(transcript: &std::path::Path, budget: Duration) {

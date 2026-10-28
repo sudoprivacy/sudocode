@@ -438,7 +438,7 @@ impl PreparedCompaction {
                 .saturating_sub(config.preserve_recent_messages),
             0,
         );
-        let todo = render_todo_continuity_block(source.fs_handle());
+        let todo = render_todo_continuity_block(&source.fs_handle());
         let fixed_cost = |boundary| {
             let framing =
                 frozen_continuation("", todo.as_deref(), boundary < source.messages.len());
@@ -497,7 +497,7 @@ impl PreparedCompaction {
     }
 
     pub fn todo_unchanged(&self) -> bool {
-        self.todo == render_todo_continuity_block(self.source.fs_handle())
+        self.todo == render_todo_continuity_block(&self.source.fs_handle())
     }
 
     /// One request only. Retry and provider fallback share the caller's run scope.
@@ -800,15 +800,15 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// Tasks". Re-injecting the structured list keeps the next `TodoWrite` faithful.
 /// Mirrors Claude Code's todo-continuity on compaction.
 ///
-/// Shared: auto-compaction and the write_plan clear-context path both call this
+/// Shared: auto-compaction and the `write_plan` clear-context path both call this
 /// so a manual "clear context & execute" carries the todo list forward the same
 /// way an automatic compaction does.
 #[inline]
 #[must_use]
 pub fn render_todo_continuity_block(
-    fs: std::sync::Arc<dyn crate::fs_backend::FsBackend>,
+    fs: &std::sync::Arc<dyn crate::fs_backend::FsBackend>,
 ) -> Option<String> {
-    let todos = crate::todo_store::TodoStore::open(&fs).list();
+    let todos = crate::todo_store::TodoStore::open(fs).list();
     format_todo_continuity_block(&todos)
 }
 
@@ -842,7 +842,7 @@ pub fn get_compact_continuation_message(
     // `None` means "do not read the todo list": the validator below builds a
     // candidate only to MEASURE it, and a measurement that depends on what is on
     // disk is a measurement that changes under it.
-    fs: Option<std::sync::Arc<dyn crate::fs_backend::FsBackend>>,
+    fs: Option<&std::sync::Arc<dyn crate::fs_backend::FsBackend>>,
 ) -> String {
     let mut base = format!(
         "{COMPACT_CONTINUATION_PREAMBLE}{}",
@@ -1139,7 +1139,7 @@ async fn compact_session_inner<C: ApiClient>(
         &summary,
         true,
         !preserved.is_empty(),
-        Some(session.fs_handle()),
+        Some(&session.fs_handle()),
     );
 
     let mut compacted_messages = vec![ConversationMessage {
@@ -1307,7 +1307,7 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
         &summary,
         true,
         !preserved.is_empty(),
-        Some(session.fs_handle()),
+        Some(&session.fs_handle()),
     );
 
     let mut compacted_messages = vec![ConversationMessage {
@@ -1403,7 +1403,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         &summary,
         true,
         !preserved.is_empty(),
-        Some(session.fs_handle()),
+        Some(&session.fs_handle()),
     );
 
     let mut compacted_messages = vec![ConversationMessage {
@@ -1745,8 +1745,8 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
     lines
 }
 
-/// Extract tool names previously discovered via ToolSearch from the
-/// session's messages. Scans ToolSearch result blocks for the `matches`
+/// Extract tool names previously discovered via `ToolSearch` from the
+/// session's messages. Scans `ToolSearch` result blocks for the `matches`
 /// array and collects the tool names. Also merges any names carried
 /// forward from prior compactions (`pre_compact_discovered_tools`).
 pub(crate) fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
@@ -2333,7 +2333,7 @@ mod tests {
                     "message[{}] is a ToolResult but message[{}] has no ToolUse: {:?}",
                     i,
                     i - 1,
-                    &messages[i - 1].blocks
+                    messages[i - 1].blocks
                 );
             }
         }
@@ -2386,7 +2386,7 @@ mod tests {
         assert_eq!(result.len(), 4);
 
         // Thinking block should be stripped
-        assert!(result[1].blocks.len() == 1);
+        assert_eq!(result[1].blocks.len(), 1);
         assert!(matches!(&result[1].blocks[0], ContentBlock::Text { text } if text == "response"));
 
         // Image should be replaced with placeholder
@@ -2724,9 +2724,8 @@ mod tests {
                 // The last message is the compaction prompt — verify it
                 // contains the custom instructions.
                 let last = messages.last().expect("messages should not be empty");
-                let prompt_text = match &last.blocks[0] {
-                    ContentBlock::Text { text } => text,
-                    _ => panic!("last message should be text"),
+                let ContentBlock::Text { text: prompt_text } = &last.blocks[0] else {
+                    panic!("last message should be text")
                 };
                 if prompt_text.contains("Focus on TypeScript changes only") {
                     SAW_INSTRUCTIONS.store(true, Ordering::Relaxed);

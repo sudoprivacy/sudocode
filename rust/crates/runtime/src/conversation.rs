@@ -11,6 +11,7 @@ use telemetry::SessionTracer;
 mod response;
 mod tool_context;
 mod tool_execution;
+mod turn;
 
 use crate::compact::{
     autocompact_buffer_tokens, compact_session_sync, estimate_block_tokens,
@@ -38,7 +39,7 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 /// the boundary heuristics walked the keep-from index all the way back).
 ///
 /// Without this circuit-breaker, a session that's structurally pinned above
-/// `auto_compaction_input_tokens_threshold` retries compact_session() on
+/// `auto_compaction_input_tokens_threshold` retries `compact_session()` on
 /// every turn for the rest of the session. The work is local & cheap, but
 /// the user-visible auto-compaction event would also fire every turn with
 /// `removed_message_count: 0`, which is noise (and would spam future
@@ -47,7 +48,7 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 /// 3 matches CC's `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES` — CC observed
 /// 1,279 sessions hammering 50+ futile retry attempts (one session: 3,272)
 /// for a global 250K wasted API-call equivalent per day. sudocode's
-/// compact_session is purely local so the wasted work is bounded, but the
+/// `compact_session` is purely local so the wasted work is bounded, but the
 /// noise-floor argument still applies.
 const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
 
@@ -117,8 +118,8 @@ pub struct ApiRequest {
     /// Optional trace ID for end-to-end request tracking.
     /// Passed through to the HTTP layer as X-Request-ID header.
     pub trace_id: Option<String>,
-    /// Tool names discovered via ToolSearch before compaction removed the
-    /// ToolSearch results. Merged with message-scanned discoveries so
+    /// Tool names discovered via `ToolSearch` before compaction removed the
+    /// `ToolSearch` results. Merged with message-scanned discoveries so
     /// these tools keep `defer_loading: false` after compaction.
     pub pre_compact_discovered_tools: std::collections::BTreeSet<String>,
 }
@@ -163,7 +164,7 @@ pub struct TextCompletion {
 /// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
-    /// Wire model ID from the API response (emitted on message_start).
+    /// Wire model ID from the API response (emitted on `message_start`).
     Model(String),
     /// A distinct provider thinking block, including an empty signed block.
     /// Deltas append within this boundary; adjacent blocks must never merge.
@@ -502,7 +503,7 @@ pub trait RuntimeObserver {
     }
 
     /// Optional `Send + Sync` sink for live plugin-hook progress (the
-    /// PreToolUse / PostToolUse / PostToolUseFailure lifecycle lines that used
+    /// `PreToolUse` / `PostToolUse` / `PostToolUseFailure` lifecycle lines that used
     /// to be eprintln'd by the CLI's build-time hook reporter).
     ///
     /// Mirrors [`tool_progress_sink`](Self::tool_progress_sink): default `None`
@@ -697,7 +698,7 @@ pub const FORK_BOILERPLATE_TAG: &str = "fork-boilerplate";
 /// Per-tool-call context threaded from the runtime tool loop into
 /// [`ToolExecutor::execute_with_context`]. Carries the parent's
 /// in-flight assistant message plus the session history up to the
-/// currently-executing tool_use so the fork subagent path can:
+/// currently-executing `tool_use` so the fork subagent path can:
 /// 1. Clone the parent's assistant message into the child's initial
 ///    session prefix (matching CC-fork's `buildForkedMessages` shape
 ///    for prompt-cache-identical prefixes).
@@ -710,20 +711,20 @@ pub const FORK_BOILERPLATE_TAG: &str = "fork-boilerplate";
 #[derive(Debug, Clone, Default)]
 pub struct ToolDispatchContext {
     /// The parent's assistant message that emitted the currently-
-    /// executing tool_use. `None` when the caller isn't inside a
+    /// executing `tool_use`. `None` when the caller isn't inside a
     /// parent's tool loop (test harnesses, direct executor invocations).
     /// Its model is stamped from the current runtime, not a prior response;
     /// subagents inherit this model unless their invocation overrides it.
     pub parent_assistant_message: Option<ConversationMessage>,
     /// The parent session's full message history at dispatch time,
-    /// including the assistant message that just emitted this tool_use.
+    /// including the assistant message that just emitted this `tool_use`.
     /// Populated by the runtime tool loop from `Session::messages`.
     /// Consumed by [`Self::is_inside_fork_child`].
     pub parent_session_messages: Vec<ConversationMessage>,
     /// The current session's `tool-results/` directory — the sole handle
     /// the `read_tool_output` tool needs to page an offloaded oversized
     /// result back in. The runtime resolves it from `Session`; the model
-    /// only ever names the opaque tool_use id, so the physical path never
+    /// only ever names the opaque `tool_use` id, so the physical path never
     /// crosses the model boundary. `None` for in-memory sessions.
     pub tool_results_dir: Option<std::path::PathBuf>,
     /// Optional live-progress sink for streaming tools (`bash`/MCP). `None`
@@ -1241,7 +1242,7 @@ pub struct ConversationRuntime<C, T> {
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     /// Consecutive turns where `maybe_auto_compact` ran and returned a no-op
-    /// (compact_session removed zero messages). Reset to 0 on any successful
+    /// (`compact_session` removed zero messages). Reset to 0 on any successful
     /// compaction. When this reaches `MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS`,
     /// `maybe_auto_compact` short-circuits for the rest of the session.
     consecutive_auto_compact_noops: u8,
@@ -1308,7 +1309,7 @@ where
         let usage_tracker = UsageTracker::from_session(&session);
         let workspace_root = session
             .workspace_root()
-            .map(|p| p.to_path_buf())
+            .map(std::path::Path::to_path_buf)
             .unwrap_or_default();
         Self {
             session,
@@ -1428,7 +1429,7 @@ where
     }
 
     /// Set the trace ID for the next request.
-    /// This is called before run_turn to pass the traceId from ACP _meta.
+    /// This is called before `run_turn` to pass the traceId from ACP _meta.
     #[must_use]
     pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
         self.trace_id = Some(trace_id.into());
@@ -1442,6 +1443,13 @@ where
 
     /// Returns the date the runtime should treat as "today" for the
     /// purpose of inter-turn date-change detection.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "Tests override the runtime date through this instance."
+        )
+    )]
     fn current_local_date(&self) -> String {
         #[cfg(test)]
         {
@@ -1965,586 +1973,6 @@ where
         Ok(blocks)
     }
 
-    async fn run_turn_with_blocks_inner(
-        &mut self,
-        blocks: Vec<ContentBlock>,
-        mut prompter: Option<&mut dyn PermissionPrompter>,
-        mut observer: Option<&mut dyn RuntimeObserver>,
-        turn_id: String,
-    ) -> Result<TurnSummary, RuntimeError> {
-        let blocks = self.inject_date_context(blocks);
-        let blocks = self.inject_model_context(blocks);
-        let label = blocks
-            .iter()
-            .find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        if self.session.compaction.is_some() {
-            if let Err(error) = self.run_session_health_probe().await {
-                return Err(RuntimeError::new(format!(
-                    "Session health probe failed after compaction: {error}. \
-                     The session may be in an inconsistent state. \
-                     Consider starting a fresh session with /session new."
-                )));
-            }
-        }
-
-        let prepared_blocks = self.prepare_input_blocks(blocks)?;
-
-        // Start file tracking for this turn
-        self.current_turn_id = Some(turn_id.clone());
-        self.file_tracker.start_turn(turn_id.clone());
-
-        // Analyze user request for file intent
-        self.user_request_intent = Some(crate::file_intent::UserRequestIntent::analyze(&label));
-
-        self.record_turn_started(&label);
-        // Start a fresh per-turn usage accumulator so the status line bills the
-        // whole turn (all tool-loop requests), not just the last request.
-        self.usage_tracker.begin_turn();
-        // Wall-clock start of the turn: recorded at turn end into the tracker
-        // (the status line's `+Ns`/`Σs`) and stamped onto the turn's last
-        // assistant message so it persists and re-sums on resume.
-        let turn_started_at = std::time::Instant::now();
-        // Match CC's resume sentinel: an unanswered prompt or tool result must
-        // not merge with a new user turn. Append it only at this outer turn
-        // boundary, never between a tool result and its in-flight continuation.
-        if self
-            .session
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role != MessageRole::System)
-            .is_some_and(|message| matches!(message.role, MessageRole::User | MessageRole::Tool))
-        {
-            self.session
-                .push_message(ConversationMessage::unanswered_turn_boundary())
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-        }
-        self.session
-            .push_user_blocks(prepared_blocks)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        if let Some(observer) = observer.as_deref_mut() {
-            observer.on_prompt_committed();
-        }
-        self.compaction_pending_input_tokens = 0;
-
-        // Hook workers share the current observer's progress sink, so slow
-        // hooks never hold the event loop while reporting lifecycle changes.
-        if let Some(sink) = observer
-            .as_deref()
-            .and_then(RuntimeObserver::hook_progress_sink)
-        {
-            self.hook_progress_reporter = Some(sink);
-        }
-
-        // Retry reporting follows the observer, so it is set unconditionally —
-        // passing `None` when this observer wants none is what stops a previous
-        // turn's renderer from still receiving events.
-        self.api_client
-            .set_retry_sink(observer.as_deref().and_then(RuntimeObserver::retry_sink));
-
-        let mut assistant_messages = Vec::new();
-        let mut tool_results = Vec::new();
-        let mut prompt_cache_events = Vec::new();
-        let mut iterations = 0;
-        let mut completed_steps = 0u32;
-        let mut final_answer_requested = false;
-        let mut retried_empty_post_tool_deliverable = false;
-        let mut stream_continuations = 0u32;
-        let mut turn_compactions = 0usize;
-        let mut recorded_compaction_budget_exhausted = false;
-        let mut overflow_compaction: Option<AutoCompactionEvent> = None;
-        let mut response_model: Option<String>;
-        let mut repaired_thinking = false;
-
-        loop {
-            if self.hook_abort_signal.is_aborted() {
-                self.finalize_cancelled_turn(Vec::new());
-                let turn_usage = sum_assistant_message_usage(&assistant_messages);
-                let session_usage = self.usage_tracker.cumulative_usage();
-                return Ok(TurnSummary {
-                    assistant_messages,
-                    tool_results,
-                    prompt_cache_events,
-                    iterations,
-                    turn_usage,
-                    session_usage,
-                    auto_compaction: None,
-                    cancelled: true,
-                    response_model: None,
-                });
-            }
-
-            for input in self.turn_inputs.batch() {
-                if self.hook_abort_signal.is_aborted() {
-                    break;
-                }
-                let view = input.view();
-                // Resolve human references through the session filesystem;
-                // peer and task notifications keep their literal text.
-                let prepared = if input.source == crate::turn_input::InputSource::Human {
-                    crate::image_input::prompt_blocks(input.text, self.session.fs_handle().as_ref())
-                        .map_err(|error| RuntimeError::new(error.to_string()))
-                        .and_then(|mut blocks| {
-                            blocks.extend(input.attachments);
-                            self.prepare_input_blocks(blocks)
-                        })
-                } else {
-                    Ok(vec![ContentBlock::Text { text: input.text }])
-                };
-                // Preparation can perform I/O; cancellation still owns admission.
-                if self.hook_abort_signal.is_aborted() {
-                    break;
-                }
-                self.session
-                    .push_user_blocks(prepared?)
-                    .map_err(|error| RuntimeError::new(error.to_string()))?;
-                self.turn_inputs.committed(input.id);
-                if let Some(observer) = observer.as_deref_mut() {
-                    observer.on_input_committed(&view);
-                }
-            }
-            let final_answer = self.max_steps.is_some_and(|limit| completed_steps >= limit);
-            if final_answer && !final_answer_requested {
-                self.session.push_user_text(format!(
-                    "<system-reminder>\nThe computation step limit ({completed_steps} steps) has been reached. No further tools or execution steps are available in this turn. Answer the user's question using the results already obtained. Clearly distinguish completed work, findings, and remaining uncertainties. Explain any unfinished work and suggest concrete next steps for discussion with the user. Do not claim unperformed work is complete. Respond in the user's language.\n</system-reminder>"
-                )).map_err(|error| RuntimeError::new(error.to_string()))?;
-                final_answer_requested = true;
-            }
-            iterations += 1;
-            if iterations > self.max_iterations {
-                let error = RuntimeError::new(
-                    "conversation loop exceeded the maximum number of iterations",
-                );
-                self.record_turn_failed(iterations, &error);
-                return Err(error);
-            }
-
-            // Compact before dispatching, not after the provider rejects.
-            // A turn that takes many tool-call steps grows its own history
-            // while it runs; the per-turn preflight ran once, before any of
-            // those steps existed. Without this the first the runtime hears
-            // of the overflow is a rejection, and the single salvage below
-            // is all a long turn ever gets.
-            while self.next_request_exceeds_budget() {
-                if turn_compactions < MAX_TURN_COMPACTIONS {
-                    let attempt = self
-                        .compact_in_place(
-                            forced_compaction_config(),
-                            CompactionTrigger::InTurnBudget,
-                            runtime_observer_mut(&mut observer),
-                        )
-                        .await;
-                    if self.hook_abort_signal.is_aborted()
-                        && !(attempt.is_err()
-                            && self
-                                .last_compaction_report
-                                .as_ref()
-                                .is_some_and(|report| report.outcome == CompactionOutcome::Failed))
-                    {
-                        return Ok(self.cancelled_summary(
-                            assistant_messages,
-                            tool_results,
-                            prompt_cache_events,
-                            iterations,
-                        ));
-                    }
-                    if let Some(event) =
-                        attempt.map_err(|error| RuntimeError::new(error.to_string()))?
-                    {
-                        overflow_compaction =
-                            merge_auto_compaction(overflow_compaction, Some(event));
-                    } else {
-                        return Err(RuntimeError::context_window_blocked(
-                            "Context cannot be compacted safely; history preserved. No model request sent."));
-                    }
-                    turn_compactions += 1;
-                } else if !recorded_compaction_budget_exhausted {
-                    self.record_compaction_budget_exhausted(CompactionTrigger::InTurnBudget);
-                    recorded_compaction_budget_exhausted = true;
-                }
-                if turn_compactions >= MAX_TURN_COMPACTIONS && self.next_request_exceeds_budget() {
-                    return Err(RuntimeError::context_window_blocked(
-                        "Compaction retry budget exhausted; history preserved. No model request sent."));
-                }
-            }
-
-            let (budget, _) = self.safe_history_budget(&self.session);
-            if !budget.fits_buffered(estimate_session_tokens(&self.session)) {
-                return Err(RuntimeError::context_window_blocked(
-                    "Context remains too large after compaction; history preserved. No model request sent."));
-            }
-
-            let stream = loop {
-                let request = ApiRequest {
-                    system_prompt: self.system_prompt.clone(),
-                    messages: self.session.messages.clone(),
-                    trace_id: self.trace_id.clone(),
-                    pre_compact_discovered_tools: self
-                        .session
-                        .compaction
-                        .as_ref()
-                        .map(|c| c.pre_compact_discovered_tools.clone())
-                        .unwrap_or_default(),
-                };
-                // Race the API stream (which includes the retry loop) against
-                // the abort signal so ESC/Ctrl-C cancels even during retries.
-                let stream_result = {
-                    let abort = &self.hook_abort_signal;
-                    let inbox = self.turn_inputs.clone();
-                    tokio::select! {
-                        biased;
-                        () = abort.cancelled() => {
-                            self.finalize_cancelled_turn(Vec::new());
-                            let turn_usage = sum_assistant_message_usage(&assistant_messages);
-                            let session_usage = self.usage_tracker.cumulative_usage();
-                            return Ok(TurnSummary {
-                                assistant_messages,
-                                tool_results,
-                                prompt_cache_events,
-                                iterations,
-                                turn_usage,
-                                session_usage,
-                                auto_compaction: None,
-                                cancelled: true,
-                                response_model: None,
-                            });
-                        }
-                        () = inbox.ready() => break None,
-                        result = async {
-                            if final_answer {
-                                self.api_client.stream_final_answer(request).await
-                            } else {
-                                self.api_client.stream(request).await
-                            }
-                        } => result,
-                    }
-                };
-                let stream = match stream_result {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        if error.is_thinking_replay_rejected() && !repaired_thinking {
-                            repaired_thinking = true;
-                            if self.repair_rejected_thinking()? > 0 {
-                                if let Some(observer) = observer.as_deref_mut() {
-                                    observer.on_notice("Archived session history and removed rejected thinking; retrying once.");
-                                }
-                                continue;
-                            }
-                        }
-                        // A context-window rejection is the one request failure
-                        // the runtime can fix on its own: compact the history and
-                        // resend. Shares the turn's compaction allowance with the
-                        // proactive check above; when compaction can no longer
-                        // remove anything the error is real and must surface.
-                        if error.is_context_window_blocked()
-                            && turn_compactions < MAX_TURN_COMPACTIONS
-                        {
-                            let attempt = self
-                                .compact_in_place(
-                                    forced_compaction_config(),
-                                    CompactionTrigger::ProviderRejection,
-                                    runtime_observer_mut(&mut observer),
-                                )
-                                .await;
-                            if self.hook_abort_signal.is_aborted()
-                                && !(attempt.is_err()
-                                    && self.last_compaction_report.as_ref().is_some_and(|report| {
-                                        report.outcome == CompactionOutcome::Failed
-                                    }))
-                            {
-                                return Ok(self.cancelled_summary(
-                                    assistant_messages,
-                                    tool_results,
-                                    prompt_cache_events,
-                                    iterations,
-                                ));
-                            }
-                            if let Some(event) =
-                                attempt.map_err(|error| RuntimeError::new(error.to_string()))?
-                            {
-                                turn_compactions += 1;
-                                overflow_compaction =
-                                    merge_auto_compaction(overflow_compaction, Some(event));
-                                break None;
-                            }
-                        }
-                        self.record_turn_failed(iterations, &error);
-                        return Err(error);
-                    }
-                };
-                break Some(stream);
-            };
-            let Some(stream) = stream else { continue };
-
-            let response = self
-                .execute_response(
-                    stream,
-                    iterations,
-                    !final_answer,
-                    &mut observer,
-                    &mut prompter,
-                )
-                .await;
-            let events = response.events;
-            let (mut assistant_message, usage, turn_prompt_cache_events, iter_response_model) =
-                match build_assistant_message(events) {
-                    Ok(result) => result,
-                    Err(error)
-                        if response.yielded
-                            && error.message == "assistant stream produced no content" =>
-                    {
-                        continue;
-                    }
-                    Err(error) if final_answer => {
-                        self.record_turn_failed(iterations, &error);
-                        return Err(error);
-                    }
-                    Err(error)
-                        if assistant_messages.last().is_some_and(has_pending_tool_uses)
-                            && error.message == "assistant stream produced no content" =>
-                    {
-                        if self.turn_inputs.has_pending() {
-                            continue;
-                        }
-                        self.record_empty_post_tool_completion(iterations);
-                        let has_unfinished_deliverable = self
-                            .has_unfinished_requested_deliverable_after_tool_empty(
-                                &assistant_messages,
-                                &tool_results,
-                            );
-                        if has_unfinished_deliverable && !retried_empty_post_tool_deliverable {
-                            retried_empty_post_tool_deliverable = true;
-                            self.session
-                                .push_user_text(EMPTY_POST_TOOL_DELIVERABLE_REMINDER)
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            continue;
-                        }
-                        if has_unfinished_deliverable {
-                            let error = RuntimeError::new(
-                                "model returned an empty response after tool use before producing the requested file deliverable",
-                            );
-                            self.record_turn_failed(iterations, &error);
-                            return Err(error);
-                        }
-                        if !self.turn_inputs.seal_if_empty() {
-                            continue;
-                        }
-                        let attempt = self
-                            .maybe_auto_compact(runtime_observer_mut(&mut observer))
-                            .await;
-                        if self.hook_abort_signal.is_aborted()
-                            && !(attempt.is_err()
-                                && self.last_compaction_report.as_ref().is_some_and(|report| {
-                                    report.outcome == CompactionOutcome::Failed
-                                }))
-                        {
-                            return Ok(self.cancelled_summary(
-                                assistant_messages,
-                                tool_results,
-                                prompt_cache_events,
-                                iterations,
-                            ));
-                        }
-                        let auto_compaction = match attempt {
-                            Ok(event) => merge_auto_compaction(overflow_compaction, event),
-                            Err(error) => {
-                                self.record_turn_failed(iterations, &error);
-                                return Err(error);
-                            }
-                        };
-                        self.file_tracker.end_turn();
-                        self.current_turn_id = None;
-                        self.user_request_intent = None;
-                        let turn_usage = sum_assistant_message_usage(&assistant_messages);
-                        let session_usage = self.usage_tracker.cumulative_usage();
-                        let summary = TurnSummary {
-                            assistant_messages,
-                            tool_results,
-                            prompt_cache_events,
-                            iterations,
-                            turn_usage,
-                            session_usage,
-                            auto_compaction,
-                            cancelled: false,
-                            response_model: None,
-                        };
-                        self.record_turn_completed(&summary);
-                        return Ok(summary);
-                    }
-                    Err(error) => {
-                        self.record_turn_failed(iterations, &error);
-                        return Err(error);
-                    }
-                };
-            response_model = iter_response_model;
-            assistant_message.model = {
-                let running = self.running_model();
-                (!running.is_empty()).then(|| running.to_string())
-            };
-            if let Some(usage) = usage {
-                self.usage_tracker.record(usage);
-            }
-            prompt_cache_events.extend(turn_prompt_cache_events);
-            let pending_tool_uses = assistant_message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolUse {
-                        id, name, input, ..
-                    } => Some((id.clone(), name.clone(), input.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            self.record_assistant_iteration(
-                iterations,
-                &assistant_message,
-                pending_tool_uses.len(),
-            );
-
-            let exchange_start = response
-                .assistant_index
-                .unwrap_or(self.session.messages.len());
-            match response.assistant_index {
-                Some(index) => self
-                    .session
-                    .update_assistant_message(index, assistant_message.clone()),
-                None => self.session.push_message(assistant_message.clone()),
-            }
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-            assistant_messages.push(assistant_message.clone());
-
-            for (index, message) in response.results.into_iter().enumerate() {
-                if index >= response.persisted_results {
-                    self.session
-                        .push_message(message.clone())
-                        .map_err(|error| RuntimeError::new(error.to_string()))?;
-                }
-                self.record_tool_finished(iterations, &message);
-                tool_results.push(message);
-            }
-            if let Some(error) = response.error {
-                if let Some(path) = self.session.persistence_path() {
-                    self.session.save_to_path(path).map_err(|failure| RuntimeError::new(format!("failed to persist interrupted tools: {failure}; provider error: {error}")))?;
-                }
-                // The partial reply and every tool result are saved above, so
-                // continue from them as a user's "continue" would. Never resend
-                // the failed request: its output, usage and tools already ran.
-                if error.is_stream_interrupted()
-                    && stream_continuations < MAX_STREAM_CONTINUATIONS
-                    && !response.cancelled
-                {
-                    stream_continuations += 1;
-                    // The failed response latched the shared abort flag to stop
-                    // its unfinished tools. Those workers hold the old turn
-                    // generation and stay cancelled; clear the flag so the
-                    // continuation runs and a later Esc still stops it.
-                    self.hook_abort_signal.reset();
-                    if let Some(observer) = observer.as_deref_mut() {
-                        // The interrupted reply never received its stop event.
-                        // Close it for observers as it is saved, so the
-                        // continuation is a separate message.
-                        observer.on_message_stop();
-                        observer.on_notice(&format!(
-                            "Model stream dropped mid-response; continuing ({stream_continuations}/{MAX_STREAM_CONTINUATIONS})."
-                        ));
-                    }
-                    for _ in 0..10 {
-                        if self.hook_abort_signal.is_aborted() {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                    if pending_tool_uses.is_empty() {
-                        self.session
-                            .push_user_text(STREAM_INTERRUPTED_REMINDER)
-                            .map_err(|error| RuntimeError::new(error.to_string()))?;
-                    }
-                    continue;
-                }
-                self.record_turn_failed(iterations, &error);
-                return Err(error);
-            }
-            if response.cancelled || self.hook_abort_signal.is_aborted() {
-                return Ok(self.cancelled_summary(
-                    assistant_messages,
-                    tool_results,
-                    prompt_cache_events,
-                    iterations,
-                ));
-            }
-            if let Some(action) = response.context_action {
-                self.apply_tool_context_action(action, exchange_start, &mut observer)?;
-            }
-            if pending_tool_uses.is_empty() && self.turn_inputs.seal_if_empty() {
-                break;
-            }
-            completed_steps = completed_steps.saturating_add(1);
-        }
-
-        let attempt = self
-            .maybe_auto_compact(runtime_observer_mut(&mut observer))
-            .await;
-        if self.hook_abort_signal.is_aborted()
-            && !(attempt.is_err()
-                && self
-                    .last_compaction_report
-                    .as_ref()
-                    .is_some_and(|report| report.outcome == CompactionOutcome::Failed))
-        {
-            return Ok(self.cancelled_summary(
-                assistant_messages,
-                tool_results,
-                prompt_cache_events,
-                iterations,
-            ));
-        }
-        let auto_compaction = match attempt {
-            Ok(event) => merge_auto_compaction(overflow_compaction, event),
-            Err(error) => {
-                self.record_turn_failed(iterations, &error);
-                return Err(error);
-            }
-        };
-
-        self.finish_current_turn_tracking();
-
-        // Record the turn's wall-clock time: into the tracker (status line) and
-        // stamped onto the last assistant message in the persisted session, so
-        // it survives to resume and re-sums into the cumulative total.
-        let turn_duration_ms = turn_started_at
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
-        self.usage_tracker.record_turn_duration(turn_duration_ms);
-        self.session
-            .record_turn_duration(turn_duration_ms)
-            .map_err(|error| {
-                RuntimeError::new(format!("failed to persist turn duration: {error}"))
-            })?;
-
-        let turn_usage = sum_assistant_message_usage(&assistant_messages);
-        let session_usage = self.usage_tracker.cumulative_usage();
-        let summary = TurnSummary {
-            assistant_messages,
-            tool_results,
-            prompt_cache_events,
-            iterations,
-            turn_usage,
-            session_usage,
-            auto_compaction,
-            cancelled: false,
-            response_model,
-        };
-        self.record_turn_completed(&summary);
-
-        Ok(summary)
-    }
-
     /// Build a validated replacement without mutating the live history.
     pub async fn compact(
         &mut self,
@@ -2704,7 +2132,7 @@ where
         let material = format!(
             "{:?}|{:?}|{:?}|{}|{}|{:?}|{}|{}|{}",
             content,
-            crate::compact::render_todo_continuity_block(source.fs_handle()),
+            crate::compact::render_todo_continuity_block(&source.fs_handle()),
             custom,
             self.system_prompt.render(),
             self.api_client.compaction_route_fingerprint(&request),
@@ -2807,7 +2235,9 @@ where
             return Err(CompactionError::ApiError(error.to_string()));
         }
         let catalog = self.api_client.model_catalog();
-        let operation = self.run_compaction_inner(&source, config, custom, options, run_id);
+        // Bound compaction state here so every caller keeps a small future.
+        let operation =
+            Box::pin(self.run_compaction_inner(&source, config, custom, options, run_id));
         if let Some(catalog) = catalog {
             catalog.scope(operation).await
         } else {
@@ -3838,11 +3268,11 @@ where
         );
         attributes.insert(
             "turn_total_tokens".to_string(),
-            Value::from(summary.turn_usage.total_tokens() as u64),
+            Value::from(u64::from(summary.turn_usage.total_tokens())),
         );
         attributes.insert(
             "session_total_tokens".to_string(),
-            Value::from(summary.session_usage.total_tokens() as u64),
+            Value::from(u64::from(summary.session_usage.total_tokens())),
         );
         session_tracer.record("turn_completed", attributes);
     }
@@ -3906,17 +3336,17 @@ pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     context_window.saturating_sub(max_output.saturating_add(buffer))
 }
 
+#[derive(Debug)]
+struct BuiltAssistantMessage {
+    message: ConversationMessage,
+    usage: Option<TokenUsage>,
+    prompt_cache_events: Vec<PromptCacheEvent>,
+    response_model: Option<String>,
+}
+
 fn build_assistant_message(
     events: Vec<AssistantEvent>,
-) -> Result<
-    (
-        ConversationMessage,
-        Option<TokenUsage>,
-        Vec<PromptCacheEvent>,
-        Option<String>,
-    ),
-    RuntimeError,
-> {
+) -> Result<BuiltAssistantMessage, RuntimeError> {
     let mut text = String::new();
     let mut blocks = Vec::new();
     let mut prompt_cache_events = Vec::new();
@@ -3980,12 +3410,12 @@ fn build_assistant_message(
         return Err(RuntimeError::new("assistant stream produced no content"));
     }
 
-    Ok((
-        ConversationMessage::assistant_with_usage(blocks, usage),
+    Ok(BuiltAssistantMessage {
+        message: ConversationMessage::assistant_with_usage(blocks, usage),
         usage,
         prompt_cache_events,
         response_model,
-    ))
+    })
 }
 
 /// Sums the token usage from all assistant messages in a turn.
@@ -4316,8 +3746,8 @@ mod tests {
     use super::{
         auto_compact_threshold_for_model, build_assistant_message, is_concurrency_safe_tool,
         max_tool_use_concurrency, push_thinking_block, ApiClient, ApiRequest, AssistantEvent,
-        AssistantEventStream, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent,
-        RuntimeError, RuntimeObserver, StaticToolExecutor, ToolExecutor, MAX_TOOL_USE_CONCURRENCY,
+        AssistantEventStream, ConversationRuntime, PromptCacheEvent, RuntimeError, RuntimeObserver,
+        StaticToolExecutor, ToolExecutor, MAX_TOOL_USE_CONCURRENCY,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -4328,10 +3758,10 @@ mod tests {
     use crate::prompt::{ProjectContext, SystemPrompt, SystemPromptBuilder};
 
     /// Serialises tests that mutate `CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().await
     }
     use crate::session::{ContentBlock, MessageRole, Session};
     use crate::usage::{TokenUsage, UsageCostCurrency};
@@ -4705,7 +4135,7 @@ mod tests {
         );
     }
 
-    /// One message emitting read_file, read_file, write_file, read_file — a
+    /// One message emitting `read_file`, `read_file`, `write_file`, `read_file` — a
     /// mixed batch. The two leading reads are concurrency-safe and must
     /// overlap; the write is not, so it partitions the run and executes serial.
     struct MixedBatchClient {
@@ -4887,65 +4317,10 @@ mod tests {
     /// failure names the message that moved.
     #[tokio::test]
     async fn consecutive_requests_only_append_and_never_rewrite_the_cached_prefix() {
-        /// Enough `bash` results that a keep-the-last-2 policy has to clear one.
-        const TOOL_CALLS: usize = 5;
-
-        #[derive(Clone)]
-        struct Recorded {
-            system_static: String,
-            system_dynamic: String,
-            messages: Vec<crate::session::ConversationMessage>,
-        }
-
-        struct RecordingClient {
-            seen: Arc<std::sync::Mutex<Vec<Recorded>>>,
-        }
-
-        #[async_trait]
-        impl ApiClient for RecordingClient {
-            async fn stream(
-                &mut self,
-                request: ApiRequest,
-            ) -> Result<AssistantEventStream, RuntimeError> {
-                let calls = {
-                    let mut seen = self.seen.lock().expect("record requests");
-                    seen.push(Recorded {
-                        system_static: request.system_prompt.static_text(),
-                        system_dynamic: request.system_prompt.dynamic_text(),
-                        messages: request.messages.clone(),
-                    });
-                    seen.len()
-                };
-
-                if calls > TOOL_CALLS {
-                    return Ok(events_to_stream(vec![
-                        AssistantEvent::TextDelta("done".to_string()),
-                        AssistantEvent::MessageStop,
-                    ]));
-                }
-                Ok(events_to_stream(vec![
-                    AssistantEvent::ToolUse {
-                        id: format!("bash-{calls}"),
-                        name: "bash".to_string(),
-                        input: String::new(),
-                        thought_signature: None,
-                    },
-                    AssistantEvent::MessageStop,
-                ]))
-            }
-        }
-
-        struct AllowAll;
-        impl PermissionPrompter for AllowAll {
-            fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
-                PermissionPromptDecision::Allow
-            }
-        }
-
-        let seen = Arc::new(std::sync::Mutex::new(Vec::<Recorded>::new()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<PrefixRequestRecord>::new()));
         let mut runtime = ConversationRuntime::new(
             Session::new(),
-            RecordingClient {
+            PrefixRecordingClient {
                 seen: Arc::clone(&seen),
             },
             // Output big enough that clearing it would be a visible saving —
@@ -4956,14 +4331,18 @@ mod tests {
         );
 
         runtime
-            .run_turn("run bash a few times", Some(&mut AllowAll), None)
+            .run_turn(
+                "run bash a few times",
+                Some(&mut PrefixPermissionPrompter),
+                None,
+            )
             .await
             .expect("conversation loop should succeed");
 
         let seen = seen.lock().expect("read records").clone();
         assert!(
-            seen.len() > TOOL_CALLS,
-            "expected the tool loop to issue more than {TOOL_CALLS} requests, got {}",
+            seen.len() > PREFIX_TOOL_CALLS,
+            "expected the tool loop to issue more than {PREFIX_TOOL_CALLS} requests, got {}",
             seen.len()
         );
 
@@ -5009,12 +4388,6 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_tool_output_is_offloaded_and_resume_is_byte_identical() {
-        // A tool whose output exceeds the offload threshold. A unique tail
-        // sentinel sits past the preview window so we can prove it is spilled
-        // to the offload file and never inlined into the transcript.
-        const SENTINEL: &str = "UNIQUE_TAIL_SENTINEL_ZZZ";
-        let big = format!("{}{SENTINEL}", "A".repeat(60_000));
-
         struct OneToolThenStop;
         #[async_trait]
         impl ApiClient for OneToolThenStop {
@@ -5039,13 +4412,18 @@ mod tests {
                 ]))
             }
         }
-
         struct AllowAll;
         impl PermissionPrompter for AllowAll {
             fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
                 PermissionPromptDecision::Allow
             }
         }
+
+        // A tool whose output exceeds the offload threshold. A unique tail
+        // sentinel sits past the preview window so we can prove it is spilled
+        // to the offload file and never inlined into the transcript.
+        const SENTINEL: &str = "UNIQUE_TAIL_SENTINEL_ZZZ";
+        let big = format!("{}{SENTINEL}", "A".repeat(60_000));
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6463,11 +5841,6 @@ mod tests {
 
     #[tokio::test]
     async fn failed_post_turn_compaction_fails_turn_and_keeps_history() {
-        let _g = env_guard();
-        // Env-var override sets threshold to 100 — test-only, independent of SSOT.
-        // Mock reports a 200-token context on the latest response → crosses
-        // 100 → triggers auto-compact.
-        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "100");
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -6488,6 +5861,12 @@ mod tests {
                 ]))
             }
         }
+
+        let _g = env_guard().await;
+        // Env-var override sets threshold to 100 — test-only, independent of SSOT.
+        // Mock reports a 200-token context on the latest response → crosses
+        // 100 → triggers auto-compact.
+        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "100");
 
         let mut session = Session::new();
         session.messages = vec![
@@ -6534,9 +5913,6 @@ mod tests {
 
     #[tokio::test]
     async fn skips_auto_compaction_below_threshold() {
-        let _g = env_guard();
-        // Env-var override sets threshold to 1000. Mock reports 50 → below → no compact.
-        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1000");
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -6557,6 +5933,10 @@ mod tests {
                 ]))
             }
         }
+
+        let _g = env_guard().await;
+        // Env-var override sets threshold to 1000. Mock reports 50 → below → no compact.
+        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1000");
 
         let mut runtime = ConversationRuntime::new(
             Session::new(),
@@ -6579,7 +5959,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_compact_threshold_uses_per_model_ssot() {
-        let _g = env_guard();
+        let _g = env_guard().await;
         // Ensure no env-var override is active.
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
         // The threshold is context_window - request max_tokens - buffer.
@@ -6742,7 +6122,7 @@ mod tests {
     #[tokio::test]
     async fn static_tool_executor_rejects_unknown_tools() {
         // given
-        let mut executor = StaticToolExecutor::new();
+        let executor = StaticToolExecutor::new();
 
         // when
         let error = executor
@@ -7555,8 +6935,7 @@ mod tests {
         let second_turn_user_blocks = requests[1]
             .messages
             .iter()
-            .filter(|m| m.role == MessageRole::User)
-            .last()
+            .rfind(|m| m.role == MessageRole::User)
             .expect("user message")
             .blocks
             .clone();
@@ -7626,8 +7005,7 @@ mod tests {
         let second_turn_user_blocks = requests[1]
             .messages
             .iter()
-            .filter(|m| m.role == MessageRole::User)
-            .last()
+            .rfind(|m| m.role == MessageRole::User)
             .expect("user message")
             .blocks
             .clone();
@@ -7669,75 +7047,10 @@ mod tests {
         );
     }
 
-    /// Test that turn_usage correctly aggregates usage across multiple model requests
-    /// within a single turn (e.g., tool_use followed by final response).
+    /// Test that `turn_usage` correctly aggregates usage across multiple model requests
+    /// within a single turn (e.g., `tool_use` followed by final response).
     #[tokio::test]
     async fn aggregates_turn_usage_across_multiple_model_requests() {
-        // This client simulates: tool_use -> tool_result -> final text
-        // with different usages for each model request
-        struct MultiRequestApiClient {
-            call_count: usize,
-        }
-
-        #[async_trait]
-        impl ApiClient for MultiRequestApiClient {
-            async fn stream(
-                &mut self,
-                request: ApiRequest,
-            ) -> Result<AssistantEventStream, RuntimeError> {
-                self.call_count += 1;
-                match self.call_count {
-                    1 => {
-                        // First request: tool_use with usage_a
-                        assert!(request
-                            .messages
-                            .iter()
-                            .any(|message| message.role == MessageRole::User));
-                        Ok(events_to_stream(vec![
-                            AssistantEvent::ToolUse {
-                                id: "tool-1".to_string(),
-                                name: "test_tool".to_string(),
-                                input: "{}".to_string(),
-                                thought_signature: None,
-                            },
-                            AssistantEvent::Usage(TokenUsage {
-                                reported_total_tokens: None,
-                                input_tokens: 100,
-                                output_tokens: 50,
-                                cache_creation_input_tokens: 10,
-                                cache_read_input_tokens: 20,
-                                cost_units: Some(1_000),
-                                cost_currency: Some(UsageCostCurrency::SudoPoint),
-                            }),
-                            AssistantEvent::MessageStop,
-                        ]))
-                    }
-                    2 => {
-                        // Second request: final text with usage_b
-                        let last_message = request
-                            .messages
-                            .last()
-                            .expect("tool result should be present");
-                        assert_eq!(last_message.role, MessageRole::Tool);
-                        Ok(events_to_stream(vec![
-                            AssistantEvent::TextDelta("Done!".to_string()),
-                            AssistantEvent::Usage(TokenUsage {
-                                reported_total_tokens: None,
-                                input_tokens: 200,
-                                output_tokens: 30,
-                                cache_creation_input_tokens: 5,
-                                cache_read_input_tokens: 15,
-                                cost_units: Some(2_000),
-                                cost_currency: Some(UsageCostCurrency::SudoPoint),
-                            }),
-                            AssistantEvent::MessageStop,
-                        ]))
-                    }
-                    _ => unreachable!("unexpected extra API call"),
-                }
-            }
-        }
-
         let mut runtime = ConversationRuntime::new(
             Session::new(),
             MultiRequestApiClient { call_count: 0 },
@@ -7850,5 +7163,125 @@ mod tests {
         assert_eq!(usage.total_tokens(), 180);
         assert_eq!(usage.cost_units, Some(0));
         assert_eq!(usage.cost_currency, Some(UsageCostCurrency::SudoPoint));
+    }
+
+    /// Enough `bash` results that a keep-the-last-2 policy has to clear one.
+    const PREFIX_TOOL_CALLS: usize = 5;
+
+    #[derive(Clone)]
+    struct PrefixRequestRecord {
+        system_static: String,
+        system_dynamic: String,
+        messages: Vec<crate::session::ConversationMessage>,
+    }
+
+    struct PrefixRecordingClient {
+        seen: Arc<std::sync::Mutex<Vec<PrefixRequestRecord>>>,
+    }
+
+    #[async_trait]
+    impl ApiClient for PrefixRecordingClient {
+        async fn stream(
+            &mut self,
+            request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            let calls = {
+                let mut seen = self.seen.lock().expect("record requests");
+                seen.push(PrefixRequestRecord {
+                    system_static: request.system_prompt.static_text(),
+                    system_dynamic: request.system_prompt.dynamic_text(),
+                    messages: request.messages.clone(),
+                });
+                seen.len()
+            };
+
+            if calls > PREFIX_TOOL_CALLS {
+                return Ok(events_to_stream(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]));
+            }
+            Ok(events_to_stream(vec![
+                AssistantEvent::ToolUse {
+                    id: format!("bash-{calls}"),
+                    name: "bash".to_string(),
+                    input: String::new(),
+                    thought_signature: None,
+                },
+                AssistantEvent::MessageStop,
+            ]))
+        }
+    }
+
+    struct PrefixPermissionPrompter;
+    impl PermissionPrompter for PrefixPermissionPrompter {
+        fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
+            PermissionPromptDecision::Allow
+        }
+    }
+
+    // This client simulates: tool_use -> tool_result -> final text
+    // with different usages for each model request
+    struct MultiRequestApiClient {
+        call_count: usize,
+    }
+
+    #[async_trait]
+    impl ApiClient for MultiRequestApiClient {
+        async fn stream(
+            &mut self,
+            request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            self.call_count += 1;
+            match self.call_count {
+                1 => {
+                    // First request: tool_use with usage_a
+                    assert!(request
+                        .messages
+                        .iter()
+                        .any(|message| message.role == MessageRole::User));
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "test_tool".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::Usage(TokenUsage {
+                            reported_total_tokens: None,
+                            input_tokens: 100,
+                            output_tokens: 50,
+                            cache_creation_input_tokens: 10,
+                            cache_read_input_tokens: 20,
+                            cost_units: Some(1_000),
+                            cost_currency: Some(UsageCostCurrency::SudoPoint),
+                        }),
+                        AssistantEvent::MessageStop,
+                    ]))
+                }
+                2 => {
+                    // Second request: final text with usage_b
+                    let last_message = request
+                        .messages
+                        .last()
+                        .expect("tool result should be present");
+                    assert_eq!(last_message.role, MessageRole::Tool);
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("Done!".to_string()),
+                        AssistantEvent::Usage(TokenUsage {
+                            reported_total_tokens: None,
+                            input_tokens: 200,
+                            output_tokens: 30,
+                            cache_creation_input_tokens: 5,
+                            cache_read_input_tokens: 15,
+                            cost_units: Some(2_000),
+                            cost_currency: Some(UsageCostCurrency::SudoPoint),
+                        }),
+                        AssistantEvent::MessageStop,
+                    ]))
+                }
+                _ => unreachable!("unexpected extra API call"),
+            }
+        }
     }
 }

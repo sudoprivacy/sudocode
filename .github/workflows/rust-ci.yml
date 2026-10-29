@@ -41,36 +41,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
-    paths:
-      # Every workflow, not two named ones. A `paths:` list that enumerates
-      # workflow FILES gives a PR adding a new one zero checks — and with required
-      # status checks that PR can only land by admin override, which is the
-      # "skipped reads as passed" shape this repo keeps stamping out. Matching the
-      # directory costs one cheap run per workflow edit and makes a new gate
-      # arrive already gated.
-      - .github/workflows/**
-      - .github/scripts/**
-      - .github/FUNDING.yml
-      - README.md
-      - sudo-code-roadmap.html
-      - CLAUDE.md
-      - CONTRIBUTING.md
-      - LAST_CODEX_REF_VERSION
-      - LAST_PARITY_SYNC_COMMIT
-      - LAST_CCB_REF_VERSION
-      - docs/**
-      - rust/**
-      # The a2a-live job RUNS these; without them a harness change ships untested.
-      - e2e/**
-      - install.sh
-      - scripts/publish_release_mirror.py
-      - scripts/generate_cache_metrics.py
-      - scripts/cache_metrics.py
-      - scripts/check_cache_usage_fixtures.py
-      - spec/cache_metrics.json
-      - spec/prompt_cache_observations.json
-      - spec/cache_usage_fixtures.json
-      - spec/cache_usage_fixtures.schema.json
+    # Every PR needs the shared preflight status, including SDK-only edits.
   # Keep integrity checks and the real daemon on the integrated queue tree.
   merge_group:
   workflow_dispatch:
@@ -107,92 +78,6 @@ jobs:
     uses: ./.github/workflows/ci-dependency-cache.yml
     with:
       linux_only: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_linux_only }}
-
-  release-mirror:
-    if: &standard_ci ${{ !inputs.live_only && !inputs.cache_only }}
-    name: release mirror recovery
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Exercise interrupted publication and real installer
-        run: python3 e2e/release-mirror/run.py
-
-  doc-source-of-truth:
-    if: *standard_ci
-    name: docs source-of-truth
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - name: Check docs and metadata for stale branding
-        run: python .github/scripts/check_doc_source_of_truth.py
-
-  fmt:
-    if: *standard_ci
-    name: cargo fmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Check generated cache metrics
-        run: python3 ../scripts/generate_cache_metrics.py --check
-      - name: Validate public cache usage fixtures
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Check public cache usage fixtures
-        run: |
-          python3 -m pip install jsonschema==4.26.0
-          python3 ../scripts/check_cache_usage_fixtures.py
-
-  boundary-gate:
-    if: *standard_ci
-    name: engine/renderer boundary gate
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - uses: actions/checkout@v4
-      - name: Every committed shell script must be executable
-        shell: bash
-        # `core.filemode=false` on a Windows checkout means a new script is
-        # committed 100644 and nobody notices until a runner reports
-        # `Permission denied` with exit 126 — which reads as a missing file.
-        # It has cost two rounds now, so the mode is asserted rather than
-        # remembered.
-        run: |
-          set -euo pipefail
-          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" { print $4 }')
-          if [ -n "$bad" ]; then
-            echo "::error::not executable in the index — run: git update-index --chmod=+x <file>"
-            echo "$bad"
-            exit 1
-          fi
-          echo "all committed shell scripts are executable"
-
-      - name: Renderer crates must not name engine-internal streaming types
-        run: bash .github/scripts/check_engine_boundary.sh
-      - name: Exercise real Git boundary violations and scanner failures
-        run: python3 e2e/engine-boundary/run.py
-
-      # The required one-nexus-vfs-pin job already resolves the single locked
-      # revision and compares these exact protocol bytes against upstream.
 
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
@@ -331,7 +216,7 @@ jobs:
 
   one-nexus-vfs-pin:
     if: ${{ !inputs.cache_only }}
-    name: one nexus-vfs pin
+    name: CI preflight
     runs-on: ubuntu-latest
     outputs:
       commit: ${{ steps.pin.outputs.commit }}
@@ -343,8 +228,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install metadata schema validator
+        run: python3 -m pip install jsonschema==4.26.0
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --all --check
+      - name: Check generated cache metrics
+        run: python3 scripts/generate_cache_metrics.py --check
+      - name: Check public cache usage fixtures
+        run: python3 scripts/check_cache_usage_fixtures.py
+      - name: Check docs and metadata for stale branding
+        run: python .github/scripts/check_doc_source_of_truth.py
+      - name: Reject silent merge rewrites and conflict markers
+        # The trusted acceptance gate checks the combined queue history.
+        if: github.event_name != 'merge_group'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: python3 .github/scripts/check_pr_history.py "$BASE" HEAD
+      - name: Exercise real Git histories
+        run: python3 e2e/pr-history/run.py
+      - name: Every committed shell script must be executable
+        shell: bash
+        # `core.filemode=false` on a Windows checkout means a new script is
+        # committed 100644 and nobody notices until a runner reports
+        # `Permission denied` with exit 126 — which reads as a missing file.
+        # It has cost two rounds now, so the mode is asserted rather than
+        # remembered.
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" { print $4 }')
+          if [ -n "$bad" ]; then
+            echo "::error::not executable in the index — run: git update-index --chmod=+x <file>"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all committed shell scripts are executable"
+
+      - name: Renderer crates must not name engine-internal streaming types
+        run: bash .github/scripts/check_engine_boundary.sh
+      - name: Exercise real Git boundary violations and scanner failures
+        run: python3 e2e/engine-boundary/run.py
+      - name: Exercise interrupted publication and real installer
+        run: python3 e2e/release-mirror/run.py
+      - name: Exercise provider probe contracts
+        run: node --test .github/scripts/probe_live_usage.test.cjs
       # Seconds, no build: this is the invariant the co-host rests on, and it is
       # cheap enough to answer before anything compiles.
       #
@@ -424,7 +363,7 @@ jobs:
         run: python3 .github/scripts/ci_input_scope.py
 
   live-api-smoke:
-    needs: [one-nexus-vfs-pin, provider-probe-contract]
+    needs: one-nexus-vfs-pin
     name: Live API smoke test
     timeout-minutes: 30
     # Also runnable on demand against any branch. Restricting it to pushes on
@@ -536,24 +475,8 @@ jobs:
             ${{ runner.temp }}/provider-usage-contract.json
           retention-days: 7
 
-  provider-probe-contract:
-    name: Live provider probe contract
-    if: ${{ !inputs.cache_only }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: node --test .github/scripts/probe_live_usage.test.cjs
-
   live-model-pty:
-    needs: [one-nexus-vfs-pin, provider-probe-contract]
+    needs: one-nexus-vfs-pin
     name: Live model PTY (${{ matrix.os }})
     if: >-
       !inputs.cache_only &&

@@ -278,3 +278,19 @@ respective checks; explicit provider dispatch remains explicit. The input
 selector is exercised against actual Git commits for docs, CI, Rust, daemon
 harness and cache-spec changes, through both push and merge-group payloads.
 No independent product case or budget is removed in this follow-up.
+
+## One shared preflight instead of seven short runners
+
+Combine format/schema, docs, architecture boundary, pinned protocol, release
+mirror, provider probe and PR-history jobs into the required `CI preflight`
+job. Keep their original commands and real Git/process scenarios. Share one
+checkout, one Python/Node/Rust environment and one queue admission; stop the
+job and its expensive daemon/provider dependents on its first failed step.
+The protected acceptance gate checks integrated queue history, so preflight
+does not repeat that same range. All PR paths trigger preflight, including
+SDK-only edits. Cache-only dispatch remains compile-only.
+
+This removes six hosted jobs per PR/queue event. It is a scheduling count,
+not a 7x latency claim: commands now run sequentially, and runner queue delay
+still needs measurement. No independent product assertion or deadline changed.
+Required contexts migrate only after the new job has an actual hosted pass.

@@ -138,7 +138,7 @@ def main():
     jobs = pages(f'repos/{REPOSITORY}/actions/runs/{ordinary["id"]}/jobs', 'jobs')
     proof = next(j for j in jobs if j['name'] == 'Verify local acceptance')
     assert proof['conclusion'] == 'failure'
-    logs = subprocess.check_output(['gh', 'api', f'repos/{REPOSITORY}/actions/jobs/{proof["id"]}/logs'], text=True)
+    logs = subprocess.check_output(['gh', 'api', '--allow-escape-sequences', f'repos/{REPOSITORY}/actions/jobs/{proof["id"]}/logs'], text=True)
     assert 'Unenrolled acceptance signer: ' + SIGNER in logs, 'Do not hide a different acceptance failure'
     assert all(j['conclusion'] in ['success', 'skipped'] or j['name'] in ['Verify local acceptance', 'Cross-platform acceptance result'] for j in jobs)
     statuses = pages(f'repos/{REPOSITORY}/commits/{target}/statuses')

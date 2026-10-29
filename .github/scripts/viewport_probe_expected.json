@@ -1,0 +1,15 @@
+{
+  "binary_sha256": "4b3a3b4b923b830ebf513f645f1d602908e22c7eb01e43c8795e7d2b12253cbd",
+  "driver_sha256": "a40bca8fbc49730433048f45551cd87f38b9435085e81a8bd4c3c03a4254ab65",
+  "harness_sha256": {
+    "scripts/benchmark_prompt_viewport.py": "bef2833e462f6e45e306a3c8db1b9e7bc1ee580747ab162fd6860dba09ad00ed",
+    "rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport.cjs": "cce5b20cd01fcb7e40dba152f1524670efacd1cbc0f3ec98066eea996782033f",
+    "rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport_browser.cjs": "855398960f4e72c9f04f3d37a459a294d89c33ce233dba61367615c2f431a9a8",
+    "e2e/terminal-resize/benchmark.py": "2ac73a847ff6c28e981054011f96680e629d56485b2b30981cd998d6d459f839",
+    "e2e/terminal-resize/host.cjs": "c89832ac352c3deabde3f78f2f0c7d110f972d5b6f7cc86448b367e0f41d1cbd",
+    "e2e/terminal-resize/performance-policy.json": "183b99f4311f94fceadf281de6c8121a454cb3df2188e1b1e4303c7e2119dfe2",
+    "e2e/terminal-resize/gui-policy.json": "f5e424eb918169a22fad1b60a6727e020ed766d734a87a16c6606bc2d89b5b45",
+    "e2e/terminal-resize/gui.html": "6775d6aea1536fc95609a5212c18e0209821b2a5f2e2aba1eaf5574b39a94dff",
+    "e2e/terminal-resize/resources.cjs": "a67fad3575f0744e558279058a7dc70b13c823ce0a35c6d280663c405f89bbb4"
+  }
+}

@@ -20,7 +20,7 @@ jobs:
     name: installer-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - name: macos-arm64

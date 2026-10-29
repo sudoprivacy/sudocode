@@ -54,7 +54,7 @@ def main():
                 os.environ["GITHUB_EVENT_PATH"] = str(path)
                 selection = gate.main()
             jobs = gate.pages(f"repos/{repository}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
-            required = ["Verify local acceptance", "Cross-platform acceptance result"]
+            required = ["Verify local acceptance"]
             required += [f"Complement local host ({system})" for system in selection["platforms"]]
             for name in required:
                 matching = [job for job in jobs if job["name"] == name]

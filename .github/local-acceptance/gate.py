@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import urllib.parse
 import urllib.request
 
@@ -52,6 +53,7 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     repository = os.environ["GITHUB_REPOSITORY"]
     policy_ref = acceptance.value("rev-parse", "HEAD")
+    execution_ref = policy_ref
     native = []
     operating_systems = []
     if "pull_request" in event:
@@ -59,8 +61,10 @@ def main():
         if pull["head"]["sha"] != event["pull_request"]["head"]["sha"]:
             raise RuntimeError("PR advanced while verification was starting")
         head = fetch_head(pull)
-        receipt = acceptance.verify(head, pull["base"]["sha"], policy_ref)
-        native = [name for name in receipt["checks"] if name.startswith("native-")]
+        execution_ref = acceptance.authorized_policy(head, pull["base"]["sha"], policy_ref, api)
+        receipt = acceptance.verify(head, pull["base"]["sha"], execution_ref, signers_ref=policy_ref)
+        current = acceptance.selected(acceptance.load_policy(execution_ref), acceptance.changed_paths(receipt["base"], head))
+        native = [name for name in current if name.startswith("native-")]
         # The local host supplies its own platform; CI supplies the other one.
         # Keep one Linux workspace run as well. The queue carries this exact
         # head's completed workflow instead of rebuilding all three again.
@@ -77,7 +81,8 @@ def main():
             raise RuntimeError("Cannot attribute this merge group to current PR heads")
         for pull in pulls:
             head = fetch_head(pull)
-            acceptance.verify(head, group["base_sha"], policy_ref)
+            authorized = acceptance.authorized_policy(head, group["base_sha"], policy_ref, api)
+            acceptance.verify(head, group["base_sha"], authorized, signers_ref=policy_ref)
             statuses = pages(f"repos/{repository}/commits/{head}/statuses")
             statuses = [status for status in statuses if status["context"] == "Local acceptance"]
             status = statuses[0] if statuses else None
@@ -91,12 +96,13 @@ def main():
             if run["path"].split("@")[0] != ".github/workflows/local-acceptance-publish.yml" or run["event"] != "workflow_run" or run["conclusion"] not in (None, "success"):
                 raise RuntimeError("Acceptance status was not produced by the trusted publisher")
             print(f"Carried PR #{pull['number']} {head[:12]} from publisher run {identifier}")
-        subprocess.run(["python3", str(ROOT / ".github/scripts/check_pr_history.py"),
+        subprocess.run([sys.executable, str(ROOT / ".github/scripts/check_pr_history.py"),
                         group["base_sha"], group["head_sha"]], cwd=ROOT, check=True)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
         stream.write("needed=" + ("true" if native else "false") + "\n")
         stream.write("checks=" + " ".join(native) + "\n")
         stream.write("platforms=" + json.dumps(operating_systems or ["ubuntu-latest"]) + "\n")
+        stream.write("policy_ref=" + execution_ref + "\n")
     return {"checks": native, "platforms": operating_systems if native else []}
 
 

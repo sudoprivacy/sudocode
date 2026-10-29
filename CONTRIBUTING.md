@@ -175,8 +175,9 @@ ssh-keygen -t ed25519 -f ~/.nexus/sudocode-acceptance-key -N ""
 python .github/scripts/local_acceptance.py install --signer YOUR_DEVICE_ID --key ~/.nexus/sudocode-acceptance-key
 ```
 
-This Windows workstation's public key is already enrolled; its private key stays
-outside the repository. A new Mac or Linux author enrolls its own platform key.
+Enrolled device public keys are listed in `spec/local_acceptance_signers.json`;
+their private keys stay outside the repository. Each new author device enrolls
+its own platform key.
 Never commit a private key. Installation preserves existing hooks by refusing to
 overwrite them; compose an existing hook explicitly. Protected-main updates refresh
 the installed runner automatically, including when pushing an older worktree.
@@ -196,6 +197,9 @@ scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Hosted complementary builds use up to two compiler workers. That hosted-only
+limit is applied after cache restore; local author builds keep one worker and
+all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
@@ -210,21 +214,99 @@ authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
 checks on an enrolled host; forks need not receive repository secrets.
 
+A failed native matrix job cancels the other pending/running platforms. The
+trusted publisher checks the actual completed jobs directly; no second hosted
+summary job repeats those checks. Scheduling-only edits keep valid completed
+local evidence when its executor/profile/image are unchanged and it covers the
+current required checks. New commits or changed commands still need acceptance.
+Provider tests on main run only for changed provider inputs, and real-daemon
+queue tests run only for changed daemon inputs. Documentation/CI-only changes
+skip those unchanged expensive journeys. The explicit provider dispatch stays
+available for gateway diagnosis.
+CLI integration-test-only edits retain native PTYs and the existing provider
+checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
+CLI manifests, production source and daemon harness edits still select it.
+When a change contains only standalone CLI integration-test modules (optionally
+with root README or Markdown documentation edits), workspace acceptance runs
+those test targets with the same mailbox feature. Unchanged metadata, Mermaid,
+benchmark and production Clippy commands are reused. Shared helpers, fixtures,
+specs, source, manifests, target deletion and moves across those boundaries
+keep full workspace acceptance. All other selected native/local profiles remain.
+Shared PTY helper sources also select native terminal resize acceptance, whether
+they live under CLI `tests/common` or the test-only `rust/crates/pty-harness` path.
+
+The required `CI preflight` job shares one checkout and tool setup for format,
+generated cache schemas, docs, history, boundary, release-mirror and provider
+probe checks. Its first failing step blocks its daemon/provider dependents.
+PRs always start this job, including SDK-only changes; path filters cannot leave
+a required status pending. The queue's protected acceptance gate still checks
+the combined Git history. No unique product test is removed by this consolidation.
+After merge, main reuses those completed integrity checks. Its lightweight
+preflight still resolves the pinned protocol and changed-input scope needed by
+the existing daemon/provider jobs. PR, queue and explicit runs retain the full
+preflight; no product assertion is removed.
+Signature verification and status publication use Windows runners, with an
+explicit Python interpreter, to avoid two extra admissions to the busy Linux
+pool. This metadata placement does not replace native Linux or macOS tests.
+
+The ACP package workflow runs integration journeys on all four PR hosts. Main
+still builds and packages its exact merged revision on those hosts, while
+reusing the PR's integration result. A newer head cancels an obsolete package
+run for the same PR/ref. Unrelated workflow edits do not start three Rust cache
+publishers; Rust changes and changes to the publisher itself still do.
+
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. A runtime interaction that
 exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
-Real provider/API acceptance on main is unchanged; mock transport results do not
+Real provider/API assertions on main are unchanged; mock transport results do not
 establish live cache hits. Cache-prefix, compaction and all existing workspace
 cases remain, including standalone vendored Mermaid and benchmark type checks.
 
 Existing PRs do not need a cosmetic merge from main to acquire the hook files:
-the managed hook loads protected-main command definitions. Deliberate edits to the
-acceptance contract need a maintainer-reviewed bootstrap so a PR cannot approve
-its own weaker policy. Registering another public device key does not invalidate
-other devices' current receipts. GitHub's normal bypass protections stay active;
-the CI migration itself uses the explicitly authorized temporary admin route.
+the managed hook loads protected-main command definitions. Registering another
+public device key does not invalidate other devices' current receipts.
+
+#### Acceptance contract changes
+
+The local hook and CI verifier reject a candidate that changes the protected
+acceptance contract relative to trusted main. This includes adding checks and
+editing diagnostics, not only removing checks or lowering thresholds. The purpose
+is to prevent a candidate from authorizing the rules used to accept itself;
+the rejection does not establish that its product tests failed.
+
+The diagnostic identifies the changed protected files and trusted policy commit.
+The rejection prints the executable next step, using the installed protected
+runner so the command also works in an older worktree:
+
+```sh
+python "$(git rev-parse --path-format=absolute --git-common-dir)/local-acceptance-hooks/local_acceptance.py" contract-update --remote origin
+```
+
+This requires GitHub repository maintain/admin authority and an already enrolled
+signing device. It runs the exact candidate executor and every selected check,
+verifies its real signed receipt against keys on protected main, and pushes only
+the checked-out non-main branch through an exact-head verifying hook. It then
+publishes the separate `Acceptance contract authorization` status, bound to the
+full candidate and trusted contract hashes. That status authorizes the rule
+update; it is not the `Local acceptance` test result. The read-only gate checks
+the actor's current role and uses the approved executor for complementary hosts.
+Failed tests, invalid signatures and missing hosts still fail normal acceptance.
+
+The command requires current main to be integrated. A changed head, changed
+trusted rules, revoked status or lost maintainer role requires a fresh update.
+If authorization publication fails after the push, rerun the same command: a
+valid exact-head signed result is reused. Neither the installed global hook nor
+branch protection is disabled. Signer registry edits also require this route;
+an existing enrolled maintainer attests new-device enrollment.
+
+"Maintainer-reviewed" describes repository responsibility, not a requirement for
+the end user personally to read the patch or for a particular chat session to
+approve it. Human maintainers and authorized AI agents follow the same checks.
+GitHub's normal bypass protections stay active. The CI migration's explicitly
+authorized temporary admin route was specific to that migration; it is not a
+general approval route for later contract changes.
 
 Rust caches keep the existing 10 GB quota and three shared main publishers.
 Queue maintenance retains current runs and cancels obsolete merge groups only

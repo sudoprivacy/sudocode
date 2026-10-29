@@ -10,32 +10,120 @@ For a ready PR, one queue group and the resulting main push:
 
 | Work | Before | After |
 | --- | --- | --- |
-| Complete deterministic workspace suite | 2 PR + 3 queue + 3 main = 8 | 1 Linux PR + 3 queue = 4 |
-| Native terminal resize suite | 2 PR + 3 queue + 3 main = 8 | 1 Linux PR + 3 queue = 4 |
-| Release startup/streaming acceptance | 2 PR + 3 queue + 3 main = 8 | 1 Linux PR + 3 queue = 4 |
-| Real daemon A2A acceptance | PR + queue + main = 3 | queue = 1 |
-| Shared-service acceptance | 4 PR + 4 main = 8 | 1 Linux PR + 4 queue = 5 |
+| Complete deterministic workspace suite | 2 PR + 3 queue + 3 main = 8 | 2 complementary CI hosts + 1 author-local host |
+| Native terminal resize suite | 2 PR + 3 queue + 3 main = 8 | 2 complementary CI hosts + 1 author-local host, for changed inputs |
+| Release startup/streaming acceptance | 2 PR + 3 queue + 3 main = 8 | 2 complementary CI hosts + 1 author-local host, for changed inputs |
+| Real daemon A2A acceptance | PR + queue + main = 3 | queue = 1, for changed daemon inputs |
+| Shared-service acceptance | 4 PR + 4 main = 8 | 2 complementary CI hosts + 1 author-local host, for changed inputs |
+| PR co-host build/size verification | 5 hosted platforms | 2 complementary CI hosts + 1 author-local host; actual tagged releases retain 5 platforms |
+| Short metadata and integrity jobs | 7 hosted jobs per event | 1 shared preflight job per event |
 | Specialized PTY/stderr pre-run steps per workspace job | 8, then the same cases in the workspace suite | 0; cases remain in the workspace suite |
 | Benchmark API compilation | Optimized build/link of workspace benchmarks and tests | Locked benchmark type-check using the workspace job's debug graph |
+| ACP package integration | 4 PR hosts + 4 main hosts | 4 PR hosts; main keeps exact-merged-revision builds and package artifacts |
 
-Manual dispatch retains full validation. Existing experimental branch pushes
-retain the three-platform Rust jobs. Paid provider jobs continue on main and
-manual dispatch; this change does not reduce their API calls. The manually
-disabled paid code-review workflows remain disabled.
+Provider assertions remain on main for changed provider inputs and explicit
+dispatch. Rendering/browser checks are mandatory locally, with their original
+budgets and sample counts. The manually disabled paid review stays disabled.
 
-Required check names and branch protection remain unchanged. Windows/macOS jobs
-report skipped on PRs without allocating runners and run in the merge queue.
-The integrated commit must pass all three platforms before landing. Rendering
-budgets, workloads, A/A calibration and sample counts are unchanged. Additional
-source before/after viewport diagnostics require an explicit label.
+Required contexts are `CI preflight`, `Local acceptance` and the real-daemon
+guard. The queue carries the exact PR heads' completed native acceptance and
+verifies combined Git history; it does not repeat native suites on that combined
+tree. Runtime interactions unique to the combination are outside that pre-merge
+coverage. Admin enforcement and the queue ruleset remain enabled after the
+explicitly authorized temporary migration route.
 
 Workspace tests and Clippy omit disposable debug-symbol output while retaining
 debug assertions. Their shared environment keeps Cargo cache inputs aligned.
-Release resource acceptance retains its normal release profile. The browser
-workflow triggers on Rust, its terminal harness and its own workflow changes;
-an unrelated workflow edit alone no longer starts two browser release builds.
+Release resource acceptance retains its normal release profile. Browser
+measurements run through the changed-input local Docker profile.
+
+## Measured timing and duplicate-test review
+
+The month contains 540 successful PR heads with all three original native
+workspace jobs actually passing. Rust CI alone has a 52.5-minute median elapsed
+time. Of these, 449 heads have every latest applicable PR acceptance workflow
+successful: their completion envelope has a 50.35-minute median and 191.13-minute
+P90. The smaller second cohort explains its lower median. Both exclude local
+pre-push time and merge queue, and the second excludes paid Claude review;
+neither is a complete submit-to-merge baseline. Do not compare a CI-only PR to
+these production cohorts and call the 10% end-to-end goal achieved.
+
+A syntax-tree scan covered 552 Rust files and 2,795 explicit test functions,
+preserving literal and helper names. It found no identical PTY test bodies.
+Three small `env_guard_recovers_after_poisoning` bodies match textually but
+exercise three separate crate-owned guards. Keep them; their deletion offers
+negligible runtime savings. Macro-generated cases and semantic overlap require
+separate review. The same ACP subagent scenario also runs against different
+GPT and Claude routes, so a repeated test name alone does not establish redundant
+provider coverage.
+
+Preflight runs while a PR is draft and does not depend on draft state. Promoting
+the same commit to ready reuses that result instead of starting it again.
+The separate native acceptance workflow retains `ready_for_review`, because its
+real complementary hosts deliberately wait for readiness.
+
+An isolated Linux experiment kept the same release CLI, exact 64 test identities,
+one CPU, non-root user, test priority and existing assertions/deadlines:
+
+| Runner | Two concurrent tests | Four concurrent tests |
+| --- | --- | --- |
+| Cargo | 490.7 s | 329.6 s |
+| nextest 0.9.150 | 483.4 s | 274.2 s |
+
+These are 63 controlled-provider PTY cases plus one live-only early return under
+mock, not 64 real API successes. Each setting has one trial. Cargo's four-thread
+run was 32.8% shorter than its two-thread control; nextest was 16.8% shorter than
+Cargo at four threads. The similar two-thread timings do not support attributing
+all improvement to a new runner. No nextest dependency or global test-concurrency
+change is adopted from this experiment. Hosted production latency is unproven.
+
+The new narrow CLI scope was also exercised through the real acceptance executor
+against a test-only Git commit and unchanged production Rust. Its mailbox-enabled
+compaction target reported 34 passes (33 controlled-provider PTY cases plus one
+live-only early return). The release-profile experiment reused the owned build
+output; it does not claim the dev native profile or real provider acceptance.
+All observed compiler/linker workers had nice 10 and actual Cargo/PTys had nice 0.
+The owned container was stopped and its original launcher restored afterward.
+
+Only 7 of 231 merged PR file scopes in the month window fit the narrow standalone
+CLI-test pattern before checking deletions/target existence. The optimization
+helps that iteration class; it is not a global 10% latency result. Existing
+production-source acceptance remains complete.
 
 ## Dependency cache within the existing quota
+
+Workflow-only changes unrelated to `ci-dependency-cache.yml` do not start its
+three host jobs. Rust pushes still check for a new dependency/toolchain/image
+key, and changes to the publisher still exercise it. Cache-hit correctness and
+source validation are unchanged.
+
+On a cache miss, the publisher compiles library/bin test targets with the same
+mailbox feature, retaining normal and dev dependencies. It omits standalone
+integration executables: the default cache action removes workspace artifacts
+before saving them, so those links do not warm an additional dependency. Native
+acceptance still builds and runs the complete selected journeys. Production
+release dependency warming, all three host pools and the 10 GB quota remain.
+See the action's [cache contract](https://github.com/Swatinem/rust-cache#cache-details).
+
+A real Windows Cargo fixture built both selections from separate empty targets.
+The reduced selection retained an integration-only dev dependency outside the
+workspace and the enabled library feature, while eliminating five integration
+executables. The fixture validates selection, not a percentage of cloud savings.
+Previously measured 139 CLI integration compilations consumed 302.26 compiler
+seconds in one single-worker desktop build; this is an opportunity estimate,
+not a hosted latency reduction. Existing cache hits skip compilation already.
+
+Complementary native jobs use the same cache environment as the main publisher.
+`rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
+default prefix list; `env-vars: ImageOS` does not replace that list. Keep
+`CARGO_TERM_COLOR=always` and the two debug settings aligned. The action itself
+sets `CARGO_INCREMENTAL=0`; the trusted command runner applies its one-job limit
+after restore so that scheduling does not split an otherwise identical cache.
+This fixes a key mismatch, not a measured cache-hit-rate claim.
+
+The boundary job no longer downloads and compares `vfs.proto` a second time.
+The required pin job retains the exact pinned-revision byte comparison once per
+event. This removes duplicate validation without removing the protocol guard.
 
 Keep the repository's 10 GB cache limit. Only a main-branch publisher writes
 the shared Rust dependency caches; PRs, merge groups, release and provider jobs
@@ -244,3 +332,117 @@ automatically publishes evidence; a new head, tampered receipt and dirty
 source fail. The local Docker image additionally launched Chromium and
 verified actual input. These are enforcement/environment checks, not claims
 that every product profile or a macOS native run was executed on Windows.
+
+## Fail-fast and unchanged-input follow-up
+
+Native, SDK, installer and live-model matrices cancel peers after the first
+failed job. Native commands already stop sequentially on their first nonzero
+exit; original logs remain. The independent publisher checks actual jobs, so
+the extra summary runner and scheduling hop are removed.
+
+Signed local evidence now binds executor/profile/image commands separately
+from scheduling/publication metadata. A scheduling-only update does not require
+rerunning already completed commands; the current required set must still be a
+subset of the signed passes. Changed commits/commands or added checks still
+require real acceptance. A real bare-Git E2E verifies this reuse across a
+protected scheduling update.
+
+Changed Git inputs also gate main's paid provider acceptance and the queue's
+real-daemon acceptance. Docs/CI-only edits do not change their test inputs.
+Rust, cache specs and relevant protocol/daemon harness changes retain their
+respective checks; explicit provider dispatch remains explicit. The input
+selector is exercised against actual Git commits for docs, CI, Rust, daemon
+harness and cache-spec changes, through both push and merge-group payloads.
+No independent product case or budget is removed in this follow-up.
+
+CLI integration-test modules under `rust/crates/rusty-sudocode-cli/tests/` do
+not enter the daemon/cohost binaries or their shell journeys. Test-only edits
+there retain author/complementary workspace acceptance and the existing main
+provider scope, but skip unchanged daemon queue work. Manifest/source changes,
+daemon/service harness edits and renames across the production boundary retain
+the daemon check. Real Git fixtures exercise push, PR and queue events, plus
+the source rename and explicit dispatch. No daemon scenario is deleted.
+
+For an isolated change to standalone CLI `tests/*.rs` modules, native workspace
+acceptance selects those actual Cargo integration targets with the existing
+mailbox feature. It keeps formatting and reuses unchanged schema/build-metadata,
+Mermaid, benchmark and production Clippy checks. Only root README and Markdown
+docs may accompany this narrow case. Shared helper/fixture/spec changes, target
+deletion, production inputs and cross-boundary moves fall back to the complete
+workspace. Other selected resize/release/services/cohost and local measurement
+profiles are unchanged. Real Git scenarios cover one and multiple targets,
+docs, common helpers, specs, manifests, deletion and a move into production.
+No test target is deleted; unchanged target executions are omitted for this
+specific input class. Its hosted latency benefit still requires observation.
+
+Before extracting the repeatedly compiled PTY helpers, enroll their shared
+test-crate path as a native resize input. Existing broad Rust source rules
+already retain workspace, rendering/browser and release acceptance. A real
+Git change at the shared helper path verifies the selected native profiles.
+This policy preparation does not claim the helper extraction has landed, and
+does not remove an existing scenario or input guard.
+
+## One shared preflight instead of seven short runners
+
+Combine format/schema, docs, architecture boundary, pinned protocol, release
+mirror, provider probe and PR-history jobs into the required `CI preflight`
+job. Keep their original commands and real Git/process scenarios. Share one
+checkout, one Python/Node/Rust environment and one queue admission; stop the
+job and its expensive daemon/provider dependents on its first failed step.
+The protected acceptance gate checks integrated queue history, so preflight
+does not repeat that same range. All PR paths trigger preflight, including
+SDK-only edits. Cache-only dispatch remains compile-only.
+
+This removes six hosted jobs per PR/queue event. It is a scheduling count,
+not a 7x latency claim: commands now run sequentially, and runner queue delay
+still needs measurement. No independent product assertion or deadline changed.
+Required contexts migrate only after the new job has an actual hosted pass.
+
+Main pushes reuse pre-merge integrity checks instead of repeating formatting,
+schemas, docs, architecture, release-mirror fixtures and provider-probe fixtures.
+The protocol pin and changed-input scope remain unconditional because downstream
+daemon/provider jobs consume their outputs. PR, queue, experimental pushes and
+explicit runs retain their existing preflight checks. This saves repeated setup
+and commands after each merge; it does not itself shorten the PR critical path.
+
+The real Git enforcement fixture clears repository-local environment variables
+exported by a caller's hook before creating its temporary repositories. Its
+acceptance run deliberately inherits another temporary repository's Git directory,
+worktree, index and injected config, then verifies that caller's HEAD, index,
+config and source remain unchanged. This protects ordinary managed pushes as
+well as direct fixture execution.
+
+The first hosted consolidated preflight passed all steps in 29 seconds after
+about 5m45s of queue wait (run 40906797832). Its actual success allowed the
+required contexts to become `CI preflight`, `Local acceptance` and the unchanged
+real-daemon guard. This is one CI-only PR, not a comparable production latency
+sample. Two retired PR-specific dependency pools were also deleted by exact ID,
+reclaiming 3,272,376,987 bytes while retaining all three main pools.
+
+Metadata-only signature verification and trusted publication use Windows
+runners instead of adding two more Linux admissions. Windows/macOS cache jobs
+started while the Linux peer remained queued; this is a capacity experiment,
+not a permanent guarantee that one host is faster. Pin Python 3.12 and use
+`sys.executable` for the queue history subprocess. Platform/runtime acceptance
+is unchanged. Compare the actual gate-to-publication path before claiming a
+latency improvement.
+
+The shared executor's one-worker default protects the author's foreground
+desktop. The complementary hosted wrapper overrides only the compiler worker
+count to the available hosted CPUs after restoring dependencies. This removes an
+unnecessary hosted build throttle without changing cache keys, source profiles,
+test concurrency, assertions or deadlines. Local/manual execution remains one
+worker. Actual hosted build-time benefit requires a comparable native run.
+GitHub's public standard Linux/Windows runners currently provide four CPUs,
+and ARM macOS provides three. The earlier two-worker hosted cap left that
+capacity unused. See [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+## ACP package runs
+
+Keep integration and portable installed-package journeys on all four PR hosts.
+Main still builds and packs its exact merged revision on each host, retaining
+the commit-bound manifest, archive integrity receipt and uploaded artifacts.
+It does not repeat the same integration journeys. As with native queue reuse,
+an interaction unique to merged changes is outside that repeated runtime
+coverage. Explicit runs retain integration; a new PR/ref head cancels an
+obsolete package run. No scenario or distribution platform is deleted.

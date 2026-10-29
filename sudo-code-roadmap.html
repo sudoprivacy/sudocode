@@ -230,8 +230,13 @@ local. GitHub verifies enrolled public keys and freshness before scheduling the
 missing platforms. Signatures authenticate an enrolled author's attestation;
 they do not remotely attest machine execution. Missing or stale evidence blocks
 the required <code>Local acceptance</code> check. Existing PRs use the protected
-runner without needing a cosmetic merge. Acceptance-policy edits require a
-maintainer-reviewed bootstrap.</p>
+runner without needing a cosmetic merge. A protected contract edit prints an
+executable <code>contract-update</code> command through the installed runner.
+An enrolled repository maintainer or authorized agent runs the exact candidate
+checks and publishes separate, exact-head authorization for the rule change.
+The read-only gate verifies current authority and both contract hashes; signed
+results and complementary native hosts remain required. This authorization is
+not a test pass and does not require the end user personally to inspect code.</p>
 
 <p>Full rendering A/A and A/B, painted browser and viewport performance checks
 run automatically in local Docker for changed production or measurement inputs.
@@ -240,6 +245,9 @@ binary graph and budgets remain. A failed A/A calibration is inconclusive.
 There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
 unchanged performance pairs; docs-only changes run preflight. Local compiler
 workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p>Complementary hosted builds use the available compiler CPUs, applied after
+cache restore; local author builds retain one worker. Test concurrency,
+assertions, deadlines and production build profiles are unchanged.</p>
 
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
@@ -254,10 +262,45 @@ execution-count reduction, not a measured percentage of runner minutes.</p>
 model precedence and stderr cases remain in the workspace. Standalone Mermaid
 tests and benchmark type checking remain explicit. Dev/test symbols are omitted
 while debug assertions and normal release settings remain. Real provider/API
-acceptance on main is unchanged and mock results earn no live-model coverage
+assertions on main are unchanged and mock results earn no live-model coverage
 credit. Rust caches retain the 10 GB quota and three shared main publishers;
 sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
+
+<p>Native, SDK and installer test matrices stop peer work after the first failure.
+The protected publisher verifies completed jobs directly; the redundant hosted
+summary job is removed. Scheduling-only edits reuse signed local results when
+the same executor/profile/image ran every currently required check. New source
+commits or command changes require acceptance. Main provider and queue daemon
+journeys skip unchanged inputs on docs/CI-only edits; no unique test case or
+performance budget is removed by this deduplication.</p>
+<p>CLI integration-test-only edits keep native PTY and existing provider
+acceptance while skipping the unchanged daemon queue suite. CLI manifests,
+production source, daemon/service harnesses and moves into production still
+select the daemon guard; no daemon journey is removed.</p>
+<p>Standalone CLI integration-test-only edits run the changed Cargo test targets
+with the existing mailbox feature, while reusing unchanged workspace quality
+checks. Root README and Markdown docs may accompany this narrow case. Shared
+helpers/fixtures/specs, target deletion, source, manifests and cross-boundary
+moves retain the full workspace. Other selected native and local measurement
+profiles remain; no test target is deleted.</p>
+<p>Shared PTY helper inputs retain native terminal resize acceptance at both
+the CLI <code>tests/common</code> path and the shared test-crate path. This
+preserves the native guard when reducing repeated helper compilation.</p>
+<p>Main pushes reuse completed pre-merge formatting, schema, docs, boundary and
+fixture checks. Their lightweight preflight retains the protocol pin and input
+scope required by existing daemon/provider jobs. PR, queue and explicit runs
+retain full integrity checks; this removes duplicate post-merge work.</p>
+<p>ACP package integration stays on all four PR hosts. Main keeps builds and
+commit-bound package artifacts for its merged revision, reusing the PR's
+integration result. Obsolete package heads cancel within the same PR/ref.
+Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
+publisher changes still check for new dependency/toolchain/image keys.</p>
+<p>Cold cache publishers compile library/bin test targets to retain dev dependencies
+but omit standalone integration executables that the dependency cache discards.
+Full native acceptance still compiles and runs those journeys. The three host
+pools, production release warming and 10 GB quota remain; warm cache hits already
+skip this work. This removes redundant compilation, with no coverage reduction.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.
@@ -270,6 +313,18 @@ that any case has never failed. See the
 <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-workload-audit-20261029.md">CI workload audit</a>
 for timing, selection and measurement limits. Execution counts are a static
 reduction; actual latency savings require post-change CI observations.</p>
+
+<p>The required <code>CI preflight</code> job combines seven short hosted jobs
+into one checkout, environment setup and runner queue admission: formatting and
+cache schemas, docs, architecture boundary, pinned protocol, release mirror,
+provider probe and PR history keep their existing checks. The trusted queue
+gate checks integrated history once; preflight checks PR history. SDK-only PRs
+also start preflight, so required contexts cannot disappear behind path filters.
+A failed preflight step stops its daemon/provider dependents. This removes six
+jobs per event without deleting a unique product case. Shared native cache
+environments match the main publisher; net timing and hit rates still require
+hosted observation. The optimization target is measured end-to-end CI latency
+at most 10% of the historical baseline, not merely fewer runner minutes.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
 

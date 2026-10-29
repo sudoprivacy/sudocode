@@ -19,22 +19,28 @@ jobs:
   proof:
     name: Verify local acceptance
     if: github.event_name == 'merge_group' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    # Signature/Git metadata needs no Linux runtime. Linux queue contention
+    # otherwise delays both this gate and its dependent native platforms.
+    runs-on: windows-latest
     outputs:
       needed: ${{ steps.proof.outputs.needed }}
       checks: ${{ steps.proof.outputs.checks }}
       platforms: ${{ steps.proof.outputs.platforms }}
+      policy_ref: ${{ steps.proof.outputs.policy_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Verify signed local evidence and select missing native hosts
         id: proof
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .github/local-acceptance/gate.py
+        run: python .github/local-acceptance/gate.py
 
   native:
     name: Complement local host (${{ matrix.os }})
@@ -43,12 +49,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: ${{ fromJSON(needs.proof.outputs.platforms) }}
     env:
-      CARGO_BUILD_JOBS: '1'
-      CARGO_INCREMENTAL: '0'
+      # Match the shared publisher's cache key. The trusted executor sets its
+      # one-job/incremental limits only on compiler subprocesses, after restore.
+      CARGO_TERM_COLOR: always
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       SCODE_TEST_BACKEND: mock
@@ -60,7 +67,9 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # Ordinary PRs use protected main. Exact-head maintainer contract
+          # authorization permits the newly verified executor and new checks.
+          ref: ${{ needs.proof.outputs.policy_ref }}
           path: .trusted-acceptance
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
@@ -93,22 +102,3 @@ jobs:
           path: ${{ runner.temp }}/local-acceptance
           if-no-files-found: error
           retention-days: 7
-
-  acceptance:
-    name: Cross-platform acceptance result
-    if: always() && (github.event_name == 'merge_group' || !github.event.pull_request.draft)
-    needs: [proof, native]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require verified evidence and every applicable native job
-        env:
-          PROOF_RESULT: ${{ needs.proof.result }}
-          NATIVE_RESULT: ${{ needs.native.result }}
-          NATIVE_NEEDED: ${{ needs.proof.outputs.needed }}
-        run: |
-          test "$PROOF_RESULT" = success
-          if [ "$NATIVE_NEEDED" = true ]; then
-            test "$NATIVE_RESULT" = success
-          else
-            test "$NATIVE_RESULT" = skipped
-          fi

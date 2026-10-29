@@ -109,7 +109,7 @@ sudocode is deliberately opinionated about what to test and how.
 
 | Layer | Status | When to write |
 |---|---|---|
-| **PTY (`pty-expect`)** | **Required CI gate**; the only layer counting toward the 90% e2e coverage metric | Every user-facing feature |
+| **PTY (`pty-expect`)** | **Required acceptance gate** (local + complementary CI); the only layer counting toward the 90% e2e coverage metric | Every user-facing feature |
 | Integration (mock harness) | Optional — debug accelerator, not a CI gate | When a PTY failure's blast radius is wide enough that shrinking bisection distance is worth the file |
 | **Unit** | **Forbidden by rule** | Don't. PRs adding unit tests will be asked to remove them. |
 
@@ -164,36 +164,81 @@ depend on Unix-only mechanisms (SIGINT/ESC signal delivery, `sh -c` /
 `python3` subprocesses, the ACP stdio subprocess handshake) are still
 `#[cfg(unix)]`-gated.
 
-CI runs the full deterministic workspace suite once on Linux for a ready PR,
-then on Linux, macOS and Windows in the merge queue. The queue tests the commit
-that becomes `main`; a push to `main` does not repeat those full suites.
-Windows/macOS required check names remain present as skipped jobs on PRs.
-Draft PRs allocate no heavy runners. Manual dispatch and the existing experimental
-branch pushes retain three-platform validation. Native terminal resize and release
-acceptance use the same cadence; shared-service acceptance uses Linux PR feedback
-and all four supported hosts in the queue. Real provider acceptance stays on
-`main` and manual dispatch.
+### Mandatory local acceptance and complementary CI
 
-The required `nexus-A2A live (real daemon)` check waits for both the real-daemon
-journeys and the reusable four-host shared-service workflow on the integrated
-commit. It explicitly fails if either result fails, is cancelled or is skipped;
-an independent optional workflow is not a merge gate.
+Install the managed pre-push hook once per clone. All worktrees share it:
 
-Coverage counts distinct user journeys, not repetitions across events or
-operating systems. Cache-prefix and compaction tests stay in the full workspace
-suite; they no longer run twice in one job. Standalone vendored Mermaid tests
-remain explicit because Cargo excludes that crate from the workspace.
+```bash
+python -m pip install psutil jsonschema
+ssh-keygen -t ed25519 -f ~/.nexus/sudocode-acceptance-key -N ""
+# Add only the .pub key to spec/local_acceptance_signers.json through review.
+python .github/scripts/local_acceptance.py install --signer YOUR_DEVICE_ID --key ~/.nexus/sudocode-acceptance-key
+```
 
-Rust dependency caches stay within the existing repository quota. One main
-publisher per supported host shares the Cargo sources and compiled dependencies
-across jobs; PRs and merge groups read those caches without publishing isolated
-copies. Exact key hits skip main's cache maintenance build; misses compile
-without running tests. Dev/test builds omit disposable debug symbols and retain
-debug assertions. Release profile settings stay unchanged. Cache-only manual
-dispatch performs no provider calls. See the
-[CI workload audit](docs/ci-workload-audit-20261029.md) for tradeoffs and evidence.
-Benchmark entry points are type-checked in the workspace job without linking an
-extra optimized copy of every test. See the
+This Windows workstation's public key is already enrolled; its private key stays
+outside the repository. A new Mac or Linux author enrolls its own platform key.
+Never commit a private key. Installation preserves existing hooks by refusing to
+overwrite them; compose an existing hook explicitly. Protected-main updates refresh
+the installed runner automatically, including when pushing an older worktree.
+
+The hook runs applicable real checks before a branch push. A Windows author runs
+the Windows workspace, resize, release and service checks locally; CI runs Linux
+and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
+author runs Linux locally; CI runs Windows and macOS. Co-host release verification
+follows the same host split when its inputs change. Each supported OS remains
+covered; this does not claim every CPU architecture is exercised on every PR.
+Actual tagged co-host releases retain their five-platform artifact builds.
+
+Rendering A/A and A/B, painted browser performance and viewport resource checks
+run automatically in local Docker when production or measurement inputs change.
+They keep their existing baselines, rounds, assertions and budgets. They have no
+scheduled or manual cloud replacement. Documentation-only changes run preflight;
+ordinary test-only changes do not rebuild an unchanged performance pair. Local
+compilers use one job and BelowNormal/nice priority while Cargo and tests stay
+Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
+On a Windows box with unregistered Build Tools, set
+`git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
+otherwise the runner discovers Visual Studio or uses the existing Developer shell.
+
+A signed Git note binds the successful command list and log hashes to the exact
+commit, tree, diff base, policy and native host. The hook publishes that note
+before the branch. GitHub's read-only metadata job verifies the signature against
+public keys enrolled on main and selects the missing hosts. Missing, failed,
+stale or tampered receipts block the Local acceptance required check. A signature
+authenticates the enrolled author's statement; it is not remote execution
+attestation. Maintainers may attest a contributor's PR by actually running its
+checks on an enrolled host; forks need not receive repository secrets.
+
+A failed native matrix job cancels the other pending/running platforms. The
+trusted publisher checks the actual completed jobs directly; no second hosted
+summary job repeats those checks. Scheduling-only edits keep valid completed
+local evidence when its executor/profile/image are unchanged and it covers the
+current required checks. New commits or changed commands still need acceptance.
+Provider tests on main run only for changed provider inputs, and real-daemon
+queue tests run only for changed daemon inputs. Documentation/CI-only changes
+skip those unchanged expensive journeys. The explicit provider dispatch stays
+available for gateway diagnosis.
+
+The merge queue verifies each included PR's current receipt and completed
+cross-platform workflow, then checks the combined Git history. It does not repeat
+the native suites on the combined merge-group tree. A runtime interaction that
+exists only in the combination of independently verified PRs is therefore outside
+that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
+Real provider/API acceptance on main is unchanged; mock transport results do not
+establish live cache hits. Cache-prefix, compaction and all existing workspace
+cases remain, including standalone vendored Mermaid and benchmark type checks.
+
+Existing PRs do not need a cosmetic merge from main to acquire the hook files:
+the managed hook loads protected-main command definitions. Deliberate edits to the
+acceptance contract need a maintainer-reviewed bootstrap so a PR cannot approve
+its own weaker policy. Registering another public device key does not invalidate
+other devices' current receipts. GitHub's normal bypass protections stay active;
+the CI migration itself uses the explicitly authorized temporary admin route.
+
+Rust caches keep the existing 10 GB quota and three shared main publishers.
+Queue maintenance retains current runs and cancels obsolete merge groups only
+when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.
 
 ### Mock parity harness — optional
@@ -403,9 +448,8 @@ work, so it is not a measurement of config parsing alone. `traced_main_ms`
 covers only the instrumented portion inside `main`; `traced_wall_ms` also
 includes process creation, loading, tracing output and shutdown. The single
 traced sample is diagnostic, not the untraced median used for the budget.
-Pass `--report path.json` to retain all paired samples and phase timings; CI
-uploads one `startup-<os>` artifact per release benchmark job.
-The release-benchmark CI jobs run it on Linux, macOS and Windows. The initial
+Pass `--report path.json` to retain all paired samples and phase timings; Local acceptance retains the report; complementary CI uploads its native logs.
+The author-local and complementary jobs together run it on Linux, macOS and Windows. The initial
 100 ms budget is a coarse regression guard, not a claim of equivalent hardware
 performance: local Intel macOS medians were 22.6 ms (`--version`) and 23.1 ms
 (`version --output-format json`), with about 1.3 ms measured inside `main`.
@@ -414,8 +458,9 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
-Renderer changes must pass the required `render performance` status from the
-shared [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
+Renderer changes must pass the mandatory local rendering/browser profiles and
+the required `Local acceptance` status. See the shared
+[release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.
 
@@ -440,7 +485,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -719,7 +764,7 @@ Before opening a PR:
 
 - [ ] Branch off the latest `main`.
 - [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings` is clean.
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - [ ] `cargo test --workspace` passes locally.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).

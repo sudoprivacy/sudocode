@@ -224,6 +224,7 @@ jobs:
       commit: ${{ steps.pin.outputs.commit }}
       live_required: ${{ steps.scope.outputs.live_required }}
       daemon_required: ${{ steps.scope.outputs.daemon_required }}
+      clippy_required: ${{ steps.scope.outputs.clippy_required }}
     defaults:
       run:
         working-directory: .

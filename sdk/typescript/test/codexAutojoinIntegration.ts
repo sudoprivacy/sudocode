@@ -7,12 +7,13 @@ import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import type { CodexAutojoin, CodexAgentClaim } from '../src/codexAutojoin';
 const root = path.resolve(__dirname,'../..');
-const {connectCodexAutojoin,sendScodeMessage} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
+const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(),'codex-autojoin-'));
 const journal = path.join(directory,'acp.jsonl');
 const calls: Array<{method:string}> = [];
 const enrollments: CodexAgentClaim[] = [];
-const ids = Array.from({length:6},()=>randomUUID());
+const ids = Array.from({length:7},()=>randomUUID());
+let offline = true;
 let loaded = ids.slice(0,4);
 let owner: CodexAutojoin | undefined;
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
@@ -38,6 +39,7 @@ async function main() {
     async resolveAgent(claim: CodexAgentClaim){
       enrollments.push(claim);
       if(claim.threadId===ids[4])throw new Error('Provider lost response after possible enrollment');
+      if(claim.threadId===ids[6]&&offline)throw new CodexEnrollmentError('not_submitted','Node unavailable before enrollment submission');
       const file=path.join(directory,claim.actor+'.profile');
       fs.writeFileSync(file,JSON.stringify({scodeArgv:[process.execPath,path.join(root,'test/fixtures/scode-direct-a2a-agent.mjs')],
         workspace:claim.workspace,acpSessionId:'fixture-'+claim.operationId,closeTimeoutMs:300,
@@ -75,6 +77,14 @@ async function main() {
   assert.equal(enrollments.length,4,'restart does not retry an ambiguous issuance or remint a failed actor');
   assert.equal(owner.status().find(row=>row.threadId===ids[4])?.state,'recovery_required');
   await owner.refresh();assert.equal(enrollments.length,4);
+  loaded.push(ids[6]);await owner.refresh();
+  const pending=owner.status().find(row=>row.threadId===ids[6]);
+  assert.equal(pending?.state,'waiting_for_identity');
+  const pendingClaim=enrollments.at(-1);
+  offline=false;
+  await new Promise(resolve=>setTimeout(resolve,2100));await owner.refresh();
+  assert.equal(owner.status().find(row=>row.threadId===ids[6])?.state,'connected');
+  assert.deepEqual(enrollments.at(-1),pendingClaim,'definite no-submission recovery keeps the original operation/actor');
   assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,2,'no replay on restart');
   assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
   assert.ok(!calls.some(row=>['thread/start','thread/resume','turn/start'].includes(row.method)));

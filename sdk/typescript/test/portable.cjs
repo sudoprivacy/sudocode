@@ -52,7 +52,7 @@ void [connectScode, sendScodeMessage, runScodeMcp, connectCodex, forwardScodeToC
     '--enrollment',JSON.stringify([process.execPath,'operator-owned-adapter.cjs']),'--peers','["fixture-peer"]'];
   const prepared=JSON.parse(run(process.execPath,initCodex));
   assert.equal(prepared.installed,false);
-  assert.deepEqual(prepared.registrationArgv,[process.execPath,'mcp','add','nexus_scode','--',process.execPath,entry,'--codex','--config',autoConfig]);
+  assert.deepEqual(prepared.registrationArgv,[process.execPath,'mcp','add','nexus_scode','--',process.execPath,fs.realpathSync(entry),'--codex','--config',autoConfig]);
   const autoBytes=fs.readFileSync(autoConfig);
   const auto=JSON.parse(autoBytes);
   assert.equal(auto.mode,'codex-autojoin');assert.match(auto.endpoint.token,/^[0-9a-f]{64}$/);

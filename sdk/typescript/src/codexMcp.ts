@@ -5,7 +5,7 @@ import { connect, createServer, type Socket } from 'node:net';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import { connectCodexAutojoin, CodexEnrollmentError, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
 import { validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
@@ -98,7 +98,8 @@ function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfi
     let failure: Error | undefined;
     const kill = (error: Error) => {failure ??= error;child.kill('SIGKILL');};
     const timer = setTimeout(()=>kill(new Error('Enrollment response timed out; recover the original operation')),30000);
-    child.on('error',error=>{failure ??= error;});
+    child.on('error',error=>{failure ??= child.pid===undefined
+      ? new CodexEnrollmentError('not_submitted',`Enrollment adapter did not start: ${error.message}`) : error;});
     child.stdin.on('error',error=>{failure ??= error;});
     child.stdout.on('data',(chunk: Buffer)=>{
       bytes = Buffer.concat([bytes,chunk]);
@@ -108,8 +109,11 @@ function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfi
       clearTimeout(timer);
       try {
         if(failure)throw failure;
+        const profile = JSON.parse(bytes.toString('utf8')) as CodexAgentProfile & {outcome?: unknown;detail?: unknown};
+        if(profile && ['not_submitted','unknown'].includes(String(profile.outcome)) && typeof profile.detail==='string'){
+          throw new CodexEnrollmentError(profile.outcome as 'not_submitted'|'unknown',profile.detail);
+        }
         if(code!==0)throw new Error(`Enrollment exited ${code}; recover the original operation`);
-        const profile = JSON.parse(bytes.toString('utf8')) as CodexAgentProfile;
         if(!profile || Object.keys(profile).some(key=>!['actor','configFile'].includes(key))) throw new Error('Invalid enrollment response');
         resolve(profile);
       } catch(error) {reject(error);}

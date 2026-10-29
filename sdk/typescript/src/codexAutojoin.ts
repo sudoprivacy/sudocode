@@ -23,6 +23,11 @@ export interface CodexAgentProfile {
   configFile: string;
 }
 
+/** Only the authorized adapter can attest that no issuance was submitted. */
+export class CodexEnrollmentError extends Error {
+  constructor(readonly outcome: 'not_submitted' | 'unknown', detail: string) {super(detail);}
+}
+
 export interface CodexAutojoinConfig {
   native: CodexConnectionConfig;
   stateDirectory: string;
@@ -32,7 +37,7 @@ export interface CodexAutojoinConfig {
   onError?: (error: unknown) => void;
 }
 
-type State = 'provisioning' | 'ready' | 'recovery_required';
+type State = 'pending' | 'provisioning' | 'ready' | 'recovery_required';
 interface Binding extends CodexAgentClaim {
   state: State;
   configFile?: string;
@@ -51,6 +56,7 @@ interface Owner {
   connection?: ScodeConnection;
   callback?: CodexCallback;
   error?: string;
+  retryAt?: number;
 }
 export interface CodexAutojoin {
   /** Host-supplied MCP metadata selects an already loaded root, never arguments. */
@@ -109,7 +115,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     if (!identifier(binding.threadId) || file !== `${binding.threadId}.json` || binding.version !== 1
         || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(binding.actor) || !identifier(binding.operationId)
         || !path.isAbsolute(binding.workspace) || seenActors.has(binding.actor)
-        || !['provisioning', 'ready', 'recovery_required'].includes(binding.state)
+        || !['pending', 'provisioning', 'ready', 'recovery_required'].includes(binding.state)
         || (binding.state === 'ready' && (!binding.configFile || !path.isAbsolute(binding.configFile)))) {
       throw new Error(`Invalid or duplicate durable Codex binding: ${file}`);
     }
@@ -128,7 +134,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     let binding = bindings.get(thread.id);
     if (!binding) {
       binding = { version: 1, actor: `codex-${randomUUID().replaceAll('-', '')}`,
-        operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd, state: 'provisioning' };
+        operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd, state: 'pending' };
       // Persist the original operation BEFORE asking any enrollment authority.
       save(binding);
       bindings.set(thread.id, binding);
@@ -138,7 +144,9 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     try {
       if (binding.workspace !== thread.cwd) throw new Error('Native root workspace differs from its durable binding');
       if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
-      if (binding.state === 'provisioning') {
+      if (binding.state === 'pending') {
+        binding.state = 'provisioning';
+        save(binding);
         try {
           const profile = await config.resolveAgent(Object.freeze({ version: 1, actor: binding.actor,
             operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
@@ -147,7 +155,8 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
           binding.state = 'ready';
           save(binding);
         } catch (error) {
-          binding.state = 'recovery_required';
+          binding.state = error instanceof CodexEnrollmentError && error.outcome === 'not_submitted' ? 'pending' : 'recovery_required';
+          if(binding.state==='pending')owner.retryAt=performance.now()+2000;
           save(binding);
           throw error;
         }
@@ -202,7 +211,9 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         cursor = page.nextCursor ?? undefined;
       } while (cursor);
       for (const [id, owner] of owners) {
-        if (!loaded.has(id)) { owners.delete(id); await stopOwner(owner); }
+        if (!loaded.has(id) || (owner.retryAt!==undefined && performance.now()>=owner.retryAt)) {
+          owners.delete(id); await stopOwner(owner);
+        }
       }
       for (const id of loaded) {
         if (closed || owners.has(id)) continue;
@@ -243,7 +254,8 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       return owner.connection;
     },
     status: () => [...owners.values()].map(owner => ({threadId:owner.binding.threadId,actor:owner.binding.actor,
-      state:owner.error ? owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected' : 'connected',error:owner.error})),
+      state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
+        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected' : 'connected',error:owner.error})),
     close,
   };
 }

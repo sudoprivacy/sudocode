@@ -61,6 +61,13 @@ It returns one bounded JSON response, then exits:
 {"actor":"<same actor>","configFile":"<absolute private ACP profile>"}
 ```
 
+Before any issuance is submitted it may instead return
+`{"outcome":"not_submitted","detail":"..."}`. The bridge can then retry the
+**same** saved actor/operation after a bounded delay, allowing an offline node
+to recover automatically. `{"outcome":"unknown","detail":"..."}`, an untyped
+failure, malformed response or a lost response requires operator recovery.
+The adapter must never label a possibly submitted issuance `not_submitted`.
+
 The adapter must use the installation's existing authenticated claim/issuance
 authority. The adapter owns authorized enrollment, an explicitly selected Agent
 context, and creation/persistence of that Agent's ACP session before returning.
@@ -92,6 +99,7 @@ durability on Windows or power-loss acceptance.
 
 | State | Meaning | Next action |
 |---|---|---|
+| pending | No issuance submitted, including a typed offline refusal | Retry the same actor/op after a bounded delay |
 | provisioning | Original operation saved; adapter may be in flight | No second operation |
 | ready | Exact existing profile selected | Load its ACP session; never create a replacement |
 | recovery_required | Issuance outcome or response is uncertain | Operator resolves the original actor/op; no automatic retry or remint |

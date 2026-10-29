@@ -821,6 +821,7 @@ fn await_runtime_ready(
             return Err(format!("Nexus exited during startup: {status}").into());
         }
         if client.stat("/", "").is_ok()
+            && replicated_prefixes_serve(client)
             && (is_local_box
                 || capabilities::dispatch(
                     client,

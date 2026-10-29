@@ -86,7 +86,7 @@ jobs:
     # stronger all-feature lint contract, including the integrated queue tree.
     if: >-
       !inputs.live_only && !inputs.cache_only &&
-      needs.one-nexus-vfs-pin.outputs.daemon_required == 'true' &&
+      needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' &&
       (github.event_name == 'merge_group' ||
        (github.event_name == 'pull_request' && !github.event.pull_request.draft))
     needs: one-nexus-vfs-pin
@@ -129,21 +129,27 @@ jobs:
       - name: Require native daemon acceptance and zero workspace warnings
         env:
           PIN_RESULT: ${{ needs.one-nexus-vfs-pin.result }}
-          NATIVE_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          DAEMON_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
           A2A_RESULT: ${{ needs.a2a-live.result }}
           CLIPPY_RESULT: ${{ needs.clippy-workspace.result }}
         run: |
           set -eu
           test "$PIN_RESULT" = success
-          case "$NATIVE_REQUIRED" in
-            true) expected=success ;;
-            false) expected=skipped ;;
-            *) echo "::error::Missing native input decision"; exit 1 ;;
-          esac
-          if [ "$A2A_RESULT" != "$expected" ] || [ "$CLIPPY_RESULT" != "$expected" ]; then
-            echo "::error::Integrated acceptance requires $expected: daemon=$A2A_RESULT clippy=$CLIPPY_RESULT"
-            exit 1
-          fi
+          require_result() {
+            label=$1 required=$2 actual=$3
+            case "$required" in
+              true) expected=success ;;
+              false) expected=skipped ;;
+              *) echo "::error::Missing $label input decision"; exit 1 ;;
+            esac
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Integrated $label acceptance requires $expected, got $actual"
+              exit 1
+            fi
+          }
+          require_result daemon "$DAEMON_REQUIRED" "$A2A_RESULT"
+          require_result clippy "$CLIPPY_REQUIRED" "$CLIPPY_RESULT"
 
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit

@@ -265,11 +265,32 @@ establish live cache hits. Cache-prefix, compaction and all existing workspace
 cases remain, including standalone vendored Mermaid and benchmark type checks.
 
 Existing PRs do not need a cosmetic merge from main to acquire the hook files:
-the managed hook loads protected-main command definitions. Deliberate edits to the
-acceptance contract need a maintainer-reviewed bootstrap so a PR cannot approve
-its own weaker policy. Registering another public device key does not invalidate
-other devices' current receipts. GitHub's normal bypass protections stay active;
-the CI migration itself uses the explicitly authorized temporary admin route.
+the managed hook loads protected-main command definitions. Registering another
+public device key does not invalidate other devices' current receipts.
+
+#### Acceptance contract changes
+
+The local hook and CI verifier reject a candidate that changes the protected
+acceptance contract relative to trusted main. This includes adding checks and
+editing diagnostics, not only removing checks or lowering thresholds. The purpose
+is to prevent a candidate from authorizing the rules used to accept itself;
+the rejection does not establish that its product tests failed.
+
+The diagnostic identifies the changed protected files and trusted policy commit.
+The runner currently has no contract-update or bootstrap command. Maintainers
+must arrange a separately authorized, reviewed integration of the contract
+change; ordinary check/verify or repeating the push cannot supply that approval.
+Treat the missing integration entry point as an infrastructure gap. Preserve the
+rejection and test evidence, and continue independent work without disabling the
+hook, changing branch protection, or treating a manually run candidate profile
+as a trusted signed acceptance receipt.
+
+"Maintainer-reviewed" describes repository responsibility, not a requirement for
+the end user personally to read the patch or for a particular chat session to
+approve it. Human maintainers and authorized AI agents follow the same checks.
+GitHub's normal bypass protections stay active. The CI migration's explicitly
+authorized temporary admin route was specific to that migration; it is not a
+general approval route for later contract changes.
 
 Rust caches keep the existing 10 GB quota and three shared main publishers.
 Queue maintenance retains current runs and cancels obsolete merge groups only

@@ -109,14 +109,26 @@ def host():
 
 def check_contract_changes(head, base, policy_ref):
     # An existing PR need not merge main merely to acquire newly added hook
-    # files. It uses the protected runner. Deliberate contract edits remain a
-    # maintainer-reviewed bootstrap rather than a self-approved policy change.
+    # files. It uses the protected runner. All candidate contract edits,
+    # including additional checks, are blocked from authorizing themselves.
     paths = changed_paths(value("merge-base", base, head), head)
     protected = [POLICY, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
                  ".github/workflows/local-acceptance-publish.yml"]
     if any(path in protected or path.startswith(".github/local-acceptance/") for path in paths):
         if contract_hash(head) != contract_hash(policy_ref):
-            raise RuntimeError("Candidate changes the protected acceptance contract; maintainer bootstrap required")
+            changed = sorted(path for path in paths
+                             if path in protected or path.startswith(".github/local-acceptance/"))
+            raise RuntimeError(
+                "Candidate changes the protected acceptance contract. "
+                f"Changed protected files: {json.dumps(changed)}. "
+                f"Trusted policy: {policy_ref} ({value('rev-parse', policy_ref)}). "
+                "Normal acceptance/push blocks every contract change, including added checks; "
+                "the candidate cannot authorize its own check definitions. "
+                "This runner has no contract-update/bootstrap command. "
+                "Repository maintainers must arrange a separately authorized contract update; "
+                "this is not a request for the end user to review code or approve this push. "
+                "See CONTRIBUTING.md#acceptance-contract-changes."
+            )
 
 
 def run_command(command, cwd, log, env=None):

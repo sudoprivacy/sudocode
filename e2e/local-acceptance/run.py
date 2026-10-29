@@ -139,6 +139,7 @@ def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
+        print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)

@@ -277,13 +277,29 @@ is to prevent a candidate from authorizing the rules used to accept itself;
 the rejection does not establish that its product tests failed.
 
 The diagnostic identifies the changed protected files and trusted policy commit.
-The runner currently has no contract-update or bootstrap command. Maintainers
-must arrange a separately authorized, reviewed integration of the contract
-change; ordinary check/verify or repeating the push cannot supply that approval.
-Treat the missing integration entry point as an infrastructure gap. Preserve the
-rejection and test evidence, and continue independent work without disabling the
-hook, changing branch protection, or treating a manually run candidate profile
-as a trusted signed acceptance receipt.
+The rejection prints the executable next step, using the installed protected
+runner so the command also works in an older worktree:
+
+```sh
+python "$(git rev-parse --path-format=absolute --git-common-dir)/local-acceptance-hooks/local_acceptance.py" contract-update --remote origin
+```
+
+This requires GitHub repository maintain/admin authority and an already enrolled
+signing device. It runs the exact candidate executor and every selected check,
+verifies its real signed receipt against keys on protected main, and pushes only
+the checked-out non-main branch through an exact-head verifying hook. It then
+publishes the separate `Acceptance contract authorization` status, bound to the
+full candidate and trusted contract hashes. That status authorizes the rule
+update; it is not the `Local acceptance` test result. The read-only gate checks
+the actor's current role and uses the approved executor for complementary hosts.
+Failed tests, invalid signatures and missing hosts still fail normal acceptance.
+
+The command requires current main to be integrated. A changed head, changed
+trusted rules, revoked status or lost maintainer role requires a fresh update.
+If authorization publication fails after the push, rerun the same command: a
+valid exact-head signed result is reused. Neither the installed global hook nor
+branch protection is disabled. Signer registry edits also require this route;
+an existing enrolled maintainer attests new-device enrollment.
 
 "Maintainer-reviewed" describes repository responsibility, not a requirement for
 the end user personally to read the patch or for a particular chat session to

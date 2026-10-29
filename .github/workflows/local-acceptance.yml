@@ -26,6 +26,7 @@ jobs:
       needed: ${{ steps.proof.outputs.needed }}
       checks: ${{ steps.proof.outputs.checks }}
       platforms: ${{ steps.proof.outputs.platforms }}
+      policy_ref: ${{ steps.proof.outputs.policy_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,7 +67,9 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # Ordinary PRs use protected main. Exact-head maintainer contract
+          # authorization permits the newly verified executor and new checks.
+          ref: ${{ needs.proof.outputs.policy_ref }}
           path: .trusted-acceptance
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable

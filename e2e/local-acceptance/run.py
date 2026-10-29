@@ -241,12 +241,15 @@ def enforcement_acceptance():
             assert 'Changed protected files: ["spec/local_acceptance.json"]' in rejected.stderr, rejected.stderr
             assert "Trusted policy: origin/main (" in rejected.stderr, rejected.stderr
             assert "including added checks" in rejected.stderr, rejected.stderr
-            assert "no contract-update/bootstrap command" in rejected.stderr, rejected.stderr
+            assert 'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin' in rejected.stderr, rejected.stderr
+            assert "maintain/admin actor" in rejected.stderr, rejected.stderr
             assert "not a request for the end user to review code" in rejected.stderr, rejected.stderr
             assert "CONTRIBUTING.md#acceptance-contract-changes" in rejected.stderr, rejected.stderr
             assert not command("git", "ls-remote", "origin", "refs/heads/contract-change", cwd=work)
             assert command("git", "ls-remote", "origin", "refs/notes/local-acceptance", cwd=work) == before_notes
         command("git", "checkout", "feature", cwd=work)
+        from contract_update_acceptance import verify_contract_update
+        verify_contract_update(directory, work, FIXTURE_ENV)
         print("PASS: added/removed checks both block real pushes with diagnostics and unchanged remote refs")
 
         # Both a new commit and unsigned changes to a previously valid receipt

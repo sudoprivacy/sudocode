@@ -56,6 +56,11 @@ separate review. The same ACP subagent scenario also runs against different
 GPT and Claude routes, so a repeated test name alone does not establish redundant
 provider coverage.
 
+Preflight runs while a PR is draft and does not depend on draft state. Promoting
+the same commit to ready reuses that result instead of starting it again.
+The separate native acceptance workflow retains `ready_for_review`, because its
+real complementary hosts deliberately wait for readiness.
+
 ## Dependency cache within the existing quota
 
 Complementary native jobs use the same cache environment as the main publisher.

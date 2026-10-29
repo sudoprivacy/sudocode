@@ -223,8 +223,12 @@ jobs:
     if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
+    env: &workspace_ci_env
       SCODE_TEST_BACKEND: mock
+      # Keep debug assertions; omit disposable DWARF/PDB output. Resource
+      # acceptance has separate jobs and retains the normal release profile.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     strategy:
       fail-fast: false
       matrix:
@@ -279,16 +283,14 @@ jobs:
     if: &queue_ci ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     name: cargo test --workspace (windows-latest)
     runs-on: windows-latest
-    env:
-      SCODE_TEST_BACKEND: mock
+    env: *workspace_ci_env
     steps: *test_workspace_steps
 
   test-workspace-macos:
     if: *queue_ci
     name: cargo test --workspace (macos-latest)
     runs-on: macos-latest
-    env:
-      SCODE_TEST_BACKEND: mock
+    env: *workspace_ci_env
     steps: *test_workspace_steps
 
   terminal-resize:
@@ -717,6 +719,7 @@ jobs:
     if: *full_ci
     name: cargo clippy --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env: *workspace_ci_env
     strategy:
       fail-fast: false
       matrix:
@@ -736,12 +739,14 @@ jobs:
     if: *queue_ci
     name: cargo clippy --workspace (windows-latest)
     runs-on: windows-latest
+    env: *workspace_ci_env
     steps: *clippy_workspace_steps
 
   clippy-workspace-macos:
     if: *queue_ci
     name: cargo clippy --workspace (macos-latest)
     runs-on: macos-latest
+    env: *workspace_ci_env
     steps: *clippy_workspace_steps
 
   live-api-smoke:

@@ -228,6 +228,8 @@ colors/layout, plan, model-precedence and stderr cases. Eight separate pre-run
 steps are removed because the workspace already executes them. Standalone
 vendored Mermaid tests remain explicit. Benchmark entry points retain type
 checking without another optimized build of every test and benchmark.
+Workspace tests omit disposable debug-symbol output while retaining debug
+assertions; resource acceptance keeps its normal release profile.
 Real provider/API acceptance stays on <code>main</code> and manual dispatch;
 deterministic transport results do not establish live cache hits.</p>
 

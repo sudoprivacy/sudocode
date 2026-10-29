@@ -29,6 +29,12 @@ The integrated commit must pass all three platforms before landing. Rendering
 budgets, workloads, A/A calibration and sample counts are unchanged. Additional
 source before/after viewport diagnostics require an explicit label.
 
+Workspace tests and Clippy omit disposable debug-symbol output while retaining
+debug assertions. Their shared environment keeps Cargo cache inputs aligned.
+Release resource acceptance retains its normal release profile. The browser
+workflow triggers on Rust, its terminal harness and its own workflow changes;
+an unrelated workflow edit alone no longer starts two browser release builds.
+
 Browser release comparisons also restore the candidate's normal release
 dependency graph after compiling its test driver. Cargo may otherwise replace
 the candidate CLI with a dev-dependency graph while the baseline uses the
@@ -86,6 +92,12 @@ The audit did not collect a complete per-case execution denominator from every
 successful run. Cancelled attempts without failed-step conclusions were not
 all parsed. A case with no matching failure in this collection therefore has
 no recorded failure here; it is not proven to have never failed.
+
+For a concrete sample, the completed Ubuntu workspace log in
+[run 40788908391](https://github.com/sudoprivacy/sudocode/actions/runs/40788908391)
+records 592 passing PTY cases. Of those, 449 have no matching parsed failure in
+the month collection. That confirms execution in this attempt, not a complete
+month-wide execution count or an argument that the cases are unnecessary.
 
 Even with complete data, zero failures can mean a stable critical feature,
 limited execution, weak assertions or obsolete behavior. Removal needs a

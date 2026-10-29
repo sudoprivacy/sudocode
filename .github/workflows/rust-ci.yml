@@ -146,9 +146,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check generated cache metrics
@@ -219,13 +216,11 @@ jobs:
         run: diff -u --strip-trailing-cr .nexus-protocol-source/proto/nexus/grpc/vfs/vfs.proto rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto
 
   test-workspace:
-    # Heavy jobs skip draft PRs: agents iterate on drafts, and every push
-    # cancelled a run that had already spent its runner time. A skipped matrix
-    # job never expands its name, so the per-OS required checks stay "expected"
-    # on a draft instead of reporting success. Marking the PR ready runs them
-    # on the same commit, and the merge queue runs them again on the commit
-    # that becomes main.
-    if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
+    # One Linux feedback run per ready PR; all three operating systems gate the
+    # merge commit in the queue. Do not repeat those same suites on push/main.
+    # Explicit Windows/macOS jobs below retain the required check names when
+    # skipped on PRs, without allocating runners. Drafts allocate none.
+    if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
@@ -233,7 +228,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
     steps: &test_workspace_steps
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -267,59 +262,33 @@ jobs:
         # from workspace membership. Keep its original suite in every OS gate.
         # This step shares the existing cache and adds no separate CI job.
         run: cargo test --locked --manifest-path vendor/codex-mermaid/Cargo.toml --target-dir target
-      - name: PTY native bracketed paste
-        # Run the complete input journey on the actual OS PTY, including
-        # ConPTY. A platform exclusion cannot count as Windows acceptance.
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test -p rusty-sudocode-cli --test pty_bracketed_paste -- --nocapture
-      - name: PTY prefix and scoped-context contract
-        # Exercise the real CLI and capture its final HTTP requests. Pin the
-        # mock transport so a live-backend override cannot skip these checks.
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety -- --nocapture
-      - name: PTY sub-agent resume and completion workflow
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_subagent_workflow -- --nocapture
-      - name: PTY host takeover and explicit return of tool control
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test -p rusty-sudocode-cli --test pty_tool_pause -- --nocapture
-      - name: PTY default code colors match Codex
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_codex_colors --test pty_text_layout -- --nocapture
-      - name: PTY Markdown plan review and automatic execution
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_plan_markdown -- --nocapture
-      - name: PTY explicit default model overrides configuration
-        # This checks CLI precedence and the actual request model, independent
-        # of a provider's file-tool decisions or availability.
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test -p rusty-sudocode-cli --test pty_model_flag_priority -- --test-threads=1 --nocapture
-      - name: Stderr capture handoff under pipe backpressure
-        run: cargo test -p rusty-sudocode-cli --test stderr_capture_process -- --nocapture
+      - name: Type-check benchmark entry points
+        # Preserve the API-drift check without an extra optimized build/link of
+        # every workspace test and benchmark. Reuse this job's debug graph.
+        run: cargo check --workspace --benches --locked
       - name: Run workspace tests
         # Keep panic diagnostics visible if a Windows PTY aborts before libtest
-        # can print its captured failure output.
+        # can print its captured failure output. This includes cache-prefix,
+        # compaction, paste, subagent, tool-pause, colors/layout, plan, model
+        # precedence and stderr suites; separate pre-runs duplicated them.
         env:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
-        run: cargo test --workspace --features engine-acp/mailbox
+        run: cargo test --workspace --locked --features engine-acp/mailbox
+
+  test-workspace-windows:
+    if: &queue_ci ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    name: cargo test --workspace (windows-latest)
+    runs-on: windows-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+    steps: *test_workspace_steps
 
   test-workspace-macos:
-    # macOS is the scarcest runner pool (about 5 slots shared by every
-    # sudoprivacy repo). It runs in the merge queue and on main, never on a
-    # pull request: nothing reaches main without passing it on the exact
-    # merge commit, and the queue cannot be bypassed. On a pull request the
-    # job is skipped by `if`, which still reports the required check (as
-    # skipped) without allocating a runner. Same steps as `test-workspace`.
-    if: ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' }}
+    if: *queue_ci
     name: cargo test --workspace (macos-latest)
     runs-on: macos-latest
+    env:
+      SCODE_TEST_BACKEND: mock
     steps: *test_workspace_steps
 
   terminal-resize:
@@ -330,7 +299,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -400,7 +369,9 @@ jobs:
           if-no-files-found: warn
 
   a2a-live:
-    if: *full_ci
+    # The real daemon and cross-node journeys gate the integrated queue commit
+    # once, rather than repeating on the PR and on push/main too.
+    if: *queue_ci
     needs: one-nexus-vfs-pin
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
@@ -612,20 +583,18 @@ jobs:
 
   bench-compile:
     if: *full_ci
-    name: cargo bench --no-run (${{ matrix.os }})
+    name: Release acceptance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
-      - name: Compile benches (catches API drift without paying full sample cost)
-        run: cargo bench --workspace --no-run
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -751,7 +720,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
     steps: &clippy_workspace_steps
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -763,14 +732,14 @@ jobs:
       - name: Run workspace clippy
         run: cargo clippy --workspace
 
+  clippy-workspace-windows:
+    if: *queue_ci
+    name: cargo clippy --workspace (windows-latest)
+    runs-on: windows-latest
+    steps: *clippy_workspace_steps
+
   clippy-workspace-macos:
-    # macOS is the scarcest runner pool (about 5 slots shared by every
-    # sudoprivacy repo). It runs in the merge queue and on main, never on a
-    # pull request: nothing reaches main without passing it on the exact
-    # merge commit, and the queue cannot be bypassed. On a pull request the
-    # job is skipped by `if`, which still reports the required check (as
-    # skipped) without allocating a runner. Same steps as `clippy-workspace`.
-    if: ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' }}
+    if: *queue_ci
     name: cargo clippy --workspace (macos-latest)
     runs-on: macos-latest
     steps: *clippy_workspace_steps

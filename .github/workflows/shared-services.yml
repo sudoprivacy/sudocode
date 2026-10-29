@@ -8,8 +8,7 @@ on:
       - 'rust/**'
       - 'e2e/shared-services/**'
       - '.github/workflows/shared-services.yml'
-  push:
-    branches: [main]
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -24,7 +23,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+        # Linux PR feedback, then every supported host on the integrated tree.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-15","macos-15-intel"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:

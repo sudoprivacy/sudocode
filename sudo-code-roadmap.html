@@ -209,8 +209,39 @@ safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
 <h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
 
 <p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
-of the scode-native testable feature surface, green on every
-<code>main</code> commit of sudocode CI.</p>
+of the scode-native testable feature surface. The merge queue must validate the
+commit that becomes <code>main</code> before landing.</p>
+
+<h3>CI cadence and coverage (2026-10-29)</h3>
+
+<p>A ready PR runs the complete deterministic workspace suite on Linux. The
+merge queue runs it on Linux, macOS and Windows against the integrated commit.
+The subsequent <code>main</code> push does not repeat those full suites.
+For one ready PR, one queue group and one main push, this reduces full workspace
+executions from eight to four. Native terminal resize and release acceptance
+follow the same cadence. Shared-service acceptance runs on Linux for PR feedback
+and all four supported hosts in the queue. Drafts allocate no heavy runners;
+manual dispatch and existing experimental branch pushes retain full validation.</p>
+
+<p>The workspace run includes cache-prefix, compaction, paste, subagent, tool-pause,
+colors/layout, plan, model-precedence and stderr cases. Eight separate pre-run
+steps are removed because the workspace already executes them. Standalone
+vendored Mermaid tests remain explicit. Benchmark entry points retain type
+checking without another optimized build of every test and benchmark.
+Real provider/API acceptance stays on <code>main</code> and manual dispatch;
+deterministic transport results do not establish live cache hits.</p>
+
+<p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
+suite executions does not halve the feature surface or earn additional coverage.
+No unique PTY case is deleted solely for having no recorded failure.
+The month audit covers 8,323 runs and all 8,436 attempts, including retries;
+its 954 failed-step log bundles contain 160 distinct PTY failure identifiers.
+These include provider and fixture failures, so they are not a product-bug count.
+The audit lacks a complete per-case execution denominator and cannot certify
+that any case has never failed. See the
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-workload-audit-20261029.md">CI workload audit</a>
+for timing, selection and measurement limits. Execution counts are a static
+reduction; actual latency savings require post-change CI observations.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
 
@@ -246,7 +277,7 @@ that diagnostic.</p>
       asserts on the byte stream <code>scode</code> produces. Catches
       API integration / tool dispatch / streaming regressions without
       any TTY.</td>
-      <td>No — it is a CI gate, not an e2e measure.</td>
+      <td>No — optional debugging aid, not an e2e measure.</td>
       <td><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
     </tr>
   </tbody>
@@ -255,9 +286,9 @@ that diagnostic.</p>
 <div class="callout">
   <strong>Coverage rule:</strong> a feature is <em>Covered</em> only
   when <code>pty-expect</code> exercises it end-to-end on
-  <code>main</code> CI. The mock parity harness still runs on every
-  PR as a required gate and catches API / dispatch / streaming
-  regressions early — but it tests the lower half of the stack
+  the integrated merge-queue commit before it becomes <code>main</code>.
+  The optional mock parity harness helps debug API / dispatch / streaming
+  failures, but it tests the lower half of the stack
   ("does <code>scode</code> dispatch and stream correctly?") and
   not the upper half a user actually sees ("does the REPL render it
   correctly, does Ctrl+C interrupt cleanly, does the prompt redraw

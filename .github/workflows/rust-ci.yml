@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: error-observation-diagnostic-${{ github.ref }}
   cancel-in-progress: false
@@ -22,10 +23,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          cache-on-failure: true
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
-      - name: Compare raw bytes and rendered errors with the same immutable CLI
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-windows-error-observation-diagnostic
+          run-id: 40791713774
+          github-token: ${{ github.token }}
+          path: previous-probe
+      - name: Use the original CI ephemeral port range
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          netsh int ipv4 show dynamicport tcp
+      - name: Preserve the original full-suite failure or an inconclusive diagnostic
         run: python .github/scripts/probe_error_observation.py
       - name: Preserve every control and the actual Windows binary pair
         if: always()

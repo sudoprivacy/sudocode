@@ -1,4 +1,4 @@
-"""Causal native-terminal probe; this is not candidate PR acceptance."""
+"""Bounded native diagnostic; neither a CI retry nor candidate acceptance."""
 import hashlib
 import json
 import os
@@ -12,7 +12,7 @@ ROOT = Path.cwd()
 OUT = ROOT / "error-observation-probe"
 OUT.mkdir(exist_ok=False)
 BASE = "63f569ce885c6bce0939b8f956e4683f2690f242"
-CASE = "thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history"
+CLI_SHA256 = "c2ed7ad1a1ad361a787286e594dcc2d34a378b0628bb18cc9a29d2938c57fee4"
 allowed = {
     ".github/workflows/rust-ci.yml",
     ".github/scripts/probe_error_observation.py",
@@ -28,7 +28,9 @@ record = {
     "production_source_unchanged": True,
     "changed_paths": sorted(changed),
     "toolchain": subprocess.check_output(["rustc", "--version"], text=True).strip(),
-    "controls": [],
+    "available_cpus": os.cpu_count(),
+    "predecessor_artifact_run": 40791713774,
+    "conditions": [],
 }
 
 
@@ -38,86 +40,101 @@ def save():
 
 save()
 build = OUT / "compile.jsonl"
+names = ["pty_bracketed_paste", "pty_cache_prefix", "pty_compaction_safety"]
+command = ["cargo", "test", "--workspace", "--no-run", "--message-format=json"]
+for name in names:
+    command.extend(["--test", name])
 with build.open("wb") as stream:
-    built = subprocess.run([
-        "cargo", "test", "--workspace", "--test", "pty_cache_prefix", "--no-run",
-        "--message-format=json",
-    ], cwd=ROOT / "rust", stdout=stream, stderr=subprocess.STDOUT)
+    built = subprocess.run(command, cwd=ROOT / "rust", stdout=stream, stderr=subprocess.STDOUT)
 assert built.returncode == 0
-messages = []
+executables = {}
 for line in build.read_text(encoding="utf-8", errors="replace").splitlines():
     try:
-        messages.append(json.loads(line))
+        item = json.loads(line)
     except ValueError:
-        pass
-test = next(Path(item["executable"]) for item in messages
-            if item.get("reason") == "compiler-artifact"
-            and item.get("target", {}).get("name") == "pty_cache_prefix"
-            and item.get("executable"))
-cli = ROOT / "rust/target/debug/scode.exe"
+        continue
+    name = item.get("target", {}).get("name")
+    if item.get("reason") == "compiler-artifact" and name in names and item.get("executable"):
+        executables[name] = Path(item["executable"])
+assert set(executables) == set(names), executables
 images = OUT / "bin"
 images.mkdir()
 sealed_cli = images / "scode-before-observation-fix.exe"
-sealed_test = images / "pty-cache-prefix-observation-probe.exe"
-for source, sealed in [(cli, sealed_cli), (test, sealed_test)]:
-    assert source.is_file(), source
-    shutil.copy2(source, sealed)
+previous_cli = ROOT / "previous-probe/bin/scode-before-observation-fix.exe"
+assert hashlib.sha256(previous_cli.read_bytes()).hexdigest() == CLI_SHA256
+shutil.copy2(previous_cli, sealed_cli)
+sealed = {}
+for name, path in executables.items():
+    sealed[name] = images / f"{name}-diagnostic.exe"
+    shutil.copy2(path, sealed[name])
 record["images"] = {
     str(path.relative_to(OUT)): hashlib.sha256(path.read_bytes()).hexdigest()
-    for path in [sealed_cli, sealed_test]
+    for path in [sealed_cli, *sealed.values()]
 }
 target_libdir = subprocess.check_output(
     ["rustc", "--print", "target-libdir"], text=True).strip()
-record["cargo_runtime_paths"] = [str(test.parent), str(cli.parent), target_libdir]
+record["cargo_runtime_paths"] = [str(next(iter(executables.values())).parent),
+                                 str(ROOT / "rust/target/debug"), target_libdir]
 save()
 
 
-def control(columns, mode):
+def condition(name, suite, threads=None):
     env = dict(os.environ, SCODE_TEST_BACKEND="mock", SCODE_TEST_BIN=str(sealed_cli),
-               SCODE_ERROR_OBSERVATION_PROBE_COLUMNS=str(columns),
-               SCODE_ERROR_OBSERVATION_PROBE_MODE=mode)
+               SCODE_ERROR_OBSERVATION_PROBE_MODE="raw")
+    for key in ["RUST_TEST_THREADS", "SCODE_ERROR_OBSERVATION_PROBE_COLUMNS"]:
+        env.pop(key, None)
     env["PATH"] = os.pathsep.join(record["cargo_runtime_paths"] + [env.get("PATH", "")])
-    command = [str(sealed_test), "--exact", CASE, "--test-threads=1", "--nocapture"]
-    log = OUT / f"{columns}-{mode}.log"
+    command = [str(sealed[suite]), "--nocapture"]
+    if threads is not None:
+        command.append(f"--test-threads={threads}")
+    log = OUT / f"{name}.log"
     started = time.monotonic()
     with log.open("xb") as stream:
         result = subprocess.run(command, cwd=ROOT / "rust", env=env,
                                 stdout=stream, stderr=subprocess.STDOUT)
-    observations = []
+    observations, phases = [], []
     for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
-        if "ERROR_PROBE_OBSERVATION " in line:
-            observations.append(json.loads(line.split("ERROR_PROBE_OBSERVATION ", 1)[1]))
-    row = {"columns": columns, "mode": mode, "exit_code": result.returncode,
+        for marker, rows in [("ERROR_PROBE_OBSERVATION ", observations),
+                             ("ERROR_PROBE_PHASE ", phases)]:
+            if marker in line:
+                rows.append(json.loads(line.split(marker, 1)[1]))
+    row = {"name": name, "suite": suite, "geometry": "original default; no resize",
+           "threads": threads or "original default", "exit_code": result.returncode,
            "seconds": round(time.monotonic() - started, 2), "command": command,
-           "log": str(log.relative_to(OUT)), "observations": observations}
-    record["controls"].append(row)
+           "log": str(log.relative_to(OUT)), "observations": observations, "phases": phases}
+    record["conditions"].append(row)
     save()
-    print(json.dumps({key: row[key] for key in ["columns", "mode", "exit_code", "seconds"]}),
-          flush=True)
+    print(json.dumps({key: row[key] for key in ["name", "exit_code", "seconds"]}), flush=True)
     return row
 
 
-for columns in [64, 72, 80, 88, 96, 120]:
-    before = control(columns, "raw")
-    if before["exit_code"] == 0:
-        continue
-    valid = any(item["raw_failed"] and item["visible"]
-                and item["requests"] == item["expected_requests"]
-                and item["archives"] == item["expected_archives"]
-                for item in before["observations"])
-    record["negative_control_valid"] = valid
-    if not valid:
-        record["unclassified_failure"] = True
+# Preserve the original prelude, geometry, suite breadth and default concurrency.
+prelude = condition("original-bracketed-paste-prelude", "pty_bracketed_paste")
+if prelude["exit_code"] != 0:
+    record["unclassified_prelude_failure"] = True
+    save()
+    sys.exit(2)
+original = condition("original-full-cache-suite", "pty_cache_prefix")
+if original["exit_code"] == 0:
+    scoped = condition("original-full-compaction-suite", "pty_compaction_safety")
+    if scoped["exit_code"] != 0:
+        record["unclassified_compaction_failure"] = True
         save()
         sys.exit(2)
-    after = control(columns, "screen")
-    record["positive_control_passed"] = after["exit_code"] == 0
-    record["images_unchanged"] = all(
-        hashlib.sha256((OUT / path).read_bytes()).hexdigest() == digest
-        for path, digest in record["images"].items())
-    save()
-    sys.exit(0 if record["positive_control_passed"] and record["images_unchanged"] else 1)
-record["negative_control_valid"] = False
-record["not_reproduced"] = True
+    # A single declared pressure condition, never a run-until-green loop.
+    last = condition("full-cache-suite-pressure-16", "pty_cache_prefix", threads=16)
+else:
+    last = original
+record["negative_observed"] = last["exit_code"] != 0
+record["raw_render_mismatch_proved"] = any(
+    item["raw_timeout"] and item["visible"] and item["raw_found_after_failure"] is False
+    and item["requests"] == item["expected_requests"]
+    and item["archives"] == item["expected_archives"]
+    for item in last["observations"])
+record["not_reproduced"] = not record["negative_observed"]
+record["images_unchanged"] = all(
+    hashlib.sha256((OUT / path).read_bytes()).hexdigest() == digest
+    for path, digest in record["images"].items())
 save()
-sys.exit(3)
+# No green acceptance: either a preserved failure, or an inconclusive probe.
+sys.exit(2 if record["negative_observed"] else 3)

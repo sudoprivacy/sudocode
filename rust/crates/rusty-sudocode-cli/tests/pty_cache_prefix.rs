@@ -730,14 +730,17 @@ fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
             .lock()
             .unwrap()
             .extend([message.to_string(), message.to_string()]);
+        probe_rejection_phase(&env, None, message, "before-spawn");
         let mut cli = spawn(&env, &path);
+        probe_rejection_phase(&env, Some(&cli), message, "ready");
         if let Ok(columns) = std::env::var("SCODE_ERROR_OBSERVATION_PROBE_COLUMNS") {
             cli.resize(40, columns.parse().unwrap()).unwrap();
             common::expect_input_line_cleared(&cli, WAIT, "controlled error layout ready");
         }
         cli.send("Continue despite the deliberately rejected request.\r")
             .unwrap();
-        probe_error_observation(&mut cli, &capture, &path, message, attempts, archives);
+        probe_rejection_phase(&env, Some(&cli), message, "sent");
+        probe_error_observation(&env, &mut cli, &capture, &path, message, attempts, archives);
         common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
         assert_eq!(capture.bodies().len(), attempts);
         assert_eq!(repair_archives(&path).len(), archives);
@@ -746,6 +749,7 @@ fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
 }
 
 fn probe_error_observation(
+    env: &TestEnv,
     cli: &mut PtySession,
     capture: &Capture,
     path: &std::path::Path,
@@ -766,6 +770,21 @@ fn probe_error_observation(
         cli.expect("recovery-test-rejection")
     };
     let screen = common::screen_tail(cli, 12000);
+    // Check without another wait after snapshotting the screen: an arrival at
+    // the original deadline must not be mistaken for an ANSI/raw mismatch.
+    let raw_after_failure = result
+        .is_err()
+        .then(|| cli.expect_within("recovery-test-rejection", Duration::ZERO));
+    let log = env.workspace_root().join("cache-prefix-requests.jsonl");
+    let trace = std::fs::read_to_string(&log).unwrap_or_else(|error| error.to_string());
+    let trace_tail: String = trace
+        .chars()
+        .rev()
+        .take(250_000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     eprintln!(
         "ERROR_PROBE_OBSERVATION {}",
         json!({
@@ -773,6 +792,8 @@ fn probe_error_observation(
             "columns": std::env::var("SCODE_ERROR_OBSERVATION_PROBE_COLUMNS").ok(),
             "message": message,
             "raw_failed": result.is_err(),
+            "raw_timeout": matches!(&result, Err(pty_expect::Error::Timeout(_, _))),
+            "raw_found_after_failure": raw_after_failure.as_ref().map(Result::is_ok),
             "error": result.as_ref().err().map(ToString::to_string),
             "visible": common::screen_contains(&screen, "recovery-test-rejection"),
             "requests": capture.bodies().len(),
@@ -780,10 +801,29 @@ fn probe_error_observation(
             "archives": repair_archives(path).len(),
             "expected_archives": archives,
             "timeout_millis": common::DEFAULT_TIMEOUT.as_millis(),
+            "pid": cli.process_id(),
+            "workspace": env.workspace_root(),
+            "trace_path": log,
+            "trace_tail": trace_tail,
             "screen": screen
         })
     );
     result.expect("original error observation");
+}
+
+fn probe_rejection_phase(env: &TestEnv, cli: Option<&PtySession>, message: &str, phase: &str) {
+    eprintln!(
+        "ERROR_PROBE_PHASE {}",
+        json!({
+            "phase": phase,
+            "message": message,
+            "workspace": env.workspace_root(),
+            "pid": cli.and_then(PtySession::process_id),
+            "unix_millis": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+            "screen": cli.map(|cli| common::screen_tail(cli, 4000)),
+        })
+    );
 }
 
 #[test]

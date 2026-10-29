@@ -29,6 +29,13 @@ The integrated commit must pass all three platforms before landing. Rendering
 budgets, workloads, A/A calibration and sample counts are unchanged. Additional
 source before/after viewport diagnostics require an explicit label.
 
+Browser release comparisons also restore the candidate's normal release
+dependency graph after compiling its test driver. Cargo may otherwise replace
+the candidate CLI with a dev-dependency graph while the baseline uses the
+production graph. No build occurs between freezing the final pair and measuring
+them. That correction adds a build step to preserve a valid comparison; it is
+not claimed as a workload saving.
+
 The 50% figure describes full-suite execution copies. It is not a measured
 50% reduction in wall time, billed usage, unique test cases or paid API calls.
 For example, removing an optimized benchmark compilation moves some cold

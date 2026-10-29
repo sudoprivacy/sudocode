@@ -74,15 +74,17 @@ def run(args, root):
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
     endpoint = f'127.0.0.1:{port}'
+    bind_addr = f'{args.bind_host}:{port}'
     native_env = env | {'NEXUS_DATA_DIR': str(data), 'NEXUS_IDENTITY_DIR': str(identity),
         'NEXUS_ADVERTISE_ADDR': endpoint, 'NEXUS_CLUSTER_INIT': 'sharedzone',
         'NEXUS_CLUSTER_INIT_MOUNTS': '/agents=sharedzone', 'RUST_LOG': 'info'}
     daemon_log = (root / 'bootstrap.log').open('wb')
-    bootstrap = subprocess.Popen([str(args.daemon), '--bind-addr', endpoint],
+    bootstrap = subprocess.Popen([str(args.daemon), '--bind-addr', bind_addr],
         env=native_env, stdout=daemon_log, stderr=subprocess.STDOUT)
     children = []
     receipt = {'daemonSha256': sha(args.daemon), 'scodeSha256': sha(args.scode),
-        'liveFleetTouched': False, 'haAccepted': False, 'domainJoinAccepted': False}
+        'liveFleetTouched': False, 'haAccepted': False, 'domainJoinAccepted': False,
+        'bindAddr': bind_addr, 'clientEndpoint': endpoint}
 
     def grpc(method, payload, raft=False, zones=False):
         proto = Path(__file__).with_name('cluster-info.proto') if raft else (
@@ -144,7 +146,7 @@ def run(args, root):
             'binarySha256': sha(args.daemon), 'dataDir': str(data), 'identityDir': str(identity),
             'nodeId': str(int.from_bytes((data / '.node_id').read_bytes(), 'big')), 'caSha256': sha(data / 'tls/ca.pem'),
             'certificateSha256': sha(data / 'tls/node.pem'), 'localEndpoint': endpoint,
-            'advertiseAddr': endpoint, 'bindAddr': endpoint, 'hostname': 'localhost',
+            'advertiseAddr': endpoint, 'bindAddr': bind_addr, 'hostname': 'localhost',
             'serverName': 'nexus-node'}
         config = root / 'owner.json'
         config.write_text(json.dumps(profile))
@@ -263,6 +265,8 @@ if __name__ == '__main__':
     for name in ['scode', 'grpcurl', 'artifacts']:
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--daemon', type=Path, help='Otherwise install the signed/pinned native package through scode')
+    parser.add_argument('--bind-host', choices=['127.0.0.1', '0.0.0.0'], default='127.0.0.1',
+        help='Exercise a loopback or wildcard Node listener through the same loopback client endpoint')
     options = parser.parse_args()
     for name in ['scode', 'grpcurl']:
         setattr(options, name, getattr(options, name).resolve(strict=True))

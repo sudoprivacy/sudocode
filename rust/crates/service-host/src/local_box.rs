@@ -4,9 +4,10 @@
 
 use std::fs;
 use std::io::Read;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use nexus_vfs_client::NexusVfsClient;
 use serde::{Deserialize, Serialize};
@@ -171,15 +172,16 @@ impl LocalBox {
     /// An occupied endpoint belongs to the existing owner. It is never stopped,
     /// adopted by PID, or taken as permission to start another Node.
     pub(crate) fn external_running(&self) -> Result<bool> {
-        match TcpListener::bind(self.local_endpoint) {
-            Ok(listener) => {
-                drop(listener);
-                Ok(false)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+        // A loopback bind can succeed beside a wildcard listener on Windows.
+        // Probe the actual connection target, then require its pinned TLS
+        // identity. Only an explicit refusal establishes that it is stopped;
+        // a timeout, another listener or an auth failure must not launch a Node.
+        match TcpStream::connect_timeout(&self.local_endpoint, Duration::from_secs(2)) {
+            Ok(_) => {
                 self.client()?.stat("/", "")?;
                 Ok(true)
             }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
             Err(error) => Err(error.into()),
         }
     }

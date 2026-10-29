@@ -58,6 +58,9 @@ jobs:
           python e2e/shared-services/existing_box.py --scode "rust/target/debug/scode${SUFFIX}" \
             --grpcurl "$(native_path "$GRPCURL")" \
             --artifacts "${{ runner.temp }}/scode-services-evidence/existing-box"
+          python e2e/shared-services/existing_box.py --scode "rust/target/debug/scode${SUFFIX}" \
+            --grpcurl "$(native_path "$GRPCURL")" --bind-host 0.0.0.0 \
+            --artifacts "${{ runner.temp }}/scode-services-evidence/existing-box-wildcard"
       - name: Preserve service startup failure logs
         if: failure()
         uses: actions/upload-artifact@v4

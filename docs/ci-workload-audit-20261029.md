@@ -19,6 +19,7 @@ For a ready PR, one queue group and the resulting main push:
 | Short metadata and integrity jobs | 7 hosted jobs per event | 1 shared preflight job per event |
 | Specialized PTY/stderr pre-run steps per workspace job | 8, then the same cases in the workspace suite | 0; cases remain in the workspace suite |
 | Benchmark API compilation | Optimized build/link of workspace benchmarks and tests | Locked benchmark type-check using the workspace job's debug graph |
+| ACP package integration | 4 PR hosts + 4 main hosts | 4 PR hosts; main keeps exact-merged-revision builds and package artifacts |
 
 Provider assertions remain on main for changed provider inputs and explicit
 dispatch. Rendering/browser checks are mandatory locally, with their original
@@ -62,6 +63,11 @@ The separate native acceptance workflow retains `ready_for_review`, because its
 real complementary hosts deliberately wait for readiness.
 
 ## Dependency cache within the existing quota
+
+Workflow-only changes unrelated to `ci-dependency-cache.yml` do not start its
+three host jobs. Rust pushes still check for a new dependency/toolchain/image
+key, and changes to the publisher still exercise it. Cache-hit correctness and
+source validation are unchanged.
 
 Complementary native jobs use the same cache environment as the main publisher.
 `rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
@@ -364,3 +370,13 @@ count, up to two available CPUs, after restoring dependencies. This removes an
 unnecessary hosted build throttle without changing cache keys, source profiles,
 test concurrency, assertions or deadlines. Local/manual execution remains one
 worker. Actual hosted build-time benefit requires a comparable native run.
+
+## ACP package runs
+
+Keep integration and portable installed-package journeys on all four PR hosts.
+Main still builds and packs its exact merged revision on each host, retaining
+the commit-bound manifest, archive integrity receipt and uploaded artifacts.
+It does not repeat the same integration journeys. As with native queue reuse,
+an interaction unique to merged changes is outside that repeated runtime
+coverage. Explicit runs retain integration; a new PR/ref head cancels an
+obsolete package run. No scenario or distribution platform is deleted.

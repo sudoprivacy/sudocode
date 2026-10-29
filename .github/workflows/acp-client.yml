@@ -12,6 +12,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: acp-client-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   package:
     name: Package integration (${{ matrix.os }})
@@ -35,7 +38,14 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
       - run: npm ci
-      - run: npm test
+      - name: Verify package integration before merge
+        if: github.event_name != 'push'
+        run: npm test
+      - name: Build the merged revision for publication
+        if: github.event_name == 'push'
+        # Preserve main's exact-revision artifacts without repeating the PR's
+        # integration journeys on all four hosts.
+        run: npm run build
       - run: npm run pack:runtime
       - uses: actions/upload-artifact@v4
         with:

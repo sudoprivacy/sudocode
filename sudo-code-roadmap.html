@@ -277,6 +277,11 @@ select the daemon guard; no daemon journey is removed.</p>
 fixture checks. Their lightweight preflight retains the protocol pin and input
 scope required by existing daemon/provider jobs. PR, queue and explicit runs
 retain full integrity checks; this removes duplicate post-merge work.</p>
+<p>ACP package integration stays on all four PR hosts. Main keeps builds and
+commit-bound package artifacts for its merged revision, reusing the PR's
+integration result. Obsolete package heads cancel within the same PR/ref.
+Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
+publisher changes still check for new dependency/toolchain/image keys.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.

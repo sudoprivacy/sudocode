@@ -245,9 +245,13 @@ fn footer_names_the_workspace_branch_and_yields_it_to_any_tip() {
     let root = env.workspace_root();
     git(root, &["init", "-q", "-b", "feat/footer-branch"]);
     git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let repo = root.file_name().unwrap().to_string_lossy().into_owned();
     let mut session = spawn(&env, "15;0", false);
-    // Idle with nothing to say: the branch leads the routine filler.
-    wait_footer(&session, "⎇ feat/footer-branch · Type /help for commands");
+    // Idle, not typing: the position, `repo ⎇ branch`, leads the filler.
+    wait_footer(
+        &session,
+        &format!("{repo} ⎇ feat/footer-branch · Type /help for commands"),
+    );
 
     // A real tip takes the slot; the branch is state, not advice, and yields.
     turn(
@@ -269,11 +273,92 @@ fn footer_names_the_workspace_branch_and_yields_it_to_any_tip() {
         "branch left the per-turn line: {rows:?}"
     );
 
-    // Detached, the footer names the commit, refreshed when the turn ends.
+    // Detached on a branch tip, the footer names that tip and the commit,
+    // refreshed when the turn ends.
     git(root, &["checkout", "-q", "--detach"]);
     let commit = git(root, &["rev-parse", "--short", "HEAD"]);
     turn(&env, &mut session, &[]);
-    wait_footer(&session, &format!("⎇ {commit} · /help"));
+    wait_footer(&session, &format!("⎇ feat/footer-branch@{commit} · /help"));
     assert!(!footer(&session).contains("detached HEAD"));
+    exit(&mut session);
+}
+
+/// The position and the keys for the current state; typing never changes it,
+/// so keystrokes never redraw the footer. It changes when a turn starts and
+/// ends, as the rest of the screen does.
+#[test]
+fn footer_keeps_position_and_state_keys_while_typing_and_switches_with_the_turn() {
+    let env = TestEnv::new_mock("footer-turn-state");
+    let root = env.workspace_root();
+    git(root, &["init", "-q", "-b", "feat/turn-state"]);
+    git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    std::fs::write(
+        root.join("wait.sh"),
+        "printf started > tool-started; while test ! -f release-tool; do sleep 0.1; done",
+    )
+    .unwrap();
+    let mut session = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    session.resize(30, 180).unwrap();
+    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "initial input");
+    let idle = "⎇ feat/turn-state · Type /help for commands";
+    wait_footer(&session, idle);
+
+    // Typing a message or a command leaves the footer as it was.
+    for draft in ["draft", "/he"] {
+        session.send(draft).unwrap();
+        common::expect_input_line(&session, draft, common::DEFAULT_TIMEOUT, "draft shown");
+        assert!(
+            footer(&session).contains(idle),
+            "typing redrew the footer: {}",
+            footer(&session)
+        );
+        session.send("\x15").unwrap();
+        common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "cleared");
+    }
+
+    // A turn held open by a real shell: the position stays, with the steering keys.
+    let call =
+        json!({"id":"hold","name":"Bash","input":{"command":"sh wait.sh","timeout":120_000}});
+    let prompt = format!(
+        "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
+        json!([call])
+    );
+    session
+        .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+        .unwrap();
+    common::expect_screen(
+        &session,
+        |s| !common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "prompt typed",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |_| root.join("tool-started").exists(),
+        common::DEFAULT_TIMEOUT,
+        "turn running",
+    );
+    let running = "⎇ feat/turn-state · Enter steer · Tab queue · Esc/Ctrl+C cancel";
+    wait_footer(&session, running);
+    session.send("steer").unwrap();
+    common::expect_input_line(
+        &session,
+        "steer",
+        common::DEFAULT_TIMEOUT,
+        "typed during turn",
+    );
+    assert!(
+        footer(&session).contains(running),
+        "typing redrew the footer: {}",
+        footer(&session)
+    );
+    session.send("\x15").unwrap();
+
+    std::fs::write(root.join("release-tool"), "release").unwrap();
+    wait_footer(&session, "⎇ feat/turn-state · /help");
     exit(&mut session);
 }

@@ -110,6 +110,36 @@ fn wait_for(path: &Path) {
     }
 }
 
+fn wait_for_reclaimed_session(path: &Path, store_root: &Path) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let references_empty = std::fs::read_dir(store_root.join(".cleanup"))
+            .unwrap()
+            .next()
+            .is_none();
+        if !path.exists() && references_empty {
+            // The worker removes its discovery reference while holding this
+            // barrier. Observe its retirement before deleting the fixture.
+            if let Some(_retired) = StdFsBackend
+                .try_lock(
+                    &path.with_extension("writer.lock").to_string_lossy(),
+                    30_000,
+                )
+                .unwrap()
+            {
+                assert!(path.with_extension("completions.json").exists());
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "deleted Session cleanup did not retire: {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct Fixture(PathBuf);
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -476,6 +506,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
+    wait_for_reclaimed_session(&path, &store_root);
     drop(fixture);
 }
 

@@ -1,4 +1,4 @@
-//! Behavioral PTY (ConPTY) tests for `scode cron` — real user journeys a
+//! Behavioral PTY (`ConPTY`) tests for `scode cron` — real user journeys a
 //! human runs at a terminal: schedule a task, see it listed + persisted,
 //! toggle it, fire it and watch the agent actually run, expire a one-shot.
 //! 3+ causal steps per test.
@@ -97,15 +97,16 @@ impl CronEnv {
         if matches!(disable_cron_tools, Some(false)) {
             command.push_str(" -u SUDOCODE_DISABLE_CRON_TOOLS");
         }
-        command.push_str(&format!(
-            " SUDO_CODE_CONFIG_HOME={config_home} HOME={home} NO_COLOR=1 TERM=xterm"
-        ));
+        let _ = std::fmt::Write::write_fmt(
+            &mut command,
+            format_args!(" SUDO_CODE_CONFIG_HOME={config_home} HOME={home} NO_COLOR=1 TERM=xterm"),
+        );
         if matches!(disable_cron_tools, Some(true)) {
             command.push_str(" SUDOCODE_DISABLE_CRON_TOOLS=1");
         }
-        command.push_str(&format!(" {scode}"));
+        let _ = std::fmt::Write::write_fmt(&mut command, format_args!(" {scode}"));
         for arg in args {
-            command.push_str(&format!(" {}", shell_quote(arg)));
+            let _ = std::fmt::Write::write_fmt(&mut command, format_args!(" {}", shell_quote(arg)));
         }
 
         let sh = common::resolve_sh();
@@ -370,7 +371,7 @@ fn repl_cron_slash_add_and_list() {
     assert!(json.contains("\"kind\": \"every\""), "kind parsed: {json}");
 }
 
-/// A host that owns scheduling (sudowork) sets SUDOCODE_DISABLE_CRON_TOOLS so
+/// A host that owns scheduling (sudowork) sets `SUDOCODE_DISABLE_CRON_TOOLS` so
 /// the agent can't "schedule" a task that would persist but never fire — an
 /// orphan. Contrast proves the gate is load-bearing: same prompt, tool absent
 /// vs present.

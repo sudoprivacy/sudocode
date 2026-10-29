@@ -468,10 +468,11 @@ impl LineEditor {
                         return Ok(ReadOutcome::Exit);
                     } else {
                         self.pending_exit_at = Some(std::time::Instant::now());
-                        // Show exit hint in the footer area (2 lines below prompt).
-                        write!(
+                        // Keep the next editor's region empty, as with peer
+                        // notices: the editor alone owns rows below its prompt.
+                        writeln!(
                             stdout,
-                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F",
+                            "  {DIM}Press Ctrl-C again to exit{RESET}",
                             DIM = DIM,
                             RESET = RESET
                         )?;

@@ -38,7 +38,7 @@
 /// - `PATH` / `PATHEXT` / `ComSpec` — resolving an external program *at all*.
 ///   `PATHEXT` is what makes a bare `printf` find `printf.exe`; without it
 ///   `scode`'s bash tool runs the command and captures empty output, which
-///   surfaces as a mystifying "expected `alpha from bash`, got ``".
+///   surfaces as a mystifying mismatch between `alpha from bash` and empty output.
 /// - `APPDATA` / `LOCALAPPDATA` / `ProgramData` / `ProgramFiles*` /
 ///   `PSModulePath` — PowerShell, which is the shell `scode`'s bash tool uses
 ///   on Windows.

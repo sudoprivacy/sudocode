@@ -5,7 +5,7 @@
 //! / `grep_search` against a real in-memory `Kernel` (not a mock) so the
 //! backend-aware path normalisation and the `readdir`-composed traversal
 //! are validated end to end. The paths used (`/ws/…`) do not exist on the
-//! host, so a host-`std::fs` regression would surface as a NotFound
+//! host, so a host-`std::fs` regression would surface as a `NotFound`
 //! rather than silently passing.
 //!
 //! One test here is deliberately NOT about the VFS: `link` is a contract both
@@ -13,12 +13,12 @@
 //! in a comment while nothing exercised it. The two live next to each other so
 //! the claim is checked rather than asserted.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
+use kernel::abc::object_store::ObjectStore;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
@@ -34,14 +34,6 @@ use runtime::{
 };
 use sudo_contracts::ResourceRef;
 
-/// Minimal in-memory content backend so a fresh `Kernel` can round-trip
-/// regular-file bytes (dirents fall through to the global metastore; only
-/// content needs a store). Mirrors the kernel's own `TestObjectStore`.
-#[derive(Default)]
-struct MemStore {
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
-}
-
 struct CountingAllow(Arc<AtomicUsize>);
 
 impl PermissionProvider for CountingAllow {
@@ -54,65 +46,6 @@ impl PermissionProvider for CountingAllow {
     ) -> Result<(), KernelError> {
         self.0.fetch_add(1, Ordering::Relaxed);
         Ok(())
-    }
-}
-
-impl ObjectStore for MemStore {
-    fn name(&self) -> &str {
-        "mem"
-    }
-
-    fn write_content(
-        &self,
-        content: &[u8],
-        content_id: &str,
-        _ctx: &OperationContext,
-        offset: u64,
-    ) -> Result<WriteResult, StorageError> {
-        let mut b = self.blobs.lock().unwrap();
-        let mut data = if offset > 0 {
-            b.get(content_id).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let start = offset as usize;
-        if start > data.len() {
-            data.resize(start, 0);
-        }
-        let end = start + content.len();
-        if end > data.len() {
-            data.resize(end, 0);
-        }
-        data[start..end].copy_from_slice(content);
-        let size = data.len() as u64;
-        b.insert(content_id.to_string(), data);
-        Ok(WriteResult {
-            content_id: content_id.to_string(),
-            version: content_id.to_string(),
-            size,
-        })
-    }
-
-    fn read_content(
-        &self,
-        content_id: &str,
-        _ctx: &OperationContext,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-
-    fn get_content_size(&self, content_id: &str) -> Result<u64, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .map(|d| d.len() as u64)
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
     }
 }
 
@@ -131,7 +64,7 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
 }
 
 /// A planted descriptor for `name` in `zone` — the test-side stand-in for
-/// what the ManagedAgentService plants for a real managed agent, so backends
+/// what the `ManagedAgentService` plants for a real managed agent, so backends
 /// built from it carry the trusted-local zone source a planted descriptor
 /// grants.
 fn desc_for(name: &str, zone: &str) -> AgentDescriptor {
@@ -503,18 +436,16 @@ fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     fs.write("secret.txt", b"private").unwrap();
     policy.deny("/ws/secret.txt");
-    let mounts = vec![mount.to_string_lossy().into_owned()];
+    let native_mount = mount.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let mounts = [native_mount];
     #[cfg(windows)]
     let mounts = {
-        let ordinary = mounts[0]
+        let ordinary = native_mount
             .strip_prefix(r"\\?\")
             .expect("canonicalized Windows workspace")
             .to_string();
-        vec![
-            mounts[0].clone(),
-            ordinary.clone(),
-            ordinary.replace('\\', "/"),
-        ]
+        [native_mount, ordinary.clone(), ordinary.replace('\\', "/")]
     };
     for native_mount in mounts {
         let secret = format!("{native_mount}/secret.txt");
@@ -798,7 +729,7 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
 /// The host backend answers `link` with a REAL OS link, needing no privilege.
 ///
 /// The other half of the parity the test above claims. It is asserted here
-/// because the kernel half cannot show it: `KernelFsBackend` plants a DT_LINK,
+/// because the kernel half cannot show it: `KernelFsBackend` plants a `DT_LINK`,
 /// which says nothing about what `StdFsBackend` does on a host filesystem, and
 /// the co-host and a plain `scode` have to behave the same way — the chat-list
 /// index is a pointer at a conversation root on both.
@@ -1050,7 +981,7 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
         "each agent's list is keyed by the agent, not by a directory they share"
     );
 
-    TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
+    let _ = TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
         content: String::from("Run the tests"),
         status: TodoStatus::InProgress,
         active_form: String::from("Running the tests"),
@@ -1382,6 +1313,8 @@ fn trusted_for_in_process_kernel_maps_host_env_fail_closed_or_scoped() {
 // constructor now fails closed before any RPC by design).
 // ─────────────────────────────────────────────────────────────────────────────
 
+type PermissionCall = (String, Permission, OperationContext, Option<String>);
+
 #[derive(Default)]
 struct FilePolicy {
     denied: Mutex<HashSet<String>>,
@@ -1389,7 +1322,7 @@ struct FilePolicy {
     read_denied: Mutex<HashSet<String>>,
     agent: Mutex<Option<String>>,
     broken: Mutex<Option<String>>,
-    calls: Mutex<Vec<(String, Permission, OperationContext, Option<String>)>>,
+    calls: Mutex<Vec<PermissionCall>>,
 }
 
 impl FilePolicy {
@@ -1631,10 +1564,10 @@ fn glob_drops_a_path_revoked_after_directory_discovery() {
         .lock()
         .unwrap()
         .insert("/ws/revoked.txt".into());
-    assert!(glob_search(&fs, "**/*.txt", None)
-        .unwrap()
-        .filenames
-        .is_empty());
+    assert_eq!(
+        glob_search(&fs, "**/*.txt", None).unwrap().filenames,
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -1810,7 +1743,7 @@ fn remote_backend(
         match fs.stat("/ws/ready.txt") {
             Ok(_) => break,
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("VFS host did not become ready: {error}"),
         }
@@ -1837,9 +1770,8 @@ fn remote_existence_preserves_admission_and_policy_errors() {
     // remote_append and remote_stat below through the same transport.
     for key in ["invalid-key", "denied-key", "unavailable-key"] {
         let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
-        assert_eq!(
-            fs.exists("/ws/ready.txt").unwrap(),
-            false,
+        assert!(
+            !fs.exists("/ws/ready.txt").unwrap(),
             "{key}: an authentication refusal must read as absence, not leak existence"
         );
     }

@@ -5,7 +5,7 @@
 //! (`KernelFsBackend` → kernel syscalls), or remote (`NexusVfsClient` → gRPC).
 //!
 //! Cold paths (session persistence, config loading) use `Arc<dyn FsBackend>`
-//! for simplicity. Hot paths (tool-facing file_ops) take `&dyn FsBackend`
+//! for simplicity. Hot paths (tool-facing `file_ops`) take `&dyn FsBackend`
 //! to avoid the Arc overhead.
 
 use std::io;
@@ -54,6 +54,19 @@ impl FsLock for HostLock {
     fn renew(&self) -> io::Result<bool> {
         Ok(true)
     }
+}
+
+fn atomic_temp_path(path: &str) -> String {
+    format!("{path}.tmp.{}", uuid::Uuid::new_v4())
+}
+
+fn write_atomic_staged<F: FsBackend + ?Sized>(fs: &F, path: &str, data: &[u8]) -> io::Result<()> {
+    let temp = atomic_temp_path(path);
+    let result = fs.write(&temp, data).and_then(|()| fs.rename(&temp, path));
+    if result.is_err() {
+        let _ = fs.delete(&temp);
+    }
+    result
 }
 
 /// What the storage returned for one committed version of a path. Opaque:
@@ -241,17 +254,15 @@ pub trait FsBackend: Send + Sync + 'static {
 
     /// Atomic write: write to a temporary file then rename into place.
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        let temp = format!("{path}.tmp.{}", std::process::id());
-        self.write(&temp, data)?;
-        self.rename(&temp, path)
+        write_atomic_staged(self, path, data)
     }
 
     /// Create `path` as an append-only log, ready for [`FsBackend::append`].
     ///
-    /// The default creates an empty regular file (host FS / VFS DT_REG),
+    /// The default creates an empty regular file (host FS / VFS `DT_REG`),
     /// which `append` then extends. Backends with a native append-log
     /// primitive override this — [`KernelFsBackend`] creates a durable
-    /// DT_STREAM so `append` becomes an O(1) frame write. `retention` is the
+    /// `DT_STREAM` so `append` becomes an O(1) frame write. `retention` is the
     /// cold-storage budget in bytes for backends that spill cold segments
     /// out of the hot tier (`0` = keep-forever); regular-file backends
     /// ignore it.
@@ -265,7 +276,7 @@ pub trait FsBackend: Send + Sync + 'static {
         Ok(())
     }
 
-    /// True when `path` is a native append-log (e.g. a VFS DT_STREAM) for
+    /// True when `path` is a native append-log (e.g. a VFS `DT_STREAM`) for
     /// which `append` is an O(1) frame write and snapshot rewrite / rotation
     /// do not apply. Regular-file backends return `false`.
     fn is_append_stream(&self, _path: &str) -> io::Result<bool> {
@@ -1034,7 +1045,7 @@ impl FsBackend for StdFsBackend {
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
         use std::io::Write;
 
-        let temp = format!("{path}.tmp.{}", uuid::Uuid::new_v4());
+        let temp = atomic_temp_path(path);
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -1261,7 +1272,7 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// genuinely absent. When the host injected a zone (the subprocess
     /// runner env), that env shapes authorization instead: elevated to
     /// trusted-local for the in-process kernel (the env's injector is this
-    /// process's parent — the position the ManagedAgentService is in for a
+    /// process's parent — the position the `ManagedAgentService` is in for a
     /// planted descriptor), enforced to its scope when one is present, and a
     /// partial or invalid hosted env keeps its fail-closed shape rather than
     /// widening into root.
@@ -1573,7 +1584,7 @@ fn kernel_err(error: KernelError) -> io::Error {
         KernelError::PermissionDenied(_) => io::ErrorKind::PermissionDenied,
         _ => io::ErrorKind::Other,
     };
-    io::Error::new(kind, error.to_string())
+    io::Error::new(kind, error)
 }
 
 impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
@@ -1691,26 +1702,31 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
             .sys_setattr(
                 path,
                 &self.ctx,
-                DT_STREAM as i32,
+                i32::from(DT_STREAM),
                 "",    // backend_name
                 None,  // backend
                 None,  // metastore
                 None,  // raft_backend
                 "wal", // io_profile — durable raft-replicated stream
                 &self.ctx.zone_id,
-                false,              // is_external
-                retention as usize, // capacity == cold-storage retention budget
-                None,               // read_fd
-                None,               // write_fd
-                None,               // mime_type
-                None,               // modified_at_ms
-                None,               // content_id
-                None,               // size
-                None,               // version
-                None,               // created_at_ms
-                None,               // link_target
-                None,               // source
-                None,               // remote_metastore
+                false, // is_external
+                usize::try_from(retention).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "stream retention exceeds platform capacity",
+                    )
+                })?, // capacity == cold-storage retention budget
+                None,  // read_fd
+                None,  // write_fd
+                None,  // mime_type
+                None,  // modified_at_ms
+                None,  // content_id
+                None,  // size
+                None,  // version
+                None,  // created_at_ms
+                None,  // link_target
+                None,  // source
+                None,  // remote_metastore
             )
             .is_ok();
         if !created_stream {
@@ -1796,7 +1812,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
             .sys_setattr(
                 alias,
                 &self.ctx,
-                DT_LINK as i32,
+                i32::from(DT_LINK),
                 "",   // backend_name
                 None, // backend
                 None, // metastore
@@ -2005,8 +2021,14 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     }
 
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        // Kernel sys_write is atomic per call — no temp file needed.
-        self.write(path, data)
+        if matches!(&self.path_view, KernelPathView::Virtual) {
+            // Virtual objects publish in one kernel write. The local connector
+            // overwrites host files in place, so host spellings need a rename
+            // to retain atomic visibility for native readers as well.
+            self.write(path, data)
+        } else {
+            write_atomic_staged(self, path, data)
+        }
     }
 
     fn working_root(&self) -> io::Result<String> {
@@ -2119,6 +2141,7 @@ pub struct NexusVfsFsBackend {
 }
 
 impl NexusVfsFsBackend {
+    #[must_use]
     pub fn new(client: nexus_vfs_client::NexusVfsClient, auth_token: String) -> Self {
         Self {
             client: std::sync::Arc::new(client),
@@ -2135,6 +2158,7 @@ impl NexusVfsFsBackend {
     /// operation fails closed before any RPC leaves the process. A remote
     /// backend that performs IO needs a transport the server itself
     /// authenticates — see [`Self::from_arc_mtls`].
+    #[must_use]
     pub fn from_arc(
         client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
         auth_token: String,
@@ -2150,7 +2174,7 @@ impl NexusVfsFsBackend {
     /// client certificate the daemon verifies (identity from its SAN). Unlike
     /// [`Self::from_arc`] the transport itself is the server-verified
     /// authorization, so the zone context is [`ContextSource::TrustedLocal`]
-    /// and local ResourceRef checks are the early-deny layer, not the only
+    /// and local `ResourceRef` checks are the early-deny layer, not the only
     /// one. A host-injected `NEXUS_RESOURCE_SCOPE` still narrows it.
     pub fn from_arc_mtls(
         client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
@@ -2165,6 +2189,7 @@ impl NexusVfsFsBackend {
     }
 
     /// Bind an explicit narrowing scope to an already authenticated transport.
+    #[must_use]
     pub fn from_arc_mtls_with_scope(
         client: Arc<nexus_vfs_client::NexusVfsClient>,
         auth_token: String,
@@ -2369,7 +2394,7 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(self.remote_stat(path).is_ok())
     }
 
-    /// A DT_LINK, with the destination in the entry's metadata.
+    /// A `DT_LINK`, with the destination in the entry's metadata.
     ///
     /// This backend was the one that could not do it: `Setattr` carried no link target
     /// on the wire, so `link` fell through to the trait's silent no-op and a standalone
@@ -2378,7 +2403,7 @@ impl FsBackend for NexusVfsFsBackend {
     /// holding a path, on every backend, including the two that could do better.
     ///
     /// The wire carries it now (nexi-lab/nexus-vfs#362), so all three backends realise
-    /// the same shared `link()` call: a DT_LINK here and on the in-process kernel, a
+    /// the same shared `link()` call: a `DT_LINK` here and on the in-process kernel, a
     /// pointer file on the host FS where no privilege-free symlink exists.
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         self.authorize_target(alias, ResourceAccessKind::Write)?;
@@ -2423,7 +2448,7 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(target)
     }
 
-    /// Provision each component as a DT_DIR, idempotently.
+    /// Provision each component as a `DT_DIR`, idempotently.
     ///
     /// This used to return `Ok(())` having done nothing, on the reasoning that "VFS
     /// servers typically auto-create intermediate paths on write". A write does plant

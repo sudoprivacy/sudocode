@@ -5,7 +5,7 @@
 //! sync REPL answers through `CliPermissionPrompter`. That prompter reads the
 //! choice through the SHARED rustyline editor (not a throwaway `dialoguer::Select`
 //! that grabbed its own crossterm raw session mid-turn) — the same single-owner
-//! fix as the write_plan dialog. This test drives that path end-to-end: the box
+//! fix as the `write_plan` dialog. This test drives that path end-to-end: the box
 //! appears, "1" (Allow) is accepted through the shared editor, and the turn
 //! proceeds.
 //!

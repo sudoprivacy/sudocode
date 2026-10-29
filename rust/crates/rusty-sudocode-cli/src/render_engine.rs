@@ -362,7 +362,7 @@ impl EngineEventRenderer {
                 self.end_thinking();
                 if !text.is_empty() {
                     if let Some(s) = &self.spinner {
-                        s.add_response_bytes(text.len() as u32);
+                        s.add_response_bytes(u32::try_from(text.len()).unwrap_or(u32::MAX));
                     }
                     if let Some(rendered) = self.markdown.push(&self.renderer, &text) {
                         self.pause_spinner();
@@ -373,7 +373,7 @@ impl EngineEventRenderer {
             }
             EngineEvent::ThinkingDelta { text } => {
                 if let Some(s) = &self.spinner {
-                    s.add_response_bytes(text.len() as u32);
+                    s.add_response_bytes(u32::try_from(text.len()).unwrap_or(u32::MAX));
                 }
                 if !self.thinking_active {
                     self.flush_markdown();
@@ -582,6 +582,17 @@ impl Drop for EngineEventRenderer {
 /// `make_mcp_progress_callback`: the executor now reports structured data
 /// (`ToolProgressEvent`) and the ANSI/glyph formatting lives here, above the
 /// seam. External output is text, never terminal cursor or screen control.
+fn format_progress_kilobytes(bytes: usize) -> String {
+    let scaled = (bytes as u128) * 10;
+    let mut tenths = scaled / 1024;
+    let remainder = scaled % 1024;
+    // Match decimal formatting's ties-to-even rule without a lossy float cast.
+    if remainder > 512 || (remainder == 512 && !tenths.is_multiple_of(2)) {
+        tenths += 1;
+    }
+    format!("{}.{} KB", tenths / 10, tenths % 10)
+}
+
 fn format_tool_progress(progress: &ToolProgressEvent) -> String {
     use crate::render::text_layout::single_line as summary;
     match progress {
@@ -591,7 +602,7 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
             total_bytes,
         } => {
             let bytes_display = if *total_bytes >= 1024 {
-                format!("{:.1} KB", *total_bytes as f64 / 1024.0)
+                format_progress_kilobytes(*total_bytes)
             } else {
                 format!("{total_bytes} B")
             };

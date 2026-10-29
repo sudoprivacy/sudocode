@@ -292,8 +292,7 @@ impl ProviderClient {
     pub fn session_tracer(&self) -> Option<&SessionTracer> {
         match self {
             Self::Anthropic(client) => client.session_tracer(),
-            Self::Xai(client) => client.session_tracer(),
-            Self::OpenAi(client) => client.session_tracer(),
+            Self::Xai(client) | Self::OpenAi(client) => client.session_tracer(),
             Self::Codex(client) => client.session_tracer(),
             Self::Gemini(client) => client.session_tracer(),
         }
@@ -732,7 +731,7 @@ mod tests {
             cache_ttl_1h: None,
             auth_modes,
             models,
-            web_search: Default::default(),
+            web_search: runtime::WebSearchConfig::default(),
             selected_account: None,
             auth_profile_conflicts: Vec::new(),
         }

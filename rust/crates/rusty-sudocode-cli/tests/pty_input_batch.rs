@@ -246,7 +246,7 @@ fn completed_turn_identity_survives_wrapping_and_advances_after_the_next_turn() 
     common::expect_turn_complete_after(&session, &marker, env.timeout(), "first turn");
     common::expect_input_line_cleared(&session, env.timeout(), "first turn ready");
     let first = common::turn_status_marker(&session);
-    assert!(!first.is_empty());
+    assert_ne!(first, "");
     let before = session.render(|screen| common::turn_status_line(&screen.contents()));
 
     session.resize(24, 120).unwrap();

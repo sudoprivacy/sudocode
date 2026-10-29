@@ -69,11 +69,6 @@ All `cargo` commands assume `rust/` as the working directory.
 # Build everything
 cargo build --workspace
 
-# Format, lint, and test before pushing
-cargo fmt --all
-cargo clippy --workspace
-cargo test --workspace
-
 # Run the CLI from a debug build
 cargo run --bin scode -- --help
 cargo run --bin scode -- prompt "explain this codebase"
@@ -84,5 +79,5 @@ cargo run --bin scode -- prompt "explain this codebase"
 
 For the canonical CLI surface, run `cargo run --bin scode -- --help`.
 
-For PR expectations, the required check commands, and the workflow, see
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+For the canonical formatting, lint and test gates, plus the PR workflow, see
+[CONTRIBUTING.md — Required checks](../CONTRIBUTING.md#required-checks).

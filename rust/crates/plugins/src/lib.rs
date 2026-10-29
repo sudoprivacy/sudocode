@@ -3302,8 +3302,8 @@ mod tests {
 
         let manifest = load_plugin_from_directory(&root).expect("packaged manifest should load");
         assert_eq!(manifest.name, "packaged-demo");
-        assert!(manifest.tools.is_empty());
-        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.tools, [] as [PluginToolManifest; 0]);
+        assert_eq!(manifest.commands, [] as [PluginCommandManifest; 0]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3322,10 +3322,10 @@ mod tests {
         );
 
         let manifest = load_plugin_from_directory(&root).expect("minimal manifest should load");
-        assert!(manifest.permissions.is_empty());
+        assert_eq!(manifest.permissions, [] as [PluginPermission; 0]);
         assert!(manifest.hooks.is_empty());
-        assert!(manifest.tools.is_empty());
-        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.tools, [] as [PluginToolManifest; 0]);
+        assert_eq!(manifest.commands, [] as [PluginCommandManifest; 0]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4762,7 +4762,7 @@ mod tests {
         let report = PluginRegistryReport::new(PluginRegistry::new(Vec::new()), vec![failure]);
         let outcome = report.load_outcome();
 
-        assert!(outcome.loaded_plugins.is_empty());
+        assert_eq!(outcome.loaded_plugins, [] as [LoadedPlugin; 0]);
         assert_eq!(outcome.failures.len(), 1);
         assert_eq!(
             outcome.failures[0].plugin_root,
@@ -5183,113 +5183,5 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
-    }
-
-    #[allow(clippy::struct_excessive_bools)]
-    struct PluginFixture {
-        plugin_id: String,
-        display_name: String,
-        description: String,
-        tool_count: usize,
-        pre_hook: usize,
-        post_hook: usize,
-        post_fail_hook: usize,
-        has_skills: bool,
-        has_mcp_servers: bool,
-        has_apps: bool,
-        enabled: bool,
-    }
-
-    impl PluginFixture {
-        fn new(plugin_id: &str, display_name: &str, description: &str) -> Self {
-            Self {
-                plugin_id: plugin_id.to_string(),
-                display_name: display_name.to_string(),
-                description: description.to_string(),
-                tool_count: 0,
-                pre_hook: 0,
-                post_hook: 0,
-                post_fail_hook: 0,
-                has_skills: false,
-                has_mcp_servers: false,
-                has_apps: false,
-                enabled: true,
-            }
-        }
-
-        fn tools(mut self, n: usize) -> Self {
-            self.tool_count = n;
-            self
-        }
-        fn pre_hooks(mut self, n: usize) -> Self {
-            self.pre_hook = n;
-            self
-        }
-        fn post_hooks(mut self, n: usize) -> Self {
-            self.post_hook = n;
-            self
-        }
-        fn post_fail_hooks(mut self, n: usize) -> Self {
-            self.post_fail_hook = n;
-            self
-        }
-        fn with_skills(mut self) -> Self {
-            self.has_skills = true;
-            self
-        }
-        fn with_mcp(mut self) -> Self {
-            self.has_mcp_servers = true;
-            self
-        }
-        fn with_apps(mut self) -> Self {
-            self.has_apps = true;
-            self
-        }
-        fn disabled(mut self) -> Self {
-            self.enabled = false;
-            self
-        }
-
-        fn build(self) -> super::LoadedPlugin {
-            let (name, source) = self.plugin_id.split_once('@').map_or_else(
-                || (self.plugin_id.clone(), "unknown".to_string()),
-                |(n, s)| (n.to_string(), s.to_string()),
-            );
-            super::LoadedPlugin {
-                summary: super::PluginSummary {
-                    metadata: super::PluginMetadata {
-                        id: self.plugin_id.clone(),
-                        name: name.clone(),
-                        version: "1.0.0".to_string(),
-                        description: self.description.clone(),
-                        kind: super::PluginKind::External,
-                        source: source.clone(),
-                        default_enabled: true,
-                        root: None,
-                        display_name: None,
-                    },
-                    enabled: self.enabled,
-                },
-                root: None,
-                kind: super::PluginKind::External,
-                source,
-                capabilities: super::PluginCapabilityMetadata::default(),
-                skill_roots: vec![],
-                mcp_config_paths: vec![],
-                app_config_paths: vec![],
-                capability_summary: super::PluginCapabilitySummary {
-                    plugin_id: self.plugin_id,
-                    display_name: self.display_name,
-                    description: self.description,
-                    tool_count: self.tool_count,
-                    pre_tool_hook_count: self.pre_hook,
-                    post_tool_hook_count: self.post_hook,
-                    post_tool_use_failure_hook_count: self.post_fail_hook,
-                    has_skills: self.has_skills,
-                    has_mcp_servers: self.has_mcp_servers,
-                    has_apps: self.has_apps,
-                },
-            }
-        }
     }
 }

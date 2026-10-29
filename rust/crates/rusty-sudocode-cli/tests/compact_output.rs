@@ -291,7 +291,7 @@ fn run_scode(
 }
 
 /// Apply the isolated test environment to `command`: `env_clear` + the minimal
-/// vars scode needs (config home, HOME, NO_COLOR) + the per-platform set a
+/// vars scode needs (config home, HOME, `NO_COLOR`) + the per-platform set a
 /// child still requires afterwards (`isolated_env`).
 fn apply_isolated_env(
     command: &mut Command,

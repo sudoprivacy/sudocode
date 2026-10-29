@@ -1,7 +1,7 @@
 //! Actual runtime turns, a native child tool, concurrent resume and cold replay.
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,8 +16,6 @@ use runtime::{
     StaticToolExecutor, SystemPrompt, ToolError,
 };
 
-const CASE: &str = "runtime_resume_inherits_completed_turn_while_native_tool_runs";
-const CHILD: &str = "SCODE_SHARED_RUNTIME_CHILD";
 const RECEIPT: &str = "NEXUS_RUNTIME_HISTORY_RECEIPT";
 const WAIT: Duration = Duration::from_secs(30);
 const PREFIX_TURNS: usize = 36;
@@ -25,6 +23,9 @@ type Requests = Arc<Mutex<Vec<Vec<ConversationMessage>>>>;
 
 #[path = "common/live_nexus.rs"]
 mod live_nexus;
+
+#[path = "common/native_tool.rs"]
+mod native_tool;
 
 fn backend(nexus: bool) -> Arc<dyn FsBackend> {
     if !nexus {
@@ -105,6 +106,20 @@ fn wait_for(path: &Path) {
             Instant::now() < deadline,
             "timeout waiting for {}",
             path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Observe durable reclamation before the fixture removes its worker's files.
+fn wait_for_reclaimed_session(transcript: &Path, references: &Path) {
+    let deadline = Instant::now() + WAIT;
+    while transcript.exists() || std::fs::read_dir(references).unwrap().next().is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "deleted Session was not reclaimed: transcript={}, references={}",
+            transcript.display(),
+            references.display()
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -237,19 +252,7 @@ fn data_dir_client(root: &Path, role: &str) {
     let store = runtime::SessionStore::from_data_dir(root.join("data"), &workspace).unwrap();
     let path = root.join("external/transcript.jsonl");
     if role == "restart" {
-        let deadline = Instant::now() + WAIT;
-        while path.exists()
-            || std::fs::read_dir(store.sessions_dir().join(".cleanup"))
-                .unwrap()
-                .next()
-                .is_some()
-        {
-            assert!(
-                Instant::now() < deadline,
-                "ordinary startup did not reclaim the external Session"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_for_reclaimed_session(&path, &store.sessions_dir().join(".cleanup"));
         return;
     }
     if role == "delete-store" {
@@ -378,6 +381,7 @@ fn assert_rejected_migrations_preserve_source(
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
+    wait_for_reclaimed_session(path, &directory.join(".cleanup"));
     assert!(!path.exists());
     assert!(
         legacy_archives(directory).is_empty(),
@@ -414,13 +418,6 @@ impl Drop for RunningTurn {
 
 #[test]
 fn runtime_resume_inherits_completed_turn_while_native_tool_runs() {
-    if let Some(root) = std::env::var_os(CHILD) {
-        let root = PathBuf::from(root);
-        std::fs::write(root.join("tool-pid"), std::process::id().to_string()).unwrap();
-        wait_for(&root.join("release"));
-        std::fs::write(root.join("actual-result"), "A_ACTUAL_NATIVE_TOOL_RESULT").unwrap();
-        return;
-    }
     exercise_runtime_history(false, false);
 }
 
@@ -486,7 +483,8 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     journal
         .purge(&journal.storage_ref(), "delete-after-refresh")
         .unwrap();
-    assert!(store_root.join(".cleanup").is_dir());
+    let references = store_root.join(".cleanup");
+    assert_eq!(std::fs::read_dir(&references).unwrap().count(), 1);
     assert_eq!(
         a.refresh_compaction_source().unwrap_err().to_string(),
         "session_deleted"
@@ -500,26 +498,9 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
-    // Deleted while writer `a` was alive, so reclaiming the Session was left to
-    // the process-wide session-cleanup worker, which retries every second and
-    // takes file locks (creating lock files) inside this fixture. Now that the
-    // last writer has retired, the reclaim must finish: it removes the durable
-    // reference and the transcript. Removing the fixture before then raced the
-    // worker's retry (ENOTEMPTY on Linux).
-    let references = store_root.join(".cleanup");
-    let deadline = Instant::now() + WAIT;
-    while std::fs::read_dir(&references)
-        .map(|entries| entries.flatten().next().is_some())
-        .unwrap_or(false)
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the deleted Session was never reclaimed after its last writer retired: {}",
-            references.display()
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!path.exists(), "reclaim removes the deleted transcript");
+    // The worker owns deferred reclamation until the last writer retires.
+    // Observe both its durable reference and the transcript before teardown.
+    wait_for_reclaimed_session(&path, &references);
     drop(fixture);
 }
 
@@ -654,16 +635,16 @@ fn start_native_tool_turn(root: &Path, path: &Path, nexus: bool) -> RunningTurn 
         let _workspace = WorkspaceRootScope::enter(&thread_root);
         let child_root = thread_root.clone();
         let tools = StaticToolExecutor::new().register("bash", move |_| {
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", CASE, "--nocapture"])
-                .env(CHILD, &child_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .map_err(|error| ToolError::new(error.to_string()))?
-                .wait()
-                .map_err(|error| ToolError::new(error.to_string()))?;
+            let status = native_tool::NativeTool::spawn(
+                &child_root.join("tool-pid"),
+                &child_root.join("release"),
+                &child_root.join("actual-result"),
+                "A_ACTUAL_NATIVE_TOOL_RESULT",
+                WAIT,
+            )
+            .map_err(|error| ToolError::new(error.to_string()))?
+            .wait()
+            .map_err(|error| ToolError::new(error.to_string()))?;
             if !status.success() {
                 return Err(ToolError::new("native tool child failed"));
             }

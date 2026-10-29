@@ -2,15 +2,15 @@
 //! `AgentOutput` manifest.
 //!
 //! The coordinator prompt + our PTY tests (`pty_agent_summary` in
-//! particular) train the LLM to look for specific snake_case field
-//! names in the pid_output response. Any drift in the wire shape
+//! particular) train the LLM to look for specific `snake_case` field
+//! names in the `pid_output` response. Any drift in the wire shape
 //! silently breaks that contract — the model can't find fields the
 //! coordinator prompt tells it exist, and downstream tests fail
 //! obliquely with "field not found" chains.
 //!
 //! This file locks in:
 //!
-//! 1. **snake_case naming** — LLMs are prompt-trained on it.
+//! 1. **`snake_case` naming** — LLMs are prompt-trained on it.
 //! 2. **Base fields always present** — `agent_id`, `status`,
 //!    `retrieval_status`, `output_file`, `manifest_file`.
 //! 3. **Optionals absent when unset** — no `null` clutter for the
@@ -18,7 +18,7 @@
 //! 4. **Optionals present when set** — this is exactly the bug that
 //!    slipped through 4 commits before session 4's live-PTY run
 //!    caught it: `result_full_path` stored on disk but not surfaced
-//!    to pid_output. Regression guard.
+//!    to `pid_output`. Regression guard.
 //!
 //! The compile-time guard against forgotten fields lives in
 //! `build_agent_output_view`'s exhaustive destructure; this file
@@ -37,14 +37,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn unique_workspace(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "sudocode-wire-schema-{label}-{nanos}-{}",
         std::process::id()

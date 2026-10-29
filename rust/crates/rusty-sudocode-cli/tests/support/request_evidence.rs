@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 
 /// Return one body per HTTP-accepted message request, in acceptance order.
-/// The transport's request_id is stable across retries, unlike a body-count
+/// The transport's `request_id` is stable across retries, unlike a body-count
 /// heuristic. Every retry must preserve the whole body; every success must
 /// have exactly one captured logical request. Failed calls (e.g. context
 /// pressure) have no usage row. The caller still verifies complete usage and

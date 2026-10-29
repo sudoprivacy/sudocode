@@ -4,7 +4,7 @@
 //! The field is opaque pass-through data for the outbound request body, so
 //! the parser has to hand it back verbatim — including float literals, which
 //! the hand-rolled `crate::json` parser cannot represent (it is re-read with
-//! serde_json for exactly this reason). These cases pin that contract, plus
+//! `serde_json` for exactly this reason). These cases pin that contract, plus
 //! the "absent means empty, and the rest of the entry is unaffected" default
 //! every existing config relies on.
 

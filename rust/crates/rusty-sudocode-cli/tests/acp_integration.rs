@@ -8485,10 +8485,51 @@ $stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|error| {
-        panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}")
-    });
+    .await;
+    let identities = match identities {
+        Ok(identities) => identities,
+        Err(error) => {
+            // Capture the producer before assertion unwinding closes its Job.
+            // The readiness and cancellation budgets above remain unchanged.
+            let outputs: Vec<_> = started
+                .iter()
+                .filter_map(|message| {
+                    message
+                        .pointer("/params/update/rawOutput/rawOutputPath")
+                        .and_then(Value::as_str)
+                })
+                .map(|path| (path, fs::read_to_string(path)))
+                .collect();
+            eprintln!("native startup output before cleanup: {outputs:?}");
+            let task_id = started
+                .iter()
+                .find_map(|message| {
+                    message
+                        .pointer("/params/update/rawOutput/backgroundTaskId")
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("missing");
+            let calls = json!([{"id":"windows-owned-diagnostic","name":"pid_status","input":{"task_id":task_id}}]);
+            let observed = timeout(Duration::from_secs(5), client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"windows-owned:diagnostic"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]}))).await;
+            eprintln!("native startup task state before cleanup: {observed:?}");
+            let script = r#"$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'pwsh.exe','powershell.exe' -and $_.CommandLine -match '(parent|child|grandchild)\.ps1' } | ForEach-Object { $p = $_; $threads = @((Get-Process -Id $p.ProcessId).Threads | ForEach-Object { @{ id = $_.Id; state = $_.ThreadState.ToString(); wait = $(if ($_.ThreadState -eq 'Wait') { $_.WaitReason.ToString() } else { '' }) } }); @{ id = $p.ProcessId; parent = $p.ParentProcessId; created = $p.CreationDate; command = $p.CommandLine; threads = $threads } } | ConvertTo-Json -Depth 6 -Compress"#;
+            let mut query = isolated_command(&workspace, Path::new("pwsh"));
+            query
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let snapshot = timeout(Duration::from_secs(5), query.output()).await;
+            eprintln!("native startup process snapshot before cleanup: {snapshot:?}");
+            panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}");
+        }
+    };
     let running = powershell_process_identities(&identities);
     assert!(
         identities.iter().all(|identity| running.contains(identity)),

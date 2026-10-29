@@ -33,6 +33,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+      - name: Restore original Windows workspace prerequisites
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          netsh int ipv4 show dynamicport tcp
+          $commands = @(
+            @('test', '--locked', '--manifest-path', 'vendor/codex-mermaid/Cargo.toml', '--target-dir', 'target'),
+            @('test', '-p', 'rusty-sudocode-cli', '--test', 'pty_bracketed_paste', '--', '--nocapture'),
+            @('test', '--workspace', '--test', 'pty_cache_prefix', '--test', 'pty_compaction_safety', '--', '--nocapture'),
+            @('test', '--workspace', '--test', 'pty_subagent_workflow', '--', '--nocapture'),
+            @('test', '-p', 'rusty-sudocode-cli', '--test', 'pty_tool_pause', '--', '--nocapture'),
+            @('test', '--workspace', '--test', 'pty_codex_colors', '--test', 'pty_text_layout', '--', '--nocapture'),
+            @('test', '--workspace', '--test', 'pty_plan_markdown', '--', '--nocapture'),
+            @('test', '-p', 'rusty-sudocode-cli', '--test', 'pty_model_flag_priority', '--', '--test-threads=1', '--nocapture'),
+            @('test', '-p', 'rusty-sudocode-cli', '--test', 'stderr_capture_process', '--', '--nocapture')
+          )
+          foreach ($arguments in $commands) {
+            & cargo @arguments
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Observe unchanged ACP tests with native process evidence
         run: |
           $ErrorActionPreference = 'Stop'
@@ -45,7 +64,11 @@ jobs:
             $folder = Join-Path $evidence "attempt-$iteration"
             New-Item -ItemType Directory -Force $folder | Out-Null
             $log = Join-Path $folder 'acp.log'
-            cargo test --workspace --features engine-acp/mailbox --test acp_integration -- --nocapture 2>&1 | Tee-Object -FilePath $log
+            if ($iteration -eq 1) {
+              cargo test --workspace --features engine-acp/mailbox 2>&1 | Tee-Object -FilePath $log
+            } else {
+              cargo test --workspace --features engine-acp/mailbox --test acp_integration -- --nocapture 2>&1 | Tee-Object -FilePath $log
+            }
             $testExit = $LASTEXITCODE
             if ($testExit -ne 0) { $overall = 1 }
             @{ iteration = $iteration; testExit = $testExit; started = $started.ToString('o'); ended = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json | Set-Content (Join-Path $folder 'result.json')

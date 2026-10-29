@@ -22,8 +22,10 @@ def fixture_environment():
     """Clear hook-exported repository selectors before touching temporary repos."""
     names = subprocess.check_output(["git", "rev-parse", "--local-env-vars"],
                                     cwd=SOURCE, text=True).splitlines()
-    return {key: value for key, value in os.environ.items() if key not in names
-            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    environment = {key: value for key, value in os.environ.items() if key not in names
+                   and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    # Every real fixture push inherits the coding-agent color opt-out.
+    return {**environment, "NO_COLOR": "1"}
 
 
 FIXTURE_ENV = fixture_environment()
@@ -71,6 +73,17 @@ def scope_acceptance(directory):
         actual = command(sys.executable, "-c", code, selector, repository, base, cwd=repository)
         assert json.loads(actual) == targets, (base, actual, targets)
 
+    def expect_local_checks(base, required):
+        policy = SOURCE / "spec/local_acceptance.json"
+        code = ('import importlib.util,json,subprocess,sys; '
+                'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
+                'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
+                'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
+        selected = json.loads(command(sys.executable, "-c", code,
+            SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
+        assert required.issubset(selected), (required, selected)
+
     cases = [("docs/note.md", False, False), (".github/workflows/rust-ci.yml", False, False),
              ("rust/crates/api/src/lib.rs", True, True), ("e2e/nexus-a2a/run.sh", False, True),
              ("spec/cache_metrics.json", True, False), ("rust/crates/runtime/src/prompt.md", True, True),
@@ -92,19 +105,28 @@ def scope_acceptance(directory):
         if path == "rust/crates/pty-harness/src/lib.rs":
             # The helper implementation may move out of tests/common. Its new
             # path must still select real native terminal acceptance.
-            policy = SOURCE / "spec/local_acceptance.json"
-            code = ('import importlib.util,json,subprocess,sys; '
-                    'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
-                    'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
-                    'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
-                    'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
-            selected = json.loads(command(sys.executable, "-c", code,
-                SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
-            assert {"native-workspace", "native-resize", "rendering", "browser", "native-release"}.issubset(selected)
+            expect_local_checks(base, {
+                "native-workspace", "native-resize", "rendering", "browser", "native-release"})
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
             expect_scope(event_name, event, live, daemon)
+    # Each real Git diff contains only one formerly unguarded ignored-test input.
+    for path, required in [
+        (".github/local-acceptance/checks.py", {"native-guard", "native-resize", "rendering", "browser"}),
+        ("rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs", {"native-workspace", "native-resize"}),
+        ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", {"native-workspace", "browser"}),
+        ("rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport_browser.cjs", {"native-workspace", "browser"}),
+        ("rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport.cjs", {"native-workspace", "browser"}),
+        ("scripts/benchmark_prompt_viewport.py", {"browser"}),
+    ]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        file = repository / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("changed ignored-test input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", "guard the actual ignored-test input", cwd=repository)
+        expect_local_checks(base, required)
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -134,10 +156,37 @@ def scope_acceptance(directory):
     print("PASS: real Git scopes for PR/push/queue, native test targets, shared fixtures, source rename and explicit dispatch")
 
 
+def windows_color_acceptance(directory):
+    if os.name != "nt":
+        return
+    # Launch real Cargo through the production executor, including VsDevCmd.
+    # A preinitialized Developer shell must not hide the reinjection regression.
+    crate = directory / "platform-color"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text('[package]\nname="platform-color-probe"\nversion="0.0.1"\nedition="2021"\n\n[workspace]\n')
+    (crate / "Cargo.lock").write_text('version = 4\n\n[[package]]\nname = "platform-color-probe"\nversion = "0.0.1"\n')
+    (crate / "src/main.rs").write_text('fn main() { println!("{:?}", std::env::var_os("NO_COLOR")); }\n')
+    code = ("import importlib.util,os,sys; from pathlib import Path; "
+            "os.environ.pop('LIB',None); "
+            "spec=importlib.util.spec_from_file_location('acceptance',sys.argv[1]); "
+            "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+            "root=Path(sys.argv[2]); "
+            "args=['cargo','run','--offline','--locked','--quiet','--manifest-path',str(root/'Cargo.toml'),'--target-dir',str(root/'target')]; "
+            "default=root/'default.log'; explicit=root/'explicit.log'; "
+            "module.run_command(args,root,default); "
+            "assert module.MSVC_ENV is not None and module.MSVC_ENV.get('NO_COLOR')=='1', 'Actual VsDevCmd environment was not exercised'; "
+            "assert default.read_text().splitlines()[-1]=='None', 'Platform environment suppressed default colors'; "
+            "module.run_command(args,root,explicit,{'NO_COLOR':'1'}); "
+            "assert explicit.read_text().splitlines()[-1]=='Some(\"1\")', 'Explicit color opt-out was lost'")
+    command(sys.executable, "-c", code, SOURCE / ".github/scripts/local_acceptance.py", crate, cwd=SOURCE)
+    print("PASS: actual Windows Cargo/Visual Studio initialization cleans inherited NO_COLOR and preserves explicit opt-out")
+
+
 def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
+        windows_color_acceptance(directory)
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
@@ -158,8 +207,10 @@ def enforcement_acceptance():
             'import sys\n'
             'def run(name, root, output, base, execute):\n'
             '    return [execute([sys.executable, "-c", '
-            '"from pathlib import Path; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
-            'root, output / "actual-process.log")]\n'
+            '"import os; from pathlib import Path; assert os.environ.get(\'NO_COLOR\') is None, \'NO_COLOR inherited into acceptance child\'; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
+            'root, output / "actual-process.log"), '
+            'execute([sys.executable, "-c", "import os; assert os.environ.get(\'NO_COLOR\') == \'1\', \'explicit color opt-out was lost\'"], '
+            'root, output / "explicit-optout.log", {"NO_COLOR": "1"})]\n'
         )
         (work / "spec").mkdir()
         (work / "spec/local_acceptance.json").write_text(json.dumps({
@@ -202,6 +253,8 @@ def enforcement_acceptance():
         receipt = json.loads(base64.b64decode(envelope["payload"]))
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
+        assert len(receipt["checks"]["real-process"]) == 2
+        assert receipt["checks"]["real-process"][1]["exit_code"] == 0
 
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production

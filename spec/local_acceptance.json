@@ -8,7 +8,7 @@
         "**"
       ]
     },
-    "guard-contract": {
+    "native-guard": {
       "include": [
         ".github/local-acceptance/**",
         ".github/scripts/local_acceptance.py",
@@ -38,7 +38,9 @@
         "rust/crates/rusty-sudocode-cli/tests/pty_review_scrollback.rs",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "e2e/terminal-resize/**",
-        "rust/Cargo.lock"
+        "rust/Cargo.lock",
+        "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs",
+        ".github/local-acceptance/checks.py"
       ],
       "exclude": [
         "**/README.md"
@@ -58,7 +60,8 @@
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs",
         "rust/crates/rusty-sudocode-cli/Cargo.toml",
-        "e2e/terminal-resize/**"
+        "e2e/terminal-resize/**",
+        ".github/local-acceptance/checks.py"
       ],
       "exclude": [
         "**/README.md"
@@ -78,7 +81,11 @@
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
         "rust/crates/rusty-sudocode-cli/Cargo.toml",
-        "e2e/terminal-resize/**"
+        "e2e/terminal-resize/**",
+        "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs",
+        "rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport*.cjs",
+        "scripts/benchmark_prompt_viewport.py",
+        ".github/local-acceptance/checks.py"
       ],
       "exclude": [
         "**/README.md"

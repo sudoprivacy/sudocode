@@ -49,7 +49,7 @@ def run(name, root, output, base, execute):
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
-    elif name == "guard-contract":
+    elif name == "native-guard":
         command(sys.executable, "e2e/local-acceptance/run.py")
     elif name == "native-workspace":
         cargo("fmt", "--all", "--check")
@@ -82,7 +82,7 @@ def run(name, root, output, base, execute):
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
+        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
         if os.name != "nt":
             tests.append("pty_codex_colors")
         for test in tests:
@@ -225,6 +225,18 @@ def exclusive_benchmark_state():
         yield
 
 
+def run_viewport_browser_cases(driver, command, environment):
+    # Use the same compiled artifact for lifecycle checks and measurements.
+    passed = {}
+    for test in ["viewport_browser_interaction", "viewport_browser_resource_exit"]:
+        log = command(driver, test, "--ignored", "--exact", "--nocapture", extra=environment)
+        counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))
+        if not counts or sum(int(count) for count, _ in counts) == 0 or any(int(failed) for _, failed in counts):
+            raise RuntimeError(f"No actual passing viewport lifecycle test: {test}")
+        passed[test] = sum(int(count) for count, _ in counts)
+    return passed
+
+
 def benchmark(name, root, output, base, command, target):
     with exclusive_benchmark_state():
         benchmark_locked(name, root, output, base, command, target)
@@ -289,9 +301,7 @@ def benchmark_locked(name, root, output, base, command, target):
                    and row.get("target", {}).get("name") == "pty_prompt_viewport" and row.get("executable")]
         if len(drivers) != 1:
             raise RuntimeError("Missing viewport measurement driver")
-        command("cargo", "test", "--release", "--locked", "--manifest-path", manifest, "--target-dir", viewport_target,
-                "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport", "viewport_browser_interaction",
-                "--", "--ignored", "--exact", "--nocapture", extra=viewport_env)
+        run_viewport_browser_cases(drivers[0], command, viewport_env)
         for observer in ["headless", "browser"]:
             arguments = [sys.executable, str(candidate / "scripts/benchmark_prompt_viewport.py"),
                          "--driver", drivers[0], "--binary", str(output / "scode-candidate"),

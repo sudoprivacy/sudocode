@@ -20,6 +20,11 @@ jobs:
       - name: Build the unchanged current-head CLI
         working-directory: rust
         run: cargo build --locked -p rusty-sudocode-cli
+      - name: Reproduce the original preceding shared-services journey
+        shell: bash
+        run: |
+          python e2e/shared-services/run.py --scode rust/target/debug/scode.exe \
+            --artifacts "$RUNNER_TEMP/existing-box-readiness/shared-services"
       - name: Capture original typed responses through actual native recovery
         shell: bash
         run: |

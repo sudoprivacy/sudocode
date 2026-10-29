@@ -102,7 +102,9 @@ def run(args, root):
         if method in ['Read', 'Write']:
             with (root / 'typed-responses.jsonl').open('a') as output:
                 output.write(json.dumps({'method': method, 'path': payload.get('path'),
-                    'response': response}) + '\n')
+                    'response': response, 'monotonic_ns': time.monotonic_ns(),
+                    'expected_sha256': hashlib.sha256(base64.b64decode(payload['content'])).hexdigest()
+                        if method == 'Write' else None}) + '\n')
             if response.get('isError'):
                 print('TYPED_RPC_ERROR', method, response, flush=True)
         return response
@@ -113,6 +115,31 @@ def run(args, root):
         # HOSTED_NOT_RESIDENT, and the first client read pays the whole load.
         presence = grpc('ZoneStatus', {'zone_id': 'sharedzone'}, zones=True).get('presence')
         assert presence == 'RESIDENT', presence
+
+    def capture_physical_marker():
+        # Read only this synthetic fixture's marker, after its original failure
+        # and before managed teardown. Never inspect TLS keys or databases.
+        journal = root / 'typed-responses.jsonl'
+        rows = [json.loads(line) for line in journal.read_text().splitlines()] if journal.exists() else []
+        submitted = next((row for row in rows if row['method'] == 'Write'), None)
+        report = {'submitted': submitted, 'files': []}
+        if submitted:
+            filename = Path(submitted['path']).name
+            for path in data.rglob(filename):
+                record = {'path': str(path.relative_to(root))}
+                try:
+                    metadata = path.stat()
+                    with path.open('rb') as stream:
+                        content = stream.read(65536)
+                    record.update(size=metadata.st_size, bytes_read=len(content),
+                        sha256=hashlib.sha256(content).hexdigest(),
+                        matches_submitted=len(content) == metadata.st_size and
+                            hashlib.sha256(content).hexdigest() == submitted['expected_sha256'],
+                        mtime_ns=metadata.st_mtime_ns, ctime_ns=metadata.st_ctime_ns)
+                except OSError as error:
+                    record.update(error=str(error), errno=error.errno, winerror=getattr(error, 'winerror', None))
+                report['files'].append(record)
+        (root / 'physical-read-failure.json').write_text(json.dumps(report, indent=2))
 
     def membership():
         return {zone: grpc('GetClusterInfo', {'zone_id': zone}, True)
@@ -244,21 +271,28 @@ def run(args, root):
         wrong[3] = '1'
         cli(wrong + ['--acknowledge-shared-outage'], expected=False)
         assert broker('service.status')['result']['instance'] == discovery['instance']
-        old_instance = discovery['instance']
-        stopped = cli(stop + ['--acknowledge-shared-outage'])
-        assert stopped['stopped'] and stopped['gracefulRaftDrain'] is False
-        children.clear()
-        assert not (services / 'run/service.json').exists()
-        restarted = setup()['service']
-        discovery = json.loads((services / 'run/service.json').read_bytes())
-        children.append(discovery)
-        assert restarted['instance'] != old_instance
-        assert restarted['persistedNodeId'] == profile['nodeId']
-        peer_messaging_resident()
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
-        print('PASS: acknowledged exact-target operator termination and recovery preserve state', flush=True)
+        for _recovery in range(12):
+            old_instance = discovery['instance']
+            stopped = cli(stop + ['--acknowledge-shared-outage'])
+            assert stopped['stopped'] and stopped['gracefulRaftDrain'] is False
+            children.clear()
+            assert not (services / 'run/service.json').exists()
+            restarted = setup()['service']
+            discovery = json.loads((services / 'run/service.json').read_bytes())
+            children.append(discovery)
+            assert restarted['instance'] != old_instance
+            assert restarted['persistedNodeId'] == profile['nodeId']
+            peer_messaging_resident()
+            assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
+            print('PASS: acknowledged exact-target operator termination and recovery preserve state', flush=True)
         receipt.update(nodeId=profile['nodeId'], before=before, after=after,
             ownerPid=discovery['supervisor_pid'], nexusPid=discovery['nexus_pid'], status='PASS')
+    except BaseException:
+        try:
+            capture_physical_marker()
+        except Exception as diagnostic_error:
+            print('PHYSICAL_DIAGNOSTIC_FAILED', repr(diagnostic_error), flush=True)
+        raise
     finally:
         if bootstrap.poll() is None:
             bootstrap.terminate()
@@ -292,7 +326,7 @@ if __name__ == '__main__':
             run(options, root)
         finally:
             import shutil
-            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'receipt.json', 'typed-responses.jsonl']:
+            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'receipt.json', 'typed-responses.jsonl', 'physical-read-failure.json']:
                 if (root / name).is_file():
                     shutil.copy2(root / name, options.artifacts / name)
 

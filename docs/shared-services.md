@@ -185,17 +185,17 @@ plane and the published Nexus codec.
 
 ## Acceptance
 
-[Shared services E2E](../.github/workflows/shared-services.yml) builds the actual
-CLI on Linux, Windows and both macOS architectures. Its
-[process harness](../e2e/shared-services/run.py) verifies signed runtime loading,
+Mandatory author-local and complementary native service acceptance use the same
+[process harness](../e2e/shared-services/run.py) to verify signed runtime loading,
 concurrent discovery, broker authentication, Vault versions, typed links, session
 waits, runtime ownership and durable recovery after restart and installation
 repair. A controlled real OS-lock handoff also checks that concurrent frontend
 start requests recover after a retiring owner releases its lifetime lock.
 
 On failure, the harness copies `run/runtime*.log` into the optional `--artifacts`
-directory before removing its temporary root. CI retains the per-platform
-`shared-services-<runner>` artifacts for seven days. To retain local evidence,
+directory before removing its temporary root. The managed local acceptance runner
+retains logs under `~/.nexus/local-acceptance/results`; complementary CI retains
+its native evidence. To retain evidence from a direct harness invocation,
 add `--artifacts ./shared-services-evidence` to the command below.
 
 ```sh
@@ -205,6 +205,14 @@ python e2e/shared-services/run.py --scode rust/target/debug/scode
 
 Use `scode.exe` on Windows. Frontend acceptance lives with each frontend, including
 Sudowork's desktop adapter and browser workflows.
+
+The [existing-Box harness](../e2e/shared-services/existing_box.py) runs both
+loopback and wildcard native listeners by default, with separate temporary Nodes
+and `loopback`/`wildcard` evidence directories. `--bind-host` selects one listener
+and preserves the direct invocation's original evidence layout. Each case keeps
+all four recovery phases and their existing deadlines. Both the local and CI
+service checks call this shared entry, so listener coverage does not depend on a
+second workflow.
 
 The existing-Box harness prepares its original isolated Node only after the
 single-voter zones have leaders and the VFS serves read-only readiness checks.

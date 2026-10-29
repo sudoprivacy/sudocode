@@ -3,6 +3,7 @@
 Never accepts an operator data directory or client record. The initial Node is
 created under the test directory. Stops are deliberate process termination,
 not a claim of graceful Node shutdown or multi-machine HA.
+By default, run both loopback and wildcard listeners through the same phases.
 """
 import argparse
 import base64
@@ -285,28 +286,34 @@ if __name__ == '__main__':
     for name in ['scode', 'grpcurl', 'artifacts']:
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--daemon', type=Path, help='Otherwise install the signed/pinned native package through scode')
-    parser.add_argument('--bind-host', choices=['127.0.0.1', '0.0.0.0'], default='127.0.0.1',
-        help='Exercise a loopback or wildcard Node listener through the same loopback client endpoint')
+    parser.add_argument('--bind-host', choices=['127.0.0.1', '0.0.0.0'],
+        help='Select one Node listener; by default exercise both through the same loopback client endpoint')
     options = parser.parse_args()
     for name in ['scode', 'grpcurl']:
         setattr(options, name, getattr(options, name).resolve(strict=True))
     if options.daemon:
         options.daemon = options.daemon.resolve(strict=True)
-    options.artifacts.mkdir(parents=True, exist_ok=True)
-    # Keep sanitized logs/receipt, never temporary TLS private keys or databases.
-    with tempfile.TemporaryDirectory(prefix='scode-existing-box-') as temporary:
-        root = Path(temporary)
-        try:
-            run(options, root)
-        finally:
-            import shutil
-            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'grpc-calls.jsonl', 'receipt.json']:
-                if (root / name).is_file():
-                    shutil.copy2(root / name, options.artifacts / name)
-            # Keep the native child diagnostics too; otherwise a failed
-            # supervisor startup loses its explanation when the private data
-            # and keys are removed. Never copy its token-bearing discovery.
-            for name in ['runtime.log', 'runtime.previous.log']:
-                source = root / 'services/run' / name
-                if source.is_file():
-                    shutil.copy2(source, options.artifacts / ('owner-' + name))
+    hosts = [options.bind_host] if options.bind_host else ['127.0.0.1', '0.0.0.0']
+    for host in hosts:
+        case = argparse.Namespace(**vars(options))
+        case.bind_host = host
+        if options.bind_host is None:
+            case.artifacts /= 'loopback' if host == '127.0.0.1' else 'wildcard'
+        case.artifacts.mkdir(parents=True, exist_ok=True)
+        # Keep sanitized logs/receipt, never temporary TLS private keys or databases.
+        with tempfile.TemporaryDirectory(prefix='scode-existing-box-') as temporary:
+            root = Path(temporary)
+            try:
+                run(case, root)
+            finally:
+                import shutil
+                for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'grpc-calls.jsonl', 'receipt.json']:
+                    if (root / name).is_file():
+                        shutil.copy2(root / name, case.artifacts / name)
+                # Keep the native child diagnostics too; otherwise a failed
+                # supervisor startup loses its explanation when the private data
+                # and keys are removed. Never copy its token-bearing discovery.
+                for name in ['runtime.log', 'runtime.previous.log']:
+                    source = root / 'services/run' / name
+                    if source.is_file():
+                        shutil.copy2(source, case.artifacts / ('owner-' + name))

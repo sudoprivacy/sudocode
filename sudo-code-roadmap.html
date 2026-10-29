@@ -209,46 +209,55 @@ safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
 <h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
 
 <p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
-of the scode-native testable feature surface. The merge queue must validate the
-commit that becomes <code>main</code> before landing.</p>
+of the scode-native testable feature surface. Every PR must pass mandatory
+local acceptance and complementary native CI before landing; the merge queue
+verifies those exact PR heads and the combined Git history.</p>
 
 <h3>CI cadence and coverage (2026-10-29)</h3>
 
-<p>A ready PR runs the complete deterministic workspace suite on Linux. The
-merge queue runs it on Linux, macOS and Windows against the integrated commit.
-The subsequent <code>main</code> push does not repeat those full suites.
-For one ready PR, one queue group and one main push, this reduces full workspace
-executions from eight to four. Native terminal resize and release acceptance
-follow the same cadence. Shared-service acceptance runs on Linux for PR feedback
-and all four supported hosts in the queue. Drafts allocate no heavy runners;
-manual dispatch and existing experimental branch pushes retain full validation.</p>
+<p><strong>Mandatory local tests plus complementary CI.</strong> Windows authors
+run Windows checks locally; CI runs Linux and macOS. Mac authors run macOS
+locally; CI runs Linux and Windows. Linux authors run Linux locally; CI runs
+Windows and macOS. Workspace, Clippy, terminal resize, release startup and shared
+service checks reuse the same command profiles on the local and hosted sides.
+All three operating systems remain covered; every CPU architecture is not a
+per-PR promise. Tagged co-host releases retain their five-platform builds.</p>
 
-<p>The workspace run includes cache-prefix, compaction, paste, subagent, tool-pause,
-colors/layout, plan, model-precedence and stderr cases. Eight separate pre-run
-steps are removed because the workspace already executes them. Standalone
-vendored Mermaid tests remain explicit. Benchmark entry points retain type
-checking without another optimized build of every test and benchmark.
-Workspace tests omit disposable debug-symbol output while retaining debug
-assertions; resource acceptance keeps its normal release profile.
-Real provider/API acceptance stays on <code>main</code> and manual dispatch;
-deterministic transport results do not establish live cache hits.</p>
+<p>A managed Git pre-push hook selects checks from changed inputs and blocks a
+push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
+diff base, native host, command exit codes and local log hashes. Full logs stay
+local. GitHub verifies enrolled public keys and freshness before scheduling the
+missing platforms. Signatures authenticate an enrolled author's attestation;
+they do not remotely attest machine execution. Missing or stale evidence blocks
+the required <code>Local acceptance</code> check. Existing PRs use the protected
+runner without needing a cosmetic merge. Acceptance-policy edits require a
+maintainer-reviewed bootstrap.</p>
 
-<p>Rust dependency caching keeps the existing 10 GB quota. One main-branch
-publisher per Linux/Windows/macOS workspace host shares dependencies across jobs;
-PRs and merge groups read those caches. Dev/test builds omit debug symbols
-while retaining debug assertions; production release profile settings stay
-unchanged. Exact key hits skip main's maintenance build. Misses compile
-dependencies without executing tests, so some main build work remains.
-Five hosted cold publications passed and uploaded 9.77 GB. Keeping the three
-workspace pools reduces that measured set to 6.54 GB; service-only macOS 15
-hosts compile on a miss. Sustained cache hits and net build time still require
-hosted observation. Cache publication does not change feature coverage.</p>
+<p>Full rendering A/A and A/B, painted browser and viewport performance checks
+run automatically in local Docker for changed production or measurement inputs.
+The existing fixed baseline, workload rounds, sample counts, normal release
+binary graph and budgets remain. A failed A/A calibration is inconclusive.
+There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
+unchanged performance pairs; docs-only changes run preflight. Local compiler
+workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
 
-<p>Ordinary integration-test edits skip release performance rebuilds; production
-Rust, manifests and the actual measurement drivers keep their gates. Queue
-maintenance cancels obsolete merge-group runs only when their Git ref is gone
-and their head is absent from the live queue. Current PR/queue checks and
-performance budgets remain in place.</p>
+<p>The merge queue checks each PR head's signed receipt and successful
+cross-platform workflow, plus the integrated Git history. It does not rerun the
+native suites on the integrated merge-group tree: runtime interactions found
+only in a combination of otherwise passing PRs are outside this pre-merge
+runtime coverage. For one ready Windows/Mac PR, one queue group and one main
+push, cloud workspace executions drop from the original eight to two (four to
+two after the first cleanup), plus one local native execution. This is an
+execution-count reduction, not a measured percentage of runner minutes.</p>
+
+<p>Cache-prefix, compaction, paste, subagent, tool-pause, colors/layout, plan,
+model precedence and stderr cases remain in the workspace. Standalone Mermaid
+tests and benchmark type checking remain explicit. Dev/test symbols are omitted
+while debug assertions and normal release settings remain. Real provider/API
+acceptance on main is unchanged and mock results earn no live-model coverage
+credit. Rust caches retain the 10 GB quota and three shared main publishers;
+sustained hits and net build-time savings still require hosted observation.
+Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.
@@ -270,10 +279,9 @@ Before/after performance comparisons use isolated build directories and retain
 binary and harness hashes. A failed A/A noise calibration is inconclusive,
 not a performance pass. These resource checks do not add feature-coverage credit.</p>
 
-<p>The automatic viewport on/off budget check remains part of CI. Additional
-enabled-before/after comparisons run when a PR has the
-<code>viewport-performance-comparison</code> label; routine changes do not repeat
-that diagnostic.</p>
+<p>The automatic viewport on/off headless and browser budget checks run in the
+mandatory local browser profile. The existing source-before/after measurement
+script remains available for diagnosis and earns no additional coverage credit.</p>
 
 <table>
   <thead>
@@ -543,7 +551,7 @@ bugs nor refactor confidence.</p>
   <tbody>
     <tr>
       <td><strong>PTY (pty-expect)</strong></td>
-      <td><strong>Required CI gate; the only layer that counts toward the 90% e2e coverage metric</strong></td>
+      <td><strong>Required acceptance gate (local + complementary CI); the only layer that counts toward the 90% e2e coverage metric</strong></td>
       <td>Every user-facing feature</td>
     </tr>
     <tr>

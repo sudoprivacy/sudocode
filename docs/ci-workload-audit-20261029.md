@@ -207,3 +207,40 @@ failed/noisy performance evidence; scheduling noise is inconclusive, not a pass.
 The canonical roadmap Goal 1 and contributor guide describe this cadence.
 Refresh the existing ShareOne roadmap only after its Git-backed source lands,
 then download it and verify that the served content matches the source.
+
+## Mandatory local execution and complementary platforms
+
+The user clarified the host split: a Windows author runs Windows locally and
+CI supplies macOS; a Mac author runs macOS locally and CI supplies Windows.
+One Linux native run is retained. No persistent Mac, SSH access, self-hosted
+runner service, scheduled benchmark or optional manual replacement is required.
+
+The managed pre-push hook runs changed-input profiles, signs commit/tree/base/
+policy/host/command/log digests and publishes a Git note. Protected-main code
+verifies evidence before complementary jobs run. All workspace cases, resize,
+service journeys, startup and co-host size budgets stay in shared profiles.
+Full rendering A/A/A-B and painted-browser/viewport measurements move to local
+Docker without changing their existing sampling or budgets. Tagged production
+artifact publishing retains its multi-platform builds.
+
+Static cloud workspace cadence is now two executions per ready Windows/Mac PR
+lifecycle, versus four after cleanup one and eight originally; a third execution
+is native on the author's machine. Co-host PR builds use the author host plus
+two complementary CI hosts instead of five cloud builds. These counts cannot
+be added to historical runner-minute percentages. Observed latency and net
+runner-minute savings remain unmeasured until fresh runs complete.
+
+The merge queue carries each exact PR head's completed acceptance workflow and
+checks its composed Git history. It does not rerun runtime suites on the
+integrated group. Interaction regressions unique to that combination are an
+explicit coverage tradeoff. A device signature authenticates its enrolled
+operator's claim, not remote execution. New public keys require main review;
+private keys and full local logs never enter Git. The protected main gate also
+rejects self-approved policy changes.
+
+The guard E2E uses actual temporary Git repositories, SSH signatures and
+pre-push transports: a failing executable blocks push; a successful one
+automatically publishes evidence; a new head, tampered receipt and dirty
+source fail. The local Docker image additionally launched Chromium and
+verified actual input. These are enforcement/environment checks, not claims
+that every product profile or a macOS native run was executed on Windows.

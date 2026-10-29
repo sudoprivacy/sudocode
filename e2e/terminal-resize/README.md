@@ -66,66 +66,36 @@ python3 e2e/terminal-resize/benchmark.py --driver rust/target/release/deps/pty_r
   --base /absolute/path/scode-base --candidate /absolute/path/scode-candidate --output /tmp/render-results
 ```
 
-Run from the repository root. `--profile stress` adds 30 turns; `--preview 1`
-measures the local experiment. Ordinary CI measures default behavior on Linux;
-the cross-platform resize job retains the visual and history contracts. Reports
-include raw input samples, per-turn process resources, terminal traces, binary
-hashes, A/A noise and paired A/B results. A noisy or incomplete run fails.
-Linux reports the kernel RSS high-water mark; local macOS peaks are phase samples.
+Run from the repository root. `--profile stress` remains an explicit diagnostic;
+the automatic local profile retains the existing core workload. Reports include
+raw input samples, per-turn resources, terminal traces, binary hashes, A/A noise
+and paired A/B results. A noisy or incomplete run fails. Linux reports the kernel
+RSS high-water mark; local macOS peaks are phase samples.
 
-The performance workflow and evaluator come from the PR base. Changes to its
-policy or shared measurement fixtures require a maintainer's approval of the
-current commit, then a gate rerun. Approved budgets may be selected for that PR;
-the evaluator still comes from the base. Baselines never update automatically.
-Candidate compilation has read permissions and no persisted checkout token;
-the separate status publisher executes trusted code only.
+The managed pre-push acceptance hook runs full core rendering and painted browser
+checks in local Docker whenever production or measurement inputs change. It uses
+isolated baseline, candidate and trusted-driver Cargo directories and freezes
+normal release binaries before driver compilation. Source snapshots contain only
+Git-tracked inputs. Docker gets no model keys or GitHub token. Full logs remain
+local; the signed Git note carries command and log digests bound to the exact
+commit and protected acceptance contract. See
+[mandatory local acceptance](../../CONTRIBUTING.md#mandatory-local-acceptance-and-complementary-ci).
 
-Ordinary integration-test changes under `rust/crates/*/tests/` skip release
-performance rebuilds. Production source and manifests still trigger them.
-Shared CLI test helpers and the relevant measurement driver remain inputs:
-`pty_render_performance` for headless measurements, `pty_hyperlinks` for browser
-measurements. The live policy contract checks this decision on test-only PRs
-in addition to rejecting stale commits. No workload, sample count or budget changes.
+The old hosted rendering/browser jobs, periodic stress run and manual dispatch
+replacement are removed. Native visual/resize contracts still run on all three
+OSes through the author-local plus complementary-CI split. Budget and baseline
+changes require maintainer review and retain original failed/noisy evidence.
+The protected default-branch publisher independently verifies the receipt and
+completed cross-platform workflow before publishing `Local acceptance`; its
+write token never executes candidate code. Candidate jobs use read-only tokens
+and no repository secrets, including for forks. See GitHub's
+[secure workflow guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
-PR builds use `pull_request`, so forks receive the normal read-only token,
-no repository secrets, and the existing fork-run approval checks. The policy
-and measurement harness are checked out from the protected base. Same-repository
-PRs publish through the existing trusted status job. Forks use
-`render-publish.yml`, a separate `workflow_run` publisher that executes only
-default-branch code and reads the fixed-name policy artifact as JSON data.
-It binds the actual workflow, fork, branch, head and run attempt to the live PR,
-rechecks current-head policy approval and required measurement jobs, and rejects
-stale revisions. Starting a fork measurement sets the gate pending; only its
-qualified completion can pass it. Its live contract verifies a real qualifying
-run and rejects an old attempt, another workflow, and a stale artifact head
-without posting test statuses. Performance budgets and the baseline are
-unchanged. See GitHub's [secure workflow guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
-
-A repository administrator who authored a PR may explicitly approve **harness-only**
-changes in a GitHub `COMMENTED` review bound to the current commit. Its first line
-must be `<!-- scode-render-harness-admin-approval -->`. CI verifies the review's
-author, commit and current administrator permission. Budget and baseline changes
-still require an independent maintainer review. Approval evidence is retained in
-`approval.json`; ordinary comments and approvals of older commits do not qualify.
-
-To measure an approved same-repository PR, dispatch `render-performance.yml` from
-its current head branch with `pull_request=<number>` and `profile=core`. This uses
-the PR base's policy and measurement harness, independently builds both releases,
-and publishes the required status only after real A/A and A/B results pass. The native approval
-job and `approval.json` retain the authenticated evidence; the validator only
-reads GitHub data. Historical Actions checks and measurement results remain
-unchanged. The final publisher rejects a PR that advanced during measurement.
-The workflow also tests stale PR-event and dispatch inputs against the live GitHub
-API in a separate job with a read-only token.
-
-Initial rollout: run Rust CI's optional `render_performance` dispatch on the
-candidate branch to validate hosted A/A calibration, merge the harness, then require
-the published `render performance` status in main's branch protection. The
-calibration dispatch skips ordinary CI jobs and live API calls; PR checks still run.
-The
-initial budgets are local regression limits and need hosted calibration before
-claiming reliable CI protection. A failed run is investigated; reruns do not
-replace its original evidence.
+Ordinary integration-test edits skip unchanged release performance pairs.
+Production source/manifests, shared CLI test helpers and measurement-driver edits
+still select their measurements. Workload rounds, sample counts and budgets are
+unchanged. The existing `policy-review.cjs` and live approval diagnostics remain
+historical tools; they no longer publish the required rendering gate.
 
 ## Painted terminal and hyperlink acceptance
 
@@ -181,4 +151,4 @@ fixed baseline are unchanged. Both binaries receive identical gestures and
 workloads; only candidate hyperlink assertions differ. The browser workflow
 compares releases built from the PR base and candidate in separate target dirs,
 and uploads failures as well as successful evidence. The existing required
-`render performance` check continues comparing the original workloads.
+mandatory local rendering profile continues comparing the original workloads.

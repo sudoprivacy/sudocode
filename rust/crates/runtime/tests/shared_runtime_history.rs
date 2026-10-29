@@ -130,12 +130,31 @@ impl Drop for Fixture {
         if std::thread::panicking() {
             eprintln!("Retained runtime history evidence: {}", self.0.display());
         } else {
-            std::fs::remove_dir_all(&self.0).unwrap_or_else(|error| {
+            // Still a failure, never retried or ignored: something writing
+            // here after every handle was dropped means a runtime did not shut
+            // down cleanly. Name what was left so the writer can be found.
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                let mut left = Vec::new();
+                let mut pending = vec![self.0.clone()];
+                while let Some(dir) = pending.pop() {
+                    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            pending.push(path.clone());
+                        }
+                        left.push(
+                            path.strip_prefix(&self.0)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string(),
+                        );
+                    }
+                }
                 panic!(
-                    "runtime history fixture removal failed: {}: {error}",
+                    "removing {} failed: {error}; still present after every handle was dropped: {left:?}",
                     self.0.display()
-                )
-            });
+                );
+            }
         }
     }
 }
@@ -485,6 +504,8 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
+    // The worker owns deferred reclamation until the last writer retires.
+    // Observe both its durable reference and the transcript before teardown.
     wait_for_reclaimed_session(&path, &references);
     drop(fixture);
 }

@@ -33,8 +33,16 @@ python .github/scripts/local_acceptance.py check --publish
 ```
 
 Then push the next substantive commit normally. If the old branch predates the
-runner files, use the installed managed runner under the common Git directory
-and run it from that worktree; it loads protected-main command definitions.
+runner files, the installed pre-push hook still loads protected-main commands.
+A branch with no remaining code changes can trigger its first verified push
+without rewriting published history:
+
+```sh
+git commit --allow-empty -m "ci: verify existing PR with local acceptance"
+git push
+```
+
+That commit runs the same real applicable checks; it does not waive them.
 Keep published commits and other contributors' work intact.
 
 Full rendering/browser/viewport measurements use local Docker automatically.

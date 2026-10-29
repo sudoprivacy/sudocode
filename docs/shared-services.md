@@ -129,6 +129,13 @@ that loses the lock race exits rather than queueing to become an unexpected
 future service. Its frontend reaps it and keeps observing ownership within the
 original startup deadline; a vacant lock permits another launch. Authenticated
 discovery, not a process exit or lock acquisition alone, establishes readiness.
+Discovery is published only once Nexus serves `/` and peer messaging's
+replicated prefixes (`/agents` and `/conversations`, from
+`a2a::REPLICATED_PREFIXES`). Nexus mounts those as their own zone and loads a
+hosted zone only on first access, so readiness makes that first access itself
+instead of leaving the load to the first client after a restart. A prefix this
+node does not mount is absent, so there is nothing to wait for. Each check is a
+local read, so a peer being down cannot hold readiness back.
 
 `data/` holds durable Nexus and Vault content. `identity/` holds the service's
 transport peer and zone membership identity, scoped to the same managed root.

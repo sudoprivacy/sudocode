@@ -733,7 +733,14 @@ fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
         let mut cli = spawn(&env, &path);
         cli.send("Continue despite the deliberately rejected request.\r")
             .unwrap();
-        cli.expect("recovery-test-rejection").unwrap();
+        // ConPTY may split a visible phrase across cursor updates or wraps.
+        // Assert the rendered UI, preserving the original per-platform budget.
+        common::expect_screen(
+            &cli,
+            |screen| common::screen_contains(screen, "recovery-test-rejection"),
+            common::DEFAULT_TIMEOUT,
+            "the rejected request must display its actual error",
+        );
         common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
         assert_eq!(capture.bodies().len(), attempts);
         assert_eq!(repair_archives(&path).len(), archives);
@@ -760,7 +767,12 @@ fn thinking_repair_preserves_a_concurrent_transcript_append() {
     let mut cli = spawn(&env, &path);
     cli.send("Continue while another writer appends history.\r")
         .unwrap();
-    cli.expect("Thinking repair preserved history").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| common::screen_contains(screen, "Thinking repair preserved history"),
+        common::DEFAULT_TIMEOUT,
+        "the concurrent history conflict must display its preservation notice",
+    );
     common::expect_input_line_cleared(&cli, WAIT, "concurrent edit preserved");
     assert_eq!(capture.bodies().len(), 1);
     assert_eq!(repair_archives(&path), [] as [std::path::PathBuf; 0]);
@@ -1457,7 +1469,12 @@ fn peer_description_survives_failed_checkpoint_and_pruning_without_a_model_call(
         .push_back("invalid max_tokens recovery-test-rejection".into());
     let mut cli = spawn(&env, &path);
     cli.send("/compact\r").unwrap();
-    cli.expect("recovery-test-rejection").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| common::screen_contains(screen, "recovery-test-rejection"),
+        common::DEFAULT_TIMEOUT,
+        "the failed checkpoint must display its actual error",
+    );
     common::expect_input_line_cleared(&cli, WAIT, "failed checkpoint preserves description");
     exit(&mut cli);
     assert_eq!(previous.as_bytes(), std::fs::read(&metadata).unwrap());

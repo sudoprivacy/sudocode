@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
-    paths: ['rust/**', 'e2e/terminal-resize/**', '.github/workflows/**']
+    paths: ['rust/**', 'e2e/terminal-resize/**', '.github/workflows/terminal-hyperlinks.yml']
   workflow_dispatch:
 
 permissions:

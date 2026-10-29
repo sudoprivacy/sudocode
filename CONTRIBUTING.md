@@ -227,6 +227,9 @@ probe checks. Its first failing step blocks its daemon/provider dependents.
 PRs always start this job, including SDK-only changes; path filters cannot leave
 a required status pending. The queue's protected acceptance gate still checks
 the combined Git history. No unique product test is removed by this consolidation.
+Signature verification and status publication use Windows runners, with an
+explicit Python interpreter, to avoid two extra admissions to the busy Linux
+pool. This metadata placement does not replace native Linux or macOS tests.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat

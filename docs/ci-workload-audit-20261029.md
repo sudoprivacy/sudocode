@@ -294,3 +294,18 @@ This removes six hosted jobs per PR/queue event. It is a scheduling count,
 not a 7x latency claim: commands now run sequentially, and runner queue delay
 still needs measurement. No independent product assertion or deadline changed.
 Required contexts migrate only after the new job has an actual hosted pass.
+
+The first hosted consolidated preflight passed all steps in 29 seconds after
+about 5m45s of queue wait (run 40906797832). Its actual success allowed the
+required contexts to become `CI preflight`, `Local acceptance` and the unchanged
+real-daemon guard. This is one CI-only PR, not a comparable production latency
+sample. Two retired PR-specific dependency pools were also deleted by exact ID,
+reclaiming 3,272,376,987 bytes while retaining all three main pools.
+
+Metadata-only signature verification and trusted publication use Windows
+runners instead of adding two more Linux admissions. Windows/macOS cache jobs
+started while the Linux peer remained queued; this is a capacity experiment,
+not a permanent guarantee that one host is faster. Pin Python 3.12 and use
+`sys.executable` for the queue history subprocess. Platform/runtime acceptance
+is unchanged. Compare the actual gate-to-publication path before claiming a
+latency improvement.

@@ -19,7 +19,9 @@ jobs:
   proof:
     name: Verify local acceptance
     if: github.event_name == 'merge_group' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    # Signature/Git metadata needs no Linux runtime. Linux queue contention
+    # otherwise delays both this gate and its dependent native platforms.
+    runs-on: windows-latest
     outputs:
       needed: ${{ steps.proof.outputs.needed }}
       checks: ${{ steps.proof.outputs.checks }}
@@ -30,11 +32,14 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Verify signed local evidence and select missing native hosts
         id: proof
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .github/local-acceptance/gate.py
+        run: python .github/local-acceptance/gate.py
 
   native:
     name: Complement local host (${{ matrix.os }})

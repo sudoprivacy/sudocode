@@ -305,6 +305,14 @@ selector is exercised against actual Git commits for docs, CI, Rust, daemon
 harness and cache-spec changes, through both push and merge-group payloads.
 No independent product case or budget is removed in this follow-up.
 
+CLI integration-test modules under `rust/crates/rusty-sudocode-cli/tests/` do
+not enter the daemon/cohost binaries or their shell journeys. Test-only edits
+there retain author/complementary workspace acceptance and the existing main
+provider scope, but skip unchanged daemon queue work. Manifest/source changes,
+daemon/service harness edits and renames across the production boundary retain
+the daemon check. Real Git fixtures exercise push, PR and queue events, plus
+the source rename and explicit dispatch. No daemon scenario is deleted.
+
 ## One shared preflight instead of seven short runners
 
 Combine format/schema, docs, architecture boundary, pinned protocol, release

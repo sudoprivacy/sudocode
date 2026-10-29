@@ -223,6 +223,9 @@ Provider tests on main run only for changed provider inputs, and real-daemon
 queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays
 available for gateway diagnosis.
+CLI integration-test-only edits retain native PTYs and the existing provider
+checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
+CLI manifests, production source and daemon harness edits still select it.
 
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider

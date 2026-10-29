@@ -37,10 +37,27 @@ def scope_acceptance(directory):
     (repository / "README.md").write_text("base\n")
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
+
+    def expect_scope(event_name, event, live, daemon):
+        data = directory / "scope-event.json"
+        output = directory / "scope-output.txt"
+        data.write_text(json.dumps(event))
+        output.write_text("")
+        environment = {**os.environ, "GITHUB_EVENT_PATH": str(data), "GITHUB_OUTPUT": str(output),
+                       "GITHUB_EVENT_NAME": event_name}
+        result = subprocess.run([sys.executable, str(source)], cwd=repository, env=environment, capture_output=True)
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert f"live_required={str(live).lower()}" in output.read_text()
+        assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+
     cases = [("docs/note.md", False, False), (".github/workflows/rust-ci.yml", False, False),
              ("rust/crates/api/src/lib.rs", True, True), ("e2e/nexus-a2a/run.sh", False, True),
              ("spec/cache_metrics.json", True, False), ("rust/crates/runtime/src/prompt.md", True, True),
-             ("rust/crates/engine-acp/src/ui.html", True, True), ("rust/crates/runtime/README.md", False, False)]
+             ("rust/crates/engine-acp/src/ui.html", True, True), ("rust/crates/runtime/README.md", False, False),
+             ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False),
+             ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False),
+             ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True),
+             ("e2e/shared-services/check.py", False, True)]
     for index, (path, live, daemon) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -50,18 +67,18 @@ def scope_acceptance(directory):
         command("git", "commit", "-m", f"input {index}", cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
         for event_name, event in [("push", {"before": base, "after": head}),
+                                  ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
-            data = directory / "scope-event.json"
-            output = directory / "scope-output.txt"
-            data.write_text(json.dumps(event))
-            output.write_text("")
-            environment = {**os.environ, "GITHUB_EVENT_PATH": str(data), "GITHUB_OUTPUT": str(output),
-                           "GITHUB_EVENT_NAME": event_name}
-            result = subprocess.run([sys.executable, str(source)], cwd=repository, env=environment, capture_output=True)
-            assert result.returncode == 0, result.stderr.decode(errors="replace")
-            assert f"live_required={str(live).lower()}" in output.read_text()
-            assert f"daemon_required={str(daemon).lower()}" in output.read_text()
-    print("PASS: real Git input scopes for docs, CI, Rust, daemon and cache specs")
+            expect_scope(event_name, event, live, daemon)
+    # A rename across the test/production boundary must see both paths.
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
+            "rust/crates/runtime/src/moved.rs", cwd=repository)
+    command("git", "commit", "-m", "move test source into production", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True)
+    expect_scope("workflow_dispatch", {}, True, True)
+    print("PASS: real Git scopes for PR/push/queue, test-only changes, source rename and explicit dispatch")
 
 
 def main():

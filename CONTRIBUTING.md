@@ -226,6 +226,12 @@ available for gateway diagnosis.
 CLI integration-test-only edits retain native PTYs and the existing provider
 checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
 CLI manifests, production source and daemon harness edits still select it.
+When a change contains only standalone CLI integration-test modules (optionally
+with root README or Markdown documentation edits), workspace acceptance runs
+those test targets with the same mailbox feature. Unchanged metadata, Mermaid,
+benchmark and production Clippy commands are reused. Shared helpers, fixtures,
+specs, source, manifests, target deletion and moves across those boundaries
+keep full workspace acceptance. All other selected native/local profiles remain.
 
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider

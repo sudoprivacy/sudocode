@@ -319,6 +319,18 @@ daemon/service harness edits and renames across the production boundary retain
 the daemon check. Real Git fixtures exercise push, PR and queue events, plus
 the source rename and explicit dispatch. No daemon scenario is deleted.
 
+For an isolated change to standalone CLI `tests/*.rs` modules, native workspace
+acceptance selects those actual Cargo integration targets with the existing
+mailbox feature. It keeps formatting and reuses unchanged schema/build-metadata,
+Mermaid, benchmark and production Clippy checks. Only root README and Markdown
+docs may accompany this narrow case. Shared helper/fixture/spec changes, target
+deletion, production inputs and cross-boundary moves fall back to the complete
+workspace. Other selected resize/release/services/cohost and local measurement
+profiles are unchanged. Real Git scenarios cover one and multiple targets,
+docs, common helpers, specs, manifests, deletion and a move into production.
+No test target is deleted; unchanged target executions are omitted for this
+specific input class. Its hosted latency benefit still requires observation.
+
 ## One shared preflight instead of seven short runners
 
 Combine format/schema, docs, architecture boundary, pinned protocol, release
@@ -366,10 +378,13 @@ latency improvement.
 
 The shared executor's one-worker default protects the author's foreground
 desktop. The complementary hosted wrapper overrides only the compiler worker
-count, up to two available CPUs, after restoring dependencies. This removes an
+count to the available hosted CPUs after restoring dependencies. This removes an
 unnecessary hosted build throttle without changing cache keys, source profiles,
 test concurrency, assertions or deadlines. Local/manual execution remains one
 worker. Actual hosted build-time benefit requires a comparable native run.
+GitHub's public standard Linux/Windows runners currently provide four CPUs,
+and ARM macOS provides three. The earlier two-worker hosted cap left that
+capacity unused. See [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
 ## ACP package runs
 

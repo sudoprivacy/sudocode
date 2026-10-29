@@ -66,6 +66,11 @@ fn main() {
     // TARGET is always set by Cargo during build
     let target = env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET={target}");
+    if target.ends_with("-apple-darwin") {
+        // Intel's linker otherwise leaves the executable unsigned. Generate the
+        // signature at link time so cold activation cannot stall before main.
+        println!("cargo:rustc-link-arg-bin=scode=-Wl,-adhoc_codesign");
+    }
 
     // Build date from SOURCE_DATE_EPOCH (reproducible builds) or current UTC date.
     // Intentionally ignoring time component to keep output deterministic within a day.

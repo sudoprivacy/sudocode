@@ -348,14 +348,16 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
-Unfinished ordinary paragraphs stream above the live status area by default.
+Unfinished ordinary paragraphs and top-level fenced code stream above the live status area by default.
 Finalized text
 moves into native scrollback in the same presentation as preview removal,
 and a draft typed during the response stays available. Parallel tool output
 keeps unfinished Markdown formatting intact. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
-Code, tables, lists, headings and emoji with ambiguous terminal widths use
+Complete code lines retain syntax parser state across deltas; the unfinished
+last line stays literal until its newline arrives. Finalization uses the same
+highlighter as replay. Nested/indented fences, Mermaid diagrams, tables, lists, headings and emoji with ambiguous terminal widths use
 the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
@@ -476,6 +478,17 @@ themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
+Write and Edit share numbered, syntax-highlighted source previews. New files
+show added lines; replacements show removed/added lines with nearby context.
+Running Write previews show the submitted content; completed cards use the
+tool's returned content. Preview lines and characters are bounded before
+highlighting, with explicit omission notices. The complete source is preserved
+in the session and file. Markdown files keep literal Markdown source in these
+tool cards rather than becoming rendered documents.
+When a large tool result is offloaded, the card labels its retained request
+content as an input preview instead of claiming an empty file or guessing
+whether the operation created or replaced it. Replay uses the recorded request;
+the complete tool result remains available through the session's output record.
 On Unix, the default REPL queries the terminal palette once at startup, with
 a shared 250 ms deadline and preservation of queued keys and pastes. Windows
 does not send OSC 10/11 color queries: some console hosts deliver replies as
@@ -492,6 +505,11 @@ Markdown uses Codex's typographic hierarchy: headings and emphasis keep the
 terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
+Tables follow Codex's column allocation: paths and long tokens surrender width
+before prose and compact values. Cells wrap with their styles and links;
+tables that cannot remain readable become labeled key/value records. Layout
+uses the available width when rendering, including replay and plan review.
+Already printed native scrollback keeps the terminal's own resize/reflow behavior.
 
 Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
 show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);

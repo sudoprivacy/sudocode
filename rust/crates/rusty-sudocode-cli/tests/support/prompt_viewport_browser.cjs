@@ -13,7 +13,7 @@ const { WebSocketServer } = require(modulePath('ws'));
 const { launch } = require(path.join(shared, 'host.cjs'));
 const sampling = require(path.join(shared, 'performance-policy.json')).sampling;
 const guiPolicy = require(path.join(shared, 'gui-policy.json'));
-const { resources: processResources } = require(path.join(shared, 'resources.cjs'));
+const { createBrowserSampler, processExited } = require(path.join(shared, 'resources.cjs'));
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const routes = {
   '/': ['text/html', path.join(shared, 'gui.html')],
@@ -51,20 +51,9 @@ websocket.on('connection', socket => {
     browser = await chromium.launch({ headless: true, executablePath: process.env.SCODE_VIEWPORT_CHROME || undefined });
     const cdp = await browser.newBrowserCDPSession();
     report.browser = await browser.version();
-    const cpu = new Map();
-    let peak = 0;
+    const sampleBrowser = createBrowserSampler(cdp);
     async function resources(label) {
-      const processes = (await cdp.send('SystemInfo.getProcessInfo')).processInfo;
-      const rows = processes.map(entry => {
-        cpu.set(entry.id, Math.max(cpu.get(entry.id) || 0, entry.cpuTime * 1000));
-        if (process.platform === 'win32') return entry;
-        try { return { ...entry, ...processResources(entry.id) }; }
-        catch (error) { if (process.platform === 'linux' && !fs.existsSync(`/proc/${entry.id}`)) return null; throw error; }
-      }).filter(Boolean);
-      const memoryAvailable = process.platform !== 'win32';
-      const rss = memoryAvailable ? rows.reduce((total, row) => total + row.rss_mib, 0) : null;
-      if (rss !== null) peak = Math.max(peak, rows.reduce((total, row) => total + row.peak_mib, 0));
-      const sample = { label, processes: rows, cpu_ms: [...cpu.values()].reduce((sum, value) => sum + value, 0), rss_mib: rss };
+      const sample = await sampleBrowser(label);
       report.resources.push(sample);
       return sample;
     }
@@ -103,14 +92,20 @@ websocket.on('connection', socket => {
       return { start: window.fixture.point(where), end: window.fixture.point(where, 'end') };
     }, label);
     await page.evaluate(() => window.fixture.frame());
-    // Shift forces selection in mouse-reporting mode; in native mode it
-    // extends an existing selection instead of beginning a new one.
-    if (config.enabled) await page.keyboard.down('Shift');
+    // xterm uses Option on macOS and Shift elsewhere to override mouse
+    // reporting. Native history needs no modifier; Shift extends a selection.
+    const selectionModifier = await page.evaluate(() => {
+      const mac = navigator.platform.startsWith('Mac');
+      if (mac) window.fixture.terminal.options.macOptionClickForcesSelection = true;
+      return mac ? 'Alt' : 'Shift';
+    });
+    report.selection_modifier = config.enabled ? selectionModifier : null;
+    if (config.enabled) await page.keyboard.down(selectionModifier);
     await page.mouse.move(target.start.x, target.start.y);
     await page.mouse.down();
     await page.mouse.move(target.end.x, target.end.y, { steps: 12 });
     await page.mouse.up();
-    if (config.enabled) await page.keyboard.up('Shift');
+    if (config.enabled) await page.keyboard.up(selectionModifier);
     assert.equal(await page.evaluate(() => window.fixture.terminal.getSelection()), label);
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await page.waitForFunction(() => window.fixture.viewport().includes('Σ'));
@@ -154,10 +149,34 @@ websocket.on('connection', socket => {
     const after = await resources('after-typing');
     report.metrics.terminal_cpu_ms = after.cpu_ms - initial.cpu_ms;
     if (after.rss_mib !== null) {
-      report.metrics.terminal_rss_peak_mib = peak;
+      report.metrics.terminal_rss_peak_mib = after.peak_mib;
       report.metrics.terminal_rss_growth_mib = Math.max(0, after.rss_mib - initial.rss_mib);
     }
     report.checks.push(`draft survives resize; ${sampling.input} real browser key events`);
+    if (config.verifyProcessExit) {
+      // Exercise an actual stale CDP snapshot after all measured work. This
+      // browser is separate from the CLI's terminal, whose page stays alive.
+      const spare = await chromium.launch({ headless: true, executablePath: process.env.SCODE_VIEWPORT_CHROME || undefined });
+      try {
+        const spareCdp = await spare.newBrowserCDPSession();
+        await spare.newPage();
+        const snapshot = (await spareCdp.send('SystemInfo.getProcessInfo')).processInfo;
+        assert(snapshot.length > 0, 'real Chromium process snapshot');
+        const staleSample = createBrowserSampler(spareCdp);
+        await spare.close();
+        for (let attempt = 0; attempt < 100 && !snapshot.every(entry => processExited(entry.id)); attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        assert(snapshot.every(entry => processExited(entry.id)), 'owned browser processes have exited');
+        const sampled = await staleSample('after-browser-exit', snapshot);
+        assert.equal(sampled.processes.length, 0);
+        assert.deepEqual(sampled.exited_processes.sort((a, b) => a - b), snapshot.map(entry => entry.id).sort((a, b) => a - b));
+        assert.equal(sampled.cpu_ms, snapshot.reduce((sum, entry) => sum + entry.cpuTime * 1000, 0));
+        assert(await page.evaluate(() => window.fixture.viewport().includes('❯')), 'main CLI terminal stays alive');
+        report.resource_exit = { ...sampled, excluded_from_resource_window: true };
+        report.checks.push('actual exited Chromium processes preserve CPU accounting without invalidating the terminal');
+      } finally { await spare.close().catch(() => {}); }
+    }
     report.status = 'complete';
   } catch (error) {
     report.status = 'failed'; report.error = String(error.stack || error); process.exitCode = 1;

@@ -522,18 +522,29 @@ pub fn expect_turn_complete_after(
     budget: Duration,
     context: &str,
 ) {
+    expect_turn_complete_with_input(sess, marker, "", budget, context);
+}
+
+/// The same fresh-turn/readiness contract while preserving an exact in-flight draft.
+pub fn expect_turn_complete_with_input(
+    sess: &PtySession,
+    marker: &str,
+    expected_input: &str,
+    budget: Duration,
+    context: &str,
+) {
     let deadline = Instant::now() + budget;
     loop {
         let screen = sess.render(screen_contents);
         let status = turn_status_line(&screen);
         let identity = turn_status_identity(&screen);
         let fresh = !identity.is_empty() && identity != marker;
-        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen).is_empty() {
+        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen) == expected_input {
             return;
         }
         if Instant::now() >= deadline {
             let unmet = if fresh {
-                "this turn finished but the input line never came back empty"
+                "this turn finished but the input line did not restore the expected text"
             } else if status.is_empty() {
                 "no per-turn status line ever appeared, so no turn ran"
             } else {
@@ -732,6 +743,25 @@ impl TestEnv {
             }
             Backend::Live { .. } => natural_prompt.to_string(),
         }
+    }
+
+    /// Keep a provider's large tool arguments out of the human input editor.
+    /// The mock still sends the complete arguments over the actual SSE transport.
+    /// Each prompt owns an immutable snapshot, including queued or replayed turns.
+    pub fn tool_batch_prompt(&self, calls: &serde_json::Value) -> String {
+        assert!(
+            self.is_mock(),
+            "tool batch fixture requires the protocol provider"
+        );
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = self
+            .workspace_root()
+            .join(format!("tool-batch-{counter}.json"));
+        std::fs::write(&path, serde_json::to_vec(calls).unwrap()).unwrap();
+        self.prompt(
+            &format!("TOOL_BATCH:{}", serde_json::json!({"calls_path":path})),
+            "tool_concurrency",
+        )
     }
 
     /// Spawn `scode` under a PTY with the right auth, model, and

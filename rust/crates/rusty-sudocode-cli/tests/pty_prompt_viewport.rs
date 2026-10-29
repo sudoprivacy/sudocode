@@ -438,7 +438,18 @@ fn viewport_browser_interaction() {
     run_viewport_observer("prompt_viewport_browser.cjs", enabled);
 }
 
+#[cfg(not(windows))]
+#[test]
+#[ignore = "real browser lifecycle and process accounting; requires Playwright Chromium"]
+fn viewport_browser_resource_exit() {
+    run_viewport_observer_with_exit("prompt_viewport_browser.cjs", true, true);
+}
+
 fn run_viewport_observer(observer: &str, enabled: bool) {
+    run_viewport_observer_with_exit(observer, enabled, false);
+}
+
+fn run_viewport_observer_with_exit(observer: &str, enabled: bool, verify_process_exit: bool) {
     let env = TestEnv::new_mock("prompt-viewport-measurements");
     let root = env.workspace_root();
     let document = (0..90)
@@ -453,6 +464,11 @@ fn run_viewport_observer(observer: &str, enabled: bool) {
         || root.join("viewport-measurements"),
         std::path::PathBuf::from,
     );
+    let logs = if verify_process_exit {
+        logs.join("resource-exit")
+    } else {
+        logs
+    };
     std::fs::create_dir_all(&logs).unwrap();
     let manifest = root.join("viewport-measurement.json");
     let report = logs.join("report.json");
@@ -461,6 +477,7 @@ fn run_viewport_observer(observer: &str, enabled: bool) {
         "root": root, "configHome": env.config_home(), "todos": root.join("todos.json"),
         "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
         "cols": 96, "rows": 40, "enabled": enabled, "prompt": prompt, "logRoot": logs, "report": report,
+        "verifyProcessExit": verify_process_exit,
         "env": { "SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT": if enabled { "1" } else { "0" } },
     });
     std::fs::write(&manifest, serde_json::to_vec(&config).unwrap()).unwrap();

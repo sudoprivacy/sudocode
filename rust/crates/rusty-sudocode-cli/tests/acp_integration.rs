@@ -8485,10 +8485,55 @@ $stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|error| {
-        panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}")
-    });
+    .await;
+    let identities = match identities {
+        Ok(identities) => identities,
+        Err(error) => {
+            // Read the producer before unwinding closes the CLI and its Job.
+            // These diagnostics do not extend the readiness deadline above.
+            let outputs: Vec<_> = started
+                .iter()
+                .filter_map(|message| {
+                    message
+                        .pointer("/params/update/rawOutput/rawOutputPath")
+                        .and_then(Value::as_str)
+                })
+                .map(|path| {
+                    (
+                        path,
+                        fs::read(path)
+                            .map(|bytes| process_text::decode_process_output(&bytes).text),
+                    )
+                })
+                .collect();
+            eprintln!("native startup output before cleanup: {outputs:?}");
+            if let Some(task_id) = started.iter().find_map(|message| {
+                message
+                    .pointer("/params/update/rawOutput/backgroundTaskId")
+                    .and_then(Value::as_str)
+            }) {
+                let calls = json!([{"id":"windows-owned-diagnostic","name":"pid_status","input":{"task_id":task_id}}]);
+                let query = client.send_request(
+                    "session/prompt",
+                    json!({
+                        "sessionId": sid,
+                        "_meta": {"traceId": "windows-owned:diagnostic"},
+                        "prompt": [{
+                            "type": "text",
+                            "text": format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}"),
+                        }],
+                    }),
+                );
+                let observed = timeout(
+                    Duration::from_secs(5),
+                    std::panic::AssertUnwindSafe(query).catch_unwind(),
+                )
+                .await;
+                eprintln!("native startup task state before cleanup: {observed:?}");
+            }
+            panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}");
+        }
+    };
     let running = powershell_process_identities(&identities);
     assert!(
         identities.iter().all(|identity| running.contains(identity)),

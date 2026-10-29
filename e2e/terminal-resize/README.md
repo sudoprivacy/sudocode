@@ -137,7 +137,13 @@ wrapped Chinese, combining characters and emoji. No programmatic selection API
 stands in for dragging. Selection must contain only visible text, must not open
 a link, and must survive output arriving while old history is selected.
 The workload includes dense links, long URLs, query semicolons, and rejected
-oversized/non-web targets. Static and streamed copies use the same document.
+oversized/non-web targets, plus adaptive tables and multiline fenced code.
+Static and streamed copies use the same document. It also executes a real file
+Write before the model question and verifies the resulting file bytes. A final
+native mouse drag selects wrapped Unicode source from that Write card; the
+selection and screenshot are retained separately. This candidate-only assertion
+runs after resource sampling, since the older baseline has no Write body to
+select. It does not enter paired CPU/RSS, input or drag timing metrics.
 
 Install with `npm ci --prefix e2e/terminal-resize`, then run
 `npx playwright install chromium` in that directory. From `rust/`:

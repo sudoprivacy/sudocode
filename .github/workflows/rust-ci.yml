@@ -374,6 +374,11 @@ jobs:
           SCODE_TEST_BACKEND: mock
           SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
         run: cargo test -p rusty-sudocode-cli --test pty_prose_preview -- --ignored --nocapture
+      - name: Preserve incremental code colors and history through real resize
+        env:
+          SCODE_TEST_BACKEND: mock
+          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
+        run: cargo test -p rusty-sudocode-cli --test pty_streaming_code -- --ignored --nocapture
       - name: Answer palette queries through the ready Unix terminal peer
         if: runner.os != 'Windows'
         env:
@@ -385,6 +390,14 @@ jobs:
           SCODE_TEST_BACKEND: mock
           SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
         run: cargo test -p rusty-sudocode-cli --test pty_review_scrollback -- --ignored --nocapture
+      - name: Verify macOS viewport painting and native selection
+        if: runner.os == 'macOS'
+        env:
+          SCODE_VIEWPORT_MEASURE_DIR: ${{ runner.temp }}/scode-resize-logs/viewport-browser
+        run: |
+          ../e2e/terminal-resize/node_modules/.bin/playwright install chromium
+          cargo test -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_interaction -- --ignored --exact --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_resource_exit -- --ignored --exact --nocapture
       - name: Retain terminal buffer and wire traces
         if: always()
         uses: actions/upload-artifact@v4
@@ -664,7 +677,9 @@ jobs:
         if: runner.os == 'Linux'
         env:
           SCODE_VIEWPORT_MEASURE_DIR: ${{ runner.temp }}/prompt-viewport-browser
-        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_interaction -- --ignored --exact --nocapture
+        run: |
+          cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_interaction -- --ignored --exact --nocapture
+          cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_resource_exit -- --ignored --exact --nocapture
       - name: Compare the opt-in viewport against normal input with unchanged budgets
         if: runner.os == 'Linux'
         shell: bash

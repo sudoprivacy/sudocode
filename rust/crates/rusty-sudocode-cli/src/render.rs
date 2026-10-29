@@ -9,6 +9,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 pub(crate) mod activity;
+pub(crate) mod code_preview;
 mod code_theme;
 mod color_math;
 mod color_theme;
@@ -25,7 +26,9 @@ pub use color_theme::{theme, ColorTheme};
 
 mod styled_line;
 pub(crate) mod styled_text;
+mod table;
 pub(crate) mod text_layout;
+mod word_wrap;
 
 /// Shared prompt surfaces for live input, committed prompts and context headers.
 /// Resolve the terminal palette once, outside redraw and typing hot paths.
@@ -499,8 +502,9 @@ enum ListKind {
     Ordered { next_index: u64 },
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct TableState {
+    alignments: Vec<pulldown_cmark::Alignment>,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     current_row: Vec<String>,
@@ -534,7 +538,7 @@ impl TableState {
 /// paragraph the way GitHub / CC render it.
 const TOP_LEVEL_LIST_INDENT: usize = 2;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct RenderState {
     code_block_complete: bool,
     emphasis: usize,
@@ -982,10 +986,22 @@ impl TerminalRenderer {
                 );
                 state.append_raw(output, &rendered);
             }
-            Event::Start(Tag::Table(..)) => state.table = Some(TableState::default()),
+            Event::Start(Tag::Table(alignments)) => {
+                state.table = Some(TableState {
+                    alignments,
+                    ..TableState::default()
+                });
+            }
             Event::End(TagEnd::Table) => {
                 if let Some(table) = state.table.take() {
-                    output.push_str(&self.render_table(&table));
+                    output.push_str(&table::render(
+                        &table.headers,
+                        &table.rows,
+                        &table.alignments,
+                        state.max_width,
+                        &self.color_theme,
+                        self.color_support,
+                    ));
                     output.push_str("\n\n");
                 }
             }
@@ -1144,48 +1160,53 @@ impl TerminalRenderer {
         state: &RenderState,
         output: &mut String,
     ) {
-        if mermaid::is_mermaid(code_language) {
-            let prefix = format!(
-                "{}{}",
-                "> ".repeat(state.quote),
-                " ".repeat(state.item_content_col)
-            );
-            let width = state.max_width.saturating_sub(visible_width(&prefix));
-            let rendered = state
-                .code_block_complete
-                .then(|| mermaid::render(code_buffer, width, &self.color_theme));
-            let block = match rendered {
-                Some(Ok(diagram)) => diagram,
-                result => {
-                    let mut fallback = String::new();
-                    if let Some(Err(error)) = result {
-                        let notice = format!("Mermaid source shown: {error}.");
-                        for line in text_layout::wrap_ansi_with_indent(&notice, width.max(1), 0) {
-                            let _ = writeln!(fallback, "{}", line.with(self.color_theme.border));
+        match fence_presentation(code_language) {
+            FencePresentation::Mermaid => {
+                let prefix = format!(
+                    "{}{}",
+                    "> ".repeat(state.quote),
+                    " ".repeat(state.item_content_col)
+                );
+                let width = state.max_width.saturating_sub(visible_width(&prefix));
+                let rendered = state
+                    .code_block_complete
+                    .then(|| mermaid::render(code_buffer, width, &self.color_theme));
+                let block = match rendered {
+                    Some(Ok(diagram)) => diagram,
+                    result => {
+                        let mut fallback = String::new();
+                        if let Some(Err(error)) = result {
+                            let notice = format!("Mermaid source shown: {error}.");
+                            for line in text_layout::wrap_ansi_with_indent(&notice, width.max(1), 0)
+                            {
+                                let _ =
+                                    writeln!(fallback, "{}", line.with(self.color_theme.border));
+                            }
                         }
+                        fallback.push_str(
+                            &self.highlight_code(&mermaid::safe_source(code_buffer), code_language),
+                        );
+                        fallback
                     }
-                    fallback.push_str(
-                        &self.highlight_code(&mermaid::safe_source(code_buffer), code_language),
-                    );
-                    fallback
+                };
+                if !prefix.is_empty()
+                    && output.ends_with(&prefix)
+                    && output.rsplit('\n').next() == Some(prefix.as_str())
+                {
+                    output.truncate(output.len() - prefix.len());
                 }
-            };
-            if !prefix.is_empty()
-                && output.ends_with(&prefix)
-                && output.rsplit('\n').next() == Some(prefix.as_str())
-            {
-                output.truncate(output.len() - prefix.len());
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                for line in block.lines() {
+                    output.push_str(&prefix);
+                    output.push_str(line);
+                    output.push('\n');
+                }
             }
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
+            FencePresentation::Source => {
+                output.push_str(&self.highlight_code(code_buffer, code_language));
             }
-            for line in block.lines() {
-                output.push_str(&prefix);
-                output.push_str(line);
-                output.push('\n');
-            }
-        } else {
-            output.push_str(&self.highlight_code(code_buffer, code_language));
         }
         if !output.ends_with('\n') {
             output.push('\n');
@@ -1206,77 +1227,6 @@ impl TerminalRenderer {
         } else {
             state.append_styled(output, text, &self.color_theme);
         }
-    }
-
-    fn render_table(&self, table: &TableState) -> String {
-        let mut rows = Vec::new();
-        if !table.headers.is_empty() {
-            rows.push(table.headers.clone());
-        }
-        rows.extend(table.rows.iter().cloned());
-
-        if rows.is_empty() {
-            return String::new();
-        }
-
-        let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let widths = (0..column_count)
-            .map(|column| {
-                rows.iter()
-                    .filter_map(|row| row.get(column))
-                    .map(|cell| visible_width(cell))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect::<Vec<_>>();
-
-        let border = format!("{}", "│".with(self.color_theme.border));
-        let separator = widths
-            .iter()
-            .map(|width| "─".repeat(*width + 2))
-            .collect::<Vec<_>>()
-            .join(&format!("{}", "┼".with(self.color_theme.border)));
-        let separator = format!("{border}{separator}{border}");
-
-        let mut output = String::new();
-        if !table.headers.is_empty() {
-            output.push_str(&self.render_table_row(&table.headers, &widths, true));
-            output.push('\n');
-            output.push_str(&separator);
-            if !table.rows.is_empty() {
-                output.push('\n');
-            }
-        }
-
-        for (index, row) in table.rows.iter().enumerate() {
-            output.push_str(&self.render_table_row(row, &widths, false));
-            if index + 1 < table.rows.len() {
-                output.push('\n');
-            }
-        }
-
-        output
-    }
-
-    fn render_table_row(&self, row: &[String], widths: &[usize], is_header: bool) -> String {
-        let border = format!("{}", "│".with(self.color_theme.border));
-        let mut line = String::new();
-        line.push_str(&border);
-
-        for (index, width) in widths.iter().enumerate() {
-            let cell = row.get(index).map_or("", String::as_str);
-            line.push(' ');
-            if is_header {
-                let _ = write!(line, "{}", cell.bold());
-            } else {
-                line.push_str(cell);
-            }
-            let padding = width.saturating_sub(visible_width(cell));
-            line.push_str(&" ".repeat(padding + 1));
-            line.push_str(&border);
-        }
-
-        line
     }
 
     #[must_use]
@@ -1552,6 +1502,22 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
     }
 
     mermaid::stream_boundary(markdown, last_boundary)
+}
+
+/// Shared presentation choice for canonical blocks and disposable live previews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FencePresentation {
+    Source,
+    Mermaid,
+}
+
+#[inline]
+fn fence_presentation(info: &str) -> FencePresentation {
+    if mermaid::is_mermaid(info) {
+        FencePresentation::Mermaid
+    } else {
+        FencePresentation::Source
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

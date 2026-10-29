@@ -24,4 +24,41 @@ function resources(pid) {
 }
 
 
-module.exports = { resources };
+// A Chromium process can exit between CDP's snapshot and the OS read. Only
+// ESRCH establishes that race; permission and malformed accounting errors fail.
+function processExited(pid) {
+  assert(Number.isSafeInteger(pid) && pid > 0, 'invalid process identity');
+  try { process.kill(pid, 0); return false; }
+  catch (error) { if (error.code === 'ESRCH') return true; throw error; }
+}
+
+function createBrowserSampler(cdp) {
+  const cpu = new Map();
+  let peak = 0;
+  return async function sample(label, snapshot) {
+    const processes = snapshot || (await cdp.send('SystemInfo.getProcessInfo')).processInfo;
+    const exited = [];
+    const rows = processes.map(entry => {
+      // Consumed CPU remains accounted for after a renderer exits.
+      cpu.set(entry.id, Math.max(cpu.get(entry.id) || 0, entry.cpuTime * 1000));
+      if (process.platform === 'win32') return { ...entry, cpu_ms: entry.cpuTime * 1000 };
+      try {
+        const measured = resources(entry.id);
+        return { ...entry, ...measured, os_cpu_ms: measured.cpu_ms, cpu_ms: entry.cpuTime * 1000 };
+      }
+      catch (error) {
+        if (!processExited(entry.id)) throw error;
+        exited.push(entry.id);
+        return null;
+      }
+    }).filter(Boolean);
+    const hasMemory = process.platform !== 'win32';
+    const rss = hasMemory ? rows.reduce((total, row) => total + row.rss_mib, 0) : null;
+    if (hasMemory) peak = Math.max(peak, rows.reduce((total, row) => total + row.peak_mib, 0));
+    return { label, processes: rows, exited_processes: exited,
+      cpu_ms: [...cpu.values()].reduce((sum, value) => sum + value, 0),
+      rss_mib: rss, peak_mib: hasMemory ? peak : null };
+  };
+}
+
+module.exports = { resources, processExited, createBrowserSampler };

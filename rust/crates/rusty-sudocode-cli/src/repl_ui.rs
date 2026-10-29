@@ -41,6 +41,7 @@ mod prompt_text;
 mod queued_message;
 mod tasks;
 mod transcript;
+mod transcript_view;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, AnsiText, RichText};
@@ -48,6 +49,7 @@ use choice_text::ChoiceText;
 pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
+use transcript_view::TextFrame;
 pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
@@ -2548,12 +2550,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
             View(height: row_height(transcript_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 #(transcript_frame.map(|display| element! {
-                    View(flex_direction: FlexDirection::Column, width: slot_width) {
-                        View(height: 1, width: slot_width, background_color: header_background) {
-                            RichText(content: display.header, width: slot_width, wrap: TextWrap::NoWrap)
-                        }
-                        RichText(content: display.body, width: slot_width, wrap: TextWrap::NoWrap)
-                    }
+                    TextFrame(header: display.header, body: display.body,
+                        width: u32::from(term_width), header_background)
                 }))
             }
             // Keep the preview parent mounted across streaming handoff so it

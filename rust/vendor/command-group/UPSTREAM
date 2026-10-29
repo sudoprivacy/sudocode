@@ -4,3 +4,6 @@ Commit: 790d818d67ef091166bada894e1694cb543792bb
 Local change: expose Windows Job active-process accounting for bounded termination confirmation.
 Local change: configure Unix async process groups through std::process::Command,
 matching the synchronous backend without an unnecessary pre_exec callback.
+Local change: own Windows thread snapshot/handle lifetimes, propagate native
+enumeration failures and reject snapshots with no child thread. Preserve the
+original system error instead of reporting successful startup without resuming it.

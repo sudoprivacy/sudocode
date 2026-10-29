@@ -14,6 +14,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
+use unicode_width::UnicodeWidthStr;
 
 fn bash(id: &str, command: &str) -> Value {
     json!({"id": id, "name": "Bash", "input": {"command": command}})
@@ -642,53 +643,100 @@ fn subagent_blocking_tools_overlap_and_accept_the_same_aliases_as_parent() {
     finish(sess);
 }
 
+fn pending_fence_keyword_color(session: &PtySession) -> String {
+    session.render(|screen| {
+        let raw = screen.raw();
+        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+        let row = rows
+            .iter()
+            .position(|row| row.contains("let PendingFenceBody"))
+            .unwrap();
+        let col = rows[row][..rows[row].find("let PendingFenceBody").unwrap()].width();
+        format!(
+            "{:?}",
+            raw.cell(row.try_into().unwrap(), col.try_into().unwrap())
+                .unwrap()
+                .fgcolor()
+        )
+    })
+}
+
+fn interleaved_preview_session(
+    source: &str,
+    completion: &str,
+    is_fence: bool,
+) -> (TestEnv, PtySession, std::path::PathBuf) {
+    let env = TestEnv::new_mock("preview-tool-interleave");
+    fifo(&env, "early.fifo");
+    let source_path = env.workspace_root().join("stream-text.json");
+    std::fs::write(&source_path, json!([source, completion]).to_string()).unwrap();
+    let gate = env.workspace_root().join("finish-stream");
+    let mut call = bash("early", &fifo_read("early.fifo"));
+    call["stream_wait_for"] = json!(gate);
+    call["stream_text_chunks_path"] = json!(source_path);
+    let prelude = if is_fence { "Prelude ready.\n\n" } else { "" };
+    if !prelude.is_empty() {
+        call["stream_text_prelude"] = json!(prelude);
+    }
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+            ("NO_COLOR", ""),
+        ],
+    );
+    sess.resize(80, 120).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains('❯'),
+        Duration::from_secs(30),
+        "prompt",
+    );
+    send_batch(&env, &mut sess, &[call]);
+    // The counter confirms that the renderer consumed the source delta.
+    let counter = format!("↓ {} tokens", (prelude.len() + source.len()) / 4);
+    common::expect_screen(
+        &sess,
+        |s| s.contains(&counter),
+        Duration::from_secs(30),
+        "open text consumed",
+    );
+    (env, sess, gate)
+}
+
 #[test]
 fn prose_preview_preserves_markdown_context_during_tool_completion() {
     for (source, completion, is_fence) in [
-        ("```rust\nlet PendingFenceBody = 7;\n", "```\n", true),
+        (
+            "```rust\nlet PendingFenceBody = 7;\n",
+            "```\n\n**AfterFenceToolProgress**\n\n",
+            true,
+        ),
         ("ProseBeforeToolProgress ordinary words", "\n\n", false),
         ("ProseBeforeToolProgress **bold", " words**\n\n", false),
         ("ProseBeforeToolProgress `inline", " code`\n\n", false),
     ] {
-        let env = TestEnv::new_mock("preview-tool-interleave");
-        fifo(&env, "early.fifo");
-        let source_path = env.workspace_root().join("stream-text.json");
-        std::fs::write(&source_path, json!([source, completion]).to_string()).unwrap();
-        let gate = env.workspace_root().join("finish-stream");
-        let mut call = bash("early", &fifo_read("early.fifo"));
-        call["stream_wait_for"] = json!(gate);
-        call["stream_text_chunks_path"] = json!(source_path);
-        let prelude = if is_fence { "Prelude ready.\n\n" } else { "" };
-        if !prelude.is_empty() {
-            call["stream_text_prelude"] = json!(prelude);
-        }
-        let mut sess = env.spawn_with_env(
-            &["--permission-mode", "danger-full-access"],
-            &[
-                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-                ("TERM", "xterm-256color"),
-                ("COLORTERM", "truecolor"),
-            ],
-        );
-        sess.resize(80, 120).unwrap();
-        common::expect_screen(
-            &sess,
-            |s| s.contains('❯'),
-            Duration::from_secs(30),
-            "prompt",
-        );
-        send_batch(&env, &mut sess, &[call]);
-        // The counter confirms that the renderer consumed the source delta.
-        let counter = format!("↓ {} tokens", (prelude.len() + source.len()) / 4);
-        common::expect_screen(
-            &sess,
-            |s| s.contains(&counter),
-            Duration::from_secs(30),
-            "open text consumed",
-        );
-        if is_fence {
-            assert!(!sess.render(|s| s.contents()).contains("PendingFenceBody"));
+        let (env, sess, gate) = interleaved_preview_session(source, completion, is_fence);
+        let initial_fence_color = if is_fence {
+            common::expect_screen(
+                &sess,
+                |screen| screen.matches("PendingFenceBody").count() == 1,
+                common::DEFAULT_TIMEOUT,
+                "open code preview before tool output",
+            );
+            let color = pending_fence_keyword_color(&sess);
+            assert_ne!(
+                color, "Default",
+                "complete code lines already have syntax colors"
+            );
+            sess.render(|screen| assert!(!screen.contents().contains("```rust")));
+            Some(color)
         } else {
+            None
+        };
+        if !is_fence {
             common::expect_screen(
                 &sess,
                 |s| s.contains("ProseBeforeToolProgress"),
@@ -702,15 +750,20 @@ fn prose_preview_preserves_markdown_context_during_tool_completion() {
         );
         common::expect_screen(
             &sess,
-            |s| s.contains("TOOL_FINISHED_WITH_OPEN_TEXT"),
+            |screen| {
+                screen.contains("TOOL_FINISHED_WITH_OPEN_TEXT")
+                    && (!is_fence || screen.matches("PendingFenceBody").count() == 1)
+            },
             common::DEFAULT_TIMEOUT,
             "tool finished before stream closes",
         );
         if is_fence {
-            assert!(
-                !sess.render(|s| s.contents()).contains("PendingFenceBody"),
-                "tool progress must not flush an open code fence"
+            assert_eq!(
+                &pending_fence_keyword_color(&sess),
+                initial_fence_color.as_ref().unwrap(),
+                "tool progress must preserve the open fence's syntax state"
             );
+            sess.render(|screen| assert!(!screen.contents().contains("```rust")));
         } else {
             sess.render(|s| assert_eq!(s.contents().matches("ProseBeforeToolProgress").count(), 1));
         }
@@ -718,6 +771,19 @@ fn prose_preview_preserves_markdown_context_during_tool_completion() {
         done(&sess);
         if is_fence {
             sess.render(|s| assert_eq!(s.contents().matches("PendingFenceBody").count(), 1));
+            assert_eq!(
+                &pending_fence_keyword_color(&sess),
+                initial_fence_color.as_ref().unwrap(),
+                "canonical history keeps the live code's syntax colors"
+            );
+            sess.render(|screen| {
+                let text = screen.contents();
+                assert!(text.contains("AfterFenceToolProgress"), "{text}");
+                assert!(
+                    !text.contains("**AfterFenceToolProgress**"),
+                    "text after the closing fence must render as Markdown: {text}"
+                );
+            });
         } else {
             sess.render(|s| {
                 let text = s.contents();

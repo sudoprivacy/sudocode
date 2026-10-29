@@ -34,18 +34,25 @@ pub(crate) fn single_line(input: &str) -> Cow<'_, str> {
 pub(crate) fn display_width(input: &str) -> usize {
     let plain = strip_ansi(input);
     if !plain.contains('\t') {
-        return plain.width();
+        return terminal_width(&plain);
     }
     plain
         .graphemes(true)
         .fold(0, |col, grapheme| col + grapheme_width(grapheme, col))
 }
 
+/// Codex's terminal-cell correction for visible halfwidth sound marks.
+/// Source: openai/codex 970111f6cb tui/src/width.rs (Apache-2.0).
+#[inline]
+fn terminal_width(text: &str) -> usize {
+    text.width() + text.matches(['\u{FF9E}', '\u{FF9F}']).count()
+}
+
 fn grapheme_width(grapheme: &str, col: usize) -> usize {
     if grapheme == "\t" {
         8 - col % 8
     } else {
-        grapheme.width()
+        terminal_width(grapheme)
     }
 }
 
@@ -108,6 +115,8 @@ fn wrap_line_with_indent(
 pub(crate) fn wrap_ansi_to_width(input: &str, width: usize) -> Vec<String> {
     wrap_ansi_with_indent(input, width, 0)
 }
+
+pub(crate) use super::word_wrap::wrap_words;
 
 /// Wrap styled list content with hanging indentation on continuation rows.
 pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) -> Vec<String> {

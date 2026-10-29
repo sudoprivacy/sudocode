@@ -1,0 +1,49 @@
+name: Existing Box native readiness diagnostic
+on:
+  push:
+    branches: [debug/pr1083-existing-box-readiness]
+permissions:
+  contents: read
+jobs:
+  native-readiness-evidence:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Build the unchanged current-head CLI
+        working-directory: rust
+        run: cargo build --locked -p rusty-sudocode-cli
+      - name: Capture original typed responses through actual native recovery
+        shell: bash
+        run: |
+          set -uo pipefail
+          source e2e/nexus-a2a/lib.sh
+          GRPCURL="$(grpcurl_bin)"
+          overall=0
+          for attempt in 1 2 3; do
+            if python e2e/shared-services/existing_box.py --scode rust/target/debug/scode.exe \
+              --grpcurl "$(native_path "$GRPCURL")" \
+              --artifacts "$RUNNER_TEMP/existing-box-readiness/attempt-$attempt"; then
+              result=0
+            else
+              result=$?
+            fi
+            echo "attempt-$attempt exit=$result"
+            if [ "$result" -ne 0 ]; then overall=1; fi
+          done
+          exit "$overall"
+      - name: Preserve exact typed responses and managed-runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: existing-box-readiness-evidence
+          path: ${{ runner.temp }}/existing-box-readiness
+          retention-days: 7
+          if-no-files-found: error

@@ -98,7 +98,14 @@ def run(args, root):
             with (root / 'grpc-errors.log').open('ab') as output:
                 output.write(result.stderr)
             result.check_returncode()
-        return json.loads(result.stdout)
+        response = json.loads(result.stdout)
+        if method in ['Read', 'Write']:
+            with (root / 'typed-responses.jsonl').open('a') as output:
+                output.write(json.dumps({'method': method, 'path': payload.get('path'),
+                    'response': response}) + '\n')
+            if response.get('isError'):
+                print('TYPED_RPC_ERROR', method, response, flush=True)
+        return response
 
     def peer_messaging_resident():
         # Readiness loads the zone that holds /agents before it is published.
@@ -285,6 +292,11 @@ if __name__ == '__main__':
             run(options, root)
         finally:
             import shutil
-            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'receipt.json']:
+            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'receipt.json', 'typed-responses.jsonl']:
                 if (root / name).is_file():
                     shutil.copy2(root / name, options.artifacts / name)
+
+            for name in ['runtime.log', 'runtime.previous.log']:
+                log = root / 'services/run' / name
+                if log.is_file():
+                    shutil.copy2(log, options.artifacts / name)

@@ -56,7 +56,9 @@ On main, an exact cache-key lookup skips download and compilation entirely.
 A miss restores the previous dependency key and compiles without executing
 tests. This compile-only maintenance is additional main work and is included
 in the tradeoff; removing duplicate main test runs does not remove all main
-builds. Manual cache-only dispatch validates publication without provider keys
+builds. The independent publisher keeps its current run when main advances,
+so frequent merges cannot repeatedly cancel a cold cache build. GitHub retains
+the latest pending publication. Manual cache-only dispatch validates publication without provider keys
 or E2E execution. No paid cache-capacity or billing settings change.
 
 The audit observed individual Rust archives around 1.5–2.7 GB and many duplicate

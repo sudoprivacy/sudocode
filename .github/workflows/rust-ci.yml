@@ -106,9 +106,9 @@ env:
 
 jobs:
   dependency-cache:
-    # Only main publishes caches shared with unrelated PR/queue refs. Manual
-    # cache-only runs can validate miss/hit behavior in their own branch scope.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.cache_only)
+    # Main has an independent publisher that survives a newer main push.
+    # Manual cache-only runs validate miss/hit in their own branch scope.
+    if: github.event_name == 'workflow_dispatch' && inputs.cache_only
     uses: ./.github/workflows/ci-dependency-cache.yml
     with:
       linux_only: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_linux_only }}

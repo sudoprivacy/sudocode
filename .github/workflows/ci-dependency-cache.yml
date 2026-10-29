@@ -1,11 +1,22 @@
 name: CI dependency cache
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/**'
   workflow_call:
     inputs:
       linux_only:
         type: boolean
         default: false
+
+# A busy main must not cancel a cold cache publication on every new commit.
+# Keep the running publisher; GitHub replaces only its superseded pending run.
+concurrency:
+  group: ci-dependency-cache-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read

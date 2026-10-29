@@ -23,15 +23,20 @@ BLOBS = {
 ROOT = Path.cwd()
 
 
+def output(command, **kwargs):
+    """Decode Git/GitHub UTF-8 independently of the Windows console code page."""
+    return subprocess.check_output(command, text=True, encoding="utf-8", **kwargs)
+
+
 def git(*args):
-    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+    return output(["git", *args], cwd=ROOT).strip()
 
 
 def api(path, body=None):
     command = ["gh", "api", "repos/" + REPOSITORY + "/" + path]
     if body is not None:
         command += ["--method", "POST", "--input", "-"]
-    return json.loads(subprocess.check_output(command, input=None if body is None else json.dumps(body), text=True))
+    return json.loads(output(command, input=None if body is None else json.dumps(body)))
 
 
 def pages(path, field=None):
@@ -48,7 +53,7 @@ def pages(path, field=None):
 def queue_entry():
     query = ('query { repository(owner:"sudoprivacy",name:"sudocode") { pullRequest(number:1138) '
              '{ mergeQueueEntry { headCommit { oid } baseCommit { oid } } } } }')
-    value = json.loads(subprocess.check_output(["gh", "api", "graphql", "-f", "query=" + query], text=True))
+    value = json.loads(output(["gh", "api", "graphql", "-f", "query=" + query]))
     assert not value.get("errors"), value
     return value["data"]["repository"]["pullRequest"]["mergeQueueEntry"]
 
@@ -120,7 +125,7 @@ def main():
     proof = next(j for j in jobs if j["name"] == "Verify local acceptance")
     assert proof["conclusion"] == "failure"
     assert all(j["conclusion"] == "skipped" or j["id"] == proof["id"] for j in jobs)
-    log = subprocess.check_output(["gh", "api", f"repos/{REPOSITORY}/actions/jobs/{proof['id']}/logs"], text=True)
+    log = output(["gh", "api", f"repos/{REPOSITORY}/actions/jobs/{proof['id']}/logs"])
     assert "No current valid local acceptance: Acceptance commands changed; rerun local acceptance" in log
     prior = next(s for s in pages(f"commits/{target}/statuses") if s["context"] == "Local acceptance")
     assert prior["state"] == "failure" and prior["creator"]["login"] == "github-actions[bot]"

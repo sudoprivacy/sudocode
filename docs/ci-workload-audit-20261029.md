@@ -89,6 +89,9 @@ independent coverage value. Platform-specific journeys remain necessary.
 
 The benchmark compilation step itself failed in 18 attempts during the window.
 Its API-drift protection is retained as a type-check rather than discarded.
+Cache-prefix and compaction targets had 37 and 20 failed-case observations
+respectively in those bundles. Their cases remain in the workspace run;
+removing their separate pre-run eliminates repetition, not those assertions.
 
 ## Validation and follow-up
 

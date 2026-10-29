@@ -67,7 +67,11 @@ jobs:
           env-vars: ImageOS
       - name: Compile workspace dependencies without running tests
         if: steps.lookup.outputs.cache-hit != 'true'
-        run: cargo test --workspace --locked --features engine-acp/mailbox --no-run
+        # Library/bin test builds include dev dependencies, including those used
+        # only by integration tests. The cache discards workspace executables,
+        # so linking every integration journey here warms nothing additional.
+        # Full product acceptance still builds and runs those journeys.
+        run: cargo test --workspace --lib --bins --locked --features engine-acp/mailbox --no-run
 
       - name: Compile production release dependencies into the same cache
         if: steps.lookup.outputs.cache-hit != 'true'

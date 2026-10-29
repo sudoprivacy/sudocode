@@ -8,8 +8,7 @@ on:
       - 'rust/**'
       - 'e2e/shared-services/**'
       - '.github/workflows/shared-services.yml'
-  push:
-    branches: [main]
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -24,8 +23,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+        # Linux PR feedback, then every supported host on the integrated tree.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-15","macos-15-intel"]') }}
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +40,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
       - name: Build the actual frontend CLI
         working-directory: rust
         run: cargo build --locked -p rusty-sudocode-cli

@@ -125,7 +125,8 @@ def main():
     proof = next(j for j in jobs if j["name"] == "Verify local acceptance")
     assert proof["conclusion"] == "failure"
     assert all(j["conclusion"] == "skipped" or j["id"] == proof["id"] for j in jobs)
-    log = output(["gh", "api", f"repos/{REPOSITORY}/actions/jobs/{proof['id']}/logs"])
+    log = output(["gh", "run", "view", str(ordinary["id"]), "--repo", REPOSITORY,
+                  "--job", str(proof["id"]), "--log-failed"])
     assert "No current valid local acceptance: Acceptance commands changed; rerun local acceptance" in log
     prior = next(s for s in pages(f"commits/{target}/statuses") if s["context"] == "Local acceptance")
     assert prior["state"] == "failure" and prior["creator"]["login"] == "github-actions[bot]"

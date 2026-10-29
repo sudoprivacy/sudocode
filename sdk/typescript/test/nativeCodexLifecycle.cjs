@@ -302,6 +302,19 @@ const closeTui = async own => {
         receipt.resumed={id:restored.id,cwd:restored.cwd,status:restored.status,actualTuiHistoryRestored:true};
         assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'Resume must add zero model requests');
         receipt.resumeAdditionalModelRequests=0;
+        if(options.autojoin){
+          const after=fs.readFileSync(path.join(root,'claims.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+          assert.deepEqual(after,receipt.autojoinClaims,'resume must not issue another Agent or operation');
+          const claim=after.find(claim=>claim.threadId===restored.id);
+          const result=await request(observer,'resumed native MCP routing','mcpServer/tool/call',{
+            threadId:restored.id,server:'nexus_auto',tool:'scode_send',
+            arguments:{to:'fixture-peer',message:'Resumed exact Agent 🧪',summary:'resume binding'},
+          });
+          assert.equal(result.isError,false,JSON.stringify(result));
+          assert.equal(JSON.parse(result.content[0].text).routing.sender,claim.actor);
+          receipt.autojoinResume={actor:claim.actor,threadId:restored.id,result};
+          assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'resumed direct send adds no inference');
+        }
         await closeTui(resumer);
       }
       receipt.result='PASS';

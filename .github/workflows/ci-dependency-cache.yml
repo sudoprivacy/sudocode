@@ -1,0 +1,60 @@
+name: CI dependency cache
+
+on:
+  workflow_call:
+    inputs:
+      linux_only:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: rust
+
+env:
+  CARGO_TERM_COLOR: always
+  # These affect only dev/test builds. Production release settings stay intact.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  dependencies:
+    name: Warm dependencies (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.linux_only && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest","macos-15-intel"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the dependency key without downloading a hit
+        id: lookup
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          lookup-only: true
+          save-if: false
+      - name: Restore dependencies for a missing key
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+      - name: Compile workspace dependencies without running tests
+        if: steps.lookup.outputs.cache-hit != 'true' && matrix.os != 'macos-15-intel'
+        run: cargo test --workspace --locked --features engine-acp/mailbox --no-run
+      - name: Compile the Intel service client's dependencies
+        if: steps.lookup.outputs.cache-hit != 'true' && matrix.os == 'macos-15-intel'
+        # Intel is the additional shared-service host, not a workspace matrix leg.
+        run: cargo build --locked -p rusty-sudocode-cli --bin scode
+
+      - name: Compile production release dependencies into the same cache
+        if: steps.lookup.outputs.cache-hit != 'true' && matrix.os != 'macos-15-intel'
+        # Keep one Cargo registry/Git copy per host, rather than one per profile.
+        run: cargo build --release --locked -p rusty-sudocode-cli --bin scode

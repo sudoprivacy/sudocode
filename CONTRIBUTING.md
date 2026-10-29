@@ -178,6 +178,15 @@ Coverage counts distinct user journeys, not repetitions across events or
 operating systems. Cache-prefix and compaction tests stay in the full workspace
 suite; they no longer run twice in one job. Standalone vendored Mermaid tests
 remain explicit because Cargo excludes that crate from the workspace.
+
+Rust dependency caches stay within the existing repository quota. One main
+publisher per supported host shares the Cargo sources and compiled dependencies
+across jobs; PRs and merge groups read those caches without publishing isolated
+copies. Exact key hits skip main's cache maintenance build; misses compile
+without running tests. Dev/test builds omit disposable debug symbols and retain
+debug assertions. Release profile settings stay unchanged. Cache-only manual
+dispatch performs no provider calls. See the
+[CI workload audit](docs/ci-workload-audit-20261029.md) for tradeoffs and evidence.
 Benchmark entry points are type-checked in the workspace job without linking an
 extra optimized copy of every test. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

@@ -233,6 +233,15 @@ assertions; resource acceptance keeps its normal release profile.
 Real provider/API acceptance stays on <code>main</code> and manual dispatch;
 deterministic transport results do not establish live cache hits.</p>
 
+<p>Rust dependency caching keeps the existing 10 GB quota. One main-branch
+publisher per host shares Cargo sources and compiled dependencies across jobs;
+PRs and merge groups read those caches. Dev/test builds omit debug symbols
+while retaining debug assertions; production release profile settings stay
+unchanged. Exact key hits skip main's maintenance build. Misses compile
+dependencies without executing tests, so some main build work remains.
+Archive sizes and cache hits require hosted observation. Cache publication
+does not change feature coverage.</p>
+
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.
 No unique PTY case is deleted solely for having no recorded failure.

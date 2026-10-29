@@ -84,6 +84,14 @@ on:
         description: 'Run genuine ACP and Linux/Windows model acceptance only; normal PR gates remain unchanged'
         type: boolean
         default: false
+      cache_only:
+        description: 'Validate dependency cache publication without E2E or provider calls'
+        type: boolean
+        default: false
+      cache_linux_only:
+        description: 'Limit manual cache validation to Linux'
+        type: boolean
+        default: true
 
 concurrency:
   group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -97,8 +105,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dependency-cache:
+    # Only main publishes caches shared with unrelated PR/queue refs. Manual
+    # cache-only runs can validate miss/hit behavior in their own branch scope.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.cache_only)
+    uses: ./.github/workflows/ci-dependency-cache.yml
+    with:
+      linux_only: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_linux_only }}
+
   rendering-calibration:
-    if: github.event_name == 'workflow_dispatch' && inputs.render_performance
+    if: github.event_name == 'workflow_dispatch' && inputs.render_performance && !inputs.cache_only
     permissions:
       contents: read
       pull-requests: read
@@ -108,7 +124,7 @@ jobs:
       profile: core
 
   release-mirror:
-    if: &standard_ci ${{ !inputs.render_performance && !inputs.live_only }}
+    if: &standard_ci ${{ !inputs.render_performance && !inputs.live_only && !inputs.cache_only }}
     name: release mirror recovery
     runs-on: ubuntu-latest
     defaults:
@@ -220,7 +236,7 @@ jobs:
     # merge commit in the queue. Do not repeat those same suites on push/main.
     # Explicit Windows/macOS jobs below retain the required check names when
     # skipped on PRs, without allocating runners. Drafts allocate none.
-    if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !inputs.cache_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env: &workspace_ci_env
@@ -249,6 +265,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       - name: Widen the Windows ephemeral port range
         # The PTY steps run back to back on one VM, and every mock server binds
         # 127.0.0.1:0. Ports left in TIME_WAIT accumulate across steps until
@@ -280,7 +298,7 @@ jobs:
         run: cargo test --workspace --locked --features engine-acp/mailbox
 
   test-workspace-windows:
-    if: &queue_ci ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: &queue_ci ${{ !inputs.render_performance && !inputs.live_only && !inputs.cache_only && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     name: cargo test --workspace (windows-latest)
     runs-on: windows-latest
     env: *workspace_ci_env
@@ -297,6 +315,7 @@ jobs:
     if: *full_ci
     name: Real terminal resize (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env: *workspace_ci_env
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -308,6 +327,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -377,6 +398,7 @@ jobs:
     needs: one-nexus-vfs-pin
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
+    env: *workspace_ci_env
     # The workflow default is `rust`; the harness lives at the repo root.
     defaults:
       run:
@@ -387,6 +409,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       # The one thing unit tests structurally cannot reach: an envelope moving
       # through a real gRPC server and a real DT_STREAM, and a blocking tail
       # woken by a real write. `ensure_inbox` shipped broken for exactly that
@@ -587,6 +611,10 @@ jobs:
     if: *full_ci
     name: Release acceptance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Match the cache owner; these do not alter the release profile.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     strategy:
       fail-fast: false
       matrix:
@@ -597,6 +625,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -732,6 +762,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       - name: Run workspace clippy
         run: cargo clippy --workspace
 
@@ -760,11 +792,13 @@ jobs:
     # can only be started by someone with write access, so the token secret is
     # never exposed to a fork's code.
     if: >-
-      !inputs.render_performance &&
+      !inputs.render_performance && !inputs.cache_only &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
       SUDOCODE_API_READ_TIMEOUT: &live_idle_seconds '90'
       SCODE_LIVE_MODEL: &live_model gpt-6-luna
       # The native credential selects a verified provider independently of GPT.
@@ -777,6 +811,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       - name: Inspect the provider's real usage contract
         working-directory: .
         env:
@@ -858,7 +894,7 @@ jobs:
 
   provider-probe-contract:
     name: Live provider probe contract
-    if: ${{ !inputs.render_performance }}
+    if: ${{ !inputs.render_performance && !inputs.cache_only }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -873,7 +909,7 @@ jobs:
   live-model-pty:
     name: Live model PTY (${{ matrix.os }})
     if: >-
-      !inputs.render_performance &&
+      !inputs.render_performance && !inputs.cache_only &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     strategy:
@@ -883,6 +919,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
       PROXY_BASE_URL: https://api.sudorouter.ai/v1
       SCODE_TEST_BACKEND: live
       SUDOCODE_API_READ_TIMEOUT: *live_idle_seconds
@@ -899,6 +937,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
       - name: Configure the live provider profiles
         shell: bash
         env:

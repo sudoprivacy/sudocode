@@ -31,6 +31,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   build-linux-x64:
@@ -61,6 +63,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
 
       - name: Build static musl release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode --target x86_64-unknown-linux-musl
@@ -164,6 +168,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          save-if: false
 
       - name: Build release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode

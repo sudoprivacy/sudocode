@@ -35,6 +35,39 @@ Release resource acceptance retains its normal release profile. The browser
 workflow triggers on Rust, its terminal harness and its own workflow changes;
 an unrelated workflow edit alone no longer starts two browser release builds.
 
+## Dependency cache within the existing quota
+
+Keep the repository's 10 GB cache limit. Only a main-branch publisher writes
+the shared Rust dependency caches; PRs, merge groups, release and provider jobs
+read them. A PR or merge-group cache is isolated from unrelated PRs, so those
+writes previously consumed storage without supplying a shared default-branch
+cache. Formatting does not need a Rust build cache.
+
+Use one dependency pool per host (Linux x64, Windows x64, macOS ARM64 and
+macOS Intel). The three workspace hosts store dev/test and normal release
+dependencies together, sharing the Cargo registry and Git sources. Intel warms
+only the service client's dev dependencies. Omit dev/test debug symbols while
+retaining debug assertions; no release profile, LTO setting or acceptance
+budget changes. The cache action excludes workspace artifacts and incremental
+output as before. Do not discard all compiled dependencies merely to reduce
+storage: cold compilation is itself a major CI cost.
+
+On main, an exact cache-key lookup skips download and compilation entirely.
+A miss restores the previous dependency key and compiles without executing
+tests. This compile-only maintenance is additional main work and is included
+in the tradeoff; removing duplicate main test runs does not remove all main
+builds. Manual cache-only dispatch validates publication without provider keys
+or E2E execution. No paid cache-capacity or billing settings change.
+
+The audit observed individual Rust archives around 1.5–2.7 GB and many duplicate
+job/ref keys. Deduplicating publishers, profiles and sources reduces that
+pressure. Actual archive sizes, hits, upload time and subsequent build time
+still need hosted observation; four pools are not proof that all future
+dependency sets will fit within 10 GB. Cache misses must remain correct.
+
+References: [GitHub cache scope and eviction](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
+[rust-cache cleanup and shared keys](https://github.com/Swatinem/rust-cache/blob/master/README.md).
+
 Browser release comparisons also restore the candidate's normal release
 dependency graph after compiling its test driver. Cargo may otherwise replace
 the candidate CLI with a dev-dependency graph while the baseline uses the
@@ -111,6 +144,14 @@ Its API-drift protection is retained as a type-check rather than discarded.
 Cache-prefix and compaction targets had 37 and 20 failed-case observations
 respectively in those bundles. Their cases remain in the workspace run;
 removing their separate pre-run eliminates repetition, not those assertions.
+
+One reviewed case also had avoidable fixed waits and a weak request-count
+assertion: `pty_repl_async_batched_flush`. Keep that journey, but use a real
+tool's fresh readiness/release files and rendered queue receipts instead of a
+30-second sleep. Verify the successful tool result, exactly one combined
+request containing each of three queued inputs once, and the persisted answer.
+The controlled provider checks client queue semantics; it earns no live-model
+coverage credit. The separate real lease-expiry journey keeps its timed wait.
 
 ## Validation and follow-up
 

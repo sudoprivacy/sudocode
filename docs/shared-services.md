@@ -84,11 +84,12 @@ endpoint. Resume never offers first-run setup. Protocol/headless entrypoints
 do not provision services. A live external owner is authenticated and reused; it
 is never killed or replaced. A stopped Node resumes through the same supervisor
 and lifetime lock, with an additional lock in its original data directory.
-External-owner detection connects to the declared loopback endpoint and
-authenticates using the declared TLS configuration, including when the Node
-listens on a wildcard address.
-Only an explicit connection refusal permits recovery. Connection timeouts and
-authentication failures report an error rather than starting a replacement.
+External-owner detection checks the declared native bind address, including a
+wildcard listener, separately from the loopback client endpoint. An occupied
+listener must authenticate using the declared TLS configuration. Only a free
+declared listener permits recovery. Other bind errors and authentication failures
+report an error rather than starting a replacement. Connection-refusal timing
+does not decide whether the Node is stopped.
 Closing the selecting CLI leaves that shared owner running. The broker exposes
 only lifecycle status for this profile: it does not turn the Node's privileged
 readiness certificate into an Agent file, Vault or session credential. Ordinary

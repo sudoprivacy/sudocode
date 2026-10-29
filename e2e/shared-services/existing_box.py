@@ -283,3 +283,10 @@ if __name__ == '__main__':
             for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'receipt.json']:
                 if (root / name).is_file():
                     shutil.copy2(root / name, options.artifacts / name)
+            # Keep the native child diagnostics too; otherwise a failed
+            # supervisor startup loses its explanation when the private data
+            # and keys are removed. Never copy its token-bearing discovery.
+            for name in ['runtime.log', 'runtime.previous.log']:
+                source = root / 'services/run' / name
+                if source.is_file():
+                    shutil.copy2(source, options.artifacts / ('owner-' + name))

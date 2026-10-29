@@ -60,7 +60,8 @@ def main():
             raise RuntimeError("PR advanced while verification was starting")
         head = fetch_head(pull)
         receipt = acceptance.verify(head, pull["base"]["sha"], policy_ref)
-        native = [name for name in receipt["checks"] if name.startswith("native-")]
+        current = acceptance.selected(acceptance.load_policy(policy_ref), acceptance.changed_paths(receipt["base"], head))
+        native = [name for name in current if name.startswith("native-")]
         # The local host supplies its own platform; CI supplies the other one.
         # Keep one Linux workspace run as well. The queue carries this exact
         # head's completed workflow instead of rebuilding all three again.

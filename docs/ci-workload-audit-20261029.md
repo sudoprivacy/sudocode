@@ -244,3 +244,25 @@ automatically publishes evidence; a new head, tampered receipt and dirty
 source fail. The local Docker image additionally launched Chromium and
 verified actual input. These are enforcement/environment checks, not claims
 that every product profile or a macOS native run was executed on Windows.
+
+## Fail-fast and unchanged-input follow-up
+
+Native, SDK, installer and live-model matrices cancel peers after the first
+failed job. Native commands already stop sequentially on their first nonzero
+exit; original logs remain. The independent publisher checks actual jobs, so
+the extra summary runner and scheduling hop are removed.
+
+Signed local evidence now binds executor/profile/image commands separately
+from scheduling/publication metadata. A scheduling-only update does not require
+rerunning already completed commands; the current required set must still be a
+subset of the signed passes. Changed commits/commands or added checks still
+require real acceptance. A real bare-Git E2E verifies this reuse across a
+protected scheduling update.
+
+Changed Git inputs also gate main's paid provider acceptance and the queue's
+real-daemon acceptance. Docs/CI-only edits do not change their test inputs.
+Rust, cache specs and relevant protocol/daemon harness changes retain their
+respective checks; explicit provider dispatch remains explicit. The input
+selector is exercised against actual Git commits for docs, CI, Rust, daemon
+harness and cache-spec changes, through both push and merge-group payloads.
+No independent product case or budget is removed in this follow-up.

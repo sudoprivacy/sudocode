@@ -43,7 +43,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: ${{ fromJSON(needs.proof.outputs.platforms) }}
     env:
@@ -93,22 +93,3 @@ jobs:
           path: ${{ runner.temp }}/local-acceptance
           if-no-files-found: error
           retention-days: 7
-
-  acceptance:
-    name: Cross-platform acceptance result
-    if: always() && (github.event_name == 'merge_group' || !github.event.pull_request.draft)
-    needs: [proof, native]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require verified evidence and every applicable native job
-        env:
-          PROOF_RESULT: ${{ needs.proof.result }}
-          NATIVE_RESULT: ${{ needs.native.result }}
-          NATIVE_NEEDED: ${{ needs.proof.outputs.needed }}
-        run: |
-          test "$PROOF_RESULT" = success
-          if [ "$NATIVE_NEEDED" = true ]; then
-            test "$NATIVE_RESULT" = success
-          else
-            test "$NATIVE_RESULT" = skipped
-          fi

@@ -16,7 +16,7 @@ jobs:
   package:
     name: Package integration (${{ matrix.os }})
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}

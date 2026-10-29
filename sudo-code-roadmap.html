@@ -259,6 +259,14 @@ credit. Rust caches retain the 10 GB quota and three shared main publishers;
 sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
+<p>Native, SDK and installer test matrices stop peer work after the first failure.
+The protected publisher verifies completed jobs directly; the redundant hosted
+summary job is removed. Scheduling-only edits reuse signed local results when
+the same executor/profile/image ran every currently required check. New source
+commits or command changes require acceptance. Main provider and queue daemon
+journeys skip unchanged inputs on docs/CI-only edits; no unique test case or
+performance budget is removed by this deduplication.</p>
+
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.
 No unique PTY case is deleted solely for having no recorded failure.

@@ -26,9 +26,48 @@ def command(*args, cwd, success=True):
     return result.stdout.strip()
 
 
+def scope_acceptance(directory):
+    source = SOURCE / ".github/scripts/ci_input_scope.py"
+    if not source.exists():
+        return
+    repository = directory / "scope"
+    command("git", "init", "--initial-branch=main", repository, cwd=directory)
+    command("git", "config", "user.name", "Scope E2E", cwd=repository)
+    command("git", "config", "user.email", "scope@example.invalid", cwd=repository)
+    (repository / "README.md").write_text("base\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "base", cwd=repository)
+    cases = [("docs/note.md", False, False), (".github/workflows/rust-ci.yml", False, False),
+             ("rust/crates/api/src/lib.rs", True, True), ("e2e/nexus-a2a/run.sh", False, True),
+             ("spec/cache_metrics.json", True, False), ("rust/crates/runtime/src/prompt.md", True, True),
+             ("rust/crates/engine-acp/src/ui.html", True, True), ("rust/crates/runtime/README.md", False, False)]
+    for index, (path, live, daemon) in enumerate(cases):
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        file = repository / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("new fixture input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", f"input {index}", cwd=repository)
+        head = command("git", "rev-parse", "HEAD", cwd=repository)
+        for event_name, event in [("push", {"before": base, "after": head}),
+                                  ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
+            data = directory / "scope-event.json"
+            output = directory / "scope-output.txt"
+            data.write_text(json.dumps(event))
+            output.write_text("")
+            environment = {**os.environ, "GITHUB_EVENT_PATH": str(data), "GITHUB_OUTPUT": str(output),
+                           "GITHUB_EVENT_NAME": event_name}
+            result = subprocess.run([sys.executable, str(source)], cwd=repository, env=environment, capture_output=True)
+            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            assert f"live_required={str(live).lower()}" in output.read_text()
+            assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+    print("PASS: real Git input scopes for docs, CI, Rust, daemon and cache specs")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
+        scope_acceptance(directory)
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)
@@ -39,6 +78,7 @@ def main():
         helper.parent.mkdir(parents=True)
         shutil.copyfile(SOURCE / ".github/scripts/local_acceptance.py", helper)
         (work / ".github/local-acceptance").mkdir()
+        (work / ".github/local-acceptance/Dockerfile").write_text("FROM scratch\n")
         (work / ".github/workflows").mkdir()
         (work / ".github/workflows/local-acceptance.yml").write_text("# Fixture metadata only\n")
         (work / ".github/workflows/local-acceptance-publish.yml").write_text("# Fixture trusted publisher\n")
@@ -90,6 +130,25 @@ def main():
         receipt = json.loads(base64.b64decode(envelope["payload"]))
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
+
+        # A protected scheduling-only change must preserve a real completed
+        # command's evidence. This is a local bare fixture, not a production
+        # branch-protection bypass.
+        command("git", "checkout", "main", cwd=work)
+        workflow = work / ".github/workflows/local-acceptance.yml"
+        workflow.write_text(workflow.read_text() + "# scheduling-only change\n")
+        command("git", "add", ".", cwd=work)
+        command("git", "commit", "-m", "Protected scheduler update", cwd=work)
+        command("git", "fetch", str(work), "main:refs/heads/main", cwd=origin)
+        command("git", "checkout", "feature", cwd=work)
+        command("git", "fetch", "origin", "main", cwd=work)
+        command(sys.executable, helper, "verify", cwd=work)
+        linked = directory / "linked-author"
+        command("git", "worktree", "add", "--detach", linked, head, cwd=work)
+        installed = work / ".git/local-acceptance-hooks/local_acceptance.py"
+        command(sys.executable, installed, "verify", cwd=linked)
+        assert linked.resolve().parent == directory.resolve()
+        command("git", "worktree", "remove", linked, cwd=work)
 
         # Both a new commit and unsigned changes to a previously valid receipt
         # must fail real SSH verification rather than borrowing an older pass.

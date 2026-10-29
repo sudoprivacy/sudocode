@@ -92,13 +92,21 @@ def main():
         subprocess.run([sys.executable, str(ROOT / ".github/scripts/check_pr_history.py"),
                         group["base_sha"], group["head_sha"]], cwd=ROOT, check=True)
     jobs = plan["ci"] if plan else []
+    # Existing PR workflows and the protected publisher still consume the old
+    # native-only fields during rollout. New workflows use the complete matrix.
+    native = [job for job in jobs if job["family"] == "native"]
+    checks = list(dict.fromkeys(name for job in native for name in job["checks"]))
+    platforms = list(dict.fromkeys(job["os"] for job in native))
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         stream.write("needed=" + ("true" if jobs else "false") + "\n")
         # A skipped job still needs a structurally valid Actions matrix.
         stream.write("matrix=" + json.dumps({"include": jobs or [{"os": "ubuntu-latest", "name": "No missing hosts",
                      "family": "native", "node": "22", "timeout": 90, "checks": []}]}) + "\n")
         stream.write("policy_ref=" + execution_ref + "\n")
-    return {"plan": plan, "required_jobs": ["Verify local acceptance", *[job["name"] for job in jobs]]}
+        stream.write("checks=" + " ".join(checks) + "\n")
+        stream.write("platforms=" + json.dumps(platforms or ["ubuntu-latest"]) + "\n")
+    return {"plan": plan, "checks": checks, "platforms": platforms,
+            "required_jobs": ["Verify local acceptance", *[job["name"] for job in jobs]]}
 
 
 if __name__ == "__main__":

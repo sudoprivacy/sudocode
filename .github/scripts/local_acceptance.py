@@ -134,7 +134,8 @@ def acceptance_plan(policy, names, author):
             key = family, target["runner"]
             if key not in jobs:
                 jobs[key] = {"os": target["runner"], "family": family, "checks": [], "targets": [],
-                             "name": f"Complement local host ({family}, {target['runner']})",
+                             "name": (f"Complement local host ({target['runner']})" if family == "native" else
+                                      f"Complement local host ({family}, {target['runner']})"),
                              "node": "20" if family == "sdk" else "22", "timeout": 15 if family == "sdk" else 90}
             if name not in jobs[key]["checks"]:
                 jobs[key]["checks"].append(name)

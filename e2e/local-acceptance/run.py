@@ -147,7 +147,12 @@ def plan_acceptance(directory):
     shutil.copyfile(SOURCE / ".github/scripts/local_acceptance.py", helper)
     policy = repository / "spec/local_acceptance.json"
     policy.parent.mkdir()
-    shutil.copyfile(SOURCE / "spec/local_acceptance.json", policy)
+    rules = json.loads((SOURCE / "spec/local_acceptance.json").read_text())
+    # The planner must understand a future architecture-specific profile before
+    # the protected workflow/publisher can safely switch to that new matrix.
+    rules["checks"]["native-sdk"] = {"include": ["sdk/typescript/**"],
+        "targets": ["linux-x64", "linux-arm64", "macos", "windows"]}
+    policy.write_text(json.dumps(rules))
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "Protected fixture policy", cwd=repository)
     command("git", "checkout", "-b", "sdk", cwd=repository)
@@ -188,6 +193,7 @@ def plan_acceptance(directory):
     assert len(plan["ci"]) == 5, plan
     native = [job for job in plan["ci"] if job["family"] == "native"]
     assert {job["os"] for job in native} == {"ubuntu-latest", "windows-latest"}
+    assert all(job["name"] == f"Complement local host ({job['os']})" for job in native)
     expected = {name for name in plan["local_checks"] if name.startswith("native-")} - {"native-sdk"}
     assert all(set(job["checks"]) == expected for job in native)
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")

@@ -15,8 +15,19 @@ def load(name, path):
 trusted = Path(__file__).resolve().parents[2]
 helper = load("acceptance", trusted / ".github/scripts/local_acceptance.py")
 checks = load("checks", trusted / ".github/local-acceptance/checks.py")
+
+
+def execute(command, cwd, log, env=None):
+    # Hosted compilers have no foreground editor to protect. Local callers
+    # retain one worker; cache restore keeps the publisher's environment.
+    jobs = min(2, os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1
+    return helper.run_command(command, cwd, log, {
+        **(env or {}), "CARGO_BUILD_JOBS": str(jobs),
+    })
+
+
 for name in os.environ["ACCEPTANCE_NATIVE_CHECKS"].split():
     if not name.startswith("native-"):
         raise RuntimeError("Only native profiles may execute in the complementary CI job")
     checks.run(name, Path.cwd(), Path(os.environ["ACCEPTANCE_OUTPUT"]) / name,
-               os.environ["ACCEPTANCE_BASE"], helper.run_command)
+               os.environ["ACCEPTANCE_BASE"], execute)

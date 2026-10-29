@@ -240,6 +240,9 @@ binary graph and budgets remain. A failed A/A calibration is inconclusive.
 There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
 unchanged performance pairs; docs-only changes run preflight. Local compiler
 workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p>Complementary hosted builds use up to two compiler workers, applied after
+cache restore; local author builds retain one worker. Test concurrency,
+assertions, deadlines and production build profiles are unchanged.</p>
 
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the

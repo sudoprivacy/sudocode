@@ -197,6 +197,9 @@ scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Hosted complementary builds use up to two compiler workers. That hosted-only
+limit is applied after cache restore; local author builds keep one worker and
+all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;

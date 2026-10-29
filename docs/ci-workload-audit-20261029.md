@@ -335,3 +335,10 @@ not a permanent guarantee that one host is faster. Pin Python 3.12 and use
 `sys.executable` for the queue history subprocess. Platform/runtime acceptance
 is unchanged. Compare the actual gate-to-publication path before claiming a
 latency improvement.
+
+The shared executor's one-worker default protects the author's foreground
+desktop. The complementary hosted wrapper overrides only the compiler worker
+count, up to two available CPUs, after restoring dependencies. This removes an
+unnecessary hosted build throttle without changing cache keys, source profiles,
+test concurrency, assertions or deadlines. Local/manual execution remains one
+worker. Actual hosted build-time benefit requires a comparable native run.

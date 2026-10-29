@@ -1,42 +1,89 @@
-name: Windows strict lint for a verified Rust snapshot
+name: Native acceptance against a verified Rust snapshot
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  strict:
-    name: Windows all-target all-feature Clippy snapshot
-    runs-on: windows-latest
-    timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: rust
+  native:
+    name: Native workspace and service acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
     env:
       CARGO_TERM_COLOR: always
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_BUILD_JOBS: '1'
-      CARGO_INCREMENTAL: '0'
+      SCODE_TEST_BACKEND: mock
     steps:
       - uses: actions/checkout@v4
         with:
           ref: cb8541262aaa20fd177ffbc46f96e9520232fa9f
+          fetch-depth: 0
           persist-credentials: false
-      - name: Require the exact qualified Rust tree and compiler installer
+      - name: Require the exact qualified runtime and executed native harness files
         shell: bash
         run: |
           test "$(git rev-parse HEAD:rust)" = 8e241c46e4abc13b57ae127f3b7a5ec93bdc58f4
+          test "$(git rev-parse HEAD:e2e/startup)" = fe738101fdbbc2dfb7a6c6108062169175997ae5
+          test "$(git rev-parse HEAD:e2e/shared-services)" = 8fa8d54c6d4380efe2113df94e04cd27cede5bcd
+          test "$(git rev-parse HEAD:e2e/build-metadata)" = a77ba1d4318fd60276dcdbdf00a5df35bc86cfc8
+          test "$(git rev-parse HEAD:e2e/nexus-a2a/lib.sh)" = 1070fdb97b7f065fa289053eefd4ce556e0ccdc1
+          test "$(git rev-parse HEAD:scripts/generate_cache_metrics.py)" = 092c4cfd9815cfcfc9c845d116d4c9af2004344e
+          test "$(git rev-parse HEAD:scripts/check_cache_usage_fixtures.py)" = 9d01183aded1129d47afb09ad5f65323649ed472
           test "$(git rev-parse HEAD:.github/actions/setup-protoc/action.yml)" = 9f3a47ef68c27253bbe71fc91ded7f102409e1ca
           test "$(git rev-parse HEAD:.github/scripts/setup_protoc.py)" = d1f133ad8ab991d815f6f9aeaca5ee685cf42f70
+          test "$(git rev-parse HEAD:e2e/terminal-resize/.gitignore)" = c2658d7d1b31848c3b71960543cb0368e56cd4c7
+          test "$(git rev-parse HEAD:e2e/terminal-resize/benchmark.py)" = 9a66568b98c1275841cbc91ed3563da3aed18f5b
+          test "$(git rev-parse HEAD:e2e/terminal-resize/check_windows_setup.py)" = 16db21562f966a61ec3ffeb03861f10ac42c75c3
+          test "$(git rev-parse HEAD:e2e/terminal-resize/fork-policy-contract.cjs)" = 2481bc1f322150068fe6b9717a5ca2d784f23e45
+          test "$(git rev-parse HEAD:e2e/terminal-resize/fork-render-publish.cjs)" = 1e24c611d7e94e5e6dc09decfbe8801211978b5b
+          test "$(git rev-parse HEAD:e2e/terminal-resize/gui-benchmark.py)" = 07af96144b98b77175c5935a5f2cc9cecd0bd499
+          test "$(git rev-parse HEAD:e2e/terminal-resize/gui-policy.json)" = eb7b26c2a4229388f717362c27656de86c094b12
+          test "$(git rev-parse HEAD:e2e/terminal-resize/gui.cjs)" = 64c82be9f0c172f904887648542d67f8c0f9ad56
+          test "$(git rev-parse HEAD:e2e/terminal-resize/gui.html)" = 04f920558e2406317fe2b8fe1c37eb0fe5ccba5b
+          test "$(git rev-parse HEAD:e2e/terminal-resize/host.cjs)" = b50fbbabdfe2f84b1b229ca7be1fad656636bc5c
+          test "$(git rev-parse HEAD:e2e/terminal-resize/package-lock.json)" = fe21f967f29345640289be0f68ffb523b466d796
+          test "$(git rev-parse HEAD:e2e/terminal-resize/package.json)" = e8169bfe7d3b08f76f186787f8b570909589acea
+          test "$(git rev-parse HEAD:e2e/terminal-resize/performance-policy.json)" = 8ff08ffd18231e0ac030a994dda71133ebb83523
+          test "$(git rev-parse HEAD:e2e/terminal-resize/performance.cjs)" = d8f51b43de07af834a77c103eecba9a31bc1a7ea
+          test "$(git rev-parse HEAD:e2e/terminal-resize/resources.cjs)" = 202417743b97e507324cb396a8aa9e14dbafaa9d
+          test "$(git rev-parse HEAD:e2e/terminal-resize/run.cjs)" = 0859305e0e6407382de3d6dcd7880e8be4a9cb8e
+          test "$(git rev-parse HEAD:e2e/terminal-resize/setup_windows.py)" = 6f72bb6ae51890de4e56c0de8481e0bcae9e94a1
+      - uses: actions/checkout@v4
+        with:
+          ref: 3698f131c4e40e1ee1dcda7253635a99c74c1102
+          path: .trusted-acceptance
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-      - uses: ./.github/actions/setup-protoc
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false
-      - name: Run workspace clippy
-        run: cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+      - name: Install acceptance observer dependencies
+        run: python -m pip install psutil jsonschema
+      - name: Execute proposed native host preparation and all native profiles
+        env:
+          ACCEPTANCE_NATIVE_CHECKS: native-workspace native-resize native-release native-services native-cohost
+          ACCEPTANCE_BASE: e5e8c01e6cba4e66ca7b6571c4ac3fe4f4b27a4d
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
+        run: python .trusted-acceptance/.github/local-acceptance/cross_platform.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-proposal-${{ matrix.os }}
+          path: ${{ runner.temp }}/local-acceptance
+          if-no-files-found: error
+          retention-days: 7

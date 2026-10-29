@@ -352,6 +352,18 @@ Context stays fixed during a turn, including in-turn steering. The following
 turn resolves anew. The provider mode is transport state, so controllers must
 negotiate it again when restoring a session.
 
+The release-build CI jobs also drive the actual CLI with a pinned Sudograph
+compiler installed in a dedicated Python environment. Two turns around a model
+edit must receive the exact compiled context for their respective revisions;
+the graph must expose the same new revision. Captured provider requests must
+retain user history without copying context into user messages, and a synthetic
+host denial must prevent another model request. The loopback provider returns
+fixed responses: this checks the compiler/engine contract, not model reasoning,
+production host authorization or Sudowork's UI. Evidence retains the executable
+checksum, compiler identity, revisions, request bodies and ACP diagnostics.
+`e2e/compiler-context/run.py` runs the same check locally with explicit source,
+engine and evidence-directory arguments; it does not rebuild Rust.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

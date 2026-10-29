@@ -62,6 +62,34 @@ the same commit to ready reuses that result instead of starting it again.
 The separate native acceptance workflow retains `ready_for_review`, because its
 real complementary hosts deliberately wait for readiness.
 
+An isolated Linux experiment kept the same release CLI, exact 64 test identities,
+one CPU, non-root user, test priority and existing assertions/deadlines:
+
+| Runner | Two concurrent tests | Four concurrent tests |
+| --- | --- | --- |
+| Cargo | 490.7 s | 329.6 s |
+| nextest 0.9.150 | 483.4 s | 274.2 s |
+
+These are 63 controlled-provider PTY cases plus one live-only early return under
+mock, not 64 real API successes. Each setting has one trial. Cargo's four-thread
+run was 32.8% shorter than its two-thread control; nextest was 16.8% shorter than
+Cargo at four threads. The similar two-thread timings do not support attributing
+all improvement to a new runner. No nextest dependency or global test-concurrency
+change is adopted from this experiment. Hosted production latency is unproven.
+
+The new narrow CLI scope was also exercised through the real acceptance executor
+against a test-only Git commit and unchanged production Rust. Its mailbox-enabled
+compaction target reported 34 passes (33 controlled-provider PTY cases plus one
+live-only early return). The release-profile experiment reused the owned build
+output; it does not claim the dev native profile or real provider acceptance.
+All observed compiler/linker workers had nice 10 and actual Cargo/PTys had nice 0.
+The owned container was stopped and its original launcher restored afterward.
+
+Only 7 of 231 merged PR file scopes in the month window fit the narrow standalone
+CLI-test pattern before checking deletions/target existence. The optimization
+helps that iteration class; it is not a global 10% latency result. Existing
+production-source acceptance remains complete.
+
 ## Dependency cache within the existing quota
 
 Workflow-only changes unrelated to `ci-dependency-cache.yml` do not start its

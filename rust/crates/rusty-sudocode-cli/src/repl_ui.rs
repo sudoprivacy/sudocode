@@ -303,8 +303,8 @@ pub enum UiCommand {
     SetCacheTip(CacheTip),
     /// A persistent tip owned by `source`; `None` clears it.
     SetStatusTip(StatusSource, Option<engine_core::Tip>),
-    /// The workspace's branch, or short commit when detached, for the footer.
-    SetBranch(Option<String>),
+    /// Where the workspace is, `repo ⎇ branch`, for the footer.
+    SetWorkspacePosition(Option<String>),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -394,8 +394,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::SetStatusTip(source, tip));
     }
 
-    pub(crate) fn set_branch(&self, label: Option<String>) {
-        let _ = self.tx.send(UiCommand::SetBranch(label));
+    pub(crate) fn set_workspace_position(&self, label: Option<String>) {
+        let _ = self.tx.send(UiCommand::SetWorkspacePosition(label));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -1982,7 +1982,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .set_cache_advice(view.advice, view.actionable);
                             frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
+                        Ok(UiCommand::SetWorkspacePosition(label)) => {
+                            footer_tips.write().position(label);
+                        }
                         Ok(UiCommand::SetStatusTip(source, tip)) => {
                             footer_tips.write().status(source, tip);
                             frame.set(frame.get().wrapping_add(1));
@@ -2234,12 +2236,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    let controls = if turn_active {
-        Some(running_input_controls(pending_input))
+    // The keys for the current state follow the workspace position. Only turn
+    // and queue state choose them — never typing — so the footer changes when
+    // a turn starts or ends, as the rest of the screen does, and keystrokes
+    // never redraw it. While queued input exists, Esc flushes it.
+    let keys = if turn_active {
+        running_input_controls(pending_input)
     } else if pending_input {
-        Some("Enter send · Esc flush · ↑ edit queued")
+        "Enter send · Esc flush · ↑ edit queued"
+    } else if submitted {
+        "/help"
     } else {
-        None
+        "Type /help for commands"
     };
     let explicit_hint = footer_hint.read().clone();
     let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
@@ -2249,13 +2257,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tips = footer_tips.read();
         let hints = FooterHints {
             transient: native_hint,
-            controls,
+            keys,
         };
         hooks.use_memo(
             || {
-                let render = |permission| {
-                    Arc::new(tips.render(permission, &browser, submitted, turn_active, hints, w))
-                };
+                let render =
+                    |permission| Arc::new(tips.render(permission, &browser, turn_active, hints, w));
                 (render(&perm), render("compact · enlarge to expand"))
             },
             (
@@ -2264,7 +2271,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 browser.footer_label(false),
                 browser.footer_label(true),
                 browser.focus,
-                submitted,
                 turn_active,
                 hints,
                 w,

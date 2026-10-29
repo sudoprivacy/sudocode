@@ -210,6 +210,16 @@ authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
 checks on an enrolled host; forks need not receive repository secrets.
 
+A failed native matrix job cancels the other pending/running platforms. The
+trusted publisher checks the actual completed jobs directly; no second hosted
+summary job repeats those checks. Scheduling-only edits keep valid completed
+local evidence when its executor/profile/image are unchanged and it covers the
+current required checks. New commits or changed commands still need acceptance.
+Provider tests on main run only for changed provider inputs, and real-daemon
+queue tests run only for changed daemon inputs. Documentation/CI-only changes
+skip those unchanged expensive journeys. The explicit provider dispatch stays
+available for gateway diagnosis.
+
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. A runtime interaction that

@@ -219,7 +219,7 @@ jobs:
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
     # once, rather than repeating on the PR and on push/main too.
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.daemon_required == 'true'
     needs: one-nexus-vfs-pin
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
@@ -352,16 +352,21 @@ jobs:
         run: cargo check -p nexusd-cohost --features daemon,driver-ai,egress-gate-presidio --bin nexusd-cohost --locked
 
   one-nexus-vfs-pin:
-    if: *standard_ci
+    if: ${{ !inputs.cache_only }}
     name: one nexus-vfs pin
     runs-on: ubuntu-latest
     outputs:
       commit: ${{ steps.pin.outputs.commit }}
+      live_required: ${{ steps.scope.outputs.live_required }}
+      daemon_required: ${{ steps.scope.outputs.daemon_required }}
     defaults:
       run:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
       # Seconds, no build: this is the invariant the co-host rests on, and it is
       # cheap enough to answer before anything compiles.
       #
@@ -436,7 +441,12 @@ jobs:
           fi
           echo "vendored vfs.proto matches pinned nexus-vfs $NEXUS_PROTO_COMMIT"
 
+      - name: Select expensive checks from changed inputs
+        id: scope
+        run: python3 .github/scripts/ci_input_scope.py
+
   live-api-smoke:
+    needs: [one-nexus-vfs-pin, provider-probe-contract]
     name: Live API smoke test
     timeout-minutes: 30
     # Also runnable on demand against any branch. Restricting it to pushes on
@@ -449,7 +459,7 @@ jobs:
     if: >-
       !inputs.cache_only &&
       (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.one-nexus-vfs-pin.outputs.live_required == 'true'))
     runs-on: ubuntu-latest
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -557,19 +567,22 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: node --test .github/scripts/probe_live_usage.test.cjs
 
   live-model-pty:
+    needs: [one-nexus-vfs-pin, provider-probe-contract]
     name: Live model PTY (${{ matrix.os }})
     if: >-
       !inputs.cache_only &&
       (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.one-nexus-vfs-pin.outputs.live_required == 'true'))
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}

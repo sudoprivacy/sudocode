@@ -46,10 +46,9 @@ cache. Formatting does not need a Rust build cache.
 Use one dependency pool per runner image and architecture, including `ImageOS`
 in the environment key. The latest Linux, Windows and macOS workspace hosts
 store dev/test and normal release dependencies together, sharing the Cargo
-registry and Git sources. macOS 15 has separate ARM64 and Intel service pools:
-ARM64 also warms the normal release CLI; Intel warms only the service client's
-dev dependencies. This keeps macOS 26/15 and Windows 2025/2022 compiler/SDK
-artifacts separate. Distribution hosts without a published pool compile normally.
+registry and Git sources. Service-only macOS 15 ARM64/Intel and distribution
+hosts compile normally on a miss. Do not restore compiled artifacts across
+macOS 26/15 or Windows 2025/2022 compiler/SDK boundaries.
 Omit dev/test debug symbols while
 retaining debug assertions; no release profile, LTO setting or acceptance
 budget changes. The cache action excludes workspace artifacts and incremental
@@ -65,11 +64,16 @@ so frequent merges cannot repeatedly cancel a cold cache build. GitHub retains
 the latest pending publication. Manual cache-only dispatch validates publication without provider keys
 or E2E execution. No paid cache-capacity or billing settings change.
 
-The audit observed individual Rust archives around 1.5–2.7 GB and many duplicate
-job/ref keys. Deduplicating publishers, profiles and sources reduces that
-pressure. Actual archive sizes, hits, upload time and subsequent build time
-still need hosted observation; five pools are not proof that all future
-dependency sets will fit within 10 GB. Cache misses must remain correct.
+The completed [five-image cold publication](https://github.com/sudoprivacy/sudocode/actions/runs/40858182147)
+passed on every host and uploaded 9,768,340,446 compressed bytes. The three
+workspace pools account for 6,543,799,447 bytes; removing the two service-only
+publishers reduces this measured set by 33.0% and leaves space for key turnover.
+That is archive footprint, not an equivalent reduction in runner time. macOS 15
+service builds lose those warm dependencies, while the more frequently used
+workspace pools gain headroom. Future archive sizes, sustained hits and net
+build time still need hosted observation. Legacy writers continued to publish
+isolated caches during the transition and evicted the new pools. Cache misses
+must remain correct.
 
 References: [GitHub cache scope and eviction](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
 [rust-cache cleanup and shared keys](https://github.com/Swatinem/rust-cache/blob/master/README.md).
@@ -80,6 +84,32 @@ the candidate CLI with a dev-dependency graph while the baseline uses the
 production graph. No build occurs between freezing the final pair and measuring
 them. That correction adds a build step to preserve a valid comparison; it is
 not claimed as a workload saving.
+
+### Integration-only edits and obsolete queue runs
+
+Ordinary `rust/crates/*/tests/**` changes do not change the production CLI, so
+they no longer compile and measure a fresh release pair. The headless benchmark
+still runs for production Rust, manifests, vendor code, the measurement harness,
+shared CLI test helpers and `pty_render_performance`. The browser workflow keeps
+its shared helpers, `pty_hyperlinks`, terminal harness and own workflow triggers.
+Renames are checked at both old and new paths by the headless policy. Test
+execution and all resource budgets are retained.
+
+At 12:50 UTC, 12 active merge-group runs referred to removed queue branches and
+commits absent from the current queue. All 12 cancellation requests succeeded:
+six Rust CI, three rendering and three history workflows. Their old Git refs
+were checked again immediately before cancellation. Current queue runs were
+retained. Queue refs include a changing base SHA, so existing concurrency keys
+do not cancel these obsolete runs when main advances.
+
+Default-branch queue maintenance now previews/cancels only `merge_group` runs
+older than two minutes whose queue ref is gone and whose head is absent from
+the live queue, rechecking identities before mutation. It never executes PR
+code with its Actions write token. API errors stop cleanup rather than treating
+a missing lookup result as permission to cancel. Run pagination finishes before
+cancellation so a shrinking result set cannot skip later pages. This adds a
+small maintenance job per new queue group/main push; current runs and unique
+test journeys remain unchanged.
 
 The 50% figure describes full-suite execution copies. It is not a measured
 50% reduction in wall time, billed usage, unique test cases or paid API calls.
@@ -114,11 +144,11 @@ a creation-window cohort rather than an exact invoice-period total.
 | Release rendering A/A and A/B job median | about 41 minutes |
 | Windows optimized benchmark compilation job median | about 20 minutes |
 | Linux merge-queue job median wait, depending on job | about 50–68 minutes |
-| Workspace test steps, accumulated runner time | 63,507 minutes |
-| Optimized benchmark compilation steps | 40,259 minutes |
-| Separate cache-prefix/compaction pre-run steps | 13,350 minutes |
-| Native resize steps | 13,745 minutes |
-| Rust-cache post steps | 13,226 minutes |
+| Workspace test steps, accumulated runner time | 64,640 minutes |
+| Optimized benchmark compilation steps | 41,215 minutes |
+| Separate cache-prefix/compaction pre-run steps | 13,772 minutes |
+| Native resize steps | 14,160 minutes |
+| Rust-cache post steps | 13,537 minutes |
 
 The snapshot of all 91 organization repositories at 2026-10-29 04:43:43 UTC
 showed two assigned in-progress jobs. That snapshot does not establish the
@@ -160,6 +190,14 @@ The controlled provider checks client queue semantics; it earns no live-model
 coverage credit. The separate real lease-expiry journey keeps its timed wait.
 
 ## Validation and follow-up
+
+The second cleanup passed actionlint, Python/JavaScript syntax checks, the
+nine-event workflow truth table and all 12 required-context checks. Its live
+policy contract made 32 authenticated, read-only GitHub API calls: test-only
+PRs #1105/#1084 skipped release measurements, production-dependency PR #1116
+retained them, and docs-only PR #1111 skipped them. All four rejected stale
+heads. The cleanup script's live preview retained all four current queue runs
+and found no remaining obsolete run after the 12 cancellations above.
 
 Workflow lint, required check names, draft/ready PR, merge-group, main-push and
 manual-dispatch behavior must be checked before landing. Observe fresh runs

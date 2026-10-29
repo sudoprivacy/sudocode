@@ -20,10 +20,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-          cache-on-failure: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -33,7 +29,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: native-windows-error-observation-diagnostic
-          run-id: 40791713774
+          run-id: 40795813479
           github-token: ${{ github.token }}
           path: previous-probe
       - name: Use the original CI ephemeral port range
@@ -41,7 +37,7 @@ jobs:
         run: |
           netsh int ipv4 set dynamicport tcp start=10000 num=55535
           netsh int ipv4 show dynamicport tcp
-      - name: Preserve the original full-suite failure or an inconclusive diagnostic
+      - name: Compare the rendered observer using the exact failing native images
         run: python .github/scripts/probe_error_observation.py
       - name: Preserve every control and the actual Windows binary pair
         if: always()

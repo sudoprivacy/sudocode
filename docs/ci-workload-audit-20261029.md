@@ -313,6 +313,18 @@ daemon/service harness edits and renames across the production boundary retain
 the daemon check. Real Git fixtures exercise push, PR and queue events, plus
 the source rename and explicit dispatch. No daemon scenario is deleted.
 
+For an isolated change to standalone CLI `tests/*.rs` modules, native workspace
+acceptance selects those actual Cargo integration targets with the existing
+mailbox feature. It keeps formatting and reuses unchanged schema/build-metadata,
+Mermaid, benchmark and production Clippy checks. Only root README and Markdown
+docs may accompany this narrow case. Shared helper/fixture/spec changes, target
+deletion, production inputs and cross-boundary moves fall back to the complete
+workspace. Other selected resize/release/services/cohost and local measurement
+profiles are unchanged. Real Git scenarios cover one and multiple targets,
+docs, common helpers, specs, manifests, deletion and a move into production.
+No test target is deleted; unchanged target executions are omitted for this
+specific input class. Its hosted latency benefit still requires observation.
+
 ## One shared preflight instead of seven short runners
 
 Combine format/schema, docs, architecture boundary, pinned protocol, release

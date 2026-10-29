@@ -13,13 +13,14 @@ permissions:
   pull-requests: read
   actions: write
 
-concurrency:
-  group: ci-queue-maintenance
-  cancel-in-progress: false
-
 jobs:
   removed-queue-refs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'merge_group'
+    # Evaluate the source-event filter before entering concurrency. A skipped
+    # Rust PR/main notification must not replace a useful pending cleanup.
+    concurrency:
+      group: ci-queue-maintenance
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

@@ -711,8 +711,8 @@ jobs:
           set -euo pipefail
           [[ "$VIEWPORT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           git fetch --no-tags origin "$VIEWPORT_BASE_SHA"
-          base_dependency=$(git show "$VIEWPORT_BASE_SHA:rust/crates/rusty-sudocode-cli/Cargo.toml" | rg '^iocraft\s*=')
-          candidate_dependency=$(rg '^iocraft\s*=' crates/rusty-sudocode-cli/Cargo.toml)
+          base_dependency=$(git show "$VIEWPORT_BASE_SHA:rust/crates/rusty-sudocode-cli/Cargo.toml" | grep -E '^iocraft[[:space:]]*=')
+          candidate_dependency=$(grep -E '^iocraft[[:space:]]*=' crates/rusty-sudocode-cli/Cargo.toml)
           if [[ "$base_dependency" == "$candidate_dependency" ]] && git diff --quiet "$VIEWPORT_BASE_SHA" HEAD -- 'crates/rusty-sudocode-cli/src/render*' 'crates/rusty-sudocode-cli/src/repl_ui*'; then
             echo 'Renderer inputs are unchanged; source comparison is not needed.'
             exit 0

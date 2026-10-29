@@ -296,6 +296,11 @@ commit-bound package artifacts for its merged revision, reusing the PR's
 integration result. Obsolete package heads cancel within the same PR/ref.
 Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
 publisher changes still check for new dependency/toolchain/image keys.</p>
+<p>Cold cache publishers compile library/bin test targets to retain dev dependencies
+but omit standalone integration executables that the dependency cache discards.
+Full native acceptance still compiles and runs those journeys. The three host
+pools, production release warming and 10 GB quota remain; warm cache hits already
+skip this work. This removes redundant compilation, with no coverage reduction.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.

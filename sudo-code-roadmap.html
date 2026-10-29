@@ -230,8 +230,13 @@ local. GitHub verifies enrolled public keys and freshness before scheduling the
 missing platforms. Signatures authenticate an enrolled author's attestation;
 they do not remotely attest machine execution. Missing or stale evidence blocks
 the required <code>Local acceptance</code> check. Existing PRs use the protected
-runner without needing a cosmetic merge. Acceptance-policy edits require a
-maintainer-reviewed bootstrap.</p>
+runner without needing a cosmetic merge. A protected contract edit prints an
+executable <code>contract-update</code> command through the installed runner.
+An enrolled repository maintainer or authorized agent runs the exact candidate
+checks and publishes separate, exact-head authorization for the rule change.
+The read-only gate verifies current authority and both contract hashes; signed
+results and complementary native hosts remain required. This authorization is
+not a test pass and does not require the end user personally to inspect code.</p>
 
 <p>Full rendering A/A and A/B, painted browser and viewport performance checks
 run automatically in local Docker for changed production or measurement inputs.
@@ -291,6 +296,11 @@ commit-bound package artifacts for its merged revision, reusing the PR's
 integration result. Obsolete package heads cancel within the same PR/ref.
 Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
 publisher changes still check for new dependency/toolchain/image keys.</p>
+<p>Cold cache publishers compile library/bin test targets to retain dev dependencies
+but omit standalone integration executables that the dependency cache discards.
+Full native acceptance still compiles and runs those journeys. The three host
+pools, production release warming and 10 GB quota remain; warm cache hits already
+skip this work. This removes redundant compilation, with no coverage reduction.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.

@@ -97,6 +97,22 @@ three host jobs. Rust pushes still check for a new dependency/toolchain/image
 key, and changes to the publisher still exercise it. Cache-hit correctness and
 source validation are unchanged.
 
+On a cache miss, the publisher compiles library/bin test targets with the same
+mailbox feature, retaining normal and dev dependencies. It omits standalone
+integration executables: the default cache action removes workspace artifacts
+before saving them, so those links do not warm an additional dependency. Native
+acceptance still builds and runs the complete selected journeys. Production
+release dependency warming, all three host pools and the 10 GB quota remain.
+See the action's [cache contract](https://github.com/Swatinem/rust-cache#cache-details).
+
+A real Windows Cargo fixture built both selections from separate empty targets.
+The reduced selection retained an integration-only dev dependency outside the
+workspace and the enabled library feature, while eliminating five integration
+executables. The fixture validates selection, not a percentage of cloud savings.
+Previously measured 139 CLI integration compilations consumed 302.26 compiler
+seconds in one single-worker desktop build; this is an opportunity estimate,
+not a hosted latency reduction. Existing cache hits skip compilation already.
+
 Complementary native jobs use the same cache environment as the main publisher.
 `rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
 default prefix list; `env-vars: ImageOS` does not replace that list. Keep

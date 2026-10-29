@@ -53,15 +53,17 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     repository = os.environ["GITHUB_REPOSITORY"]
     policy_ref = acceptance.value("rev-parse", "HEAD")
+    execution_ref = policy_ref
     plan = None
     if "pull_request" in event:
         pull = api(f"repos/{repository}/pulls/{event['pull_request']['number']}")
         if pull["head"]["sha"] != event["pull_request"]["head"]["sha"]:
             raise RuntimeError("PR advanced while verification was starting")
         head = fetch_head(pull)
-        receipt = acceptance.verify(head, pull["base"]["sha"], policy_ref)
-        current = acceptance.selected(acceptance.load_policy(policy_ref), acceptance.changed_paths(receipt["base"], head))
-        plan = acceptance.acceptance_plan(acceptance.load_policy(policy_ref), current, receipt["host"])
+        execution_ref = acceptance.authorized_policy(head, pull["base"]["sha"], policy_ref, api)
+        receipt = acceptance.verify(head, pull["base"]["sha"], execution_ref, signers_ref=policy_ref)
+        current = acceptance.selected(acceptance.load_policy(execution_ref), acceptance.changed_paths(receipt["base"], head))
+        plan = acceptance.acceptance_plan(acceptance.load_policy(execution_ref), current, receipt["host"])
     else:
         group = event["merge_group"]
         acceptance.git("fetch", "--no-tags", "origin", group["head_sha"], group["base_sha"])
@@ -72,7 +74,8 @@ def main():
             raise RuntimeError("Cannot attribute this merge group to current PR heads")
         for pull in pulls:
             head = fetch_head(pull)
-            acceptance.verify(head, group["base_sha"], policy_ref)
+            authorized = acceptance.authorized_policy(head, group["base_sha"], policy_ref, api)
+            acceptance.verify(head, group["base_sha"], authorized, signers_ref=policy_ref)
             statuses = pages(f"repos/{repository}/commits/{head}/statuses")
             statuses = [status for status in statuses if status["context"] == "Local acceptance"]
             status = statuses[0] if statuses else None
@@ -94,6 +97,7 @@ def main():
         # A skipped job still needs a structurally valid Actions matrix.
         stream.write("matrix=" + json.dumps({"include": jobs or [{"os": "ubuntu-latest", "name": "No missing hosts",
                      "family": "native", "node": "22", "timeout": 90, "checks": []}]}) + "\n")
+        stream.write("policy_ref=" + execution_ref + "\n")
     return {"plan": plan, "required_jobs": ["Verify local acceptance", *[job["name"] for job in jobs]]}
 
 

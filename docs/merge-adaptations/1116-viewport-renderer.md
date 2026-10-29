@@ -11,6 +11,8 @@ records retain the original resolution.
 Freeze the normal release binary before Cargo compiles test drivers, which can
 otherwise rebuild the CLI with a different dependency feature graph. Streaming,
 startup, viewport measurements and the Windows artifact use that frozen binary.
+The separate browser release comparison also restores the candidate's normal
+release graph after compiling its driver, with no later build before measuring.
 The before/after baseline uses an isolated target directory to avoid stale
 same-version path-crate artifacts. Workloads, sample counts and budgets remain
 the existing ones.

@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2a"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "blake3",
  "contracts",
@@ -425,7 +425,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "auth"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "contracts",
  "dashmap",
@@ -436,7 +436,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tonic 0.14.6",
+ "tonic",
  "tracing",
  "transport",
 ]
@@ -505,7 +505,7 @@ dependencies = [
 [[package]]
 name = "backends"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "ahash",
  "base64 0.22.1",
@@ -536,7 +536,7 @@ dependencies = [
  "simdutf8",
  "tempfile",
  "tokio",
- "tonic 0.14.6",
+ "tonic",
  "tracing",
  "uuid",
 ]
@@ -631,16 +631,6 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
-]
-
-[[package]]
-name = "bloomfilter"
-version = "3.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f6d7f06817e48ea4e17532fa61bc4e8b9a101437f0623f69d2ea54284f3a817"
-dependencies = [
- "getrandom 0.2.17",
- "siphasher",
 ]
 
 [[package]]
@@ -977,7 +967,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "parking_lot",
  "serde",
@@ -1495,7 +1485,7 @@ dependencies = [
 [[package]]
 name = "egress-gate"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "a2a",
  "contracts",
@@ -2268,7 +2258,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -2663,14 +2653,13 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.10.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "ahash",
  "arc-swap",
  "base64 0.22.1",
  "bincode",
  "blake3",
- "bloomfilter",
  "bytes",
  "chrono",
  "contracts",
@@ -2700,7 +2689,7 @@ dependencies = [
  "string-interner",
  "tempfile",
  "tokio",
- "tonic 0.14.6",
+ "tonic",
  "tonic-prost",
  "tonic-prost-build",
  "tracing",
@@ -2726,7 +2715,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2756,7 +2745,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
- "tonic 0.14.6",
+ "tonic",
  "tracing",
  "windows-sys 0.61.2",
  "x509-parser",
@@ -2814,7 +2803,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "llm-mount"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "contracts",
  "dashmap",
@@ -2855,7 +2844,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "managed-agent"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "a2a",
  "contracts",
@@ -2999,7 +2988,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nexus-cluster"
 version = "0.1.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "a2a",
  "anyhow",
@@ -3020,7 +3009,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tonic 0.14.6",
+ "tonic",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -3031,12 +3020,12 @@ dependencies = [
 [[package]]
 name = "nexus-plugin-abi"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 
 [[package]]
 name = "nexus-rebac"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "ahash",
  "contracts",
@@ -3051,26 +3040,24 @@ dependencies = [
 [[package]]
 name = "nexus-search-common"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "dashmap",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tonic 0.14.6",
+ "tonic",
 ]
 
 [[package]]
 name = "nexus-vfs-client"
 version = "0.2.37"
 dependencies = [
- "prost 0.13.5",
- "protoc-bin-vendored",
+ "kernel",
  "serde_json",
  "tokio",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic",
 ]
 
 [[package]]
@@ -3081,8 +3068,13 @@ dependencies = [
  "anyhow",
  "engine-acp",
  "kernel",
+ "lib",
  "managed-agent",
  "nexus-cluster",
+ "nexus-vfs-client",
+ "raft 0.1.0",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3951,7 +3943,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3989,7 +3981,7 @@ dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -4028,7 +4020,7 @@ dependencies = [
 [[package]]
 name = "raft"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -4056,7 +4048,7 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
- "tonic 0.14.6",
+ "tonic",
  "tonic-prost",
  "tonic-prost-build",
  "tracing",
@@ -4459,6 +4451,7 @@ dependencies = [
  "nix 0.29.0",
  "plugins",
  "process-text",
+ "raft 0.1.0",
  "rcgen",
  "regex",
  "reqwest 0.12.28",
@@ -4468,9 +4461,10 @@ dependencies = [
  "shell-words",
  "sudo-contracts",
  "telemetry",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
- "tonic 0.14.6",
+ "tonic",
  "tower-http",
  "tracing",
  "transport",
@@ -5168,16 +5162,6 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
@@ -5255,7 +5239,7 @@ dependencies = [
 [[package]]
 name = "subprocess"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "kernel",
  "libc",
@@ -5543,7 +5527,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.5",
+ "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -5654,36 +5638,6 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tonic"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bytes",
- "h2",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-timeout",
- "hyper-util",
- "percent-encoding",
- "pin-project",
- "prost 0.13.5",
- "socket2 0.5.10",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tower",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "tonic"
 version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
@@ -5701,7 +5655,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "socket2 0.6.5",
+ "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -5710,20 +5664,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "tonic-build"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac6f67be712d12f0b41328db3137e0d0757645d8904b4cb7d51cd9c2279e847"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "prost-build 0.13.5",
- "prost-types 0.13.5",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -5746,7 +5686,7 @@ checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
  "prost 0.14.4",
- "tonic 0.14.6",
+ "tonic",
 ]
 
 [[package]]
@@ -5762,7 +5702,7 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "tempfile",
- "tonic-build 0.14.6",
+ "tonic-build",
 ]
 
 [[package]]
@@ -5914,7 +5854,7 @@ dependencies = [
 [[package]]
 name = "transport"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.24#10fd74c7c68c2b60aa13a2aa91c92d95dc0f9a78"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.29-rc.1#d6d7c54ebd0dbe0a52d12d0d370563ce6fe4bad3"
 dependencies = [
  "axum",
  "backends",
@@ -5941,7 +5881,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
- "tonic 0.14.6",
+ "tonic",
  "tonic-prost-build",
  "tower",
  "tracing",

@@ -14,12 +14,16 @@ use std::sync::Arc;
 use crate::workspace_root::current_workspace_root;
 use crate::zone_context::{ContextSource, HostZoneContext, ResourceAccessKind, ZoneAuthError};
 use kernel::core::agents::registry::AgentDescriptor;
+use kernel::kernel::conditional_content::{
+    ConditionalContentError, ConditionalContentResult, VersionedContent,
+};
 use kernel::kernel::convenience::KernelConvenience;
 use kernel::kernel::syscall::ReaddirOpts;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::{DT_LINK, DT_STREAM};
 use kernel::Permission;
 
+mod conditional_content;
 mod record_log;
 pub use record_log::{RecordLog, RecordLogMode};
 
@@ -1130,11 +1134,23 @@ pub struct KernelFsBackend<K: KernelConvenience> {
     path_view: KernelPathView,
 }
 
-/// Permission capability needed by the in-process filesystem adapter.
-/// Metadata syscalls carry only a routing zone, so the adapter must admit them
-/// through the kernel's installed policy using the caller's full identity.
-/// Implementations delegate to that policy rather than maintaining another one.
+/// Host operations needed by the in-process filesystem adapter.
+/// Implementations retain the caller's full identity and delegate to the kernel.
 pub trait KernelFsAccess {
+    fn read_versioned_content(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<VersionedContent>, ConditionalContentError>;
+
+    fn replace_content_if_version(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+        content: &[u8],
+        expected_version: Option<&[u8]>,
+    ) -> Result<ConditionalContentResult, ConditionalContentError>;
+
     /// Inspect through the kernel's I/O resolver, preserving operation authority.
     fn inspect_io_target(
         &self,
@@ -1160,6 +1176,24 @@ pub trait KernelFsAccess {
 }
 
 impl KernelFsAccess for Kernel {
+    fn read_versioned_content(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<VersionedContent>, ConditionalContentError> {
+        Kernel::read_versioned_content(self, path, ctx)
+    }
+
+    fn replace_content_if_version(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+        content: &[u8],
+        expected_version: Option<&[u8]>,
+    ) -> Result<ConditionalContentResult, ConditionalContentError> {
+        Kernel::replace_content_if_version(self, path, ctx, content, expected_version)
+    }
+
     fn inspect_io_target(
         &self,
         path: &str,
@@ -1579,6 +1613,28 @@ fn kernel_err(error: KernelError) -> io::Error {
 impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     for KernelFsBackend<K>
 {
+    fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
+        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = self.to_kernel(path)?;
+        conditional_content::read(self.kernel.read_versioned_content(&path, &self.ctx))
+    }
+
+    fn write_if_version(
+        &self,
+        path: &str,
+        expected: Option<&VersionToken>,
+        data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = self.to_kernel(path)?;
+        conditional_content::write(self.kernel.replace_content_if_version(
+            &path,
+            &self.ctx,
+            data,
+            expected.map(|token| token.0.as_slice()),
+        ))
+    }
+
     fn record_log(&self, path: &str, mode: RecordLogMode) -> io::Result<Arc<dyn RecordLog>> {
         record_log::open_kernel(self, path, mode)
     }
@@ -2240,6 +2296,26 @@ impl NexusVfsFsBackend {
 }
 
 impl FsBackend for NexusVfsFsBackend {
+    fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
+        self.authorize_target(path, ResourceAccessKind::Read)?;
+        conditional_content::read(self.client.read_versioned(path, &self.auth_token))
+    }
+
+    fn write_if_version(
+        &self,
+        path: &str,
+        expected: Option<&VersionToken>,
+        data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        self.authorize_target(path, ResourceAccessKind::Write)?;
+        conditional_content::write(self.client.write_if_version(
+            path,
+            expected.map(|token| token.0.as_slice()),
+            data,
+            &self.auth_token,
+        ))
+    }
+
     fn record_log(&self, path: &str, mode: RecordLogMode) -> io::Result<Arc<dyn RecordLog>> {
         record_log::open_remote(self, path, mode)
     }

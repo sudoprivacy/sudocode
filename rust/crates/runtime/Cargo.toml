@@ -76,6 +76,9 @@ nix = { version = "0.29", features = ["poll", "process", "signal"] }
 backends = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+backends = { workspace = true, features = ["driver-cas-local"] }
+nexus-raft = { workspace = true }
+tempfile = "3"
 # Exercise the shipped VFS host and its error envelopes over real mTLS gRPC.
 transport = { workspace = true }
 nexus-rebac = { workspace = true }

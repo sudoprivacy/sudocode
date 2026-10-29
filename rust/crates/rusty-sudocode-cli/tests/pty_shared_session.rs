@@ -1,5 +1,7 @@
 //! Restore interleaved same-SID history through the actual CLI and model wire.
 mod common;
+#[path = "support/request_dumps.rs"]
+mod request_dumps;
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -635,15 +637,7 @@ fn assert_completed_tool_restore_requests(dump: &std::path::Path) {
     let mut fresh_requests = 0;
     for entry in fs::read_dir(dump).unwrap() {
         let entry = entry.unwrap();
-        let name = entry.file_name();
-        if ![
-            "-messages.json",
-            "-chat-completions.json",
-            "-responses.json",
-        ]
-        .iter()
-        .any(|suffix| name.to_string_lossy().ends_with(suffix))
-        {
+        if !request_dumps::is_inference_request_dump(&entry.path()) {
             continue;
         }
         let request: Value = serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();

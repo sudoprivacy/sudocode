@@ -1,6 +1,8 @@
 //! Child Bash approval on the parent terminal -> fresh invoice -> follow-up.
 //! Run with `SCODE_TEST_BACKEND=live` and the normal live provider configuration.
 mod common;
+#[path = "support/request_dumps.rs"]
+mod request_dumps;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;
 
@@ -35,7 +37,7 @@ fn requests(directory: &Path) -> Vec<Value> {
     std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| wire_requests::is_inference_request_dump(path))
+        .filter(|path| request_dumps::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .collect()
 }

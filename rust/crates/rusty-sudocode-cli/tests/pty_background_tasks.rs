@@ -1,10 +1,6 @@
 //! Background task discovery, inspection and control through the real terminal.
 mod common;
 #[path = "support/wire_requests.rs"]
-#[allow(
-    dead_code,
-    reason = "This journey decodes tool blocks; other PTYs use the shared dump-file filter."
-)]
 mod wire_requests;
 
 use common::TestEnv;

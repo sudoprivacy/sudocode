@@ -230,8 +230,13 @@ local. GitHub verifies enrolled public keys and freshness before scheduling the
 missing platforms. Signatures authenticate an enrolled author's attestation;
 they do not remotely attest machine execution. Missing or stale evidence blocks
 the required <code>Local acceptance</code> check. Existing PRs use the protected
-runner without needing a cosmetic merge. Acceptance-policy edits require a
-maintainer-reviewed bootstrap.</p>
+runner without needing a cosmetic merge. A protected contract edit prints an
+executable <code>contract-update</code> command through the installed runner.
+An enrolled repository maintainer or authorized agent runs the exact candidate
+checks and publishes separate, exact-head authorization for the rule change.
+The read-only gate verifies current authority and both contract hashes; signed
+results and complementary native hosts remain required. This authorization is
+not a test pass and does not require the end user personally to inspect code.</p>
 
 <p>Full rendering A/A and A/B, painted browser and viewport performance checks
 run automatically in local Docker for changed production or measurement inputs.

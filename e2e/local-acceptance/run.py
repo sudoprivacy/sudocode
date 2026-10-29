@@ -222,6 +222,36 @@ def enforcement_acceptance():
         assert linked.resolve().parent == directory.resolve()
         command("git", "worktree", "remove", linked, cwd=work)
 
+        # Both stronger and weaker candidate policies must fail the actual
+        # push with actionable diagnostics, without publishing a branch/note.
+        command("git", "checkout", "-b", "contract-change", cwd=work)
+        policy_file = work / "spec/local_acceptance.json"
+        original_policy = json.loads(policy_file.read_text())
+        before_notes = command("git", "ls-remote", "origin", "refs/notes/local-acceptance", cwd=work)
+        for label, checks in [
+            ("add-check", {**original_policy["checks"], "additional-check": {"include": ["**"]}}),
+            ("remove-checks", {}),
+        ]:
+            policy_file.write_text(json.dumps({**original_policy, "checks": checks}))
+            command("git", "add", ".", cwd=work)
+            command("git", "commit", "-m", label, cwd=work)
+            rejected = subprocess.run(["git", "push", "origin", "contract-change"], cwd=work,
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", env=FIXTURE_ENV)
+            assert rejected.returncode != 0, rejected.stdout + rejected.stderr
+            assert 'Changed protected files: ["spec/local_acceptance.json"]' in rejected.stderr, rejected.stderr
+            assert "Trusted policy: origin/main (" in rejected.stderr, rejected.stderr
+            assert "including added checks" in rejected.stderr, rejected.stderr
+            assert 'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin' in rejected.stderr, rejected.stderr
+            assert "maintain/admin actor" in rejected.stderr, rejected.stderr
+            assert "not a request for the end user to review code" in rejected.stderr, rejected.stderr
+            assert "CONTRIBUTING.md#acceptance-contract-changes" in rejected.stderr, rejected.stderr
+            assert not command("git", "ls-remote", "origin", "refs/heads/contract-change", cwd=work)
+            assert command("git", "ls-remote", "origin", "refs/notes/local-acceptance", cwd=work) == before_notes
+        command("git", "checkout", "feature", cwd=work)
+        from contract_update_acceptance import verify_contract_update
+        verify_contract_update(directory, work, FIXTURE_ENV)
+        print("PASS: added/removed checks both block real pushes with diagnostics and unchanged remote refs")
+
         # Both a new commit and unsigned changes to a previously valid receipt
         # must fail real SSH verification rather than borrowing an older pass.
         command("git", "commit", "--allow-empty", "-m", "New head needs a new receipt", cwd=work)

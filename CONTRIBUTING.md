@@ -175,8 +175,9 @@ ssh-keygen -t ed25519 -f ~/.nexus/sudocode-acceptance-key -N ""
 python .github/scripts/local_acceptance.py install --signer YOUR_DEVICE_ID --key ~/.nexus/sudocode-acceptance-key
 ```
 
-This Windows workstation's public key is already enrolled; its private key stays
-outside the repository. A new Mac or Linux author enrolls its own platform key.
+Enrolled device public keys are listed in `spec/local_acceptance_signers.json`;
+their private keys stay outside the repository. Each new author device enrolls
+its own platform key.
 Never commit a private key. Installation preserves existing hooks by refusing to
 overwrite them; compose an existing hook explicitly. Protected-main updates refresh
 the installed runner automatically, including when pushing an older worktree.

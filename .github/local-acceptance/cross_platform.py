@@ -20,7 +20,7 @@ checks = load("checks", trusted / ".github/local-acceptance/checks.py")
 def execute(command, cwd, log, env=None):
     # Hosted compilers have no foreground editor to protect. Local callers
     # retain one worker; cache restore keeps the publisher's environment.
-    jobs = min(2, os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1
+    jobs = (os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1
     return helper.run_command(command, cwd, log, {
         **(env or {}), "CARGO_BUILD_JOBS": str(jobs),
     })

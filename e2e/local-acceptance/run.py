@@ -63,6 +63,15 @@ def scope_acceptance(directory):
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
 
+    def expect_native_targets(base, targets):
+        selector = SOURCE / ".github/local-acceptance/checks.py"
+        code = ('import importlib.util,json,sys; from pathlib import Path; '
+                'spec=importlib.util.spec_from_file_location("checks",sys.argv[1]); '
+                'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                'print(json.dumps(module.changed_cli_test_targets(Path(sys.argv[2]),sys.argv[3])))')
+        actual = command(sys.executable, "-c", code, selector, repository, base, cwd=repository)
+        assert json.loads(actual) == targets, (base, actual, targets)
+
     cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, False, False),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
              ("spec/cache_metrics.json", True, False, False), ("rust/crates/runtime/src/prompt.md", True, True, True),
@@ -70,6 +79,7 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True, True),
+             ("rust/crates/pty-harness/src/lib.rs", True, True, True),
              ("e2e/shared-services/check.py", False, True, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
@@ -79,6 +89,19 @@ def scope_acceptance(directory):
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"input {index}", cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
+        expect_native_targets(base, ["pty_file_operations"] if path.endswith("/tests/pty_file_operations.rs") else None)
+        if path == "rust/crates/pty-harness/src/lib.rs":
+            # The helper implementation may move out of tests/common. Its new
+            # path must still select real native terminal acceptance.
+            policy = SOURCE / "spec/local_acceptance.json"
+            code = ('import importlib.util,json,subprocess,sys; '
+                    'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
+                    'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                    'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
+                    'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
+            selected = json.loads(command(sys.executable, "-c", code,
+                SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
+            assert {"native-workspace", "native-resize", "rendering", "browser", "native-release"}.issubset(selected)
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
@@ -89,9 +112,27 @@ def scope_acceptance(directory):
             "rust/crates/runtime/src/moved.rs", cwd=repository)
     command("git", "commit", "-m", "move test source into production", cwd=repository)
     head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_native_targets(base, None)
     expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True)
     expect_scope("workflow_dispatch", {}, True, True, True)
-    print("PASS: real Git scopes for PR/push/queue, test-only changes, source rename and explicit dispatch")
+    base = head
+    for name in ["pty_first", "pty_second"]:
+        (repository / f"rust/crates/rusty-sudocode-cli/tests/{name}.rs").write_text("new fixture input\n")
+    (repository / "README.md").write_text("documentation alongside two changed targets\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "two integration targets and docs", cwd=repository)
+    expect_native_targets(base, ["pty_first", "pty_second"])
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    (repository / "spec/cache_metrics.json").write_text("shared input changed\n")
+    (repository / "rust/crates/rusty-sudocode-cli/tests/pty_second.rs").write_text("changed target and shared fixture\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "shared fixture keeps full acceptance", cwd=repository)
+    expect_native_targets(base, None)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", "rust/crates/rusty-sudocode-cli/tests/pty_first.rs", cwd=repository)
+    command("git", "commit", "-m", "deleted target keeps full acceptance", cwd=repository)
+    expect_native_targets(base, None)
+    print("PASS: real Git scopes for PR/push/queue, native test targets, shared fixtures, source rename and explicit dispatch")
 
 
 def enforcement_acceptance():

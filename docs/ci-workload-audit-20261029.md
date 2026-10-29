@@ -19,6 +19,7 @@ For a ready PR, one queue group and the resulting main push:
 | Short metadata and integrity jobs | 7 hosted jobs per event | 1 shared preflight job per event |
 | Specialized PTY/stderr pre-run steps per workspace job | 8, then the same cases in the workspace suite | 0; cases remain in the workspace suite |
 | Benchmark API compilation | Optimized build/link of workspace benchmarks and tests | Locked benchmark type-check using the workspace job's debug graph |
+| ACP package integration | 4 PR hosts + 4 main hosts | 4 PR hosts; main keeps exact-merged-revision builds and package artifacts |
 
 Provider assertions remain on main for changed provider inputs and explicit
 dispatch. Rendering/browser checks are mandatory locally, with their original
@@ -61,7 +62,40 @@ the same commit to ready reuses that result instead of starting it again.
 The separate native acceptance workflow retains `ready_for_review`, because its
 real complementary hosts deliberately wait for readiness.
 
+An isolated Linux experiment kept the same release CLI, exact 64 test identities,
+one CPU, non-root user, test priority and existing assertions/deadlines:
+
+| Runner | Two concurrent tests | Four concurrent tests |
+| --- | --- | --- |
+| Cargo | 490.7 s | 329.6 s |
+| nextest 0.9.150 | 483.4 s | 274.2 s |
+
+These are 63 controlled-provider PTY cases plus one live-only early return under
+mock, not 64 real API successes. Each setting has one trial. Cargo's four-thread
+run was 32.8% shorter than its two-thread control; nextest was 16.8% shorter than
+Cargo at four threads. The similar two-thread timings do not support attributing
+all improvement to a new runner. No nextest dependency or global test-concurrency
+change is adopted from this experiment. Hosted production latency is unproven.
+
+The new narrow CLI scope was also exercised through the real acceptance executor
+against a test-only Git commit and unchanged production Rust. Its mailbox-enabled
+compaction target reported 34 passes (33 controlled-provider PTY cases plus one
+live-only early return). The release-profile experiment reused the owned build
+output; it does not claim the dev native profile or real provider acceptance.
+All observed compiler/linker workers had nice 10 and actual Cargo/PTys had nice 0.
+The owned container was stopped and its original launcher restored afterward.
+
+Only 7 of 231 merged PR file scopes in the month window fit the narrow standalone
+CLI-test pattern before checking deletions/target existence. The optimization
+helps that iteration class; it is not a global 10% latency result. Existing
+production-source acceptance remains complete.
+
 ## Dependency cache within the existing quota
+
+Workflow-only changes unrelated to `ci-dependency-cache.yml` do not start its
+three host jobs. Rust pushes still check for a new dependency/toolchain/image
+key, and changes to the publisher still exercise it. Cache-hit correctness and
+source validation are unchanged.
 
 Complementary native jobs use the same cache environment as the main publisher.
 `rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
@@ -313,6 +347,25 @@ daemon/service harness edits and renames across the production boundary retain
 the daemon check. Real Git fixtures exercise push, PR and queue events, plus
 the source rename and explicit dispatch. No daemon scenario is deleted.
 
+For an isolated change to standalone CLI `tests/*.rs` modules, native workspace
+acceptance selects those actual Cargo integration targets with the existing
+mailbox feature. It keeps formatting and reuses unchanged schema/build-metadata,
+Mermaid, benchmark and production Clippy checks. Only root README and Markdown
+docs may accompany this narrow case. Shared helper/fixture/spec changes, target
+deletion, production inputs and cross-boundary moves fall back to the complete
+workspace. Other selected resize/release/services/cohost and local measurement
+profiles are unchanged. Real Git scenarios cover one and multiple targets,
+docs, common helpers, specs, manifests, deletion and a move into production.
+No test target is deleted; unchanged target executions are omitted for this
+specific input class. Its hosted latency benefit still requires observation.
+
+Before extracting the repeatedly compiled PTY helpers, enroll their shared
+test-crate path as a native resize input. Existing broad Rust source rules
+already retain workspace, rendering/browser and release acceptance. A real
+Git change at the shared helper path verifies the selected native profiles.
+This policy preparation does not claim the helper extraction has landed, and
+does not remove an existing scenario or input guard.
+
 ## One shared preflight instead of seven short runners
 
 Combine format/schema, docs, architecture boundary, pinned protocol, release
@@ -360,7 +413,20 @@ latency improvement.
 
 The shared executor's one-worker default protects the author's foreground
 desktop. The complementary hosted wrapper overrides only the compiler worker
-count, up to two available CPUs, after restoring dependencies. This removes an
+count to the available hosted CPUs after restoring dependencies. This removes an
 unnecessary hosted build throttle without changing cache keys, source profiles,
 test concurrency, assertions or deadlines. Local/manual execution remains one
 worker. Actual hosted build-time benefit requires a comparable native run.
+GitHub's public standard Linux/Windows runners currently provide four CPUs,
+and ARM macOS provides three. The earlier two-worker hosted cap left that
+capacity unused. See [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+## ACP package runs
+
+Keep integration and portable installed-package journeys on all four PR hosts.
+Main still builds and packs its exact merged revision on each host, retaining
+the commit-bound manifest, archive integrity receipt and uploaded artifacts.
+It does not repeat the same integration journeys. As with native queue reuse,
+an interaction unique to merged changes is outside that repeated runtime
+coverage. Explicit runs retain integration; a new PR/ref head cancels an
+obsolete package run. No scenario or distribution platform is deleted.

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,20 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
+
+
+def changed_cli_test_targets(root, base):
+    """Scope isolated test edits; any shared or production input keeps the full suite."""
+    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+                                      cwd=root).decode().split("\0")[:-1]
+    # External specs/fixtures can affect unchanged tests too. Only known docs
+    # may accompany an isolated integration module without widening acceptance.
+    inputs = [path for path in changed if path != "README.md"
+              and not (path.startswith("docs/") and path.endswith(".md"))]
+    pattern = r"rust/crates/rusty-sudocode-cli/tests/([A-Za-z0-9_]+)\.rs"
+    if not inputs or any(not re.fullmatch(pattern, path) or not (root / path).is_file() for path in inputs):
+        return None
+    return sorted({Path(path).stem for path in inputs})
 
 
 def run(name, root, output, base, execute):
@@ -37,14 +52,25 @@ def run(name, root, output, base, execute):
         command(sys.executable, "e2e/local-acceptance/run.py")
     elif name == "native-workspace":
         cargo("fmt", "--all", "--check")
-        command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
-        command(sys.executable, "scripts/check_cache_usage_fixtures.py")
-        command(sys.executable, "e2e/build-metadata/run.py",
-                extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
-        cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
-        cargo("check", "--workspace", "--benches", "--locked")
-        cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox")
-        cargo("clippy", "--workspace", "--locked")
+        tests = changed_cli_test_targets(root, base)
+        (output / "test-scope.json").write_text(json.dumps({
+            "mode": "changed-cli-targets" if tests is not None else "full-workspace",
+            "targets": tests,
+        }, indent=2))
+        if tests is not None:
+            arguments = ["test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
+            for test in tests:
+                arguments += ["--test", test]
+            cargo(*arguments)
+        else:
+            command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
+            command(sys.executable, "scripts/check_cache_usage_fixtures.py")
+            command(sys.executable, "e2e/build-metadata/run.py",
+                    extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
+            cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
+            cargo("check", "--workspace", "--benches", "--locked")
+            cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox")
+            cargo("clippy", "--workspace", "--locked")
     elif name == "native-resize":
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"

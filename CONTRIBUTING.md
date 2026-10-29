@@ -226,6 +226,14 @@ available for gateway diagnosis.
 CLI integration-test-only edits retain native PTYs and the existing provider
 checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
 CLI manifests, production source and daemon harness edits still select it.
+When a change contains only standalone CLI integration-test modules (optionally
+with root README or Markdown documentation edits), workspace acceptance runs
+those test targets with the same mailbox feature. Unchanged metadata, Mermaid,
+benchmark and production Clippy commands are reused. Shared helpers, fixtures,
+specs, source, manifests, target deletion and moves across those boundaries
+keep full workspace acceptance. All other selected native/local profiles remain.
+Shared PTY helper sources also select native terminal resize acceptance, whether
+they live under CLI `tests/common` or the test-only `rust/crates/pty-harness` path.
 
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider
@@ -240,6 +248,12 @@ preflight; no product assertion is removed.
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
+
+The ACP package workflow runs integration journeys on all four PR hosts. Main
+still builds and packages its exact merged revision on those hosts, while
+reusing the PR's integration result. A newer head cancels an obsolete package
+run for the same PR/ref. Unrelated workflow edits do not start three Rust cache
+publishers; Rust changes and changes to the publisher itself still do.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat

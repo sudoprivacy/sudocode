@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - 'rust/**'
-      - '.github/workflows/**'
+      # Other workflow edits change neither Cargo inputs nor this cache's
+      # environment. Rust pushes still warm a new toolchain/image key.
+      - '.github/workflows/ci-dependency-cache.yml'
   workflow_call:
     inputs:
       linux_only:

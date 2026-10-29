@@ -7,6 +7,7 @@ No candidate code is executed by the GitHub verification job.
 """
 
 import argparse
+import ast
 import base64
 import fnmatch
 import hashlib
@@ -63,6 +64,18 @@ def contract_hash(ref):
              ".github/workflows/local-acceptance-publish.yml"]
     paths += value("ls-tree", "-r", "--name-only", ref, ".github/local-acceptance").splitlines()
     return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
+
+
+def commands_hash(ref):
+    # Scheduling, publication and selection edits do not change a completed
+    # command's evidence. Bind actual executors/images, then require the current
+    # selected check set to be covered. New commands still require a real run.
+    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+    executor = "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
+    paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
+    return sha(canonical({"executor": sha(executor.encode()), **{p: sha(tracked(ref, p)) for p in paths}}))
 
 
 def changed_paths(base, head):
@@ -213,12 +226,22 @@ def verify_envelope(envelope, head, base, policy_ref):
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
-    if receipt.get("contract_sha256") != contract_hash(policy_ref):
-        raise RuntimeError("Acceptance policy/runner changed; rerun local acceptance")
+    compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+    if not compatible and "commands_sha256" not in receipt:
+        # Bootstrap receipts used the whole protected contract. Accept them
+        # only when that signed hash matches their actual protected base and
+        # the commands are byte-identical to today's executor/profile/image.
+        try:
+            compatible = (receipt.get("contract_sha256") == contract_hash(receipt["base"])
+                          and commands_hash(receipt["base"]) == commands_hash(policy_ref))
+        except RuntimeError:
+            compatible = False
+    if not compatible:
+        raise RuntimeError("Acceptance commands changed; rerun local acceptance")
     check_contract_changes(head, base, policy_ref)
     required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
     checks = receipt.get("checks", {})
-    if set(checks) != set(required):
+    if not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
     for name, commands in checks.items():
         if not isinstance(commands, list) or not commands:
@@ -298,6 +321,7 @@ def check(args):
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
+               "commands_sha256": commands_hash(policy_ref),
                "finished_at": int(time.time()), "checks": results}
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))
@@ -371,6 +395,7 @@ def pre_push(args):
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="operation", required=True)
     for name in ["check", "verify"]:
@@ -390,6 +415,9 @@ def main():
     command.add_argument("url")
     args = parser.parse_args()
     try:
+        # Installed runners live outside a worktree. Their caller's checkout,
+        # not the installation directory, supplies the exact tested sources.
+        ROOT = Path(value("rev-parse", "--show-toplevel", root=Path.cwd()))
         if args.operation == "verify":
             verify(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
         elif args.operation == "check":

@@ -175,8 +175,9 @@ ssh-keygen -t ed25519 -f ~/.nexus/sudocode-acceptance-key -N ""
 python .github/scripts/local_acceptance.py install --signer YOUR_DEVICE_ID --key ~/.nexus/sudocode-acceptance-key
 ```
 
-This Windows workstation's public key is already enrolled; its private key stays
-outside the repository. A new Mac or Linux author enrolls its own platform key.
+Enrolled device public keys are listed in `spec/local_acceptance_signers.json`;
+their private keys stay outside the repository. Each new author device enrolls
+its own platform key.
 Never commit a private key. Installation preserves existing hooks by refusing to
 overwrite them; compose an existing hook explicitly. Protected-main updates refresh
 the installed runner automatically, including when pushing an older worktree.
@@ -210,12 +211,29 @@ authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
 checks on an enrolled host; forks need not receive repository secrets.
 
+A failed native matrix job cancels the other pending/running platforms. The
+trusted publisher checks the actual completed jobs directly; no second hosted
+summary job repeats those checks. Scheduling-only edits keep valid completed
+local evidence when its executor/profile/image are unchanged and it covers the
+current required checks. New commits or changed commands still need acceptance.
+Provider tests on main run only for changed provider inputs, and real-daemon
+queue tests run only for changed daemon inputs. Documentation/CI-only changes
+skip those unchanged expensive journeys. The explicit provider dispatch stays
+available for gateway diagnosis.
+
+The required `CI preflight` job shares one checkout and tool setup for format,
+generated cache schemas, docs, history, boundary, release-mirror and provider
+probe checks. Its first failing step blocks its daemon/provider dependents.
+PRs always start this job, including SDK-only changes; path filters cannot leave
+a required status pending. The queue's protected acceptance gate still checks
+the combined Git history. No unique product test is removed by this consolidation.
+
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. A runtime interaction that
 exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
-Real provider/API acceptance on main is unchanged; mock transport results do not
+Real provider/API assertions on main are unchanged; mock transport results do not
 establish live cache hits. Cache-prefix, compaction and all existing workspace
 cases remain, including standalone vendored Mermaid and benchmark type checks.
 

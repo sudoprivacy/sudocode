@@ -14,7 +14,8 @@
         ".github/scripts/local_acceptance.py",
         "e2e/local-acceptance/**",
         "spec/local_acceptance*.json",
-        ".github/workflows/local-acceptance*.yml"
+        ".github/workflows/local-acceptance*.yml",
+        ".github/scripts/ci_input_scope.py"
       ]
     },
     "native-workspace": {
@@ -24,7 +25,7 @@
       ],
       "exclude": [
         "e2e/local-acceptance/**",
-        "**/*.md"
+        "**/README.md"
       ]
     },
     "native-resize": {
@@ -39,7 +40,7 @@
         "rust/Cargo.lock"
       ],
       "exclude": [
-        "**/*.md"
+        "**/README.md"
       ]
     },
     "rendering": {
@@ -59,7 +60,7 @@
         "e2e/terminal-resize/**"
       ],
       "exclude": [
-        "**/*.md"
+        "**/README.md"
       ]
     },
     "browser": {
@@ -79,7 +80,7 @@
         "e2e/terminal-resize/**"
       ],
       "exclude": [
-        "**/*.md"
+        "**/README.md"
       ]
     },
     "native-release": {
@@ -95,7 +96,7 @@
         "e2e/startup/**"
       ],
       "exclude": [
-        "**/*.md"
+        "**/README.md"
       ]
     },
     "native-services": {
@@ -110,7 +111,7 @@
         "e2e/shared-services/**"
       ],
       "exclude": [
-        "**/*.md"
+        "**/README.md"
       ]
     },
     "native-cohost": {
@@ -126,7 +127,7 @@
       ],
       "exclude": [
         "rust/crates/*/tests/**",
-        "**/*.md"
+        "**/README.md"
       ]
     }
   }

@@ -1,0 +1,73 @@
+name: CI dependency cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/**'
+  workflow_call:
+    inputs:
+      linux_only:
+        type: boolean
+        default: false
+
+# A busy main must not cancel a cold cache publication on every new commit.
+# Keep the running publisher; GitHub replaces only its superseded pending run.
+concurrency:
+  group: ci-dependency-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: rust
+
+env:
+  CARGO_TERM_COLOR: always
+  # These affect only dev/test builds. Production release settings stay intact.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  dependencies:
+    name: Warm dependencies (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # The three full workspace hosts have the most consumers. Separate
+        # macOS 15 pools pushed one publication set to 9.77 GB of a 10 GB quota.
+        # Those service-only hosts build normally on a miss instead of evicting
+        # dependencies shared by workspace, resize, Clippy and release jobs.
+        os: ${{ fromJSON(inputs.linux_only && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the dependency key without downloading a hit
+        id: lookup
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          lookup-only: true
+          save-if: false
+      - name: Restore dependencies for a missing key
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+      - name: Compile workspace dependencies without running tests
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: cargo test --workspace --locked --features engine-acp/mailbox --no-run
+
+      - name: Compile production release dependencies into the same cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        # Keep one Cargo registry/Git copy per host, rather than one per profile.
+        run: cargo build --release --locked -p rusty-sudocode-cli --bin scode

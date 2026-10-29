@@ -209,10 +209,79 @@ safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
 <h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
 
 <p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
-of the scode-native testable feature surface, green on every
-<code>main</code> commit of sudocode CI.</p>
+of the scode-native testable feature surface. Every PR must pass mandatory
+local acceptance and complementary native CI before landing; the merge queue
+verifies those exact PR heads and the combined Git history.</p>
+
+<h3>CI cadence and coverage (2026-10-29)</h3>
+
+<p><strong>Mandatory local tests plus complementary CI.</strong> Windows authors
+run Windows checks locally; CI runs Linux and macOS. Mac authors run macOS
+locally; CI runs Linux and Windows. Linux authors run Linux locally; CI runs
+Windows and macOS. Workspace, Clippy, terminal resize, release startup and shared
+service checks reuse the same command profiles on the local and hosted sides.
+All three operating systems remain covered; every CPU architecture is not a
+per-PR promise. Tagged co-host releases retain their five-platform builds.</p>
+
+<p>A managed Git pre-push hook selects checks from changed inputs and blocks a
+push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
+diff base, native host, command exit codes and local log hashes. Full logs stay
+local. GitHub verifies enrolled public keys and freshness before scheduling the
+missing platforms. Signatures authenticate an enrolled author's attestation;
+they do not remotely attest machine execution. Missing or stale evidence blocks
+the required <code>Local acceptance</code> check. Existing PRs use the protected
+runner without needing a cosmetic merge. Acceptance-policy edits require a
+maintainer-reviewed bootstrap.</p>
+
+<p>Full rendering A/A and A/B, painted browser and viewport performance checks
+run automatically in local Docker for changed production or measurement inputs.
+The existing fixed baseline, workload rounds, sample counts, normal release
+binary graph and budgets remain. A failed A/A calibration is inconclusive.
+There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
+unchanged performance pairs; docs-only changes run preflight. Local compiler
+workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+
+<p>The merge queue checks each PR head's signed receipt and successful
+cross-platform workflow, plus the integrated Git history. It does not rerun the
+native suites on the integrated merge-group tree: runtime interactions found
+only in a combination of otherwise passing PRs are outside this pre-merge
+runtime coverage. For one ready Windows/Mac PR, one queue group and one main
+push, cloud workspace executions drop from the original eight to two (four to
+two after the first cleanup), plus one local native execution. This is an
+execution-count reduction, not a measured percentage of runner minutes.</p>
+
+<p>Cache-prefix, compaction, paste, subagent, tool-pause, colors/layout, plan,
+model precedence and stderr cases remain in the workspace. Standalone Mermaid
+tests and benchmark type checking remain explicit. Dev/test symbols are omitted
+while debug assertions and normal release settings remain. Real provider/API
+acceptance on main is unchanged and mock results earn no live-model coverage
+credit. Rust caches retain the 10 GB quota and three shared main publishers;
+sustained hits and net build-time savings still require hosted observation.
+Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
+
+<p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
+suite executions does not halve the feature surface or earn additional coverage.
+No unique PTY case is deleted solely for having no recorded failure.
+The month audit covers 8,323 runs and all 8,436 attempts, including retries;
+its 954 failed-step log bundles contain 160 distinct PTY failure identifiers.
+These include provider and fixture failures, so they are not a product-bug count.
+The audit lacks a complete per-case execution denominator and cannot certify
+that any case has never failed. See the
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-workload-audit-20261029.md">CI workload audit</a>
+for timing, selection and measurement limits. Execution counts are a static
+reduction; actual latency savings require post-change CI observations.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
+
+<p>Release UI and resource checks use a frozen binary built with the normal
+release dependency graph. Compiling test drivers must not replace that binary.
+Before/after performance comparisons use isolated build directories and retain
+binary and harness hashes. A failed A/A noise calibration is inconclusive,
+not a performance pass. These resource checks do not add feature-coverage credit.</p>
+
+<p>The automatic viewport on/off headless and browser budget checks run in the
+mandatory local browser profile. The existing source-before/after measurement
+script remains available for diagnosis and earns no additional coverage credit.</p>
 
 <table>
   <thead>
@@ -235,7 +304,7 @@ of the scode-native testable feature surface, green on every
       asserts on the byte stream <code>scode</code> produces. Catches
       API integration / tool dispatch / streaming regressions without
       any TTY.</td>
-      <td>No — it is a CI gate, not an e2e measure.</td>
+      <td>No — optional debugging aid, not an e2e measure.</td>
       <td><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
     </tr>
   </tbody>
@@ -244,9 +313,9 @@ of the scode-native testable feature surface, green on every
 <div class="callout">
   <strong>Coverage rule:</strong> a feature is <em>Covered</em> only
   when <code>pty-expect</code> exercises it end-to-end on
-  <code>main</code> CI. The mock parity harness still runs on every
-  PR as a required gate and catches API / dispatch / streaming
-  regressions early — but it tests the lower half of the stack
+  the integrated merge-queue commit before it becomes <code>main</code>.
+  The optional mock parity harness helps debug API / dispatch / streaming
+  failures, but it tests the lower half of the stack
   ("does <code>scode</code> dispatch and stream correctly?") and
   not the upper half a user actually sees ("does the REPL render it
   correctly, does Ctrl+C interrupt cleanly, does the prompt redraw
@@ -482,7 +551,7 @@ bugs nor refactor confidence.</p>
   <tbody>
     <tr>
       <td><strong>PTY (pty-expect)</strong></td>
-      <td><strong>Required CI gate; the only layer that counts toward the 90% e2e coverage metric</strong></td>
+      <td><strong>Required acceptance gate (local + complementary CI); the only layer that counts toward the 90% e2e coverage metric</strong></td>
       <td>Every user-facing feature</td>
     </tr>
     <tr>
@@ -2032,7 +2101,7 @@ namespace for the new TUI work.</p>
 
 <section id="prompt-viewport-experiment">
 <h5>Bounded inline prompt viewport experiment — 2026-10-27</h5>
-<p><strong>Experimental; not validated or enabled by default.</strong> Reviewing an
+<p><strong>Experimental; off by default.</strong> Reviewing an
 earlier answer while composing a queued follow-up currently moves the editor out
 of view in native terminal scrollback. Evaluate an opt-in inline conversation
 viewport with a fixed composer, a
@@ -2047,6 +2116,10 @@ not approval for dashboards, split panes, a new renderer dependency or a
   do not enter alternate-screen mode.</li>
   <li>Keep immutable rendered history in a disposable disk spool, with bounded
   visible-row caches. Typing must not scan or rewrap accumulated history.</li>
+  <li>Retain unchanged renderer layout and prepared styled-text lines, with
+  explicit cache limits and invalidation for content, styles and width.
+  Measure the enabled feature before and after optimization, as well as
+  enabled/disabled costs; preserve the four visual effects and existing budgets.</li>
   <li>Anchor reading to content while new output arrives. Keep prompt headers
   presentation-only and preserve the draft through scroll and resize.</li>
   <li>Reuse semantic prompt styling and the existing Unicode/ANSI layout code;

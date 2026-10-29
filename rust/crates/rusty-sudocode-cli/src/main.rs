@@ -82,7 +82,7 @@ use cli::format::{
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
-    parse_git_workspace_summary, resolve_git_branch_for, resolve_git_head_label_for,
+    parse_git_workspace_summary, resolve_git_branch_for, resolve_git_position_for,
     GitWorkspaceSummary,
 };
 use cli::help::{
@@ -3695,7 +3695,7 @@ fn run_repl_iocraft_dispatch(
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
     }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
-    repl_ui_cmd.set_branch(workspace_head_label());
+    repl_ui_cmd.set_workspace_position(workspace_position());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
     // Route LiveCli output through iocraft's OutputSender so it goes
@@ -5548,7 +5548,7 @@ impl LiveCli {
         if let Some(ui) = ui {
             ui.set_cache_tip(self.cache_ttl_tip());
             // A turn can switch branches (its tools run git), so refresh here.
-            ui.set_branch(workspace_head_label());
+            ui.set_workspace_position(workspace_position());
         }
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
@@ -7049,11 +7049,11 @@ impl LiveCli {
     }
 }
 
-/// The footer's workspace label: the branch, or the short commit when detached.
-fn workspace_head_label() -> Option<String> {
+/// The footer's workspace position: `repo ⎇ branch`.
+fn workspace_position() -> Option<String> {
     env::current_dir()
         .ok()
-        .and_then(|cwd| resolve_git_head_label_for(&cwd))
+        .and_then(|cwd| resolve_git_position_for(&cwd))
 }
 
 fn print_skills_for_outcome(

@@ -2,7 +2,7 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use flate2::{write::GzEncoder, Compression};
@@ -66,7 +66,6 @@ impl ResponseRecordingConfig {
 /// This lock never takes the transcript commit barrier.
 pub(crate) struct ResponseArchiveWriter {
     lock: Arc<dyn FsLock>,
-    writes: Mutex<()>,
 }
 
 impl ResponseArchiveWriter {
@@ -95,10 +94,7 @@ impl ResponseArchiveWriter {
             std::thread::sleep(Duration::from_millis(5));
         };
         crate::subagent_completion::check_response_storage(fs, transcript)?;
-        Ok(Arc::new(Self {
-            lock,
-            writes: Mutex::new(()),
-        }))
+        Ok(Arc::new(Self { lock }))
     }
 
     fn check(&self) -> Result<(), String> {
@@ -106,12 +102,6 @@ impl ResponseArchiveWriter {
             return Err("session_writer_lost".into());
         }
         Ok(())
-    }
-
-    fn write(&self) -> Result<MutexGuard<'_, ()>, String> {
-        let guard = self.writes.lock().map_err(|_| "response writer poisoned")?;
-        self.check()?;
-        Ok(guard)
     }
 }
 
@@ -201,7 +191,7 @@ impl ResponseArchive for SessionResponseArchive {
     fn begin(&self, metadata: ResponseCaptureMetadata) -> io::Result<Box<dyn ResponseRecorder>> {
         let writer = self.capture_writer()?;
         self.initialize_budget()?;
-        let write_guard = writer.write().map_err(io::Error::other)?;
+        writer.check().map_err(io::Error::other)?;
         self.fs.create_dir_all(&self.directory.to_string_lossy())?;
         {
             let mut used = self
@@ -225,7 +215,6 @@ impl ResponseArchive for SessionResponseArchive {
         let body_path = self.directory.join(format!("{stem}.sse.gz"));
         let metadata_path = self.directory.join(format!("{stem}.json"));
         self.fs.create_append_log(&body_path.to_string_lossy(), 0)?;
-        drop(write_guard);
         let output = ArchiveWriter {
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
@@ -247,7 +236,7 @@ impl ResponseArchive for SessionResponseArchive {
             finished: false,
         };
         {
-            let _guard = writer.write().map_err(io::Error::other)?;
+            writer.check().map_err(io::Error::other)?;
             recording.write_metadata("recording", false)?;
         }
         Ok(Box::new(recording))
@@ -264,18 +253,22 @@ struct ArchiveWriter {
 
 impl Write for ArchiveWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let _guard = self.writer.write().map_err(io::Error::other)?;
-        let mut used = self
-            .used
-            .lock()
-            .map_err(|_| io::Error::other("response budget poisoned"))?;
-        let current = used.unwrap_or(0);
-        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if current.saturating_add(length) > self.limit {
-            return Err(io::Error::other("session_response_budget_exhausted"));
+        self.writer.check().map_err(io::Error::other)?;
+        {
+            let mut used = self
+                .used
+                .lock()
+                .map_err(|_| io::Error::other("response budget poisoned"))?;
+            let current = used.unwrap_or(0);
+            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if current.saturating_add(length) > self.limit {
+                return Err(io::Error::other("session_response_budget_exhausted"));
+            }
+            // Reserve before I/O: an error may have committed these bytes.
+            // Independent response files share this budget, not their I/O.
+            *used = Some(current.saturating_add(length));
         }
         self.fs.append(&self.path.to_string_lossy(), bytes)?;
-        *used = Some(current.saturating_add(length));
         Ok(bytes.len())
     }
 
@@ -366,8 +359,8 @@ impl ResponseRecorder for SessionResponseRecorder {
                     false
                 }
             });
-        // Serialize the final metadata with deletion, without failing inference.
-        if let Ok(_guard) = self.writer.write() {
+        // The shared lease excludes reclamation until every recorder finalizes.
+        if self.writer.check().is_ok() {
             let _ = self.write_metadata(end.reason, complete);
         }
     }
@@ -380,5 +373,177 @@ impl Drop for SessionResponseRecorder {
             observed_bytes: self.observed,
             capture_error: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_backend::{FsDirEntry, FsMetadata, StdFsBackend};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    enum AppendFault {
+        Pause {
+            entered: mpsc::SyncSender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        },
+        CommitThenFail,
+    }
+
+    struct ControlledAppend {
+        target: PathBuf,
+        fault: AppendFault,
+    }
+
+    impl FsBackend for ControlledAppend {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            StdFsBackend.read(path)
+        }
+        fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
+            StdFsBackend.write(path, data)
+        }
+        fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
+            if Path::new(path) == self.target {
+                match &self.fault {
+                    AppendFault::Pause { entered, release } => {
+                        entered.send(()).unwrap();
+                        release
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10))
+                            .unwrap();
+                    }
+                    AppendFault::CommitThenFail => {
+                        StdFsBackend.append(path, data)?;
+                        return Err(io::Error::other("append committed before its reply failed"));
+                    }
+                }
+            }
+            StdFsBackend.append(path, data)
+        }
+        fn delete(&self, path: &str) -> io::Result<()> {
+            StdFsBackend.delete(path)
+        }
+        fn stat(&self, path: &str) -> io::Result<FsMetadata> {
+            StdFsBackend.stat(path)
+        }
+        fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
+            StdFsBackend.readdir(path)
+        }
+        fn create_dir_all(&self, path: &str) -> io::Result<()> {
+            StdFsBackend.create_dir_all(path)
+        }
+        fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+            StdFsBackend.rename(from, to)
+        }
+        fn canonicalize(&self, path: &str) -> io::Result<String> {
+            StdFsBackend.canonicalize(path)
+        }
+        fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
+            StdFsBackend.symlink_metadata(path)
+        }
+    }
+
+    struct FixtureDir(PathBuf);
+
+    impl FixtureDir {
+        fn new() -> Self {
+            let path = crate::test_support::temp_dir_path("response-archive-writers");
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for FixtureDir {
+        fn drop(&mut self) {
+            if let (Ok(path), Ok(parent)) =
+                (self.0.canonicalize(), std::env::temp_dir().canonicalize())
+            {
+                if path.parent() == Some(parent.as_path()) && path.file_name() == self.0.file_name()
+                {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+    }
+
+    fn output(
+        fs: &Arc<dyn FsBackend>,
+        writer: &Arc<ResponseArchiveWriter>,
+        used: &Arc<Mutex<Option<u64>>>,
+        path: PathBuf,
+        limit: u64,
+    ) -> ArchiveWriter {
+        ArchiveWriter {
+            fs: Arc::clone(fs),
+            writer: Arc::clone(writer),
+            path,
+            used: Arc::clone(used),
+            limit,
+        }
+    }
+
+    #[test]
+    fn an_independent_response_can_write_while_another_append_is_blocked() {
+        let directory = FixtureDir::new();
+        let first_path = directory.0.join("first.sse.gz");
+        let second_path = directory.0.join("second.sse.gz");
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+        let fs: Arc<dyn FsBackend> = Arc::new(ControlledAppend {
+            target: first_path.clone(),
+            fault: AppendFault::Pause {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            },
+        });
+        let writer =
+            ResponseArchiveWriter::acquire(&StdFsBackend, &directory.0.join("transcript.jsonl"))
+                .unwrap();
+        let used = Arc::new(Mutex::new(Some(0)));
+        let mut first = output(&fs, &writer, &used, first_path.clone(), 16);
+        let mut second = output(&fs, &writer, &used, second_path.clone(), 16);
+        let first = std::thread::spawn(move || first.write_all(b"first"));
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let second = std::thread::spawn(move || {
+            let result = second.write_all(b"second");
+            done_tx.send(()).unwrap();
+            result
+        });
+        let independent = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert!(
+            independent,
+            "an unrelated response waited for another file's I/O"
+        );
+        assert_eq!(std::fs::read(first_path).unwrap(), b"first");
+        assert_eq!(std::fs::read(second_path).unwrap(), b"second");
+        assert_eq!(*used.lock().unwrap(), Some(11));
+    }
+
+    #[test]
+    fn an_uncertain_append_keeps_its_reserved_session_budget() {
+        let directory = FixtureDir::new();
+        let first_path = directory.0.join("first.sse.gz");
+        let second_path = directory.0.join("second.sse.gz");
+        let fs: Arc<dyn FsBackend> = Arc::new(ControlledAppend {
+            target: first_path.clone(),
+            fault: AppendFault::CommitThenFail,
+        });
+        let writer =
+            ResponseArchiveWriter::acquire(&StdFsBackend, &directory.0.join("transcript.jsonl"))
+                .unwrap();
+        let used = Arc::new(Mutex::new(Some(0)));
+        let mut first = output(&fs, &writer, &used, first_path.clone(), 8);
+        let mut second = output(&fs, &writer, &used, second_path.clone(), 8);
+        assert!(first.write_all(b"first").is_err());
+        assert!(second.write_all(b"next").is_err());
+        assert_eq!(std::fs::read(first_path).unwrap(), b"first");
+        assert!(!second_path.exists());
+        assert_eq!(*used.lock().unwrap(), Some(5));
     }
 }

@@ -12,17 +12,28 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Hash)]
 pub(super) struct FooterHints<'a> {
     pub transient: Option<&'a str>,
-    pub controls: Option<&'a str>,
+    /// The keys for the current turn and queue state, after the position.
+    pub keys: &'a str,
+}
+
+/// Who owns a persistent footer tip. Unlike the model's tips these outlive a
+/// turn; each source replaces or clears only its own. A later source wins a
+/// priority tie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum StatusSource {
+    /// Prompt-cache advice; the only tip the footer can focus and act on.
+    Cache,
+    /// Peer-messaging health: shown only while degraded, gone once it recovers.
+    A2a,
 }
 
 #[derive(Clone, Default, Hash)]
 pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
-    cache: Option<Tip>,
-    /// Where the workspace is: its branch, or the short commit when HEAD is
-    /// detached. State rather than advice, so it is not a `Tip`: it rides on
-    /// the routine filler and yields the slot to every real tip.
-    branch: Option<String>,
+    status: BTreeMap<StatusSource, Tip>,
+    /// Where the workspace is, `repo ⎇ branch`. State rather than advice, so it
+    /// is not a `Tip`: it leads the filler and yields to every tip.
+    position: Option<String>,
 }
 
 impl FooterTips {
@@ -36,11 +47,14 @@ impl FooterTips {
             self.model.insert(tip.priority, tip);
         }
     }
-    pub fn cache(&mut self, tip: Option<Tip>) {
-        self.cache = tip;
+    pub fn status(&mut self, source: StatusSource, tip: Option<Tip>) {
+        match tip {
+            Some(tip) => self.status.insert(source, tip),
+            None => self.status.remove(&source),
+        };
     }
-    pub fn branch(&mut self, label: Option<String>) {
-        self.branch = label;
+    pub fn position(&mut self, label: Option<String>) {
+        self.position = label;
     }
     pub fn begin_turn(&mut self) {
         self.model.clear();
@@ -50,7 +64,6 @@ impl FooterTips {
         &self,
         permission: &str,
         tasks: &TaskBrowser,
-        submitted: bool,
         active: bool,
         hints: FooterHints<'_>,
         width: usize,
@@ -61,26 +74,19 @@ impl FooterTips {
                 .text
                 .replace(['\n', '\r', '\t'], " "),
         });
-        let control = hints.controls.map(|message| Tip {
+        // Where the workspace is, then the keys for the current state. The
+        // position leads so truncation trims the keys first.
+        let filler = Tip {
             priority: TipPriority::Normal,
-            message: message.to_string(),
-        });
-        let guidance = if submitted {
-            "/help · /exit"
-        } else {
-            "Type /help for commands · Tab completes /commands"
-        };
-        // The branch leads the filler so truncation trims the guidance first.
-        let ordinary = Tip {
-            priority: TipPriority::Normal,
-            message: match &self.branch {
-                Some(branch) => format!("⎇ {branch} · {guidance}"),
-                None => guidance.into(),
+            message: match &self.position {
+                Some(position) => format!("{position} · {}", hints.keys),
+                None => hints.keys.into(),
             },
         };
         // A focused cache tip is the footer's selection and says how to act on it.
         let tip_focused = tasks.focus == TaskFocus::Tip;
-        let focused = self.cache.as_ref().filter(|_| tip_focused).map(|tip| Tip {
+        let cache = self.status.get(&StatusSource::Cache);
+        let focused = cache.filter(|_| tip_focused).map(|tip| Tip {
             priority: TipPriority::Important,
             message: format!("{} · Enter to review", tip.message),
         });
@@ -88,15 +94,19 @@ impl FooterTips {
             .as_ref()
             .or_else(|| {
                 let model = self.model.values().next_back();
-                match (model, self.cache.as_ref()) {
-                    (Some(m), Some(c)) if c.priority > m.priority => Some(c),
+                let status = self
+                    .status
+                    .iter()
+                    .max_by_key(|(source, tip)| (tip.priority, **source))
+                    .map(|(_, tip)| tip);
+                match (model, status) {
+                    (Some(m), Some(s)) if s.priority > m.priority => Some(s),
                     (Some(m), _) => Some(m),
-                    (_, cache) => cache,
+                    (_, status) => status,
                 }
             })
             .filter(|tip| !active || tip.priority == TipPriority::Urgent)
-            .or(control.as_ref())
-            .or((!active).then_some(&ordinary))
+            .or(Some(&filler))
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
         let selected = focused.as_ref().or(selected);
 

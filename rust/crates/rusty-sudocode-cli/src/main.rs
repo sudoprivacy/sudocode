@@ -82,7 +82,7 @@ use cli::format::{
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
-    parse_git_workspace_summary, resolve_git_branch_for, resolve_git_head_label_for,
+    parse_git_workspace_summary, resolve_git_branch_for, resolve_git_position_for,
     GitWorkspaceSummary,
 };
 use cli::help::{
@@ -986,11 +986,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let wait_model = model.clone();
             let mut cli = LiveCli::new(
                 model,
-                true,
                 allowed_tools,
                 permission_mode,
                 reasoning_effort,
                 auth_mode,
+                None,
             )?;
             // Non-interactive one-shot: SIGINT / Ctrl-C must gracefully cancel
             // the turn across the seam (the running tool returns interrupted and
@@ -1254,16 +1254,13 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
                     metrics.read_share_pct = None;
                     metrics.write_share_pct = None;
                 }
-                let mut report = serde_json::json!({
-                    "session": index + 1,
-                    "tracked_requests": stats.tracked_requests,
-                    "cache_efficiency": metrics,
-                    "completion_intervals": engine_core::cache_report::completion_intervals(
-                        &root.join(name).join("requests.jsonl")),
-                });
-                if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-                    report["ttl_advisor"] = engine_core::cache_advisor::report(&root.join(name));
-                }
+                let mut report = engine_core::cache_report::session_report(
+                    &root.join(name),
+                    runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor),
+                );
+                report["session"] = serde_json::json!(index + 1);
+                report["tracked_requests"] = serde_json::json!(stats.tracked_requests);
+                report["cache_efficiency"] = serde_json::json!(metrics);
                 report
             }).collect::<Vec<_>>(),
         });
@@ -1679,13 +1676,13 @@ fn run_resume(
             return Ok(());
         }
         // No commands — enter the interactive REPL with the restored session.
-        let mut cli = match LiveCli::new(
+        let cli = match LiveCli::new(
             model,
-            true,
             None,
             permission_mode,
             reasoning_effort,
             auth_mode,
+            Some((handle, session)),
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -1693,12 +1690,6 @@ fn run_resume(
                 std::process::exit(1);
             }
         };
-        // Load the restored session into the running CLI.
-        let session_ref = resolved_path.display().to_string();
-        if let Err(e) = cli.load_session(Some(session_ref)) {
-            eprintln!("failed to resume: {e}");
-            std::process::exit(1);
-        }
         // Enter the REPL loop (it renders banner + any existing messages).
         // Propagate terminal/save errors to the same top-level handler used
         // by a new REPL, after the loop has cleaned up its receiver/editor.
@@ -1844,15 +1835,15 @@ fn run_resumed_compaction(
     auth_mode: Option<AuthMode>,
     reasoning_effort: Option<String>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    let persisted = load_session_reference(&path.display().to_string())?;
     let cli = LiveCli::new(
         model.to_string(),
-        true,
         None,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        Some(persisted),
     )?;
-    cli.lifecycle.resume_session(&path.display().to_string())?;
     // Maintenance runs through the lifecycle port while the turn pump is
     // idle. Keep SIGINT alive until its receipts and final report are saved.
     let _cancel_guard = SignalCancelGuard::install_compaction(cli.lifecycle.clone());
@@ -2346,11 +2337,11 @@ fn run_repl(
     run_stale_base_preflight(base_commit.as_deref());
     let cli = LiveCli::new(
         model,
-        true,
         allowed_tools,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        None,
     )?;
 
     dispatch_repl(cli)
@@ -3471,6 +3462,50 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
     output.print_block(rendered);
 }
 
+/// Peer-messaging health, not raw receiver errors, reaches the footer. An
+/// outage that heals within the grace period shows nothing, and the tip clears
+/// itself once receiving recovers. Detail stays in `/status`.
+fn spawn_a2a_health_tip(agent: String, ui: repl_ui::UiCommandSender) {
+    let _ = thread::Builder::new()
+        .name("a2a-health-tip".into())
+        .spawn(move || {
+            let mut shown = None;
+            loop {
+                let tip = a2a_health_tip(&engine_host::peer::status(&agent).health);
+                if tip != shown {
+                    ui.set_status_tip(repl_ui::StatusSource::A2a, tip.clone());
+                    shown = tip;
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+}
+
+fn a2a_health_tip(health: &runtime::mailbox::ReceiverHealth) -> Option<engine_core::Tip> {
+    // Important, not Urgent, for both: it stays visible at the prompt, but the
+    // footer does not hold it through every turn of a session that may not use
+    // A2A at all.
+    if !matches!(health.level, "warn" | "fail") {
+        return None;
+    }
+    let priority = engine_core::TipPriority::Important;
+    let what = match health.failing.as_slice() {
+        [] if health.level == "fail" => "node binding unusable".to_string(),
+        [] => "receiving not yet recovered".to_string(),
+        [(scope, _)] => format!("{scope} failing"),
+        [(scope, _), rest @ ..] => format!("{scope} and {} more failing", rest.len()),
+    };
+    let age = match health.outage_secs {
+        Some(secs) if secs >= 60 => format!(" for {}m", secs / 60),
+        Some(secs) => format!(" for {secs}s"),
+        None => String::new(),
+    };
+    Some(engine_core::Tip {
+        priority,
+        message: format!("A2A: {what}{age} · /status"),
+    })
+}
+
 /// The footer's cache-TTL tip and whether it offers a choice. Pinned, the tip
 /// suggests the other TTL; automatic, it is a stop only while a move to 1h
 /// waits for a cold point, which can be applied now or pinned instead.
@@ -3660,7 +3695,7 @@ fn run_repl_iocraft_dispatch(
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
     }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
-    repl_ui_cmd.set_branch(workspace_head_label());
+    repl_ui_cmd.set_workspace_position(workspace_position());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
     // Route LiveCli output through iocraft's OutputSender so it goes
@@ -3670,6 +3705,7 @@ fn run_repl_iocraft_dispatch(
     // mailbox poller below: reading it back through the lock would have the
     // coordinator thread contend with every turn for a value that cannot change.
     let session_agent_name = cli.lifecycle.agent_name();
+    spawn_a2a_health_tip(session_agent_name.clone(), repl_ui_cmd.clone());
     // UI input, peer messages, sub-agent results and turn completion converge
     // on this channel so idle delivery needs no polling.
     let (coord_tx, coord_rx) = mpsc::channel::<CoordinatorEvent>();
@@ -4844,16 +4880,12 @@ impl LiveCli {
 
     fn new(
         model: String,
-        enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
+        persisted: Option<(SessionHandle, Session)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // The engine always builds with tools enabled for the interactive
-        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
-        // seam doesn't model (SessionEngine is single-purpose here).
-        let _ = enable_tools;
         let system_prompt = startup::measure("system_prompt", build_system_prompt)?;
         let cwd = env::current_dir()?;
         let sudocode_config =
@@ -4874,21 +4906,40 @@ impl LiveCli {
         let mcp_servers = std::collections::BTreeMap::new();
         let engine = Arc::new(
             startup::measure("engine_build", || {
-                SessionEngine::build(
-                    &cwd,
-                    &mcp_servers,
-                    runtime::SystemPromptOverrides::default(),
-                    // The REPL always uses memory; the per-session switch is an
-                    // ACP-client knob (`_meta.sudocode.memory`).
-                    runtime::memory::MemoryMode::Enabled,
-                    system_prompt,
-                    model.clone(),
-                    Some(model),
-                    allowed_tools,
-                    Some(permission_mode),
-                    reasoning_effort,
-                    auth_mode,
-                )
+                if let Some((handle, mut session)) = persisted {
+                    session.mode = runtime::SessionMode::Interactive;
+                    SessionEngine::open_persisted(
+                        &cwd,
+                        handle,
+                        session,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model.clone(),
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                } else {
+                    SessionEngine::build(
+                        &cwd,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        // The REPL always uses memory; the per-session switch is an
+                        // ACP-client knob (`_meta.sudocode.memory`).
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model.clone(),
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                }
             })
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
         );
@@ -4901,7 +4952,7 @@ impl LiveCli {
         // (same pattern the todo store uses). Skip if the caller already set it
         // (tests point it at a temp path).
         if std::env::var_os("SUDOCODE_PLAN_FILE").is_none() {
-            let session_id = lifecycle.session_snapshot().session_id;
+            let session_id = lifecycle.session_handle().id;
             let sanitized: String = session_id
                 .chars()
                 .map(|c| {
@@ -5497,7 +5548,7 @@ impl LiveCli {
         if let Some(ui) = ui {
             ui.set_cache_tip(self.cache_ttl_tip());
             // A turn can switch branches (its tools run git), so refresh here.
-            ui.set_branch(workspace_head_label());
+            ui.set_workspace_position(workspace_position());
         }
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
@@ -6408,18 +6459,6 @@ impl LiveCli {
         Ok(true)
     }
 
-    /// Resume a pre-resolved session (for `--resume` at startup). The engine
-    /// reloads it by reference and swaps it in.
-    fn replace_with_session(
-        &mut self,
-        _session: runtime::Session,
-        handle: SessionHandle,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.lifecycle.resume_session(&handle.id)?;
-        self.undone_tool_use_ids.clear();
-        Ok(())
-    }
-
     fn handle_config_set(
         &mut self,
         key: &str,
@@ -7010,11 +7049,11 @@ impl LiveCli {
     }
 }
 
-/// The footer's workspace label: the branch, or the short commit when detached.
-fn workspace_head_label() -> Option<String> {
+/// The footer's workspace position: `repo ⎇ branch`.
+fn workspace_position() -> Option<String> {
     env::current_dir()
         .ok()
-        .and_then(|cwd| resolve_git_head_label_for(&cwd))
+        .and_then(|cwd| resolve_git_position_for(&cwd))
 }
 
 fn print_skills_for_outcome(

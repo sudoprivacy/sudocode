@@ -183,6 +183,16 @@ receiver stops. Hosts can also subscribe to structured tracing. Ordinary
 receivers use this status and the local log without emitting terminal notices;
 retries continue without writing into the terminal's input area.
 
+The current condition is reported separately as `Health` in `/status` and
+`health` in the structured peer status. It reads the same retry diagnostics, so
+it clears when they confirm recovery: every failed check has succeeded again
+after a short quiet period. An outage younger than 30 seconds stays `ok`, and
+`/status` lists the scope being retried; most outages recover on the next
+attempt. A longer one is `degraded`, with each failing scope and its detail.
+The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
+receiving recovers. `failing` means the node binding itself cannot be used.
+`SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
+
 The connection record alone does not start Nexus or mint an agent credential.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
 can resume the same locally owned Box after shared selection. A missing record still
@@ -635,12 +645,20 @@ one contextual tip. General startup guidance also lives here. The highest
 priority applicable tip wins: immediate local interaction feedback, then model
 tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
-over cache advice. Routine `/help` guidance fills otherwise unused space,
-led by the workspace's position: `⎇ <branch>`, or `⎇ <short commit>` when HEAD
-is detached. The position is state rather than advice, so every tip takes the
-slot from it; it is read at startup and refreshed when each turn ends, and the
-per-turn status line no longer repeats it.
-While a turn runs, only urgent tips are shown.
+over cache advice. While a turn runs, only urgent tips are shown.
+
+Below the tips, the slot shows where the workspace is, then the keys for the
+current turn and queue state: `sudocode ⎇ main · /help` when idle, `· Enter
+steer · Tab queue · Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C
+cancel` in place of the cancel keys when input is queued, and `· Enter send ·
+Esc flush · ↑ edit queued` for queued input when idle. Typing never changes it,
+so keystrokes never redraw the footer; it changes when a turn starts or ends,
+as the rest of the screen does. The repository is named by its shared git
+directory, so every worktree of one repository shows the same name; a detached
+HEAD names the branch tip it sits on, `sudocode ⎇ origin/main@4d3c4ad4`, or
+just the commit. The position is state rather than advice, so every tip takes
+the slot from it; it is read at startup and refreshed when each turn ends, and
+the per-turn status line no longer repeats it.
 
 The model has an always-loaded, read-only `set_tip` tool:
 
@@ -732,6 +750,7 @@ scode --resume path/to/session.jsonl
 ```
 
 `--resume` replays the named session into the REPL with full context.
+The restored session ID scopes the runtime, default plan file, and session trace.
 
 `latest` prefers your most recently used interactive session with saved history. A newer
 `--print`/`-p` run keeps its own transcript without displacing that session.

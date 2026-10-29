@@ -223,6 +223,9 @@ Provider tests on main run only for changed provider inputs, and real-daemon
 queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays
 available for gateway diagnosis.
+CLI integration-test-only edits retain native PTYs and the existing provider
+checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
+CLI manifests, production source and daemon harness edits still select it.
 
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider
@@ -230,6 +233,10 @@ probe checks. Its first failing step blocks its daemon/provider dependents.
 PRs always start this job, including SDK-only changes; path filters cannot leave
 a required status pending. The queue's protected acceptance gate still checks
 the combined Git history. No unique product test is removed by this consolidation.
+After merge, main reuses those completed integrity checks. Its lightweight
+preflight still resolves the pinned protocol and changed-input scope needed by
+the existing daemon/provider jobs. PR, queue and explicit runs retain the full
+preflight; no product assertion is removed.
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.

@@ -18,9 +18,20 @@ import tempfile
 SOURCE = Path(__file__).resolve().parents[2]
 
 
+def fixture_environment():
+    """Clear hook-exported repository selectors before touching temporary repos."""
+    names = subprocess.check_output(["git", "rev-parse", "--local-env-vars"],
+                                    cwd=SOURCE, text=True).splitlines()
+    return {key: value for key, value in os.environ.items() if key not in names
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+
+
+FIXTURE_ENV = fixture_environment()
+
+
 def command(*args, cwd, success=True):
     result = subprocess.run(list(map(str, args)), cwd=cwd, capture_output=True,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace", env=FIXTURE_ENV)
     if (result.returncode == 0) != success:
         raise RuntimeError(f"Unexpected exit {result.returncode}: {args}\n{result.stdout}\n{result.stderr}")
     return result.stdout.strip()
@@ -32,15 +43,33 @@ def scope_acceptance(directory):
         return
     repository = directory / "scope"
     command("git", "init", "--initial-branch=main", repository, cwd=directory)
+    assert Path(command("git", "rev-parse", "--show-toplevel", cwd=repository)).resolve() == repository.resolve()
     command("git", "config", "user.name", "Scope E2E", cwd=repository)
     command("git", "config", "user.email", "scope@example.invalid", cwd=repository)
     (repository / "README.md").write_text("base\n")
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
+
+    def expect_scope(event_name, event, live, daemon):
+        data = directory / "scope-event.json"
+        output = directory / "scope-output.txt"
+        data.write_text(json.dumps(event))
+        output.write_text("")
+        environment = {**FIXTURE_ENV, "GITHUB_EVENT_PATH": str(data), "GITHUB_OUTPUT": str(output),
+                       "GITHUB_EVENT_NAME": event_name}
+        result = subprocess.run([sys.executable, str(source)], cwd=repository, env=environment, capture_output=True)
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert f"live_required={str(live).lower()}" in output.read_text()
+        assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+
     cases = [("docs/note.md", False, False), (".github/workflows/rust-ci.yml", False, False),
              ("rust/crates/api/src/lib.rs", True, True), ("e2e/nexus-a2a/run.sh", False, True),
              ("spec/cache_metrics.json", True, False), ("rust/crates/runtime/src/prompt.md", True, True),
-             ("rust/crates/engine-acp/src/ui.html", True, True), ("rust/crates/runtime/README.md", False, False)]
+             ("rust/crates/engine-acp/src/ui.html", True, True), ("rust/crates/runtime/README.md", False, False),
+             ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False),
+             ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False),
+             ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True),
+             ("e2e/shared-services/check.py", False, True)]
     for index, (path, live, daemon) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -50,27 +79,28 @@ def scope_acceptance(directory):
         command("git", "commit", "-m", f"input {index}", cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
         for event_name, event in [("push", {"before": base, "after": head}),
+                                  ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
-            data = directory / "scope-event.json"
-            output = directory / "scope-output.txt"
-            data.write_text(json.dumps(event))
-            output.write_text("")
-            environment = {**os.environ, "GITHUB_EVENT_PATH": str(data), "GITHUB_OUTPUT": str(output),
-                           "GITHUB_EVENT_NAME": event_name}
-            result = subprocess.run([sys.executable, str(source)], cwd=repository, env=environment, capture_output=True)
-            assert result.returncode == 0, result.stderr.decode(errors="replace")
-            assert f"live_required={str(live).lower()}" in output.read_text()
-            assert f"daemon_required={str(daemon).lower()}" in output.read_text()
-    print("PASS: real Git input scopes for docs, CI, Rust, daemon and cache specs")
+            expect_scope(event_name, event, live, daemon)
+    # A rename across the test/production boundary must see both paths.
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
+            "rust/crates/runtime/src/moved.rs", cwd=repository)
+    command("git", "commit", "-m", "move test source into production", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True)
+    expect_scope("workflow_dispatch", {}, True, True)
+    print("PASS: real Git scopes for PR/push/queue, test-only changes, source rename and explicit dispatch")
 
 
-def main():
+def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)
+        assert Path(command("git", "rev-parse", "--show-toplevel", cwd=work)).resolve() == work.resolve()
         command("git", "config", "user.name", "Acceptance E2E", cwd=work)
         command("git", "config", "user.email", "acceptance@example.invalid", cwd=work)
         command("git", "remote", "add", "origin", str(origin), cwd=work)
@@ -173,6 +203,33 @@ def main():
         (work / "input.txt").write_text("uncommitted")
         command(sys.executable, helper, "check", cwd=work, success=False)
         print("PASS: actual hook/push, failed process, signed notes, fresh head, tamper, preserved notes and dirty inputs")
+
+
+def main():
+    if sys.argv[1:] == ["--fixture-child"]:
+        enforcement_acceptance()
+        return
+    with tempfile.TemporaryDirectory(prefix="scode-hook-parent-") as temporary:
+        parent = Path(temporary)
+        command("git", "init", "--initial-branch=main", parent, cwd=parent)
+        command("git", "config", "user.name", "Hook parent", cwd=parent)
+        command("git", "config", "user.email", "parent@example.invalid", cwd=parent)
+        (parent / "sentinel.txt").write_text("The fixture must not modify its caller.\n")
+        command("git", "add", ".", cwd=parent)
+        command("git", "commit", "-m", "Preserve hook caller", cwd=parent)
+        before = {name: (parent / ".git" / name).read_bytes() for name in ("HEAD", "index", "config")}
+        head = command("git", "rev-parse", "HEAD", cwd=parent)
+        environment = {**FIXTURE_ENV, "GIT_DIR": str(parent / ".git"),
+                       "GIT_WORK_TREE": str(parent), "GIT_INDEX_FILE": str(parent / ".git/index"),
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                       "GIT_CONFIG_VALUE_0": "Inherited hook identity"}
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--fixture-child"],
+                                cwd=parent, env=environment)
+        assert result.returncode == 0, "Acceptance failed with a real inherited hook environment"
+        assert all((parent / ".git" / name).read_bytes() == data for name, data in before.items())
+        assert command("git", "rev-parse", "HEAD", cwd=parent) == head
+        assert not command("git", "status", "--porcelain", cwd=parent)
+        print("PASS: inherited hook environment leaves caller HEAD, index, config and source unchanged")
 
 
 if __name__ == "__main__":

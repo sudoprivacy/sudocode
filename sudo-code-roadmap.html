@@ -269,6 +269,14 @@ the same executor/profile/image ran every currently required check. New source
 commits or command changes require acceptance. Main provider and queue daemon
 journeys skip unchanged inputs on docs/CI-only edits; no unique test case or
 performance budget is removed by this deduplication.</p>
+<p>CLI integration-test-only edits keep native PTY and existing provider
+acceptance while skipping the unchanged daemon queue suite. CLI manifests,
+production source, daemon/service harnesses and moves into production still
+select the daemon guard; no daemon journey is removed.</p>
+<p>Main pushes reuse completed pre-merge formatting, schema, docs, boundary and
+fixture checks. Their lightweight preflight retains the protocol pin and input
+scope required by existing daemon/provider jobs. PR, queue and explicit runs
+retain full integrity checks; this removes duplicate post-merge work.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.

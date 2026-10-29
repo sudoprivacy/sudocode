@@ -44,7 +44,13 @@ def main():
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
             daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**"]
             live = any(fnmatch.fnmatchcase(path, rule) for path in relevant for rule in live_inputs)
-            daemon = any(fnmatch.fnmatchcase(path, rule) for path in relevant for rule in daemon_inputs)
+            # CLI integration modules are not inputs to the daemon/cohost
+            # binaries or shell journeys. Native PTYs and live model scope
+            # remain unchanged; manifests, src and moved source still qualify.
+            daemon = any(fnmatch.fnmatchcase(path, rule)
+                         for path in relevant
+                         if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
+                         for rule in daemon_inputs)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower()}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():

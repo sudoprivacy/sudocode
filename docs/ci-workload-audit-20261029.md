@@ -305,6 +305,14 @@ selector is exercised against actual Git commits for docs, CI, Rust, daemon
 harness and cache-spec changes, through both push and merge-group payloads.
 No independent product case or budget is removed in this follow-up.
 
+CLI integration-test modules under `rust/crates/rusty-sudocode-cli/tests/` do
+not enter the daemon/cohost binaries or their shell journeys. Test-only edits
+there retain author/complementary workspace acceptance and the existing main
+provider scope, but skip unchanged daemon queue work. Manifest/source changes,
+daemon/service harness edits and renames across the production boundary retain
+the daemon check. Real Git fixtures exercise push, PR and queue events, plus
+the source rename and explicit dispatch. No daemon scenario is deleted.
+
 ## One shared preflight instead of seven short runners
 
 Combine format/schema, docs, architecture boundary, pinned protocol, release
@@ -320,6 +328,20 @@ This removes six hosted jobs per PR/queue event. It is a scheduling count,
 not a 7x latency claim: commands now run sequentially, and runner queue delay
 still needs measurement. No independent product assertion or deadline changed.
 Required contexts migrate only after the new job has an actual hosted pass.
+
+Main pushes reuse pre-merge integrity checks instead of repeating formatting,
+schemas, docs, architecture, release-mirror fixtures and provider-probe fixtures.
+The protocol pin and changed-input scope remain unconditional because downstream
+daemon/provider jobs consume their outputs. PR, queue, experimental pushes and
+explicit runs retain their existing preflight checks. This saves repeated setup
+and commands after each merge; it does not itself shorten the PR critical path.
+
+The real Git enforcement fixture clears repository-local environment variables
+exported by a caller's hook before creating its temporary repositories. Its
+acceptance run deliberately inherits another temporary repository's Git directory,
+worktree, index and injected config, then verifies that caller's HEAD, index,
+config and source remain unchanged. This protects ordinary managed pushes as
+well as direct fixture execution.
 
 The first hosted consolidated preflight passed all steps in 29 seconds after
 about 5m45s of queue wait (run 40906797832). Its actual success allowed the

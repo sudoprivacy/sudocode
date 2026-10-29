@@ -96,6 +96,11 @@ def run(args, root):
             endpoint, ('nexus.raft.ZoneApiService/' if raft else 'nexus.grpc.vfs.ZoneRuntimeService/' if zones
                        else 'nexus.grpc.vfs.NexusVFSService/') + method]
         result = subprocess.run(command, capture_output=True, timeout=5)
+        with (root / 'grpc-calls.jsonl').open('a', encoding='utf-8') as output:
+            output.write(json.dumps({'at': time.time(), 'method': method,
+                'path': payload.get('path'), 'zone': payload.get('zone_id'),
+                'exit': result.returncode,
+                'error': result.stderr.decode('utf-8', errors='replace')}) + '\n')
         if result.returncode:
             with (root / 'grpc-errors.log').open('ab') as output:
                 output.write(result.stderr)
@@ -112,6 +117,21 @@ def run(args, root):
     def membership():
         return {zone: grpc('GetClusterInfo', {'zone_id': zone}, True)
                 for zone in ['root', 'sharedzone', '__control__']}
+
+    def bootstrap_ready():
+        current = membership()
+        # Raft serves membership before the rest of native boot completes.
+        # Prepare the original Box only after its single-voter leaders and
+        # actual VFS reads serve, within the existing startup observation.
+        # No setup write is retried: a timed-out write has an unknown outcome.
+        if not all(item.get('isLeader') and item.get('leaderId') == item['nodeId']
+                   for item in current.values()):
+            return None
+        for path in ['/', '/agents', '/conversations']:
+            response = grpc('Stat', {'path': path})
+            if response.get('isError'):
+                return None
+        return current
 
     def cli(arguments, expected=True, environment=None):
         result = subprocess.run([str(args.scode), *arguments], env=environment or env,
@@ -137,7 +157,7 @@ def run(args, root):
 
     try:
         wait_until(lambda: data.joinpath('tls/node.pem').is_file())
-        before = wait_until(membership)
+        before = wait_until(bootstrap_ready)
         assert all(item['nodeId'] == before['root']['nodeId'] for item in before.values())
         marker = base64.b64encode('original durable Box body 中文\x00'.encode()).decode()
         grpc('Write', {'path': '/agents/lifecycle-proof', 'content': marker})
@@ -280,7 +300,7 @@ if __name__ == '__main__':
             run(options, root)
         finally:
             import shutil
-            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'receipt.json']:
+            for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'grpc-calls.jsonl', 'receipt.json']:
                 if (root / name).is_file():
                     shutil.copy2(root / name, options.artifacts / name)
             # Keep the native child diagnostics too; otherwise a failed

@@ -205,3 +205,10 @@ python e2e/shared-services/run.py --scode rust/target/debug/scode
 
 Use `scode.exe` on Windows. Frontend acceptance lives with each frontend, including
 Sudowork's desktop adapter and browser workflows.
+
+The existing-Box harness prepares its original isolated Node only after the
+single-voter zones have leaders and the VFS serves read-only readiness checks.
+Membership RPCs alone can answer before native boot finishes. This preparation
+uses the existing 30-second observation and 3-second RPC deadlines; writes are
+issued once. Failure evidence includes the method, target and result of each
+fixture RPC alongside the native bootstrap and owner logs.

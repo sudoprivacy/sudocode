@@ -4,7 +4,14 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
-    paths: ['rust/**', 'e2e/terminal-resize/**', '.github/workflows/terminal-hyperlinks.yml']
+    paths:
+      - 'rust/**'
+      # Ordinary integration tests do not change the release binary or driver.
+      - '!rust/crates/*/tests/**'
+      - 'rust/crates/rusty-sudocode-cli/tests/common/**'
+      - 'rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs'
+      - 'e2e/terminal-resize/**'
+      - '.github/workflows/terminal-hyperlinks.yml'
   workflow_dispatch:
 
 permissions:

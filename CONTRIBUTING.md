@@ -180,7 +180,7 @@ suite; they no longer run twice in one job. Standalone vendored Mermaid tests
 remain explicit because Cargo excludes that crate from the workspace.
 
 Rust dependency caches stay within the existing repository quota. One main
-publisher per supported host shares the Cargo sources and compiled dependencies
+publisher per Linux/Windows/macOS workspace host shares Cargo sources and compiled dependencies
 across jobs; PRs and merge groups read those caches without publishing isolated
 copies. Exact key hits skip main's cache maintenance build; misses compile
 without running tests. Dev/test builds omit disposable debug symbols and retain
@@ -190,6 +190,18 @@ dispatch performs no provider calls. See the
 Benchmark entry points are type-checked in the workspace job without linking an
 extra optimized copy of every test. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.
+
+Service-only macOS 15 hosts compile on a cache miss. This leaves headroom for
+the three heavily reused workspace pools within the existing quota. Ordinary
+integration-test edits do not rebuild the release performance pair; changes to
+production source, manifests and the measurement driver still do. CI queue
+maintenance cancels old merge-group runs only after their Git ref is removed
+and their commit is absent from the current queue. PR and current queue runs
+are retained. Its local command defaults to a read-only preview:
+
+```bash
+python .github/scripts/cancel_obsolete_queue_runs.py --repository sudoprivacy/sudocode --output /tmp/queue-preview.json
+```
 
 ### Mock parity harness — optional
 

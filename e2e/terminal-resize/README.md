@@ -80,6 +80,13 @@ the evaluator still comes from the base. Baselines never update automatically.
 Candidate compilation has read permissions and no persisted checkout token;
 the separate status publisher executes trusted code only.
 
+Ordinary integration-test changes under `rust/crates/*/tests/` skip release
+performance rebuilds. Production source and manifests still trigger them.
+Shared CLI test helpers and the relevant measurement driver remain inputs:
+`pty_render_performance` for headless measurements, `pty_hyperlinks` for browser
+measurements. The live policy contract checks this decision on test-only PRs
+in addition to rejecting stale commits. No workload, sample count or budget changes.
+
 PR builds use `pull_request`, so forks receive the normal read-only token,
 no repository secrets, and the existing fork-run approval checks. The policy
 and measurement harness are checked out from the protected base. Same-repository

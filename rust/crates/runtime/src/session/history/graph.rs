@@ -248,7 +248,9 @@ impl HistoryGraph {
         if record.expected_revision.is_some()
             && matches!(
                 record.event,
-                HistoryEvent::Initialize { .. } | HistoryEvent::OpenContext { .. }
+                HistoryEvent::Initialize { .. }
+                    | HistoryEvent::OpenContext { .. }
+                    | HistoryEvent::OpenCompletedContext
             )
         {
             return Err(invalid(
@@ -260,6 +262,7 @@ impl HistoryGraph {
         }
         let parent = match &record.event {
             HistoryEvent::Initialize { .. } => None,
+            HistoryEvent::OpenCompletedContext => self.latest_commit.clone(),
             HistoryEvent::OpenContext { source_commit } => source_commit.clone().or_else(|| {
                 self.latest_context
                     .as_ref()
@@ -272,6 +275,13 @@ impl HistoryGraph {
             HistoryEvent::Initialize { session } => self.initialize(record, session)?,
             HistoryEvent::OpenContext { source_commit } => {
                 self.open_context(record, source_commit.as_deref())?
+            }
+            HistoryEvent::OpenCompletedContext => {
+                let source = self
+                    .latest_commit
+                    .clone()
+                    .ok_or_else(|| invalid("no completed context"))?;
+                self.open_context(record, Some(&source))?
             }
             _ => self.change(record)?,
         };
@@ -651,7 +661,9 @@ impl HistoryGraph {
                     return Ok(rejected("context_has_unfinished_tools"));
                 }
             }
-            HistoryEvent::Initialize { .. } | HistoryEvent::OpenContext { .. } => unreachable!(),
+            HistoryEvent::Initialize { .. }
+            | HistoryEvent::OpenContext { .. }
+            | HistoryEvent::OpenCompletedContext => unreachable!(),
         }
         touch(&mut context.projection, record.timestamp_ms);
         context.revision.clone_from(&record.id);

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 
 const [input, output] = process.argv.slice(2);
 if (!input || !output) throw new Error('Usage: summarize_live_model_trace.cjs INPUT OUTPUT');
-const { clean, writeEvidence } = require('./live_model_evidence.cjs');
+const { clean, writeEvidence, providerFailure } = require('./live_model_evidence.cjs');
 const report = { traceFiles: 0, malformedLines: 0, requests: [] };
 const responses = new Map();
 const refusals = new Map();
@@ -108,6 +108,11 @@ for (const request of report.requests) {
   request.streamError = find(streamErrors);
   request.failures = find(failures);
   request.streamProgress = find(progress);
+  request.providerFailure = providerFailure(request.streamError ? undefined : request.response?.status,
+    request.streamError?.message ?? request.failures?.map(failure => failure.error).join('\n'));
+  if (request.providerFailure) {
+    console.error(`::error title=Live provider failure (${request.providerFailure})::Request ${request.requestId} could not complete provider acceptance. See the retained evidence.`);
+  }
 }
 writeEvidence(output, report);
 console.log(`Live model evidence: ${report.requests.length} requests, ${report.malformedLines} malformed lines`);

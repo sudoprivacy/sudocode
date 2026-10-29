@@ -212,3 +212,68 @@ fn footer_tips_preserve_theme_and_unicode_and_draft_across_resize() {
         exit(&mut session);
     }
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Rows of the per-turn status line, which carries `turn N` and a token count.
+fn status_rows(session: &PtySession) -> Vec<String> {
+    session.render(|screen| {
+        let raw = screen.raw();
+        raw.rows(0, raw.size().1)
+            .filter(|row| row.contains("turn ") && row.contains("tokens"))
+            .collect()
+    })
+}
+
+#[test]
+fn footer_names_the_workspace_branch_and_yields_it_to_any_tip() {
+    let env = TestEnv::new_mock("footer-branch");
+    let root = env.workspace_root();
+    git(root, &["init", "-q", "-b", "feat/footer-branch"]);
+    git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let mut session = spawn(&env, "15;0", false);
+    // Idle with nothing to say: the branch leads the routine filler.
+    wait_footer(&session, "⎇ feat/footer-branch · Type /help for commands");
+
+    // A real tip takes the slot; the branch is state, not advice, and yields.
+    turn(
+        &env,
+        &mut session,
+        &[tip("important", "BRANCH_YIELDS", "i")],
+    );
+    wait_footer(&session, "BRANCH_YIELDS");
+    assert!(
+        !footer(&session).contains("feat/footer-branch"),
+        "a tip must win the slot: {}",
+        footer(&session)
+    );
+    // The per-turn line no longer repeats the branch.
+    let rows = status_rows(&session);
+    assert!(!rows.is_empty(), "the turn status line is on screen");
+    assert!(
+        rows.iter().all(|row| !row.contains("feat/footer-branch")),
+        "branch left the per-turn line: {rows:?}"
+    );
+
+    // Detached, the footer names the commit, refreshed when the turn ends.
+    git(root, &["checkout", "-q", "--detach"]);
+    let commit = git(root, &["rev-parse", "--short", "HEAD"]);
+    turn(&env, &mut session, &[]);
+    wait_footer(&session, &format!("⎇ {commit} · /help"));
+    assert!(!footer(&session).contains("detached HEAD"));
+    exit(&mut session);
+}

@@ -60,7 +60,14 @@ pub struct EngineApiClient {
 
 impl Drop for EngineApiClient {
     fn drop(&mut self) {
-        // Covers every host, including runtimes taken out of BuiltRuntime.
+        self.flush_response_captures();
+    }
+}
+
+impl EngineApiClient {
+    /// Drain session-owned response evidence before the host retires its
+    /// persistence writer. Other lifecycle readers may still retain this client.
+    pub fn flush_response_captures(&self) {
         if !api::flush_response_captures(&self.session_id, Duration::from_secs(2)) {
             if let Some(tracer) = self.session_tracer() {
                 tracer.record("response_capture_shutdown_timeout", serde_json::Map::new());
@@ -76,17 +83,29 @@ impl EngineApiClient {
         let Some(ttl) = self.client.cache_ttl() else {
             return;
         };
-        let ledger = self
-            .client
-            .cache_advisor_context()
+        let context = self.client.cache_advisor_context();
+        let directory = context
+            .as_ref()
             .map(|(cache, _, _)| cache.paths().session_dir);
+        let advisor =
+            context
+                .as_ref()
+                .zip(directory.as_deref())
+                .map(
+                    |((cache, route, _), directory)| crate::cache_ttl::AdvisorInput {
+                        directory,
+                        segment: cache.context_segment(),
+                        model: &self.model,
+                        route,
+                    },
+                );
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        crate::cache_ttl::before_request(&self.session_id, ttl, ledger.as_deref(), now_ms);
+        crate::cache_ttl::before_request(&self.session_id, ttl, advisor.as_ref(), now_ms);
     }
 
     #[must_use]
@@ -156,6 +175,7 @@ impl EngineApiClient {
     /// Build a client for `model`, resolving the provider from config + auth
     /// mode (identical resolution to the old CLI client, minus the render
     /// plumbing).
+    #[inline]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: &str,
@@ -167,8 +187,61 @@ impl EngineApiClient {
         allowed_tools: Option<BTreeSet<String>>,
         access: &api::ModelAccess,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_access(
+            session_id,
+            sudocode_config,
+            model,
+            auth_mode,
+            tool_registry,
+            enable_tools,
+            allowed_tools,
+            |_| Ok(access.clone()),
+        )
+    }
+
+    /// Resolve the provider once, then obtain its model filesystem only if
+    /// that resolved provider actually uses a Nexus mount. Ordinary HTTP
+    /// clients do not need a node credential merely to start their session.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_access(
+        session_id: &str,
+        sudocode_config: &SudoCodeConfig,
+        model: &str,
+        auth_mode: AuthMode,
+        tool_registry: GlobalToolRegistry,
+        enable_tools: bool,
+        allowed_tools: Option<BTreeSet<String>>,
+        access: impl FnOnce(bool) -> Result<api::ModelAccess, Box<dyn std::error::Error>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let resolved: ResolvedProvider =
             api::resolve_provider_from_config(model, Some(auth_mode), sudocode_config)?;
+        let access = access(resolved.base_url.starts_with("nexus://"))?;
+        Self::from_resolved_with_access(
+            session_id,
+            sudocode_config,
+            model,
+            auth_mode,
+            tool_registry,
+            enable_tools,
+            allowed_tools,
+            resolved,
+            access,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_resolved_with_access(
+        session_id: &str,
+        sudocode_config: &SudoCodeConfig,
+        model: &str,
+        auth_mode: AuthMode,
+        tool_registry: GlobalToolRegistry,
+        enable_tools: bool,
+        allowed_tools: Option<BTreeSet<String>>,
+        resolved: ResolvedProvider,
+        access: api::ModelAccess,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let catalog = if resolved.base_url.starts_with("nexus://") || access.require_mount {
             None
         } else {
@@ -178,7 +251,7 @@ impl EngineApiClient {
             catalog.refresh_in_background();
         }
         let mut client =
-            ProviderClient::from_resolved_with_access(&resolved, Some(auth_mode), access)?
+            ProviderClient::from_resolved_with_access(&resolved, Some(auth_mode), &access)?
                 .with_prompt_cache(PromptCache::new(session_id));
         let sink = Arc::new(SudoclawLogSink::new()?);
         client = client.with_session_tracer(SessionTracer::new(session_id, sink));
@@ -607,17 +680,20 @@ impl ApiClient for EngineApiClient {
     }
 
     fn cache_context_boundary(&mut self, segment: u64) {
-        crate::cache_ttl::context_boundary(&self.session_id, segment);
+        let pinned = self.client.cache_ttl().is_none_or(api::CacheTtl::pinned);
+        crate::cache_ttl::context_boundary(&self.session_id, segment, pinned);
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
             if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
                 cache.set_context_segment(segment);
-                crate::cache_advisor::context_boundary(
+                let (verdict, decided) = crate::cache_advisor::context_boundary(
                     &cache.paths().session_dir,
                     segment,
                     &self.model,
                     &route,
                     ttl,
+                    crate::cache_ttl::status(&self.session_id).auto,
                 );
+                crate::cache_ttl::advised(&self.session_id, verdict, decided);
             }
         }
     }

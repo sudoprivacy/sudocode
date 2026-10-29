@@ -14,6 +14,8 @@
 mod acp_direct_fences;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[path = "support/acp_node_binding.rs"]
+mod node_binding;
 #[path = "support/node_home.rs"]
 mod node_home;
 #[path = "common/openai_compat_mock.rs"]
@@ -7209,6 +7211,13 @@ async fn initialize_task_completions(client: &mut AcpTestClient) {
         .is_none());
 }
 
+fn completion_gate_calls(node: &str, label: &str) -> Value {
+    let shell = if cfg!(windows) { "PowerShell" } else { "Bash" };
+    json!([{"id":"call_1","name":shell,"input":{
+        "command":format!("{node} completion-gate.cjs {label}"),"run_in_background":true
+    }}])
+}
+
 /// Independent ACP processes retain completion ownership while they append to
 /// one SID, including a provider call ID reused within the first process.
 #[tokio::test]
@@ -7246,6 +7255,8 @@ const timer = setInterval(() => {
 "#,
     )
     .unwrap();
+    let _releases = ["A1", "B1", "A2", "B3"]
+        .map(|label| CompletionFixtureRelease(workspace.root.join(format!("{label}.release"))));
     let spawn = || {
         spawn_stdio_client_with_args_and_env(
             &workspace,
@@ -7308,10 +7319,7 @@ const timer = setInterval(() => {
         } else {
             &mut first
         };
-        let shell = if cfg!(windows) { "PowerShell" } else { "Bash" };
-        let calls = json!([{"id":"call_1","name":shell,"input":{
-            "command":format!("{node} completion-gate.cjs {label}"),"run_in_background":true
-        }}]);
+        let calls = completion_gate_calls(&node, label);
         let (events, response) = client
             .send_request(
                 "session/prompt",
@@ -7336,20 +7344,7 @@ const timer = setInterval(() => {
         .await
         .expect("background process reached its gate");
     }
-    let (_, rejected) = first
-        .send_request(
-            "_sudocode/task/purge",
-            json!({
-                "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"live-peer"
-            }),
-        )
-        .await;
-    assert!(
-        rejected["error"]
-            .to_string()
-            .contains("session_writer_busy"),
-        "{rejected}"
-    );
+    let journals = find_session_transcript(&workspace.root, &sid).with_extension("completions");
     for label in ["B1", "A2", "A1"] {
         let client = if label == "B1" {
             &mut second
@@ -7378,6 +7373,34 @@ const timer = setInterval(() => {
                 "completionId":event["params"]["completionId"],"disposition":"stored"
             }}))
             .await;
+        // Flushing the response does not wait for the transport task to commit
+        // its receipt. Observe this exact ACK before replay or process shutdown.
+        timeout(SUBAGENT_EVENTS_WAIT, async {
+            loop {
+                let is_stored = fs::read_dir(&journals).unwrap().any(|entry| {
+                    let path = entry.unwrap().path();
+                    if path.extension().is_none_or(|extension| extension != "json") {
+                        return false;
+                    }
+                    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                    saved["sources"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .any(|source| {
+                            source["payload"]["completionId"] == event["params"]["completionId"]
+                                && source["ack"] == "stored"
+                                && source["settled"] == true
+                        })
+                });
+                if is_stored {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completion ACK must be durable before replay and process shutdown");
     }
     for (client, expected) in [(&mut first, 2), (&mut second, 1)] {
         let (_, status) = client
@@ -7416,11 +7439,137 @@ const timer = setInterval(() => {
         status["result"]["settled"], 2,
         "latest context restores A's journal: {status}"
     );
+    let mut stale = spawn();
+    initialize_task_completions(&mut stale).await;
+    let (_, loaded) = stale
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let calls = completion_gate_calls(&node, "B3");
+    let (_, response) = stale
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId":sid,"_meta":{"traceId":"B3"},"prompt":[{"type":"text",
+                "text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]
+            }),
+        )
+        .await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    fs::write(workspace.root.join("B3.release"), "release").unwrap();
+    let (_, unacknowledged) = stale
+        .recv_until(SUBAGENT_EVENTS_WAIT, |event| {
+            event["method"] == "_sudocode/task/completed"
+        })
+        .await
+        .expect("real B3 completion before deletion");
+    assert_eq!(unacknowledged["params"]["originTraceId"], "B3");
+    let transcript = find_session_transcript(&workspace.root, &sid);
+    let stale_journal = fs::read_dir(transcript.with_extension("completions"))
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            saved["sources"]
+                .as_object()
+                .is_some_and(|sources| {
+                    sources
+                        .values()
+                        .any(|source| source["trace_id"] == "B3" && source["ack"].is_null())
+                })
+                .then_some(path)
+        })
+        .expect("durable B3 source still awaits its real ACK");
     let (_,purged) = restored.send_request("_sudocode/task/purge",json!({
         "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"finished-contexts"
     })).await;
     assert_eq!(purged["result"]["disposition"], "purged", "{purged}");
+    assert!(
+        transcript.is_file(),
+        "live runtime clients must retire before physical cleanup"
+    );
+    let history_after_delete = fs::read(&transcript).unwrap();
+    let journal_after_delete = fs::read(&stale_journal).unwrap();
+    stale
+        .send_raw(&json!({"jsonrpc":"2.0","id":unacknowledged["id"],"result":{
+            "completionId":unacknowledged["params"]["completionId"],"disposition":"stored"
+        }}))
+        .await;
+    let (_, refused) = stale
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId":sid,"_meta":{"traceId":"stale-after-delete"},
+                "prompt":[{"type":"text","text":"STALE_CONTEXT_MUST_NOT_WRITE"}]
+            }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("session_deleted"),
+        "{refused}"
+    );
+    stale.shutdown().await;
+    assert_eq!(
+        fs::read(&stale_journal).unwrap(),
+        journal_after_delete,
+        "a real old ACK must not settle or replace the deleted Session's journal"
+    );
+    assert_eq!(
+        fs::read(&transcript).unwrap(),
+        history_after_delete,
+        "the old runtime must not append to a deleted Session"
+    );
+    let mut observer = spawn();
+    initialize_task_completions(&mut observer).await;
+    let (_, refused) = observer
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("session_deleted"),
+        "{refused}"
+    );
     restored.shutdown().await;
+    timeout(Duration::from_secs(10), async {
+        while transcript.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ordinary process startup resumes final cleanup without a cleanup RPC");
+    assert_eq!(
+        fs::read_to_string(workspace.root.join("B3.effect")).unwrap(),
+        "B3 durable effect"
+    );
+    let binding: Value =
+        serde_json::from_slice(&fs::read(transcript.with_extension("completions.json")).unwrap())
+            .unwrap();
+    assert_eq!(binding["deleted"], "finished-contexts");
+    let (_, refused) = observer
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(
+        refused.get("error").is_some(),
+        "physical cleanup must not permit SID recreation: {refused}"
+    );
+    observer.shutdown().await;
     workspace.cleanup();
 }
 
@@ -7769,7 +7918,7 @@ async fn acp_task_completions_interrupted_shell_and_encoded_budget() {
 }
 
 /// Concurrent ACP contexts append to the same SID while retaining separate
-/// completion ownership. A continuation repairs only its frozen inherited tail.
+/// completion ownership. A continuation inherits only a completed turn.
 #[tokio::test]
 async fn acp_completions_keep_live_contexts_independent_during_replay_and_load() {
     let server = MockAnthropicService::spawn().await.unwrap();
@@ -7908,15 +8057,24 @@ async fn acp_completions_keep_live_contexts_independent_during_replay_and_load()
     let continued_transcript = read_transcript();
     assert!(
         String::from_utf8_lossy(&continued_transcript)
-            .contains("Side effects may already have occurred"),
-        "the continuation must retain its inherited tool's unknown outcome"
+            .contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")),
+        "the source's unfinished turn must remain in durable history"
     );
+    let selected = runtime::Session::load_from_path(&transcript)
+        .unwrap()
+        .to_json()
+        .unwrap()
+        .render();
+    assert!(!selected.contains("Side effects may already have occurred"));
+    assert!(!selected.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")));
+    assert!(selected.contains(&format!("{SCENARIO_PREFIX}streaming_text")));
     let requests = server.captured_requests().await;
     let request = &requests.last().unwrap().raw_body;
     assert!(
-        request.contains("Side effects may already have occurred")
-            && request.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")),
-        "the resumed model must inherit the written turn and its recovery result: {request}"
+        !request.contains("Side effects may already have occurred")
+            && !request.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip"))
+            && request.contains(&format!("{SCENARIO_PREFIX}streaming_text")),
+        "the resumed model must exclude the sibling's unfinished turn and synthetic result: {request}"
     );
     competitor.shutdown().await;
     assert_eq!(fs::read(&journal).unwrap(), before_journal);
@@ -8410,6 +8568,17 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     const FIRST: &str = "acp-pair-first";
     const SECOND: &str = "acp-pair-second";
     const PEER: &str = "acp-pair-peer";
+    const SUMMARY: &str = "摘要 \"ready\" & <checked>\nSECOND-SUMMARY-LINE";
+    // The one peer wrapper carries the summary as an escaped attribute.
+    let summary_attr = format!(
+        "summary=\"{}\"",
+        SUMMARY
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('\n', "&#10;")
+    );
     let server = MockAnthropicService::spawn()
         .await
         .expect("mock service should start");
@@ -8455,7 +8624,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
             from: PEER.to_string(),
             to: (*agent).to_string(),
             body: format!("for {agent} PARITY_SCENARIO:single_turn_text"),
-            summary: None,
+            summary: (*agent == FIRST).then(|| SUMMARY.to_string()),
             timestamp: 0,
             color: None,
             kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
@@ -8492,6 +8661,21 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
             text.contains(&format!("for {agent} ")),
             "{agent}'s session got another agent's message: {text}"
         );
+        if *agent == FIRST {
+            assert_eq!(
+                update["params"]["_meta"]["sudocode"]["a2a"]["summary"],
+                SUMMARY
+            );
+            assert!(text.contains(&summary_attr), "{text}");
+        } else {
+            assert!(update["params"]["_meta"]["sudocode"]["a2a"]
+                .get("summary")
+                .is_none());
+            assert!(
+                !text.contains("summary="),
+                "legacy messages have no summary: {text}"
+            );
+        }
     }
 
     for (agent, _) in &sessions {
@@ -8513,6 +8697,37 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
         }
     }
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = server.captured_requests().await;
+        if requests.iter().any(|request| {
+            request
+                .raw_body
+                .contains(&summary_attr.replace('"', "\\\""))
+                && request.raw_body.contains("SECOND-SUMMARY-LINE")
+                && request.raw_body.contains("for acp-pair-first")
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summary never reached the provider"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let saved = runtime::SessionStore::from_cwd(&workspace.root)
+        .unwrap()
+        .load_session("latest")
+        .unwrap()
+        .session;
+    assert!(saved
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .any(|block| {
+            matches!(block, runtime::ContentBlock::Text { text }
+            if text.contains(&summary_attr) && text.contains("for acp-pair-first"))
+        }));
     client.shutdown().await;
     workspace.cleanup();
 }

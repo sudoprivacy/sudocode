@@ -321,19 +321,39 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
         runtime::plan_store::PlanReviewStatus::Approved
     );
     assert!(
-        review.message.contains(plan),
-        "execution must receive the reviewed file, including framing"
-    );
-    assert!(
         !text.contains("you will receive"),
         "no future prompt promise"
     );
+    let call = blocks
+        .iter()
+        .find(|block| block["type"] == "tool_use" && block["id"] == result["tool_use_id"])
+        .expect("preserve tool pairing across reset");
+    let reviewed = call["input"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines: Vec<_> = plan
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.len() > 30)
+        .collect();
     assert!(
-        blocks
-            .iter()
-            .any(|block| block["type"] == "tool_use" && block["id"] == result["tool_use_id"]),
-        "preserve tool pairing across reset"
+        !lines.is_empty(),
+        "the reviewed plan has lines worth checking"
     );
+    for line in lines {
+        assert!(
+            reviewed.contains(line),
+            "execution must see the reviewed plan through its write_plan call: {line}"
+        );
+        assert!(
+            !review.message.contains(line),
+            "approval must not repeat the plan the model already sent: {line}"
+        );
+    }
 }
 
 fn approve(queue: bool, clear: bool, no_color: bool) {

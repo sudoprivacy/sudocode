@@ -105,6 +105,58 @@ fn transcripts(root: &Path, paths: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn two_submits_in_one_write_keep_both_prompts() {
+    let env = TestEnv::new_mock("input-batch-submit");
+    let mut session = start(&env);
+    let first = env.prompt("First request: calculate 2 + 2.", "single_turn_text");
+    let second = env.prompt("Second request: calculate 2 + 2.", "single_turn_text");
+    // Enter steers into a running turn regardless of the queue setting, so the
+    // second prompt may join the first turn. What must hold is that neither
+    // prompt is lost, merged into the other or reordered.
+    session.send(&format!("{first}\r{second}\r")).unwrap();
+    common::expect_screen_settled(
+        &session,
+        |screen| {
+            screen.contains("The answer is 4") && common::input_line_of(screen).trim().is_empty()
+        },
+        env.timeout(),
+        "both submitted prompts answered",
+    );
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+
+    let mut paths = Vec::new();
+    transcripts(&env.workspace_root().join(".scode"), &mut paths);
+    assert_eq!(paths.len(), 1);
+    let saved = Session::load_from_path(&paths[0]).unwrap();
+    let users: Vec<_> = saved
+        .messages()
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .map(|message| {
+            message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .next_back()
+                .expect("user-authored text follows the host context blocks")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(users, vec![first.clone(), second.clone()]);
+    let bodies = env.captured_message_bodies();
+    let last = bodies.last().expect("the model was asked");
+    let (at_first, at_second) = (last.find(&first), last.find(&second));
+    assert!(
+        at_first.is_some() && at_second.is_some() && at_first < at_second,
+        "the model must receive both prompts, in order"
+    );
+}
+
+#[test]
 fn middle_paste_then_typing_preserves_submitted_content() {
     let env = TestEnv::new("input-batch-paste");
     let mut session = start(&env);

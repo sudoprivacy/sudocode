@@ -2,6 +2,7 @@
 
 mod a2a;
 mod plan;
+pub(super) use a2a::summary_preview;
 
 use std::fmt::Write as _;
 
@@ -176,11 +177,36 @@ pub(crate) fn render_messages(
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
+    render_messages_observed(messages, term_width, renderer, |_, _| {})
+}
+
+/// Keep prompt locations as presentation metadata, never embedded terminal text.
+pub(crate) fn render_messages_with_prompts(
+    messages: &[runtime::ConversationMessage],
+    term_width: usize,
+    renderer: &crate::render::TerminalRenderer,
+) -> (String, Vec<usize>) {
+    let mut prompts = Vec::new();
+    let text = render_messages_observed(messages, term_width, renderer, |offset, msg| {
+        if msg.role == runtime::MessageRole::User {
+            prompts.push(offset);
+        }
+    });
+    (text, prompts)
+}
+
+fn render_messages_observed(
+    messages: &[runtime::ConversationMessage],
+    term_width: usize,
+    renderer: &crate::render::TerminalRenderer,
+    mut observe: impl FnMut(usize, &runtime::ConversationMessage),
+) -> String {
     let mut output = String::new();
     let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
         if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
             crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
+            observe(output.len() - rendered.trim_matches('\n').len(), msg);
         }
     }
     output
@@ -677,9 +703,7 @@ pub(crate) fn format_internal_prompt_progress_line(
     }
 }
 
-/// Render the REPL echo for a submitted user input. Each line is on its own
-/// row, padded out to `term_width` and wrapped in the gray-background SGR pair
-/// the REPL uses for echoed input.
+/// Render submitted input through the same formatter for live and replay.
 ///
 /// `lines_consumed` is the number of `\n`-delimited input lines so callers
 /// know how many rows of rustyline output to clear before printing the echo.
@@ -699,16 +723,22 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     let mut rendered = String::new();
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
-        // box uses, so a message echoed here (session-history replay on resume)
-        // is visually identical to how it appeared when you typed it: the plain
-        // `❯ text` prompt line, no styled background. Continuation lines indent
+        // box uses. Live commits and replay share this presentation; the
+        // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
         let body = format!("{prefix}{line}");
         if idx > 0 {
             rendered.push('\n');
         }
-        rendered.push_str(&body);
+        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
+            let styled = crate::render::prompt_style(false).apply(body).to_string();
+            rendered.push_str(
+                &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
+            );
+        } else {
+            rendered.push_str(&body);
+        }
     }
     (rendered, raw_lines.len())
 }
@@ -1005,8 +1035,8 @@ impl ToolCardContent {
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
-/// syntax-theme green (ok), or red (error). Bold caps distinguish adjacent
-/// calls; the long vertical border uses normal weight without dimming.
+/// syntax-theme green (ok), or red (error). All frame strokes use regular
+/// weight without dimming so the corners align with the vertical border.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -1059,7 +1089,6 @@ pub(crate) fn render_tool_card_with_width(
             .map(String::as_str),
         term_width,
         color,
-        true,
     )
 }
 
@@ -2161,8 +2190,6 @@ pub(crate) struct TurnStatus<'a> {
     pub elapsed: Option<Duration>,
     /// Session-cumulative wall-clock time across every turn (the `Σs` field).
     pub cumulative_duration: Option<Duration>,
-    /// Current git branch, when the workspace is a repository.
-    pub branch: Option<&'a str>,
     /// The proxy account the turn was billed to, when one resolved. Shown
     /// because a session spends someone's money and the name is otherwise
     /// invisible until the bill arrives; `/status` carries which rule chose it.
@@ -2236,8 +2263,8 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
 /// token count, estimated cost (when pricing for the model is known), elapsed
-/// wall-clock time for the turn, context-window occupancy, and the current git
-/// branch (when one is available). Labels use the theme's muted foreground;
+/// wall-clock time for the turn, and context-window occupancy. The workspace's
+/// branch lives in the footer instead: it is state, not a per-turn figure. Labels use the theme's muted foreground;
 /// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
@@ -2259,7 +2286,6 @@ pub(crate) fn turn_status_line_with_context_estimate(
         context_window,
         elapsed,
         cumulative_duration,
-        branch,
         account,
     } = status;
 
@@ -2321,10 +2347,6 @@ pub(crate) fn turn_status_line_with_context_estimate(
         if let Some(share) = total.read_share_pct {
             line.push(format!(" · Σ⚡{share:.0}%"));
         }
-    }
-    if let Some(branch) = branch.filter(|b| !b.is_empty()) {
-        line.push(" · ");
-        line.push(branch);
     }
     line
 }
@@ -3359,7 +3381,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3382,7 +3403,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(0.3)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3408,7 +3428,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3437,7 +3456,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3445,45 +3463,6 @@ mod tests {
             plain.contains("~$90.00"),
             "estimate should be model-priced and marked: {plain}"
         );
-    }
-
-    #[test]
-    fn turn_status_line_appends_branch_when_present() {
-        let usage = TokenUsage::default();
-        let rendered = format_turn_status_line(&TurnStatus {
-            model: "claude-opus-4-6",
-            turn: 1,
-            usage: &usage,
-            cumulative_usage: &usage,
-            context_tokens: None,
-            context_window: None,
-            elapsed: Some(Duration::from_millis(800)),
-            cumulative_duration: None,
-            branch: Some("feat/tui-backlog-179"),
-            account: None,
-        });
-        let plain = strip_ansi(&rendered);
-        assert!(plain.ends_with("feat/tui-backlog-179"), "{plain}");
-    }
-
-    #[test]
-    fn turn_status_line_omits_branch_when_empty() {
-        let usage = TokenUsage::default();
-        let rendered = format_turn_status_line(&TurnStatus {
-            model: "claude-opus-4-6",
-            turn: 1,
-            usage: &usage,
-            cumulative_usage: &usage,
-            context_tokens: None,
-            context_window: None,
-            elapsed: Some(Duration::from_millis(800)),
-            cumulative_duration: None,
-            branch: Some(""),
-            account: None,
-        });
-        let plain = strip_ansi(&rendered);
-        // Trailing segment should be the duration, not an empty " · ".
-        assert!(plain.ends_with("+0.8s"), "{plain}");
     }
 
     #[test]
@@ -3569,7 +3548,6 @@ mod tests {
             context_window: Some(1_000_000),
             elapsed: Some(Duration::from_secs_f64(0.5)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3589,7 +3567,6 @@ mod tests {
             context_window: Some(1_000_000),
             elapsed: Some(Duration::from_secs_f64(0.5)),
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3608,7 +3585,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_millis(500)),
             cumulative_duration: None,
-            branch: None,
             account: Some("fujitoken"),
         });
         let plain = strip_ansi(&rendered);
@@ -3655,7 +3631,6 @@ mod tests {
             context_window: None,
             elapsed: Some(Duration::from_secs_f64(1.2)),
             cumulative_duration: Some(Duration::from_secs(312)),
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
@@ -3678,7 +3653,6 @@ mod tests {
             context_window: None,
             elapsed: None,
             cumulative_duration: None,
-            branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);

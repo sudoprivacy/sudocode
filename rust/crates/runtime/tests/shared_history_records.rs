@@ -556,8 +556,14 @@ fn stale_reader_opens_latest_completed_turn_at_its_own_commit_position() {
     commit(&mut a, &branch_a);
     append(&mut a, branch_a.context_id(), &text("NEW_COMPLETED_PREFIX"));
     let a_commit = finish_turn(&mut a, branch_a.context_id(), "new-completed-turn");
+    let completed_ids = a.graph().message_ids(branch_a.context_id()).unwrap();
+    append(
+        &mut a,
+        branch_a.context_id(),
+        &ConversationMessage::user_text("UNFINISHED_AFTER_COMPLETION"),
+    );
     assert_ne!(b.graph().latest_commit(), Some(a_commit.as_str()));
-    let branch_b = HistoryRecord::branch_latest();
+    let branch_b = HistoryRecord::branch_latest_completed();
     commit(&mut b, &branch_b);
     assert_eq!(
         b.graph()
@@ -571,6 +577,6 @@ fn stale_reader_opens_latest_completed_turn_at_its_own_commit_position() {
     );
     assert_eq!(
         b.graph().message_ids(branch_b.context_id()).unwrap(),
-        a.graph().message_ids(branch_a.context_id()).unwrap()
+        completed_ids
     );
 }

@@ -740,10 +740,16 @@ impl CliToolExecutor {
                         "The saved plan changed while approval was pending. Present the current plan with write_plan for review before executing.",
                     ));
                 }
+                // No echo of the plan: this result stays paired with its write_plan
+                // call under both options (clearing context keeps the current
+                // exchange), and that call's input already holds the plan, which
+                // the check above proves is exactly what the user approved. A copy
+                // here would only sit in context, twice, for the rest of the session.
                 let mut output = plan_review_output(&runtime::plan_store::PlanReviewResult::new(
                     runtime::plan_store::PlanReviewStatus::Approved,
                     plan_file,
-                    format!("The user APPROVED the plan. Implement it now.\n\n{plan}"),
+                    "The user APPROVED the plan in this write_plan call. Implement it now."
+                        .to_string(),
                 ))?;
                 if answer.value == "1" {
                     output.context_action = Some(ToolContextAction::RestartFromCurrentExchange);

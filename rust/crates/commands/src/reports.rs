@@ -185,6 +185,23 @@ pub fn resolve_git_branch_for(cwd: &Path) -> Option<String> {
     }
 }
 
+/// Where the workspace is, for display: its branch, or the short commit when
+/// HEAD is detached. `None` outside a repository.
+///
+/// Unlike [`resolve_git_branch_for`], a detached HEAD names the commit rather
+/// than reporting "detached HEAD", which says nothing about where you are.
+#[must_use]
+pub fn resolve_git_head_label_for(cwd: &Path) -> Option<String> {
+    let branch = run_git_capture_in(cwd, &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if !branch.is_empty() {
+        return Some(branch.to_string());
+    }
+    let commit = run_git_capture_in(cwd, &["rev-parse", "--short", "HEAD"])?;
+    let commit = commit.trim();
+    (!commit.is_empty()).then(|| commit.to_string())
+}
+
 #[must_use]
 pub fn run_git_capture_in(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -600,9 +617,19 @@ pub fn format_status_report(
 }
 
 fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
+    use std::fmt::Write as _;
     let namespace = match (peer.namespace, &peer.endpoint, &peer.error) {
-        (Some("node"), Some(endpoint), _) => format!("node {endpoint}"),
-        (Some(_), _, _) => "same-machine pair root".to_string(),
+        (Some("node"), endpoint, error) => {
+            let selected = endpoint
+                .as_ref()
+                .map_or_else(|| "node".to_string(), |endpoint| format!("node {endpoint}"));
+            match error {
+                Some(error) => format!("{selected} (unavailable: {error})"),
+                None => selected,
+            }
+        }
+        (Some("disk"), _, _) => "same-machine pair root".to_string(),
+        (Some(namespace), _, _) => namespace.to_string(),
         (None, _, Some(error)) => format!("unavailable: {error}"),
         (None, _, None) => "unavailable".to_string(),
     };
@@ -612,6 +639,7 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         }
         ("receiving", _) => "receiving",
         ("standby", _) => "standing by: waiting for the receiver seat",
+        ("unavailable", _) => "unavailable; ordinary session remains usable",
         _ => "not running in this process",
     };
     let cursor = match peer.cursor {
@@ -622,17 +650,44 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         }
         _ => "decided when this process first claims a conversation",
     };
+    let health = &peer.health;
+    let failing = match health.failing.as_slice() {
+        [] => None,
+        scopes => Some(
+            scopes
+                .iter()
+                .map(|(scope, _)| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    };
+    let age = health
+        .outage_secs
+        .map_or_else(String::new, |secs| format!(" for {secs}s"));
+    let health_line = match (health.level, failing) {
+        ("fail", _) => "failing: the node binding above cannot be used".to_string(),
+        ("warn", Some(failing)) => format!("degraded: {failing} failing{age}"),
+        ("warn", None) => format!("degraded: receiving not yet recovered{age}"),
+        (_, Some(failing)) => format!("ok; retrying {failing}{age}"),
+        _ => "ok".to_string(),
+    };
     let mut report = format!(
         "Peers
   Agent            {}
   Namespace        {namespace}
   Receiver         {receiver}
+  Health           {health_line}
   Cursor           {cursor}",
         peer.agent
     );
+    // A failed binding is already explained on the Namespace line.
+    if health.level != "fail" {
+        for (scope, detail) in &health.failing {
+            let _ = write!(report, "\n    {scope}: {detail}");
+        }
+    }
     if let Some(error) = &peer.last_receiver_error {
-        use std::fmt::Write as _;
-        let _ = write!(report, "\n  Last RX error    {error}");
+        let _ = write!(report, "\n  Last RX error    (history) {error}");
     }
     report
 }

@@ -32,6 +32,17 @@ pub fn node_record_path() -> Option<PathBuf> {
     crate::user_paths::home_dir().map(|home| home.join(".nexus").join("run").join("node.json"))
 }
 
+/// Presence reserves the node namespace even for a dangling or unreadable path.
+/// It does not establish valid configuration, credentials or a live connection.
+#[must_use]
+#[inline]
+pub fn node_record_present() -> bool {
+    node_record_path().is_some_and(|path| {
+        !std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// The fields of the node record `scode` reads. The record also names the
 /// node's deployment role and zone, which are the node owner's concern.
 #[derive(Debug, serde::Deserialize)]
@@ -53,7 +64,11 @@ impl NodeRecord {
         };
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && !node_record_present() =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(format!("read node record {}: {error}", path.display())),
         };
         let record: Self = serde_json::from_str(&raw)
@@ -218,10 +233,10 @@ impl Config {
             tls: credential.tls,
         }))
     }
-    /// Dial the daemon, returning a shared client. mTLS with the credential's
-    /// material when [`Config::tls`] is set (the cert is the whole
-    /// authorization - the node derives identity from its SAN, so no token is
-    /// sent).
+    /// Construct a shared lazy client using this agent's mTLS material.
+    /// Construction does not establish node reachability or authentication;
+    /// actual IO reports those failures. The node derives the authenticated
+    /// identity from the certificate's SAN, so no request token is substituted.
     ///
     /// # Errors
     /// Returns a message if a PEM file cannot be read or the channel fails
@@ -237,19 +252,6 @@ impl Config {
         let client = NexusVfsClient::connect_tls(&self.endpoint, ca, cert, key, &t.server_name)
             .map_err(|e| format!("mTLS dial {}: {e}", self.endpoint))?;
         Ok(Arc::new(client))
-    }
-
-    /// System-prompt section telling the model its A2A identity and how to
-    /// reach peers. Delegates the reply contract + framing to the shared
-    /// [`crate::agent_mailbox::repl_a2a_prompt_section`] (the SSOT every REPL
-    /// receive path renders) and prepends the nexus-specific network note.
-    #[must_use]
-    pub fn peer_system_prompt(&self) -> String {
-        let base = crate::agent_mailbox::repl_a2a_prompt_section(&self.agent);
-        format!(
-            "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
-             be on another machine; addressing it by name still reaches it."
-        )
     }
 }
 
@@ -287,16 +289,6 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
-    /// A throwaway `TlsPaths` for prompt tests that never dial.
-    fn test_tls() -> TlsPaths {
-        TlsPaths {
-            ca_pem: "ca.pem".into(),
-            client_cert: "agent.pem".into(),
-            client_key: "agent-key.pem".into(),
-            server_name: "nexus-node".into(),
-        }
-    }
-
     #[test]
     fn load_credential_from_manifest_path_or_dir() {
         let bundle = write_test_bundle("mac-ai");
@@ -313,26 +305,6 @@ mod tests {
         std::fs::write(&manifest, b"{ not json").unwrap();
         assert!(AgentCredential::load(&bundle).is_err());
         let _ = std::fs::remove_dir_all(&bundle);
-    }
-
-    #[test]
-    fn peer_prompt_names_self_and_points_at_discovery() {
-        let cfg = Config {
-            endpoint: "127.0.0.1:2126".into(),
-            agent: "operator".into(),
-            tls: test_tls(),
-        };
-        let p = cfg.peer_system_prompt();
-        assert!(p.contains("\"operator\""), "prompt must name self: {p}");
-        assert!(p.contains("send"), "prompt must teach the tool: {p}");
-        assert!(
-            p.contains("agent_list"),
-            "prompt must point at agent_list for discovery: {p}"
-        );
-        assert!(
-            p.contains("another machine"),
-            "prompt must carry the nexus network note: {p}"
-        );
     }
 
     #[test]

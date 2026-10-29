@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 mod response_capture;
+mod retry_diagnostics;
 pub use response_capture::{
     ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder,
 };
+pub use retry_diagnostics::{Outage, RetryDiagnostics, RetryNotices};
 
 const SUDOCLAW_LOG_ROTATE_AFTER_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 const SUDOCLAW_LOG_MAX_ROTATED_FILES: usize = 3;
@@ -492,12 +494,13 @@ impl SudoclawLogSink {
     }
 }
 
-impl TelemetrySink for SudoclawLogSink {
-    fn record(&self, event: TelemetryEvent) {
+impl SudoclawLogSink {
+    /// Write through the same local serializer/rotation path, letting a caller
+    /// with an existing diagnostic policy report IO failures without recursion.
+    #[inline]
+    pub fn try_record(&self, event: TelemetryEvent) -> Result<(), std::io::Error> {
         let log_entry = format_log_entry(&event);
-        let Ok(json) = serde_json::to_string(&log_entry) else {
-            return;
-        };
+        let json = serde_json::to_string(&log_entry).map_err(std::io::Error::other)?;
 
         // Acquire lock first to prevent race condition during rotation check
         let mut file = self
@@ -514,9 +517,7 @@ impl TelemetrySink for SudoclawLogSink {
                 drop(file);
 
                 // Perform rotation
-                if let Err(e) = self.rotate_log_file() {
-                    eprintln!("[scode telemetry] Failed to rotate log: {e}");
-                }
+                self.rotate_log_file()?;
 
                 // Re-acquire lock after rotation
                 file = self
@@ -526,11 +527,15 @@ impl TelemetrySink for SudoclawLogSink {
             }
         }
 
-        if let Err(e) = writeln!(file, "{json}") {
-            eprintln!("[scode telemetry] Failed to write log: {e}");
-        }
-        if let Err(e) = file.flush() {
-            eprintln!("[scode telemetry] Failed to flush log: {e}");
+        writeln!(file, "{json}")?;
+        file.flush()
+    }
+}
+
+impl TelemetrySink for SudoclawLogSink {
+    fn record(&self, event: TelemetryEvent) {
+        if let Err(error) = self.try_record(event) {
+            eprintln!("[scode telemetry] Failed to write log: {error}");
         }
     }
 }
@@ -697,6 +702,7 @@ impl SessionTracer {
         self.response_archive.is_some()
     }
 
+    #[must_use]
     pub fn begin_response_capture(
         &self,
         metadata: ResponseCaptureMetadata,

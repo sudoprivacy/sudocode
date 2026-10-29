@@ -17,7 +17,7 @@ The peer store depends on one durable fact: whether the machine publishes a node
 | Machine state | Peer store | When the store is unusable |
 |---|---|---|
 | No node record | Same-machine pair root on disk (`local_pair_root()`) | n/a |
-| Node record present | The machine's node | Error. Never falls back to disk. |
+| Node record present | The machine's node | A2A reports the actual cause while ordinary standalone work remains usable. Never falls back to disk. |
 
 `engine_host::peer::attach` is the only place this decision is made. The session build uses it for:
 - the system-prompt identity section;
@@ -42,15 +42,33 @@ The node owner's bring-up publishes `<home>/.nexus/run/node.json` atomically onc
 | `agents_dir` | Absolute directory holding one credential bundle per agent name. |
 | `role`, `zone` | The node's deployment role and zone; `scode` does not read them. |
 
-A session attaches as its own resolved agent name (the `agentName` setting, else the name derived from its workspace):
+A session selects its namespace as its own resolved agent name (the `agentName`
+setting, else the name derived from its workspace). A present record retains a
+node binding even when configuration or credentials cannot yet be loaded:
 
-1. It loads `<agents_dir>/<name>/credential.json`. The manifest's `agent` must equal `<name>`.
-2. It dials `endpoint` with that credential. The server certificate is checked against the bundle's `server_name` and CA, not against the dial address.
-3. It reads `/agents` once. The client connects lazily, so without this probe an unreachable node, a failed handshake or a missing mount would only surface on the session's first message.
+1. The binding resolves `<agents_dir>/<name>/credential.json`. Its manifest,
+   certificate and key must match that Agent and the configured node trust.
+2. Tools, the original receiver and configured Nexus model mounts obtain the
+   same actual authenticated backend. Client construction is lazy; startup does
+   not probe `/agents` or require a network handshake.
+3. The existing receiver retries presence, local binding resolution and node IO.
+   Preparing a previously missing bundle can make that same receiver usable.
+   An ordinary HTTP model and workspace work do not depend on those attempts.
 
-Every failure names its cause and stops the session: an unreadable or malformed record, another version, an endpoint with a scheme, a relative `agents_dir`, no credential for this agent, a credential minted for another agent, or a failed probe. None of them falls back to disk. Credentials are minted by the node owner; `scode` never mints one.
+Failures retain their specific cause in status and tool results. A malformed
+record, unsupported version, invalid endpoint/directory, missing bundle or
+identity mismatch leaves the selected node unavailable rather than stopping an
+ordinary standalone session or selecting disk. Credentials are minted by the
+node owner; `scode` never mints one. An explicitly Nexus-mounted model still
+needs that node's authenticated filesystem.
 
-The attach decision is cached per agent name for the life of the process, so the session build and its receiver cannot disagree, and a host running sessions under several identities dials each with its own credential.
+Namespace selection, including the pending binding, is cached per Agent for the
+process lifetime. Tools and receiver therefore cannot select different stores.
+Local configuration can be retried, but a constructed client's credentials stay
+fixed; rotation or client replacement is a separate operation. A process that
+selected disk requires an explicit handoff/restart to select node. The
+[standalone session contract](../usage.md#standalone-sessions-and-the-local-nexus-node)
+documents these limits and receiver status. Cohost keeps its injected services.
 
 ## Rename (S1)
 

@@ -1,10 +1,8 @@
-//! PTY test for the `write_plan` tool — the plan file is the SSOT.
+//! PTY coverage of persisted `write_plan` drafts.
 //!
-//! The model calls `write_plan(content=...)`; the CLI writes that content to the
-//! session plan file (here pointed at a temp file via `SUDOCODE_PLAN_FILE`) and
-//! the plan text is the source of truth for approval/execution — not scraped
-//! from chat. This test drives the deterministic mock scenario and asserts the
-//! plan file holds the written content verbatim.
+//! The default draft path follows the restored session ID. `SUDOCODE_PLAN_FILE`
+//! selects an explicit path. Both journeys exercise the CLI and verify the
+//! saved Markdown, including headless review that requires human input.
 //!
 //! ```bash
 //! cargo test --test pty_write_plan                          # mock (CI)
@@ -14,6 +12,63 @@
 mod common;
 
 use common::TestEnv;
+use runtime::{ContentBlock, Session, SessionStore};
+
+#[test]
+fn resumed_plan_uses_the_persisted_session_identity() {
+    let env = TestEnv::new("resumed-plan-identity");
+    let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
+    let session = Session::new().with_workspace_root(env.workspace_root().to_path_buf());
+    let handle = store.create_handle(&session.session_id);
+    session.save_to_path(&handle.path).unwrap();
+    let prompt = env.prompt(
+        "Call write_plan once to save a short Markdown plan. Include context, constraints, and acceptance criteria. Save the plan without executing its steps.",
+        "write_plan_roundtrip",
+    );
+    let mut cli = env.spawn(&[
+        "-p",
+        &prompt,
+        "--resume",
+        &session.session_id,
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "write_plan",
+    ]);
+    assert_eq!(
+        cli.expect_eof().unwrap(),
+        1,
+        "{}",
+        common::screen_tail(&cli, 12000),
+    );
+    assert!(
+        common::screen_tail(&cli, 12000).contains("needs_input"),
+        "headless review must report its need for human input",
+    );
+    let restored = Session::load_from_path(&handle.path).unwrap();
+    assert!(
+        restored
+            .messages()
+            .iter()
+            .any(|message| message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::ToolUse { name, .. } if name == "write_plan")
+            )),
+        "the model must invoke the plan tool"
+    );
+    let plan = env
+        .workspace_root()
+        .join(".sudocode")
+        .join(format!("{}.plan.md", session.session_id));
+    let saved = std::fs::read_to_string(&plan).expect("the resumed session owns its plan file");
+    for heading in ["## Context", "## Constraints", "## Acceptance Criteria"] {
+        assert!(
+            saved.contains(heading),
+            "missing {heading} in {}",
+            plan.display()
+        );
+    }
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+}
 
 #[test]
 fn write_plan_persists_the_plan_file() {

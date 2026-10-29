@@ -89,3 +89,128 @@ fn tool_identity_is_required_and_scoping_clears_that_gate() {
 
     let _ = std::fs::remove_dir_all(&cwd);
 }
+
+/// Exercise the real background monitor, including its post-exit persistence
+/// loop. A protocol-level rejection alone cannot show that this worker retires.
+#[test]
+fn background_exit_after_external_session_deletion_retires_its_monitor() {
+    use runtime::background_tasks::BackgroundTaskStatus;
+    use runtime::fs_backend::StdFsBackend;
+    use runtime::history::HistoryRecord;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "SCODE_DELETED_BACKGROUND_CHILD";
+    fn wait_for(mut predicate: impl FnMut() -> bool, label: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !predicate() {
+            assert!(Instant::now() < deadline, "timed out: {label}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        std::fs::write(root.join("ready"), b"ready").unwrap();
+        wait_for(|| root.join("release").exists(), "native child release");
+        std::fs::write(root.join("effect"), b"independent native write completed").unwrap();
+        return;
+    }
+    struct Release(std::path::PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("release"), b"release");
+        }
+    }
+    let root = std::env::temp_dir().join(format!("scode-deleted-monitor-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let release = Release(root.clone());
+    let path = root.join("session.jsonl");
+    let mut session = Session::new()
+        .with_workspace_root(&root)
+        .with_persistence_path(&path);
+    std::fs::write(
+        &path,
+        HistoryRecord::initialize(&session)
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    session.activate_persistence().unwrap();
+    let journal = CompletionJournal::open(&session, &root, true).unwrap();
+    journal.set_task_protocol(true);
+    journal.begin("before-external-delete", None).unwrap();
+    let tasks = BackgroundTasks::default()
+        .with_completion(Some(Arc::clone(&journal)))
+        .for_tool(None, Some("native-child"));
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "background_exit_after_external_session_deletion_retires_its_monitor",
+            "--nocapture",
+        ])
+        .env(CHILD, &root)
+        .current_dir(&root);
+    let (task, output) = runtime::launch_background_command(
+        command,
+        ShellKind::Bash,
+        "native child",
+        "deletion retirement acceptance",
+        Some(&tasks),
+    )
+    .unwrap();
+    wait_for(
+        || root.join("ready").exists(),
+        "real background child ready",
+    );
+    CompletionJournal::purge_stored(
+        Arc::new(StdFsBackend),
+        &path,
+        &session.session_id,
+        &root,
+        &journal.storage_ref(),
+        "external-delete-with-live-child",
+        None,
+    )
+    .unwrap();
+    let history = std::fs::read(&path).unwrap();
+    let journals: Vec<_> = std::fs::read_dir(path.with_extension("completions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    assert!(!journals.is_empty());
+    std::fs::write(root.join("release"), b"release").unwrap();
+    wait_for(
+        || {
+            tasks
+                .get(&task)
+                .is_some_and(|task| task.status == BackgroundTaskStatus::Completed)
+        },
+        "background monitor retires after observing deletion",
+    );
+    assert_eq!(
+        std::fs::read(root.join("effect")).unwrap(),
+        b"independent native write completed"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), history);
+    for (path, bytes) in journals {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    session.close_persistence();
+    drop(journal);
+    drop(tasks);
+    wait_for(
+        || !path.exists(),
+        "automatic cleanup after the native monitor retires",
+    );
+    std::fs::remove_file(output).unwrap();
+    drop(release);
+    std::fs::remove_dir_all(root).unwrap();
+}

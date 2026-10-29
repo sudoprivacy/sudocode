@@ -30,7 +30,7 @@ impl ContextHistory {
         let record = if history.graph().latest_commit().is_none() {
             HistoryRecord::initialize(seed.ok_or_else(|| invalid("new history requires a seed"))?)?
         } else {
-            source.map_or_else(HistoryRecord::branch_latest, |id| {
+            source.map_or_else(HistoryRecord::branch_latest_completed, |id| {
                 HistoryRecord::branch(id.into())
             })
         };
@@ -42,7 +42,7 @@ impl ContextHistory {
         match current.history.commit(&record, COMMIT_TIMEOUT)? {
             RecordOutcome::Applied => {}
             RecordOutcome::Rejected(reason) if reason == "history_already_initialized" => {
-                let branch = source.map_or_else(HistoryRecord::branch_latest, |id| {
+                let branch = source.map_or_else(HistoryRecord::branch_latest_completed, |id| {
                     HistoryRecord::branch(id.into())
                 });
                 current.context = branch.context_id().into();
@@ -102,6 +102,14 @@ impl ContextHistory {
     pub(crate) fn session(&self) -> io::Result<Session> {
         self.check()?;
         self.history.graph().context_session(&self.context)
+    }
+
+    /// Refresh this continuation, never the latest sibling's committed view.
+    #[inline]
+    pub(crate) fn refresh_session(&mut self) -> io::Result<Session> {
+        self.check()?;
+        self.history.refresh()?;
+        self.session()
     }
 
     pub(crate) fn revision(&self) -> io::Result<&str> {

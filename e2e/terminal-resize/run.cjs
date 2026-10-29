@@ -36,8 +36,10 @@ async function queuedPeer() {
   await frame(text => text.includes('❯ draft-中文'));
   started = Date.now();
   resize(180, 60);
+  // Release artifacts may show the supplied summary or the legacy body preview.
   await frame(text => text.split('\n').some(line => line.includes('queued: Message from mac-ai')
-    && line.includes(config.firstLine)) && text.includes('❯ draft-中文'), started);
+    && (line.includes(config.firstLine) || (config.peerSummary && line.includes(config.peerSummary))))
+    && !text.includes('QUEUED-BODY-END') && text.includes('❯ draft-中文'), started);
   child.write('\x15');
   await frame(text => !text.includes('draft-中文'));
   child.write('\x03');

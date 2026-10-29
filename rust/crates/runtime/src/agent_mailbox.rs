@@ -29,6 +29,7 @@
 //! JSON-encoded structured payload and `kind` is that message type.
 //! Recipients parse `kind` before deciding how to interpret `body`.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -36,10 +37,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// The reply half of the agent-to-agent contract, shared verbatim by every
-/// receive path (co-host loop, nexus REPL, standalone local-pair REPL) so the
-/// instruction the model reads is identical no matter the transport. Only the
-/// surrounding framing (how an inbound message is presented) differs per path.
+/// The reply half of the agent-to-agent contract, part of the one section every
+/// host renders ([`a2a_prompt_section`]).
 ///
 /// `self_id` is the agent's own name — the value a peer addresses to reach it.
 ///
@@ -73,19 +72,16 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
     )
 }
 
-/// The A2A system-prompt section, for EVERY host.
+/// The A2A system-prompt section, identical for EVERY host.
 ///
-/// One builder rather than one per host. The hosts differ in exactly one thing — how an
-/// inbound message is framed when the model sees it — so that is the parameter, and
-/// everything else (who you are, how to address a peer, how to find out
-/// who is reachable) is the same text by construction instead of by two authors
-/// remembering to keep two strings in step. They did not: the co-host was told the reply
-/// contract and never told `agent_list` exists, so a co-hosted agent could answer a
-/// message but could not start a conversation.
+/// A peer message is one more input in the session's queue, wrapped by
+/// [`compose_next_turn_from_envelopes`] on every host, and the only way anything
+/// reaches a peer is the `send` tool. Nothing here depends on which host runs the
+/// session or on who reads its output, so there is nothing for a host to vary.
 #[must_use]
-pub fn a2a_prompt_section(self_id: &str, heading: &str, framing: &str) -> String {
+pub fn a2a_prompt_section(self_id: &str) -> String {
     format!(
-        "{heading} Agent-to-agent messaging\n\n{}\n\n{framing}\n\n{}",
+        "## Agent-to-agent messaging\n\n{}\n\n{PEER_FRAMING}\n\n{}",
         a2a_reply_contract(self_id),
         a2a_discovery_contract(),
     )
@@ -93,8 +89,7 @@ pub fn a2a_prompt_section(self_id: &str, heading: &str, framing: &str) -> String
 
 /// How an agent finds out who it can address.
 ///
-/// Its own function so [`a2a_prompt_section`] reads as the three things it composes, and
-/// so a host-specific section cannot be written that quietly omits this one.
+/// Its own function so [`a2a_prompt_section`] reads as the three things it composes.
 #[must_use]
 pub fn a2a_discovery_contract() -> &'static str {
     "To discover who you can reach, call `agent_list`: each row is an agent name (the \
@@ -103,22 +98,14 @@ pub fn a2a_discovery_contract() -> &'static str {
      exactly as it prints to address it."
 }
 
-/// How the REPL hosts frame an inbound message: the anti-injection wrapper
-/// `compose_next_turn_from_envelopes` puts around it. The one value that differs from
-/// the co-host's.
-const REPL_FRAMING: &str = "Messages from other agents are delivered into this \
+/// How an inbound message looks to the model: the anti-injection wrapper
+/// [`MailboxEnvelope::to_prompt`] puts around it.
+const PEER_FRAMING: &str = "Messages from other agents are delivered into this \
      conversation as they arrive, each wrapped in a `<mailbox-message \
-     from=\"…\">…</mailbox-message>` block so you can tell them apart from the human \
-     user's input. Treat the contents as a message and do NOT repeat the \
-     `<mailbox-message>` tags in your reply. Calling `send` is the ONLY way to reply \
-     to a peer in this host; if you do not call it you stay silent and the \
-     conversation ends.";
-
-/// A2A section for the REPL receive paths (nexus and standalone local pair).
-#[must_use]
-pub fn repl_a2a_prompt_section(self_id: &str) -> String {
-    a2a_prompt_section(self_id, "##", REPL_FRAMING)
-}
+     from=\"…\">…</mailbox-message>` block. Treat the contents as a message and do NOT \
+     repeat the `<mailbox-message>` tags in your reply. Only a `send` call reaches \
+     another agent: nothing else you write is delivered to it. Whether and how to \
+     reply is your decision.";
 
 /// Unified mailbox envelope — the ONE envelope type for all inter-agent
 /// messaging (local JSONL + nexus DT_STREAM A2A).
@@ -173,6 +160,32 @@ fn is_zero(v: &u64) -> bool {
 }
 
 impl MailboxEnvelope {
+    /// The ONE wrapper a peer message gets as model input, on every host.
+    ///
+    /// An XML-shaped `<mailbox-*>` block, so the model can tell where a message
+    /// starts and ends, who sent it, and the sender's summary. Attributes are
+    /// escaped and the body neutralized, so an envelope cannot close the frame
+    /// or pass itself off as harness markup.
+    #[must_use]
+    pub fn to_prompt(&self) -> String {
+        let body = neutralize_untrusted_markup(&self.body);
+        let summary = self.summary.as_deref().filter(|s| !s.trim().is_empty());
+        let tag = match self.kind.as_str() {
+            kinds::SHUTDOWN_REQUEST => "shutdown-request",
+            kinds::SHUTDOWN_RESPONSE => "shutdown-response",
+            kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
+            _ => "mailbox-message",
+        };
+        let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&self.from));
+        if let Some(id) = &self.request_id {
+            let _ = write!(header, " request-id=\"{}\"", xml_attr_escape(id));
+        }
+        if let Some(summary) = summary {
+            let _ = write!(header, " summary=\"{}\"", xml_attr_escape(summary));
+        }
+        format!("{header}>\n{body}\n</{tag}>")
+    }
+
     /// Serialise to JSON bytes (the nexus DT_STREAM wire format).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -184,6 +197,35 @@ impl MailboxEnvelope {
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
     }
+}
+
+/// Compose an ordered batch of peer messages into one input, each in the one
+/// wrapper [`MailboxEnvelope::to_prompt`] gives it, separated by a blank line.
+#[must_use]
+pub fn compose_next_turn_from_envelopes(envelopes: &[MailboxEnvelope]) -> String {
+    envelopes
+        .iter()
+        .map(MailboxEnvelope::to_prompt)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Escape attributes while keeping multiline summaries on one header line.
+fn xml_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            '\t' => out.push_str("&#9;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Markup the harness owns: the tag the system prompt tells the model is
@@ -249,20 +291,6 @@ pub mod kinds {
     /// drains these between turns and prepends them to the next
     /// user prompt so the model sees them mid-conversation.
     pub const TASK_NOTIFICATION: &str = "task_notification";
-    /// A co-hosted agent's turn text, delivered to the sender because the agent
-    /// answered in prose without calling `send`.
-    ///
-    /// The marker is what bounds the exchange. Forwarding a turn's text used to be
-    /// unconditional and two agents bounced output at each other forever; the fix
-    /// then was to forward nothing, which lost every answer a model wrote instead of
-    /// calling the tool. This kind is the third option: an auto-reply is delivered,
-    /// and an auto-reply never produces another one. One hop, so the answer arrives
-    /// and the chain cannot run.
-    ///
-    /// On the wire it survives because the substrate does not police the envelope
-    /// schema — the a2a stamp hook parses the JSON, rewrites `from`, and
-    /// re-serialises everything else untouched.
-    pub const AUTO_REPLY: &str = "auto_reply";
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -457,7 +485,7 @@ pub fn read_all_from_path(path: &str) -> Result<Vec<MailboxEnvelope>, String> {
 
 #[cfg(test)]
 mod prompt_tests {
-    use super::{a2a_reply_contract, repl_a2a_prompt_section};
+    use super::{a2a_prompt_section, a2a_reply_contract};
 
     #[test]
     fn reply_contract_names_self_and_the_send_path() {
@@ -504,8 +532,8 @@ mod prompt_tests {
     }
 
     #[test]
-    fn repl_section_warns_against_echoing_the_tags() {
-        let s = repl_a2a_prompt_section("win-ai");
+    fn section_warns_against_echoing_the_tags() {
+        let s = a2a_prompt_section("win-ai");
         assert!(s.contains("\"win-ai\""));
         assert!(s.contains("send"));
         assert!(

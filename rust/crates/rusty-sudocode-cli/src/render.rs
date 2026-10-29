@@ -26,6 +26,50 @@ pub use color_theme::{theme, ColorTheme};
 mod styled_line;
 pub(crate) mod styled_text;
 pub(crate) mod text_layout;
+
+/// Shared prompt surfaces for live input, committed prompts and context headers.
+/// Resolve the terminal palette once, outside redraw and typing hot paths.
+pub(crate) fn prompt_style(live: bool) -> ContentStyle {
+    static STYLES: std::sync::OnceLock<[ContentStyle; 2]> = std::sync::OnceLock::new();
+    STYLES.get_or_init(|| {
+        let support = ColorSupport::detect();
+        if support == ColorSupport::NoColor {
+            return [ContentStyle::default(); 2];
+        }
+        let light = theme().light_background;
+        let fallback = if light { (255, 255, 255) } else { (24, 24, 24) };
+        let (r, g, b) = terminal_palette::background().unwrap_or(fallback);
+        [false, true].map(|live| {
+            let alpha: u16 = if light {
+                if live {
+                    8
+                } else {
+                    4
+                }
+            } else if live {
+                16
+            } else {
+                10
+            };
+            let target: u16 = if light { 0 } else { 255 };
+            let blend = |channel: u8| {
+                u8::try_from((u16::from(channel) * (100 - alpha) + target * alpha) / 100)
+                    .expect("blended channel")
+            };
+            ContentStyle {
+                // A fallback background must remain legible when the terminal
+                // cannot report its default foreground on Windows.
+                foreground_color: Some(if light { Color::Black } else { Color::White }),
+                background_color: Some(support.color(Color::Rgb {
+                    r: blend(r),
+                    g: blend(g),
+                    b: blend(b),
+                })),
+                ..ContentStyle::default()
+            }
+        })
+    })[usize::from(live)]
+}
 pub(crate) use styled_line::StyledLine;
 use text_layout::display_width as visible_width;
 
@@ -688,7 +732,6 @@ impl TerminalRenderer {
                     .skip(if plan_file.is_empty() { 2 } else { 0 }),
                 width,
                 theme().tool_borders().running,
-                true,
             )
         )
     }

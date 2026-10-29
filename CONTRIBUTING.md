@@ -322,7 +322,29 @@ Prompt cache observation defaults, field semantics and synthetic scenarios live
 in [`spec/prompt_cache_observations.json`](./spec/prompt_cache_observations.json).
 The native ledger reads that specification directly. Endpoint probes can pin
 the same public file by commit and SHA-256. Cache efficiency formulas remain
-in [`spec/cache_metrics.json`](./spec/cache_metrics.json).
+in [`spec/cache_metrics.json`](./spec/cache_metrics.json). Synthetic usage
+snapshots with expected totals live in
+[`spec/cache_usage_fixtures.json`](./spec/cache_usage_fixtures.json), with a
+validated [schema](./spec/cache_usage_fixtures.schema.json) beside it. Report
+and scanner adapters should reproduce those totals.
+
+Completion intervals and TTL advisor coverage share the bounded ledger reader
+in `engine-core::cache_report`. With attempt timing, the final cumulative
+snapshot replaces earlier snapshots of the same request identity. Different
+attempt starts, attempt counts, routes, models and context segments stay
+separate. Legacy rows without attempt timing deduplicate only exact repeats;
+missing correlation IDs remain separate. Malformed rows interrupt adjacency.
+Missing usage fields remain unknown and do not match an explicit zero.
+The JSON stats report reads the ledger once for both views.
+
+The fixture PTYs exercise that reader, reporting and shared metric formulas.
+Their `stats.json` rollup is prefilled from expected totals, so they do not
+establish the runtime's accumulation of those totals, provider cache hits or
+measured TTL savings. The growing-snapshot fixture also retains two attempts
+that reuse a correlation ID. Reuse these public fixtures when adding scanner
+or runtime adapters, rather than maintaining another copy of the observations.
+Validate the schema with `python scripts/check_cache_usage_fixtures.py`
+(`jsonschema==4.26.0`); Rust CI runs this check, including invalid variants.
 
 ### Startup latency
 
@@ -409,7 +431,7 @@ comment.
 suite (not behind `#[ignore]`). Tests that need network or a live
 API gate behind `#[ignore]` or a dedicated `--test` integration
 target (see `rusty-sudocode-cli/tests/acp_live_smoke.rs` for the
-live-API smoke pattern, which CI only runs on `main`).
+live-API smoke pattern, which CI runs on `main` and by manual dispatch).
 
 ### Targeted commands
 
@@ -432,6 +454,25 @@ cargo doc --workspace --no-deps
 
 ## Company model routing in CI
 
+Every PR runs real CLI/PTY regressions with a scripted model transport, including
+keyboard input, rendering, resize, cancellation, descendant process cleanup and
+recovery in the next turn. The process checks inspect actual child PIDs and fresh
+files. They do not require paid credentials.
+
+Funded acceptance runs ACP and co-host model journeys, plus every live PTY
+journey in the `live-model-pty` job on Linux and Windows. It runs on main pushes
+and manual dispatch. Before merging a change to those paths, run it on the PR
+branch:
+
+```bash
+gh workflow run rust-ci.yml --ref <branch> -f live_only=true
+```
+
+Provider preflight and traces identify quota, authentication, rate-limit and
+service failures separately. A failed preflight keeps the job failed and retains
+its evidence; it never counts as model acceptance. Successful small probes do
+not reserve quota for the full workflow.
+
 CI uses the company `SUDOROUTER_CI_API_KEY` secret. Personal developer accounts
 belong only in local configuration and must never be copied into CI secrets.
 `SUDOROUTER_NATIVE_CHANNEL` optionally selects an existing company-accessible
@@ -446,6 +487,9 @@ assertions; changing a route or model does not raise their turn budgets.
 reasoning/file-tool journey. That journey uses its own copied auth profile with
 the same company credential and a channel suffix. Other PTYs keep normal routing.
 Validate this route with the complete file-read scenario on Linux and Windows.
+The provider probe and CLI profile share `AZURE_PROXY_AUTH_TOKEN`. Evidence names
+the auth profile separately from the model, so the same model can be checked on
+different provider channels without silently reusing another credential.
 
 Verify a changed native route with the original real subagent/cache scenario,
 retaining its output/thinking budgets and assertions. A small successful request

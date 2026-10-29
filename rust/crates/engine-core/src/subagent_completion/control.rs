@@ -16,6 +16,7 @@ pub(super) struct StorageBinding {
     path: PathBuf,
     session_id: String,
     cwd: PathBuf,
+    store_root: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -29,6 +30,20 @@ pub(super) struct DeliveryState {
 }
 
 impl CompletionState {
+    #[inline]
+    pub(super) fn persistence_diagnostics(&self) -> &telemetry::RetryDiagnostics {
+        self.persistence_diagnostics.get_or_init(|| {
+            Box::new(telemetry::RetryDiagnostics::new(
+                "engine-completion",
+                self.binding
+                    .as_ref()
+                    .map_or("unbound session", |binding| binding.session_id.as_str()),
+                "Task completion persistence is pending; retrying in the background.",
+                "Task completion persistence checks recovered.",
+            ))
+        })
+    }
+
     /// Composition only: open the journal shared with this session's writer.
     pub fn open(session: &runtime::Session, cwd: &Path, create: bool) -> Result<Arc<Self>, String> {
         let state = Arc::new(Self {
@@ -40,6 +55,7 @@ impl CompletionState {
                     .into(),
                 session_id: session.session_id.clone(),
                 cwd: cwd.into(),
+                store_root: session.session_store_root().map(Path::to_path_buf),
             }),
             ..Self::default()
         });
@@ -61,8 +77,9 @@ impl CompletionState {
         if !cwd.is_dir() {
             return Err("params.cwd must be a directory".into());
         }
-        let path = runtime::session_control::SessionStore::from_cwd(&cwd)
-            .map_err(|e| e.to_string())?
+        let store =
+            runtime::session_control::SessionStore::from_cwd(&cwd).map_err(|e| e.to_string())?;
+        let path = store
             .resolve_completion_path(session_id)
             .map_err(|e| e.to_string())?;
         Ok(Arc::new(Self {
@@ -71,6 +88,7 @@ impl CompletionState {
                 path,
                 session_id: session_id.into(),
                 cwd,
+                store_root: Some(store.sessions_dir().into()),
             }),
             ..Self::default()
         }))
@@ -127,8 +145,12 @@ impl CompletionState {
             .binding
             .as_ref()
             .ok_or("session has no durable completion store")?;
-        let session = runtime::Session::load_from_path_with(b.fs.as_ref(), &b.path)
-            .map_err(|e| e.to_string())?;
+        let mut session = runtime::Session::load_from_path_with(b.fs.as_ref(), &b.path)
+            .map_err(|e| e.to_string())?
+            .with_fs_backend(Arc::clone(&b.fs));
+        if let Some(root) = &b.store_root {
+            session = session.with_session_store_root(root);
+        }
         if session.session_id != b.session_id {
             return Err("completion session identity mismatch".into());
         }
@@ -191,12 +213,13 @@ impl CompletionState {
                 } else {
                     let b = self.binding.as_ref().ok_or("missing completion binding")?;
                     CompletionJournal::purge_stored(
-                        b.fs.as_ref(),
+                        Arc::clone(&b.fs),
                         &b.path,
                         &b.session_id,
                         &b.cwd,
                         &storage_ref,
                         &cleanup_id,
+                        b.store_root.as_deref(),
                     )
                 }
             }
@@ -334,8 +357,7 @@ impl CompletionState {
             }
             return;
         }
-        if let Err(error) = self.retry_terminals() {
-            eprintln!("[engine-completion] terminal persistence pending: {error}");
+        if self.retry_terminals().is_err() {
             self.delivery
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

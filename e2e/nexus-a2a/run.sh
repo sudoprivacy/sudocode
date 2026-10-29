@@ -123,7 +123,7 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_RECORD_LOG_RECEIPT="$(native_path "$RECORD_RECEIPT")" \
   "${RECORD_TEST[@]}" live_record_log_commits_large_frames_from_independent_clients -- --ignored --nocapture
 
-echo "== [deterministic] runtime resume inherits the written prefix while a native tool runs =="
+echo "== [deterministic] runtime resume inherits the completed turn while a native tool runs =="
 cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_runtime_history -- --nocapture
 HISTORY_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_history_records)
 HISTORY_RECEIPT="$AUTHON_DATA_DIR/shared-history.json"
@@ -135,7 +135,7 @@ RUNTIME_HISTORY_RECEIPT="$AUTHON_DATA_DIR/runtime-history.json"
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_RUNTIME_HISTORY_RECEIPT="$(native_path "$RUNTIME_HISTORY_RECEIPT")" \
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_runtime_history \
-    live_runtime_resume_inherits_written_prefix_and_keeps_native_tool_result -- --ignored --nocapture
+    live_runtime_resume_inherits_completed_turn_and_keeps_native_tool_result -- --ignored --nocapture
 
 if [ "$(uname -s)" = Linux ]; then
   echo "== [deterministic] native failed flush requires a durable read barrier =="
@@ -229,6 +229,13 @@ echo "== [deterministic] a silent connection errors, then recovers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
 
+echo "== [deterministic] an unminted session recovers its original node receiver =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  NEXUS_A2A_TEST_PENDING_CREDENTIAL="$(authon_mint "pending-node-actor")" \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test acp_integration live_pending_node_recovers_send_and_the_original_receiver \
+  -- --ignored --test-threads=1 --nocapture
+
 # The baseline lease path against the node's real lease table: one renewal of a
 # conversation reader's lock is failed by a test-only wrapper (INJECTED, it never
 # reaches the node). The commit must be refused, the durable read position left
@@ -254,6 +261,8 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age -- --ignored --nocapture
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_commit_refused_by_its_register_write_records_no_lease_loss -- --ignored --nocapture
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_retry_diagnostics_distinguish_commit_lapse_from_register_io -- --ignored --nocapture
 # The receiver seat trusts only fresh renewals: a late reply, a partition and a
 # slow-but-successful renewal are injected by the test-only wrapper; the node's
 # TTL is what any takeover waits on.

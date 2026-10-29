@@ -1,5 +1,6 @@
 //! Persistent descriptions use the actual native or cohost mailbox filesystem.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use kernel::core::agents::registry::AgentDescriptor;
@@ -95,4 +96,50 @@ fn cohost_mailbox_keeps_description_in_the_agents_vfs_directory() {
         .unwrap();
     assert_eq!(reopened.description, "Current session recovery work");
     assert_eq!(reopened.source_session_id, "current-session");
+
+    // A store created before the host can resolve its transport must retain
+    // that same binding, including for publication after natural recovery.
+    let ready = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let pending = Mailbox::daemon_resolving("peer-author".into(), {
+        let ready = Arc::clone(&ready);
+        let calls = Arc::clone(&calls);
+        let fs = Arc::clone(&fs);
+        move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            if ready.load(Ordering::Acquire) {
+                Ok(Arc::clone(&fs))
+            } else {
+                Err("agent credentials are still unavailable".into())
+            }
+        }
+    });
+    let store = pending.description_store("peer-author").unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(store
+        .read()
+        .unwrap_err()
+        .to_string()
+        .contains("agent credentials are still unavailable"));
+    ready.store(true, Ordering::Release);
+    assert_eq!(
+        store.read().unwrap().unwrap().description,
+        reopened.description
+    );
+    let update = store
+        .snapshot("recovered-session")
+        .unwrap()
+        .update("Recovered through the original mailbox")
+        .unwrap();
+    assert!(store.publish(&update).unwrap());
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs.read("/agents/peer-author/description.json").unwrap()).unwrap();
+    assert_eq!(persisted["source_session_id"], "recovered-session");
+    assert_eq!(
+        persisted["description"],
+        "Recovered through the original mailbox"
+    );
+    // Exactly one selected backend per operation, including the locked read
+    // before publication; recovery never changes the target inside an IO.
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
 }

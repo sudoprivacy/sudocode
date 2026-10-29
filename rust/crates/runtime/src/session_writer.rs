@@ -14,9 +14,11 @@ pub struct SessionWriter {
     cursor: Mutex<Option<String>>,
     deleted: AtomicBool,
     writes: Mutex<()>,
-    presence: Option<WriterPresence>,
     history: Mutex<Option<ActiveHistory>>,
     _legacy_owner: Option<Arc<dyn FsLock>>,
+    // Rust drops fields in declaration order. Keep admission visible until
+    // the record-log client and legacy writer handle have both retired.
+    presence: Option<WriterPresence>,
 }
 
 struct ActiveHistory {
@@ -45,12 +47,23 @@ enum CommitBackend {
 pub struct SessionWriteGuard<'a> {
     _operation: MutexGuard<'a, ()>,
     _storage: Option<Arc<dyn FsLock>>,
-    _owners: Vec<Arc<dyn FsLock>>,
+    owners: Vec<Arc<dyn FsLock>>,
 }
 
 pub(crate) struct SessionPurgeGuard {
     _storage: Arc<dyn FsLock>,
     _owners: Vec<Arc<dyn FsLock>>,
+}
+
+struct BackupCommitGuard {
+    owner: Arc<dyn FsLock>,
+    backup: Arc<dyn FsLock>,
+}
+
+impl FsLock for BackupCommitGuard {
+    fn renew(&self) -> std::io::Result<bool> {
+        Ok(self.owner.renew()? && self.backup.renew()?)
+    }
 }
 
 impl SessionWriter {
@@ -104,7 +117,7 @@ impl SessionWriter {
                     .map_err(|error| error.to_string())?;
             }
         }
-        let owners = transcript.with_extension("writers");
+        let owners = crate::session_backup::owner(transcript).with_extension("writers");
         fs.create_dir_all(&owners.to_string_lossy())
             .map_err(|error| error.to_string())?;
         let path = owners.join(format!("{}.lock", uuid::Uuid::new_v4()));
@@ -190,7 +203,7 @@ impl SessionWriter {
                 if !native {
                     return Err("session history initialization binding missing".into());
                 }
-                let _owners = Self::exclude_writers(fs.as_ref(), transcript, None)?;
+                let _owners = Self::exclude_writers_at(fs.as_ref(), transcript, None)?;
                 Self::migrate_native_history(fs.as_ref(), transcript, &bytes, seed)?;
             }
             RecordLogMode::Existing
@@ -214,7 +227,7 @@ impl SessionWriter {
             return Err("session history identity mismatch".into());
         }
         let presence = if native {
-            let owners = transcript.with_extension("writers");
+            let owners = crate::session_backup::owner(transcript).with_extension("writers");
             fs.create_dir_all(&owners.to_string_lossy())
                 .map_err(|error| error.to_string())?;
             let path = owners.join(format!("{}.lock", uuid::Uuid::new_v4()));
@@ -296,6 +309,21 @@ impl SessionWriter {
             .map_err(|_| "session history poisoned")?
             .as_ref()
             .map(|active| active.context.session().map_err(|error| error.to_string()))
+            .transpose()
+    }
+
+    #[inline]
+    pub(crate) fn refresh_history_session(&self) -> Result<Option<crate::Session>, String> {
+        self.history
+            .lock()
+            .map_err(|_| "session history poisoned")?
+            .as_mut()
+            .map(|active| {
+                active
+                    .context
+                    .refresh_session()
+                    .map_err(|error| error.to_string())
+            })
             .transpose()
     }
 
@@ -423,6 +451,22 @@ impl SessionWriter {
         fs: &dyn FsBackend,
         transcript: &Path,
     ) -> Result<Arc<dyn FsLock>, String> {
+        let owner = crate::session_backup::owner(transcript);
+        if owner != transcript {
+            let owner_lock = Self::commit_lock_at(fs, &owner)?;
+            if owner.with_extension("writer.lock") == transcript.with_extension("writer.lock") {
+                return Ok(owner_lock);
+            }
+            let backup = Self::commit_lock_at(fs, transcript)?;
+            return Ok(Arc::new(BackupCommitGuard {
+                owner: owner_lock,
+                backup,
+            }));
+        }
+        Self::commit_lock_at(fs, transcript)
+    }
+
+    fn commit_lock_at(fs: &dyn FsBackend, transcript: &Path) -> Result<Arc<dyn FsLock>, String> {
         let started = std::time::Instant::now();
         let path = transcript.with_extension("writer.lock");
         loop {
@@ -440,12 +484,19 @@ impl SessionWriter {
     }
 
     pub fn check(&self) -> Result<(), String> {
-        if self.deleted.load(Ordering::Acquire) {
+        if self.deleted() {
             return Err("session_deleted".into());
         }
         match &self.backend {
             CommitBackend::Native(fs) => {
-                crate::subagent_completion::check_shared_storage(fs.as_ref(), &self.transcript)?;
+                if let Err(error) =
+                    crate::subagent_completion::check_shared_storage(fs.as_ref(), &self.transcript)
+                {
+                    if error == "session_deleted" {
+                        self.retire();
+                    }
+                    return Err(error);
+                }
             }
             CommitBackend::Stream(fs)
                 if !fs
@@ -454,7 +505,7 @@ impl SessionWriter {
             {
                 return Err("session_storage_lost".into())
             }
-            _ => {}
+            CommitBackend::Stream(_) => {}
         }
         Ok(())
     }
@@ -476,14 +527,14 @@ impl SessionWriter {
         Ok(SessionWriteGuard {
             _operation: guard,
             _storage: storage,
-            _owners: Vec::new(),
+            owners: Vec::new(),
         })
     }
 
     pub(crate) fn purge_write(&self) -> Result<SessionWriteGuard<'_>, String> {
         let mut guard = self.write()?;
         if let CommitBackend::Native(fs) = &self.backend {
-            guard._owners = Self::exclude_writers(
+            guard.owners = Self::exclude_writers(
                 fs.as_ref(),
                 &self.transcript,
                 self.presence
@@ -506,8 +557,71 @@ impl SessionWriter {
         })
     }
 
+    /// Physical cleanup never waits on an admitted writer or its commit.
+    pub(crate) fn try_purge_lock(
+        fs: &dyn FsBackend,
+        transcript: &Path,
+    ) -> Result<Option<SessionPurgeGuard>, String> {
+        if !fs.fenced_locks() {
+            return Err("completion_storage_exclusion_unavailable".into());
+        }
+        let Some(storage) = fs
+            .try_lock(
+                &transcript.with_extension("writer.lock").to_string_lossy(),
+                30_000,
+            )
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let owners = match Self::exclude_writers(fs, transcript, None) {
+            Ok(owners) => owners,
+            Err(error) if error == "session_writer_busy" => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(SessionPurgeGuard {
+            _storage: storage,
+            _owners: owners,
+        }))
+    }
+
+    /// The caller already holds the source SID barrier. New backup writers
+    /// register there; any remaining old per-backup writer must retire first.
+    pub(crate) fn backup_retirement_lock(
+        fs: &dyn FsBackend,
+        backup: &Path,
+    ) -> Result<SessionPurgeGuard, String> {
+        let storage = fs
+            .try_lock(
+                &backup.with_extension("writer.lock").to_string_lossy(),
+                30_000,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("session_commit_busy")?;
+        let owners = Self::exclude_writers_at(fs, backup, None)?;
+        Ok(SessionPurgeGuard {
+            _storage: storage,
+            _owners: owners,
+        })
+    }
+
+    pub(crate) fn backup_commit_lock(
+        fs: &dyn FsBackend,
+        backup: &Path,
+    ) -> Result<Arc<dyn FsLock>, String> {
+        Self::commit_lock_at(fs, backup)
+    }
+
     // The caller holds the SID commit lock, excluding new owner registration.
     fn exclude_writers(
+        fs: &dyn FsBackend,
+        transcript: &Path,
+        own: Option<&Path>,
+    ) -> Result<Vec<Arc<dyn FsLock>>, String> {
+        Self::exclude_writers_at(fs, &crate::session_backup::owner(transcript), own)
+    }
+
+    fn exclude_writers_at(
         fs: &dyn FsBackend,
         transcript: &Path,
         own: Option<&Path>,
@@ -547,5 +661,9 @@ impl SessionWriter {
 
     pub fn retire(&self) {
         self.deleted.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn deleted(&self) -> bool {
+        self.deleted.load(Ordering::Acquire)
     }
 }

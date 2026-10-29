@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+a2a = { workspace = true }
 axum.workspace = true
 base64 = "0.22"
 fs2 = "0.4"

@@ -159,29 +159,69 @@ remains owned by global `settings.json` and project `settings.local.json`.
 ### Standalone sessions and the local Nexus node
 
 Standalone `scode` reads `~/.nexus/run/node.json` when selecting its peer
-namespace. With a readable record and credential files for this agent,
-starting or resuming a session does not wait for the node to answer. Ordinary
-model and workspace work can continue while the node is offline. The receiver
-retries its existing node connection, and A2A tools report node IO errors;
-they do not redirect messages to a disk inbox. An uncertain send result must
-not be retried automatically.
+namespace. Starting or resuming an ordinary session does not require that node
+to answer or this agent's bundle to be ready. A present but unusable record,
+missing credential files or an identity mismatch leave A2A unavailable with
+the actual cause in `/status` and tool results. They do not redirect messages
+to a disk inbox or prevent ordinary model and workspace work.
+
+Background receive failures share one diagnostic reporter across the receiver's
+conversations. It retains the first error, changed errors and repeat counts in
+the existing rotated local `scode.log` / `sudoclaw.log`; `SCODE_LOG_PATH` can
+select the file. A healthy peer does not hide another peer's failure. Retrying
+task-completion persistence uses the same reporting implementation. Services
+which own terminal notices emit at most one reminder per minute and report
+recovery only after all observed failures clear and checks stay healthy.
+See [background retry diagnostics](design/background-retry-diagnostics.md)
+for the shared implementation and repository audit.
 
 Background receiver errors are available as `Last RX error` in `/status` and
 `last_receiver_error` in the structured peer status. This is the most recent
 failure in the current process, not a claim that the node remains offline.
 It is retained with the receiver's transient state and removed when its last
-receiver stops. Hosts can also subscribe to structured tracing. An unchanged
-receiver-seat error is recorded once; retries continue without writing into
-the terminal's input area.
+receiver stops. Hosts can also subscribe to structured tracing. Ordinary
+receivers use this status and the local log without emitting terminal notices;
+retries continue without writing into the terminal's input area.
+
+The current condition is reported separately as `Health` in `/status` and
+`health` in the structured peer status. It reads the same retry diagnostics, so
+it clears when they confirm recovery: every failed check has succeeded again
+after a short quiet period. An outage younger than 30 seconds stays `ok`, and
+`/status` lists the scope being retried; most outages recover on the next
+attempt. A longer one is `degraded`, with each failing scope and its detail.
+The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
+receiving recovers. `failing` means the node binding itself cannot be used.
+`SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
 
 The connection record alone does not start Nexus or mint an agent credential.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
-can resume the same locally owned Box after multi-agent selection. A missing record still
-selects the same-machine disk namespace. Record parsing, missing credential
-files and credential identity mismatches still stop startup; a lazy client is
-not proof that TLS authentication will succeed. Changing an already running session
-from disk to node remains an explicit handoff. Receiver ownership and a selected
-node endpoint in `/status` are not proof that a remote peer is online.
+can resume the same locally owned Box after shared selection. A missing record still
+selects the same-machine disk namespace for that process. When a node was
+selected, its tools and original receiver share one binding: the receiver
+retries local configuration and credential resolution, then retries node IO
+through the same client. Preparing the missing bundle can therefore make
+that binding usable without starting another receiver. A failed or uncertain
+send is never automatically resent. Receiver `unavailable` means the receiver
+could not initialize; `standby` means another instance holds its seat.
+
+Automatic shared-service preparation keeps ordinary startup usable when that
+configured record is unusable; the receiver retains the selected namespace and
+reports its cause. Explicit `scode setup` and `setup --check` still return their
+actual failures. A dangling node-record symlink is a configured but unusable
+record, not permission to prepare a replacement service.
+
+A constructed client is not proof that TLS authentication succeeds. The
+client's credentials remain fixed after construction; rotation or replacing
+an unusable constructed client is not covered by local binding retries.
+Changing a running session from disk to node remains an explicit handoff.
+Receiver ownership and a selected node endpoint in `/status` are not proof
+that a remote peer is online. Cohost continues using its injected mailbox and
+requires its host services.
+
+An ordinary HTTP model can run while A2A is unavailable. A model explicitly
+configured through a `nexus://` mount still needs the selected node's
+authenticated filesystem; model traffic keeps that mount's authorization and
+hooks.
 
 ### CLI packages
 
@@ -341,9 +381,9 @@ this subset. Explicit system-prompt replacement still replaces those defaults.
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
 hooks, approval, or an execution slot; amber while running; the code theme's
-green on success; and red on failure. The opening and closing
-caps stay bold to separate adjacent calls; long vertical borders use normal
-weight without dimming. Colors adapt to dark/light backgrounds and terminal
+green on success; and red on failure. Frame strokes use normal weight without
+dimming so corners align with vertical borders across terminal fonts.
+Colors adapt to dark/light backgrounds and terminal
 color depth. `ColorTheme` is the single semantic color interface; its `info`
 role (including Thinking/Reasoning) and successful tool borders share one
 soft-green definition. Syntax-backed colors load on demand and stay cached.
@@ -399,8 +439,15 @@ request or combining usage from the two responses. HTTP failures before a
 response starts remain eligible for the normal transport retry policy.
 
 Incoming peer messages appear in a separate `Message from <peer>` frame with
-muted content and a blue peer name. This presentation does not alter the
-message envelope or content supplied to the model.
+muted framing and a blue peer name. Sender-supplied `Summary:` text appears above
+the complete body and is preferred in the one-line queued preview. Live display
+and resumed history use the same presentation; older messages without a summary
+continue to show their body. The summary travels with the existing envelope into
+the saved turn and model context.
+
+Outgoing `send` cards keep the summary concise and preview up to six source
+lines of the body, with a character cap. Lines wrap to the terminal width; a
+truncation notice points to the complete message preserved in the session.
 
 Queued messages use muted labels and normal-intensity bodies, and Todo
 items distinguish active and completed states. This uses the same palette as
@@ -544,6 +591,31 @@ For the canonical, live command list:
 scode --help
 ```
 
+### Experimental pinned composer
+
+Enable `experimental.promptViewport` to try a fixed composer, shaded submitted
+prompts and a one-line header for the answer currently being read:
+
+```json
+{"experimental":{"promptViewport":true}}
+```
+
+This temporary experiment is off by default and applies to the default REPL.
+Use the mouse wheel to browse; the composer also accepts Page Up / Page Down
+and Alt+End to return to the latest output. Typing preserves the reading
+position. The draft survives scrolling and resize. Use your terminal's native
+selection gesture (often Shift+drag) while mouse reporting is enabled.
+
+The experiment keeps the terminal's main buffer and existing inline renderer;
+it does not enter alternate-screen mode. On normal exit it restores rendered
+conversation output to native terminal history. Saved sessions remain the
+durable record and `--resume` restores their prompt boundaries.
+Older presentation rows live in a disposable disk spool; only nearby row layouts
+and the visible frame remain cached. Colors respect the terminal palette and
+`NO_COLOR`. This changes presentation only and adds no model requests or prompt
+context. Validation and graduation requirements live in the
+[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+
 ## Bash tool results
 
 Model-invoked `bash` returns compact JSON: `stdout` and the actual
@@ -573,7 +645,11 @@ one contextual tip. General startup guidance also lives here. The highest
 priority applicable tip wins: immediate local interaction feedback, then model
 tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
-over cache advice. Routine `/help` guidance fills otherwise unused space.
+over cache advice. Routine `/help` guidance fills otherwise unused space,
+led by the workspace's position: `⎇ <branch>`, or `⎇ <short commit>` when HEAD
+is detached. The position is state rather than advice, so every tip takes the
+slot from it; it is read at startup and refreshed when each turn ends, and the
+per-turn status line no longer repeats it.
 While a turn runs, only urgent tips are shown.
 
 The model has an always-loaded, read-only `set_tip` tool:
@@ -666,6 +742,7 @@ scode --resume path/to/session.jsonl
 ```
 
 `--resume` replays the named session into the REPL with full context.
+The restored session ID scopes the runtime, default plan file, and session trace.
 
 `latest` prefers your most recently used interactive session with saved history. A newer
 `--print`/`-p` run keeps its own transcript without displacing that session.

@@ -210,6 +210,13 @@ pub trait FsBackend: Send + Sync + 'static {
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn delete(&self, path: &str) -> io::Result<()>;
+    /// Remove an owned directory tree without following links to other objects.
+    fn remove_dir_all(&self, _path: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no directory tree removal",
+        ))
+    }
     fn stat(&self, path: &str) -> io::Result<FsMetadata>;
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>>;
     /// Only a missing entry is false. Admission and storage failures are errors.
@@ -560,6 +567,9 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn delete(&self, path: &str) -> io::Result<()> {
         (**self).delete(path)
+    }
+    fn remove_dir_all(&self, path: &str) -> io::Result<()> {
+        (**self).remove_dir_all(path)
     }
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
         (**self).stat(path)
@@ -947,6 +957,10 @@ impl FsBackend for StdFsBackend {
             }
         }
         std::fs::remove_file(path)
+    }
+
+    fn remove_dir_all(&self, path: &str) -> io::Result<()> {
+        std::fs::remove_dir_all(path)
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {

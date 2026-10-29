@@ -54,15 +54,6 @@ pub mod testing {
         )
     }
 
-    /// Test seam for the pure XML formatter used to synthesise the
-    /// resume prompt from mailbox envelopes.
-    #[must_use]
-    pub fn compose_next_turn_from_envelopes_for_test(
-        envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
-    ) -> String {
-        crate::compose_next_turn_from_envelopes(envelopes)
-    }
-
     /// Test seam for `prepare_agent_job`. Callers just want to fire
     /// the side effect (Verification -> reset_streak); the manifest
     /// return value is discarded because the test env has no real
@@ -6731,7 +6722,8 @@ where
             // A shutdown in a mixed batch cannot acknowledge ordinary messages
             // before their turn succeeds. Process that batch, then stop.
             is_shutdown_pending = has_shutdown;
-            current_prompt = compose_next_turn_from_envelopes(&new_envelopes);
+            current_prompt =
+                runtime::agent_mailbox::compose_next_turn_from_envelopes(&new_envelopes);
             continue;
         }
 
@@ -6774,63 +6766,6 @@ fn run_single_turn(
         rt.block_on(conv_runtime.run_turn(prompt, prompter, observer))
             .map_err(|e| e.to_string())
     }
-}
-
-/// Render a batch of freshly-arrived mailbox envelopes into a single
-/// synthetic user-turn text. Each envelope is wrapped in an
-/// XML-shaped `<mailbox-*>` block so the model can tell them apart
-/// from ordinary user prompts and — critically — so a follow-up
-/// SendMessage in the middle of a stream doesn't look like it came
-/// from the human user.
-///
-/// Multiple envelopes are concatenated with a blank line so the
-/// model treats them as distinct messages. Order preserves the
-/// mailbox write order (JSONL is append-only).
-pub fn compose_next_turn_from_envelopes(
-    envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
-) -> String {
-    let mut blocks = Vec::with_capacity(envelopes.len());
-    for env in envelopes {
-        let tag = match env.kind.as_str() {
-            runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST => "shutdown-request",
-            runtime::agent_mailbox::kinds::SHUTDOWN_RESPONSE => "shutdown-response",
-            runtime::agent_mailbox::kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
-            _ => "mailbox-message",
-        };
-        let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&env.from));
-        if let Some(rid) = &env.request_id {
-            header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
-        }
-        header.push('>');
-        // `from` and `request-id` are escaped above so a hostile envelope can't
-        // break this synthetic prompt. The body is the same envelope from the
-        // same stranger, and it is the field that can both close `</{tag}>`
-        // early and impersonate a `<system-reminder>` — so it gets the same
-        // treatment, through the one neutralizer the co-host loop also uses.
-        blocks.push(format!(
-            "{header}\n{}\n</{tag}>",
-            runtime::agent_mailbox::neutralize_untrusted_markup(&env.body)
-        ));
-    }
-    blocks.join("\n\n")
-}
-
-/// Minimal XML-attribute escape for the mailbox envelope headers.
-/// Only escapes `"` and `&` — the character set for `from` / request-id
-/// is `[A-Za-z0-9_-]` in practice, but a hostile envelope shouldn't
-/// break the synthetic prompt.
-fn xml_attr_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 fn build_agent_runtime(

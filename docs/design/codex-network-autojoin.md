@@ -87,10 +87,31 @@ it does not discover every independently embedded or custom-socket frontend.
 An installer must therefore qualify native endpoint ownership and discovery for
 its supported Codex launch mode before claiming that restart covers every root.
 
-The next native proof must distinguish concurrent root threads in one workspace,
-start/resume without a model turn, and frontend closure. Prefer the smallest
-owner that this proof supports; do not introduce another background controller
-or a second reconnect implementation merely to work around an untested race.
+The opt-in [native lifecycle fixture](../../sdk/typescript/README.md#opt-in-native-codex-lifecycle-fixture)
+now exercises actual CLI processes through the shared connection helper. On Mac
+`0.163.0`, an isolated default endpoint exposed two distinct same-workspace idle
+roots before a model request. Resume restored the original ID, canonical cwd and
+visible cancelled user history; a controlled completed-assistant-history case
+also passed with one explicit mock seed request and zero additional requests on
+resume. The CLIs exited normally. This fixture starts its own private native
+server; it does not prove cold discovery or ownership of every launch mode.
+
+The native TUI can create a hidden title-generation thread after the first user
+item. The fixture names its own thread before seeding to keep that separate
+feature out of the lifecycle case, while continuing to count every HTTP request.
+An unnamed-thread diagnostic captured the title prompt as an actual additional
+request. Production discovery must therefore distinguish root Agents from
+native feature workers, and cannot treat every new thread notification as a
+request for another credential or receiver. The inspected native schema exposes
+`parentThreadId`, `ephemeral` and `threadSource`; their availability and meaning
+still need qualification on every supported runtime.
+
+Loaded threads can remain after their frontend closes. Loaded inventory is not
+a frontend-ownership or receiver-retirement signal. Windows qualification uses
+the same orchestrator with a ConPTY adapter; platform probe results remain
+distinct from qualification of the final composed source. Prefer the smallest
+owner these proofs support, without another controller or reconnect implementation
+to work around an untested race.
 
 ## Durable identity and transient binding
 

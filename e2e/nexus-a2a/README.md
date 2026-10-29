@@ -14,6 +14,7 @@ default). The transport lives in `runtime::mailbox` +
 | Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
 | Cross-node replication and PTY duet | `e2e/nexus-a2a/run-cross-node.sh` | scripted by default |
+| Offline message before first receiver start | `bash e2e/nexus-a2a/run-live-offline.sh` | funded, real model |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
 
 The **live round-trip** (`mailbox_nexus_live`, an ignored `runtime` integration
@@ -21,6 +22,16 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 `Mailbox::send` + `Mailbox::poll` through a real gRPC server and a real
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
+
+The funded offline script uses a private `SUDO_CODE_CONFIG_HOME` containing the
+normal proxy configuration, `SCODE_LIVE_AUTH_PROFILE`, and `SCODE_LIVE_MODEL`.
+It starts the pinned daemon with mTLS, waits for its writable data plane, and
+runs the existing two-CLI PTY journey. The sender's real model stores the exact
+message before the receiver first starts; the receiver's real model consumes
+it and commits its durable reader position. A skipped journey fails this script.
+The live API CI job runs it on main and on authorized workflow dispatches.
+Participant fixtures share one live-test permit while keeping separate homes,
+configuration and workspaces, so independent tests remain serialized.
 
 The same harness runs `fs_record_log` against four independent mTLS clients,
 appends 32 large JSON records to a new WAL with unlimited retention, restarts

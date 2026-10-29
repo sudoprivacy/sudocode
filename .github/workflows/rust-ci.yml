@@ -698,6 +698,28 @@ jobs:
       - name: Check complete process startup budget
         shell: bash
         run: python ../e2e/startup/run.py --bin "$SCODE_TEST_BIN" --budget-ms 100 --report target/startup.json
+      - name: Checkout the pinned compiler context contract
+        uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/sudograph
+          ref: 15beeb830f7d30cc9f495337eca678d4604603b8
+          path: .sudocode/acceptance/compiler
+          persist-credentials: false
+      - name: Accept installed compiler context in the actual release CLI
+        working-directory: .
+        shell: bash
+        run: |
+          python e2e/compiler-context/run.py \
+            --source .sudocode/acceptance/compiler \
+            --engine "$SCODE_TEST_BIN" \
+            --directory "$RUNNER_TEMP/compiler-context"
+      - name: Retain compiler context revisions, model requests and ACP diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-context-${{ matrix.os }}
+          path: ${{ runner.temp }}/compiler-context/evidence/
+          if-no-files-found: warn
       - name: Retain Windows release CLI for local acceptance
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4

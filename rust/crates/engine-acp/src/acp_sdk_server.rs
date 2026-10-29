@@ -1017,6 +1017,7 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("hostContext".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
@@ -1072,8 +1073,52 @@ fn session_response_meta(
 
 /// `_meta.sudocode` key: replace the built-in static system-prompt blocks.
 pub const SYSTEM_PROMPT_META_KEY: &str = "systemPrompt";
-/// `_meta.sudocode` key: append a trailing dynamic system-prompt block.
+/// `_meta.sudocode` key: append a trailing static system-prompt block.
 pub const APPEND_SYSTEM_PROMPT_META_KEY: &str = "appendSystemPrompt";
+
+fn host_context_from_meta(
+    meta: Option<&agent_client_protocol_schema::Meta>,
+) -> Result<bool, AcpError> {
+    let Some(value) = meta
+        .and_then(|meta| meta.get("sudocode"))
+        .and_then(|ns| ns.get("hostContext"))
+    else {
+        return Ok(false);
+    };
+    if value == &json!({ "version": 1 }) {
+        Ok(true)
+    } else {
+        Err(AcpError::invalid_params(
+            "_meta.sudocode.hostContext must be {version:1}",
+        ))
+    }
+}
+
+/// Caller context is resolved at execution, never at input admission. A failed,
+/// disconnected or malformed provider cannot fall back to an older snapshot.
+pub(crate) async fn resolve_host_context(
+    session_id: &str,
+    cx: ConnectionTo<Client>,
+) -> Result<String, String> {
+    let params = json!({ "sessionId": session_id });
+    let request = ClientRequest::ExtMethodRequest(ExtRequest::new(
+        "_sudocode/session/host_context",
+        StdArc::from(serde_json::value::to_raw_value(&params).map_err(|error| error.to_string())?),
+    ));
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        cx.send_request(request).block_task(),
+    )
+    .await
+    .map_err(|_| "Host context resolution timed out".to_string())?
+    .map_err(|error| format!("Host context resolution failed: {error}"))?;
+    response
+        .get("appendSystemPrompt")
+        .and_then(|value| value.as_str())
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "Host context response must contain non-empty appendSystemPrompt".into())
+}
 
 /// Read `_meta.sudocode.systemPrompt` / `_meta.sudocode.appendSystemPrompt`
 /// from a `session/new` or `session/load` request.
@@ -2473,6 +2518,13 @@ pub(crate) async fn run_acp_on_transport(
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    let host_context = match host_context_from_meta(req.meta.as_ref()) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            responder.respond_with_error(acp_error_to_sdk(&error))?;
+                            return Ok(());
+                        }
+                    };
                     let prompt_overrides =
                         match system_prompt_overrides_from_meta(req.meta.as_ref()) {
                             Ok(v) => v,
@@ -2557,6 +2609,7 @@ pub(crate) async fn run_acp_on_transport(
 
                         match result {
                             Ok((engine, session_id, cwd)) => {
+                                engine.require_host_context(host_context);
                                 let completion = if completions_enabled {
                                     match registry.completion_route(
                                         &engine.session_snapshot(),
@@ -2818,6 +2871,13 @@ pub(crate) async fn run_acp_on_transport(
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    let host_context = match host_context_from_meta(req.meta.as_ref()) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            responder.respond_with_error(acp_error_to_sdk(&error))?;
+                            return Ok(());
+                        }
+                    };
                     let prompt_overrides =
                         match system_prompt_overrides_from_meta(req.meta.as_ref()) {
                             Ok(v) => v,
@@ -2912,6 +2972,7 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((engine, session_id, cwd)) => {
                                 // A reload of a live session keeps its route, so
+                                engine.require_host_context(host_context);
                                 // background agents it already spawned still
                                 // reach the client.
                                 let completion = if completions_enabled {

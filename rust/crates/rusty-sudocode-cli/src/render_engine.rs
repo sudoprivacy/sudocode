@@ -542,6 +542,7 @@ impl EngineEventRenderer {
             // No transcript output: the REPL event bridge projects lifecycle
             // into live chrome; deltas above update response progress and phase.
             EngineEvent::PermissionDenied { .. }
+            | EngineEvent::HostContextRequest { .. }
             | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
             | EngineEvent::InputState(_)

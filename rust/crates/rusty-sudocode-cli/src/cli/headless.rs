@@ -399,6 +399,17 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                             "input":serde_json::from_str::<Value>(&input).unwrap_or(Value::Null), "reason":reason,
                         }));
                     }
+                    EngineEvent::HostContextRequest { id } => {
+                        cli.engine_handle
+                            .commands
+                            .send(EngineCommand::HostContextAnswer {
+                            id,
+                            context: Err(
+                                "No host context provider is configured for the headless renderer"
+                                    .into(),
+                            ),
+                        })?;
+                    }
                     EngineEvent::QuestionRequest { id, .. } => {
                         needs_input = true;
                         cancelled_at = Some(Instant::now());

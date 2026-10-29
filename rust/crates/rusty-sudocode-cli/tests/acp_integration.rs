@@ -12,6 +12,8 @@
 
 #[path = "support/acp_direct_fences.rs"]
 mod acp_direct_fences;
+#[path = "support/acp_host_context.rs"]
+mod acp_host_context;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
 #[path = "support/acp_node_binding.rs"]
@@ -3888,6 +3890,8 @@ fn dump_subagent_events(label: &str, notifs: &[Value]) {
 /// to finish so a late update would be caught too.
 /// Independent terminal tool updates may arrive in completion order; only
 /// contiguous runs of those updates are reordered for the comparison.
+/// Initialize records track later additive capability advertisements; the
+/// scenario event payloads remain the original baseline.
 ///
 /// Regenerate (only when an off-path change is intended) with
 /// `SUDOCODE_UPDATE_ACP_FIXTURES=1`.

@@ -43,10 +43,14 @@ read them. A PR or merge-group cache is isolated from unrelated PRs, so those
 writes previously consumed storage without supplying a shared default-branch
 cache. Formatting does not need a Rust build cache.
 
-Use one dependency pool per host (Linux x64, Windows x64, macOS ARM64 and
-macOS Intel). The three workspace hosts store dev/test and normal release
-dependencies together, sharing the Cargo registry and Git sources. Intel warms
-only the service client's dev dependencies. Omit dev/test debug symbols while
+Use one dependency pool per runner image and architecture, including `ImageOS`
+in the environment key. The latest Linux, Windows and macOS workspace hosts
+store dev/test and normal release dependencies together, sharing the Cargo
+registry and Git sources. macOS 15 has separate ARM64 and Intel service pools:
+ARM64 also warms the normal release CLI; Intel warms only the service client's
+dev dependencies. This keeps macOS 26/15 and Windows 2025/2022 compiler/SDK
+artifacts separate. Distribution hosts without a published pool compile normally.
+Omit dev/test debug symbols while
 retaining debug assertions; no release profile, LTO setting or acceptance
 budget changes. The cache action excludes workspace artifacts and incremental
 output as before. Do not discard all compiled dependencies merely to reduce
@@ -64,7 +68,7 @@ or E2E execution. No paid cache-capacity or billing settings change.
 The audit observed individual Rust archives around 1.5–2.7 GB and many duplicate
 job/ref keys. Deduplicating publishers, profiles and sources reduces that
 pressure. Actual archive sizes, hits, upload time and subsequent build time
-still need hosted observation; four pools are not proof that all future
+still need hosted observation; five pools are not proof that all future
 dependency sets will fit within 10 GB. Cache misses must remain correct.
 
 References: [GitHub cache scope and eviction](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),

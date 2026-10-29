@@ -51,6 +51,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
 
       # Seed the proxy config that the live-mode TestEnv reads. Same

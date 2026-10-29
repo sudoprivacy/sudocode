@@ -266,6 +266,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - name: Widen the Windows ephemeral port range
         # The PTY steps run back to back on one VM, and every mock server binds
@@ -328,6 +329,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - uses: actions/setup-python@v5
         with:
@@ -410,6 +412,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       # The one thing unit tests structurally cannot reach: an envelope moving
       # through a real gRPC server and a real DT_STREAM, and a blocking tail
@@ -626,6 +629,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - uses: actions/setup-python@v5
         with:
@@ -763,6 +767,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - name: Run workspace clippy
         run: cargo clippy --workspace
@@ -812,6 +817,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - name: Inspect the provider's real usage contract
         working-directory: .
@@ -938,6 +944,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - name: Configure the live provider profiles
         shell: bash

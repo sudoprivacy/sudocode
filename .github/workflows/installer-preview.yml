@@ -51,6 +51,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
 
       - name: Build release binary

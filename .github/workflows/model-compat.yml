@@ -65,6 +65,7 @@ jobs:
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
+          env-vars: ImageOS
           save-if: false
       - name: Build the PTY test
         run: cargo test --locked --test pty_model_compat --no-run

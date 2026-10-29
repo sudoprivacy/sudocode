@@ -1,9 +1,5 @@
 name: ACP client package
 on:
-  pull_request:
-    paths:
-      - 'sdk/typescript/**'
-      - '.github/workflows/acp-client.yml'
   push:
     branches: [main]
     paths:
@@ -13,7 +9,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: acp-client-${{ github.event.pull_request.number || github.ref }}
+  group: acp-client-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   package:
@@ -30,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
@@ -38,8 +34,10 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
       - run: npm ci
-      - name: Verify package integration before merge
-        if: github.event_name != 'push'
+      # PR tests are mandatory in Local acceptance: signed author-local tests
+      # plus the policy-selected missing targets. Dispatch is diagnostic only.
+      - name: Explicit diagnostic integration run
+        if: github.event_name == 'workflow_dispatch'
         run: npm test
       - name: Build the merged revision for publication
         if: github.event_name == 'push'
@@ -49,5 +47,5 @@ jobs:
       - run: npm run pack:runtime
       - uses: actions/upload-artifact@v4
         with:
-          name: scode-acp-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          name: scode-acp-${{ matrix.os }}-${{ github.sha }}
           path: sdk/typescript/artifacts/*

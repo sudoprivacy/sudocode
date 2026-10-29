@@ -186,8 +186,10 @@ The hook runs applicable real checks before a branch push. A Windows author runs
 the Windows workspace, resize, release and service checks locally; CI runs Linux
 and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
 author runs Linux locally; CI runs Windows and macOS. Co-host release verification
-follows the same host split when its inputs change. Each supported OS remains
-covered; this does not claim every CPU architecture is exercised on every PR.
+follows the same host split when its inputs change. SDK changes additionally
+require both Linux x64 and ARM64: a Linux author supplies only their own CPU
+target, and CI supplies the other. Each supported OS remains covered; macOS and
+Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
@@ -208,7 +210,9 @@ otherwise the runner discovers Visual Studio or uses the existing Developer shel
 A signed Git note binds the successful command list and log hashes to the exact
 commit, tree, diff base, policy and native host. The hook publishes that note
 before the branch. GitHub's read-only metadata job verifies the signature against
-public keys enrolled on main and selects the missing hosts. Missing, failed,
+public keys enrolled on main and selects the missing hosts. The SDK profile runs
+the actual `npm ci`, `npm test` and runtime packaging commands locally and in CI;
+an older preflight-only receipt cannot satisfy it. Missing, failed,
 stale or tampered receipts block the Local acceptance required check. A signature
 authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
@@ -249,11 +253,29 @@ Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
 
-The ACP package workflow runs integration journeys on all four PR hosts. Main
-still builds and packages its exact merged revision on those hosts, while
-reusing the PR's integration result. A newer head cancels an obsolete package
-run for the same PR/ref. Unrelated workflow edits do not start three Rust cache
+`spec/local_acceptance.json` selects required targets, and the protected runner's
+`acceptance_plan` drives both the hook and CI. Push output and CI summaries print
+the local/CI responsibilities and an `ACCEPTANCE_PLAN` JSON record. The signed
+receipt retains that plan; GitHub's required `Local acceptance` status description
+also names the local host and complementary CI targets, so `gh`/API clients see
+the split directly. To preview it without executing or attesting tests, run:
+
+```bash
+python .github/scripts/local_acceptance.py plan
+```
+
+The ACP package workflow no longer repeats PR integration tests on the author's
+platform. Ready PRs use the mandatory shared acceptance gate; drafts do not claim
+those skipped jobs passed. Main still builds and packages its exact merged
+revision on all four hosts. Explicit package dispatch remains diagnostic and
+does not replace a signed receipt. A newer head cancels obsolete acceptance runs.
+Unrelated workflow edits do not start three Rust cache
 publishers; Rust changes and changes to the publisher itself still do.
+
+These receipts establish source-test coverage. They do not prove installation,
+authenticated enrollment, frontend lifecycle or deployed cross-machine delivery.
+Do not request another author's manual platform rerun to duplicate CI; separately
+scoped deployment acceptance still exercises the actual installed system.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
@@ -268,8 +290,9 @@ Existing PRs do not need a cosmetic merge from main to acquire the hook files:
 the managed hook loads protected-main command definitions. Deliberate edits to the
 acceptance contract need a maintainer-reviewed bootstrap so a PR cannot approve
 its own weaker policy. Registering another public device key does not invalidate
-other devices' current receipts. GitHub's normal bypass protections stay active;
-the CI migration itself uses the explicitly authorized temporary admin route.
+other devices' current receipts. This requirement does not authorize bypassing
+the hook or branch protection. For a contract change, retain the source commit
+and local test logs for the maintainer's separately reviewed bootstrap.
 
 Rust caches keep the existing 10 GB quota and three shared main publishers.
 Queue maintenance retains current runs and cancels obsolete merge groups only

@@ -53,8 +53,7 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     repository = os.environ["GITHUB_REPOSITORY"]
     policy_ref = acceptance.value("rev-parse", "HEAD")
-    native = []
-    operating_systems = []
+    plan = None
     if "pull_request" in event:
         pull = api(f"repos/{repository}/pulls/{event['pull_request']['number']}")
         if pull["head"]["sha"] != event["pull_request"]["head"]["sha"]:
@@ -62,13 +61,7 @@ def main():
         head = fetch_head(pull)
         receipt = acceptance.verify(head, pull["base"]["sha"], policy_ref)
         current = acceptance.selected(acceptance.load_policy(policy_ref), acceptance.changed_paths(receipt["base"], head))
-        native = [name for name in current if name.startswith("native-")]
-        # The local host supplies its own platform; CI supplies the other one.
-        # Keep one Linux workspace run as well. The queue carries this exact
-        # head's completed workflow instead of rebuilding all three again.
-        operating_systems = {"windows": ["ubuntu-latest", "macos-latest"],
-                             "macos": ["ubuntu-latest", "windows-latest"],
-                             "linux": ["windows-latest", "macos-latest"]}[receipt["host"]["system"]]
+        plan = acceptance.acceptance_plan(acceptance.load_policy(policy_ref), current, receipt["host"])
     else:
         group = event["merge_group"]
         acceptance.git("fetch", "--no-tags", "origin", group["head_sha"], group["base_sha"])
@@ -95,11 +88,13 @@ def main():
             print(f"Carried PR #{pull['number']} {head[:12]} from publisher run {identifier}")
         subprocess.run([sys.executable, str(ROOT / ".github/scripts/check_pr_history.py"),
                         group["base_sha"], group["head_sha"]], cwd=ROOT, check=True)
-    with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
-        stream.write("needed=" + ("true" if native else "false") + "\n")
-        stream.write("checks=" + " ".join(native) + "\n")
-        stream.write("platforms=" + json.dumps(operating_systems or ["ubuntu-latest"]) + "\n")
-    return {"checks": native, "platforms": operating_systems if native else []}
+    jobs = plan["ci"] if plan else []
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+        stream.write("needed=" + ("true" if jobs else "false") + "\n")
+        # A skipped job still needs a structurally valid Actions matrix.
+        stream.write("matrix=" + json.dumps({"include": jobs or [{"os": "ubuntu-latest", "name": "No missing hosts",
+                     "family": "native", "node": "22", "timeout": 90, "checks": []}]}) + "\n")
+    return {"plan": plan, "required_jobs": ["Verify local acceptance", *[job["name"] for job in jobs]]}
 
 
 if __name__ == "__main__":

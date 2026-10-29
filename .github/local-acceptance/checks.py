@@ -50,6 +50,12 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
         command(sys.executable, "e2e/local-acceptance/run.py")
+    elif name == "native-sdk":
+        sdk = root / "sdk/typescript"
+        command("node", "--version", cwd=sdk)
+        command("npm", "ci", cwd=sdk)
+        command("npm", "test", cwd=sdk)
+        command("npm", "run", "pack:runtime", cwd=sdk)
     elif name == "native-workspace":
         cargo("fmt", "--all", "--check")
         tests = changed_cli_test_targets(root, base)

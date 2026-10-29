@@ -10,30 +10,51 @@ For a ready PR, one queue group and the resulting main push:
 
 | Work | Before | After |
 | --- | --- | --- |
-| Complete deterministic workspace suite | 2 PR + 3 queue + 3 main = 8 | 1 Linux PR + 3 queue = 4 |
-| Native terminal resize suite | 2 PR + 3 queue + 3 main = 8 | 1 Linux PR + 3 queue = 4 |
-| Release startup/streaming acceptance | 2 PR + 3 queue + 3 main = 8 | 1 Linux PR + 3 queue = 4 |
-| Real daemon A2A acceptance | PR + queue + main = 3 | queue = 1 |
-| Shared-service acceptance | 4 PR + 4 main = 8 | 1 Linux PR + 4 queue = 5 |
+| Complete deterministic workspace suite | 2 PR + 3 queue + 3 main = 8 | 2 complementary CI hosts + 1 author-local host |
+| Native terminal resize suite | 2 PR + 3 queue + 3 main = 8 | 2 complementary CI hosts + 1 author-local host, for changed inputs |
+| Release startup/streaming acceptance | 2 PR + 3 queue + 3 main = 8 | 2 complementary CI hosts + 1 author-local host, for changed inputs |
+| Real daemon A2A acceptance | PR + queue + main = 3 | queue = 1, for changed daemon inputs |
+| Shared-service acceptance | 4 PR + 4 main = 8 | 2 complementary CI hosts + 1 author-local host, for changed inputs |
+| PR co-host build/size verification | 5 hosted platforms | 2 complementary CI hosts + 1 author-local host; actual tagged releases retain 5 platforms |
+| Short metadata and integrity jobs | 7 hosted jobs per event | 1 shared preflight job per event |
 | Specialized PTY/stderr pre-run steps per workspace job | 8, then the same cases in the workspace suite | 0; cases remain in the workspace suite |
 | Benchmark API compilation | Optimized build/link of workspace benchmarks and tests | Locked benchmark type-check using the workspace job's debug graph |
 
-Manual dispatch retains full validation. Existing experimental branch pushes
-retain the three-platform Rust jobs. Paid provider jobs continue on main and
-manual dispatch; this change does not reduce their API calls. The manually
-disabled paid code-review workflows remain disabled.
+Provider assertions remain on main for changed provider inputs and explicit
+dispatch. Rendering/browser checks are mandatory locally, with their original
+budgets and sample counts. The manually disabled paid review stays disabled.
 
-Required check names and branch protection remain unchanged. Windows/macOS jobs
-report skipped on PRs without allocating runners and run in the merge queue.
-The integrated commit must pass all three platforms before landing. Rendering
-budgets, workloads, A/A calibration and sample counts are unchanged. Additional
-source before/after viewport diagnostics require an explicit label.
+Required contexts are `CI preflight`, `Local acceptance` and the real-daemon
+guard. The queue carries the exact PR heads' completed native acceptance and
+verifies combined Git history; it does not repeat native suites on that combined
+tree. Runtime interactions unique to the combination are outside that pre-merge
+coverage. Admin enforcement and the queue ruleset remain enabled after the
+explicitly authorized temporary migration route.
 
 Workspace tests and Clippy omit disposable debug-symbol output while retaining
 debug assertions. Their shared environment keeps Cargo cache inputs aligned.
-Release resource acceptance retains its normal release profile. The browser
-workflow triggers on Rust, its terminal harness and its own workflow changes;
-an unrelated workflow edit alone no longer starts two browser release builds.
+Release resource acceptance retains its normal release profile. Browser
+measurements run through the changed-input local Docker profile.
+
+## Measured timing and duplicate-test review
+
+The month contains 540 successful PR heads with all three original native
+workspace jobs actually passing. Rust CI alone has a 52.5-minute median elapsed
+time. Of these, 449 heads have every latest applicable PR acceptance workflow
+successful: their completion envelope has a 50.35-minute median and 191.13-minute
+P90. The smaller second cohort explains its lower median. Both exclude local
+pre-push time and merge queue, and the second excludes paid Claude review;
+neither is a complete submit-to-merge baseline. Do not compare a CI-only PR to
+these production cohorts and call the 10% end-to-end goal achieved.
+
+A syntax-tree scan covered 552 Rust files and 2,795 explicit test functions,
+preserving literal and helper names. It found no identical PTY test bodies.
+Three small `env_guard_recovers_after_poisoning` bodies match textually but
+exercise three separate crate-owned guards. Keep them; their deletion offers
+negligible runtime savings. Macro-generated cases and semantic overlap require
+separate review. The same ACP subagent scenario also runs against different
+GPT and Claude routes, so a repeated test name alone does not establish redundant
+provider coverage.
 
 ## Dependency cache within the existing quota
 

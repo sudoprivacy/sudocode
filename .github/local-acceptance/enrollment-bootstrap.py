@@ -1,5 +1,6 @@
 """One reviewed enrollment only; not a general acceptance bypass."""
 
+import ast
 import importlib.util
 import json
 import os
@@ -100,9 +101,28 @@ def main():
         subprocess.run(['git', 'fetch', '--no-tags', 'origin', target, queue_base], check=True)
         subprocess.run(['git', 'merge-base', '--is-ancestor', HEAD, target], check=True)
         assert git('diff', '--name-only', queue_base, target).splitlines() == sorted(BLOBS), 'No other PR or source change may share this enrollment bootstrap'
-        for path, blob in BLOBS.items():
-            assert git('rev-parse', target + ':' + path) == blob
-        assert acceptance.contract_hash(queue_base) == acceptance.contract_hash(BASE)
+        # Main may advance its scheduling/verification code while this data-only
+        # enrollment waits. Preserve that code and every other registered device.
+        prior_registry = json.loads(git('show', queue_base + ':spec/local_acceptance_signers.json'))
+        assert SIGNER not in prior_registry['signers']
+        prior_registry['signers'][SIGNER] = expected['signers'][SIGNER]
+        assert json.loads(git('show', target + ':spec/local_acceptance_signers.json')) == prior_registry
+        def changed_document_lines(older, newer):
+            diff = git('diff', '--no-color', '--no-ext-diff', '--unified=0', older, newer, '--', 'CONTRIBUTING.md')
+            return [line for line in diff.splitlines() if line.startswith(('+', '-')) and not line.startswith(('+++', '---'))]
+        assert changed_document_lines(BASE, HEAD) == changed_document_lines(queue_base, target)
+        assert acceptance.contract_hash(queue_base) == acceptance.contract_hash(target)
+        # Honor main's unchanged-command receipt compatibility, without executing
+        # a newer or candidate runner in this write-enabled operation.
+        for path in ['.github/local-acceptance/checks.py', '.github/local-acceptance/Dockerfile']:
+            assert git('rev-parse', BASE + ':' + path) == git('rev-parse', queue_base + ':' + path)
+        def executor(ref):
+            source = git('show', ref + ':.github/scripts/local_acceptance.py')
+            node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'run_command')
+            return '\n'.join(source.splitlines()[node.lineno - 1:node.end_lineno])
+        assert executor(BASE) == executor(queue_base)
+        required = acceptance.selected(acceptance.load_policy(queue_base), acceptance.changed_paths(BASE, HEAD))
+        assert set(required).issubset(receipt['checks'])
         subprocess.run(['python3', '.github/scripts/check_pr_history.py', queue_base, target], check=True)
 
     # Every ordinary test must finish successfully. The sole initialization

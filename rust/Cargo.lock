@@ -4957,6 +4957,7 @@ dependencies = [
 name = "service-host"
 version = "0.2.37"
 dependencies = [
+ "a2a",
  "axum",
  "base64 0.22.1",
  "flate2",

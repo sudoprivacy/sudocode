@@ -158,6 +158,23 @@ fn is_serving(http: &reqwest::blocking::Client, discovery: &Discovery) -> bool {
     })
 }
 
+/// Readiness covers peer messaging, not only the root zone. Nexus mounts the
+/// replicated A2A prefixes as their own zone and loads a hosted zone only on
+/// first access. After a restart, `/` can therefore serve while that zone is
+/// still `HOSTED_NOT_RESIDENT`, and the first client to touch `/agents` pays
+/// the whole load. That measured 0.4–0.7 s locally and exceeded a 3 s client
+/// deadline on Windows CI. A stat of each prefix is that first access, taken
+/// before readiness is published. A prefix this node does not mount is
+/// absent, so there is nothing to wait for.
+fn replicated_prefixes_serve(client: &NexusVfsClient) -> bool {
+    a2a::REPLICATED_PREFIXES
+        .iter()
+        .all(|prefix| match client.stat(prefix, "") {
+            Ok(_) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        })
+}
+
 fn spawn_runtime(root: &Path) -> Result<Child> {
     let mut command = Command::new(std::env::current_exe()?);
     command

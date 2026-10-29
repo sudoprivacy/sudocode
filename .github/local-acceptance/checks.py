@@ -1,6 +1,7 @@
 """Real acceptance commands shared by the author's hook and opposite-OS CI."""
 
 import argparse
+from contextlib import contextmanager
 import importlib.util
 import json
 import os
@@ -163,8 +164,8 @@ def container(name, root, output, base, command, execute):
     state = Path.home() / ".cache/sudocode-local-acceptance/linux"
     state.mkdir(parents=True, exist_ok=True)
     image = "sudocode-local-acceptance:1"
-    # Each checkout has its own Cargo directory; Cargo must never reuse a
-    # same-version path crate compiled from another source checkout.
+    # The container leases its reusable checkouts and targets exclusively;
+    # dependency downloads remain shared across profiles.
     protected = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=root).decode().strip()
     context = output / "image-context"
     for source, destination in [
@@ -192,23 +193,59 @@ def container(name, root, output, base, command, execute):
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
             "--mount", f"type=bind,source={state},target=/state",
+            "--mount", "type=volume,source=sudocode-acceptance-benchmark-lease,target=/locks",
             "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
 
 
+def copy_checkout_file(source, destination):
+    """Keep executable modes, but give replaced sources fresh Cargo mtimes."""
+    shutil.copyfile(source, destination)
+    shutil.copymode(source, destination)
+    return destination
+
+
+def replace_checkout(source, destination):
+    """Replace a leased checkout as a normal edit, not an old-mtime archive."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination, copy_function=copy_checkout_file)
+
+
+@contextmanager
+def exclusive_benchmark_state():
+    """Serialize the Linux container's mutable sources, npm trees and targets."""
+    import fcntl
+
+    # Docker Desktop bind mounts do not provide reliable flock exclusion.
+    # The shared named volume keeps this inode on the Linux filesystem.
+    with (Path("/locks") / "benchmark.lock").open("a") as lease:
+        fcntl.flock(lease, fcntl.LOCK_EX)
+        yield
+
+
 def benchmark(name, root, output, base, command, target):
+    with exclusive_benchmark_state():
+        benchmark_locked(name, root, output, base, command, target)
+
+
+def benchmark_storage(name):
+    """Keep leased state disjoint from still-running pre-lease executors."""
+    state = Path("/state/leased-benchmarks-v1")
+    return state / name, state / "target" / name
+
+
+def benchmark_locked(name, root, output, base, command, target):
     # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
     # budget and sample assertions. Changing execution host changes none of them.
     inputs = Path("/inputs")
-    work = Path("/state") / name
-    work.mkdir(exist_ok=True)
+    work, targets = benchmark_storage(name)
+    work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
         destination = work / label
         # Sources are disposable copies from this invocation's exact Git archive.
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(inputs / label, destination)
+        replace_checkout(inputs / label, destination)
     candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
     driver_source = trusted if name == "rendering" else candidate
     terminal = driver_source / "e2e/terminal-resize"
@@ -218,10 +255,10 @@ def benchmark(name, root, output, base, command, target):
     driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", f"/state/target/{name}/{label}", "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(f"/state/target/{name}/{label}/release/scode", output / f"scode-{label}")
+                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
     log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
-                  "--target-dir", f"/state/target/{name}/driver", "-p", "rusty-sudocode-cli", "--test", driver_name,
+                  "--target-dir", str(targets / "driver"), "-p", "rusty-sudocode-cli", "--test", driver_name,
                   "--no-run", "--message-format=json-render-diagnostics")
     messages = []
     for line in log.read_text(errors="replace").splitlines():
@@ -241,7 +278,7 @@ def benchmark(name, root, output, base, command, target):
         # Move the existing viewport gates too; deleting the old release job
         # must not silently drop its headless/browser CPU and painting checks.
         manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = "/state/target/browser/viewport-driver"
+        viewport_target = str(targets / "viewport-driver")
         viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
                         "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
         log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,

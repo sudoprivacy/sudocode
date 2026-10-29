@@ -47,6 +47,9 @@ jobs:
     if: needs.proof.outputs.needed == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
+    defaults:
+      run:
+        working-directory: candidate
     strategy:
       fail-fast: true
       matrix: ${{ fromJSON(needs.proof.outputs.matrix) }}
@@ -61,6 +64,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -83,7 +87,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: matrix.family == 'native'
         with:
-          workspaces: rust -> target
+          workspaces: candidate/rust -> target
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false
@@ -94,7 +98,7 @@ jobs:
           ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
           ACCEPTANCE_BASE: ${{ github.event.pull_request.base.sha }}
           ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
-        run: python .trusted-acceptance/.github/local-acceptance/cross_platform.py
+        run: python ../.trusted-acceptance/.github/local-acceptance/cross_platform.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -106,5 +110,5 @@ jobs:
         if: matrix.family == 'sdk' && success()
         with:
           name: scode-acp-${{ matrix.os }}-${{ github.event.pull_request.head.sha }}
-          path: sdk/typescript/artifacts/*
+          path: candidate/sdk/typescript/artifacts/*
           if-no-files-found: error

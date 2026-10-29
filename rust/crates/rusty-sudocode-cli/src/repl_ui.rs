@@ -46,6 +46,7 @@ use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, AnsiText, RichText};
 use choice_text::ChoiceText;
+pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
 use transcript_view::TextFrame;
@@ -302,6 +303,8 @@ pub enum UiCommand {
     },
     SetTip(engine_core::Tip),
     SetCacheTip(CacheTip),
+    /// A persistent tip owned by `source`; `None` clears it.
+    SetStatusTip(StatusSource, Option<engine_core::Tip>),
     /// The workspace's branch, or short commit when detached, for the footer.
     SetBranch(Option<String>),
     BeginTurn,
@@ -387,6 +390,10 @@ impl UiCommandSender {
 
     pub(crate) fn set_cache_tip(&self, tip: CacheTip) {
         let _ = self.tx.send(UiCommand::SetCacheTip(tip));
+    }
+
+    pub(crate) fn set_status_tip(&self, source: StatusSource, tip: Option<engine_core::Tip>) {
+        let _ = self.tx.send(UiCommand::SetStatusTip(source, tip));
     }
 
     pub(crate) fn set_branch(&self, label: Option<String>) {
@@ -1973,7 +1980,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::SetTip(tip)) => footer_tips.write().set(tip),
                         Ok(UiCommand::SetCacheTip(view)) => {
-                            footer_tips.write().cache(view.tip);
+                            footer_tips.write().status(StatusSource::Cache, view.tip);
                             tasks_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1981,6 +1988,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             frame.set(frame.get().wrapping_add(1));
                         }
                         Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
+                        Ok(UiCommand::SetStatusTip(source, tip)) => {
+                            footer_tips.write().status(source, tip);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                         Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
                         Ok(UiCommand::SetTurnResult { text, turn }) => {
                             turn_result.set(Some((turn, text)));

@@ -986,11 +986,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let wait_model = model.clone();
             let mut cli = LiveCli::new(
                 model,
-                true,
                 allowed_tools,
                 permission_mode,
                 reasoning_effort,
                 auth_mode,
+                None,
             )?;
             // Non-interactive one-shot: SIGINT / Ctrl-C must gracefully cancel
             // the turn across the seam (the running tool returns interrupted and
@@ -1254,16 +1254,13 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
                     metrics.read_share_pct = None;
                     metrics.write_share_pct = None;
                 }
-                let mut report = serde_json::json!({
-                    "session": index + 1,
-                    "tracked_requests": stats.tracked_requests,
-                    "cache_efficiency": metrics,
-                    "completion_intervals": engine_core::cache_report::completion_intervals(
-                        &root.join(name).join("requests.jsonl")),
-                });
-                if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-                    report["ttl_advisor"] = engine_core::cache_advisor::report(&root.join(name));
-                }
+                let mut report = engine_core::cache_report::session_report(
+                    &root.join(name),
+                    runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor),
+                );
+                report["session"] = serde_json::json!(index + 1);
+                report["tracked_requests"] = serde_json::json!(stats.tracked_requests);
+                report["cache_efficiency"] = serde_json::json!(metrics);
                 report
             }).collect::<Vec<_>>(),
         });
@@ -1679,13 +1676,13 @@ fn run_resume(
             return Ok(());
         }
         // No commands — enter the interactive REPL with the restored session.
-        let mut cli = match LiveCli::new(
+        let cli = match LiveCli::new(
             model,
-            true,
             None,
             permission_mode,
             reasoning_effort,
             auth_mode,
+            Some((handle, session)),
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -1693,12 +1690,6 @@ fn run_resume(
                 std::process::exit(1);
             }
         };
-        // Load the restored session into the running CLI.
-        let session_ref = resolved_path.display().to_string();
-        if let Err(e) = cli.load_session(Some(session_ref)) {
-            eprintln!("failed to resume: {e}");
-            std::process::exit(1);
-        }
         // Enter the REPL loop (it renders banner + any existing messages).
         // Propagate terminal/save errors to the same top-level handler used
         // by a new REPL, after the loop has cleaned up its receiver/editor.
@@ -1844,15 +1835,15 @@ fn run_resumed_compaction(
     auth_mode: Option<AuthMode>,
     reasoning_effort: Option<String>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    let persisted = load_session_reference(&path.display().to_string())?;
     let cli = LiveCli::new(
         model.to_string(),
-        true,
         None,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        Some(persisted),
     )?;
-    cli.lifecycle.resume_session(&path.display().to_string())?;
     // Maintenance runs through the lifecycle port while the turn pump is
     // idle. Keep SIGINT alive until its receipts and final report are saved.
     let _cancel_guard = SignalCancelGuard::install_compaction(cli.lifecycle.clone());
@@ -2346,11 +2337,11 @@ fn run_repl(
     run_stale_base_preflight(base_commit.as_deref());
     let cli = LiveCli::new(
         model,
-        true,
         allowed_tools,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        None,
     )?;
 
     dispatch_repl(cli)
@@ -2493,7 +2484,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     if matches!(trimmed.as_str(), "/exit" | "/quit") {
-                        cli.persist_session()?;
+                        cli.persist_before_shutdown()?;
                         break;
                     }
                     // `!<cmd>` bash mode: run it here, no model turn.
@@ -2545,7 +2536,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 input::ReadOutcome::Exit => {
-                    cli.persist_session()?;
+                    cli.persist_before_shutdown()?;
                     break;
                 }
             }
@@ -2558,7 +2549,6 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     peer_abort.abort();
     drop(pending_peer_turns);
     let _ = peer_receiver.join();
-    loop_result?;
 
     // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
@@ -2581,7 +2571,8 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    Ok(())
+    cli.shutdown();
+    loop_result
 }
 
 /// Resolves when the OS delivers Ctrl-Break; on non-Windows it never resolves.
@@ -3471,6 +3462,50 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
     output.print_block(rendered);
 }
 
+/// Peer-messaging health, not raw receiver errors, reaches the footer. An
+/// outage that heals within the grace period shows nothing, and the tip clears
+/// itself once receiving recovers. Detail stays in `/status`.
+fn spawn_a2a_health_tip(agent: String, ui: repl_ui::UiCommandSender) {
+    let _ = thread::Builder::new()
+        .name("a2a-health-tip".into())
+        .spawn(move || {
+            let mut shown = None;
+            loop {
+                let tip = a2a_health_tip(&engine_host::peer::status(&agent).health);
+                if tip != shown {
+                    ui.set_status_tip(repl_ui::StatusSource::A2a, tip.clone());
+                    shown = tip;
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+}
+
+fn a2a_health_tip(health: &runtime::mailbox::ReceiverHealth) -> Option<engine_core::Tip> {
+    // Important, not Urgent, for both: it stays visible at the prompt, but the
+    // footer does not hold it through every turn of a session that may not use
+    // A2A at all.
+    if !matches!(health.level, "warn" | "fail") {
+        return None;
+    }
+    let priority = engine_core::TipPriority::Important;
+    let what = match health.failing.as_slice() {
+        [] if health.level == "fail" => "node binding unusable".to_string(),
+        [] => "receiving not yet recovered".to_string(),
+        [(scope, _)] => format!("{scope} failing"),
+        [(scope, _), rest @ ..] => format!("{scope} and {} more failing", rest.len()),
+    };
+    let age = match health.outage_secs {
+        Some(secs) if secs >= 60 => format!(" for {}m", secs / 60),
+        Some(secs) => format!(" for {secs}s"),
+        None => String::new(),
+    };
+    Some(engine_core::Tip {
+        priority,
+        message: format!("A2A: {what}{age} · /status"),
+    })
+}
+
 /// The footer's cache-TTL tip and whether it offers a choice. Pinned, the tip
 /// suggests the other TTL; automatic, it is a stop only while a move to 1h
 /// waits for a cold point, which can be applied now or pinned instead.
@@ -3670,6 +3705,7 @@ fn run_repl_iocraft_dispatch(
     // mailbox poller below: reading it back through the lock would have the
     // coordinator thread contend with every turn for a value that cannot change.
     let session_agent_name = cli.lifecycle.agent_name();
+    spawn_a2a_health_tip(session_agent_name.clone(), repl_ui_cmd.clone());
     // UI input, peer messages, sub-agent results and turn completion converge
     // on this channel so idle delivery needs no polling.
     let (coord_tx, coord_rx) = mpsc::channel::<CoordinatorEvent>();
@@ -4398,7 +4434,7 @@ fn run_repl_iocraft_dispatch(
     // still be alive and the shared CLI mutex must remain accessible.
     {
         let cli_lock = cli_shared.lock().expect("LiveCli mutex");
-        let _ = cli_lock.persist_session();
+        let _ = cli_lock.persist_before_shutdown();
     }
     // Drop coordinator sender so bridge/poller threads see Disconnected,
     // which drops input_rx and lets the iocraft render loop exit.
@@ -4408,6 +4444,11 @@ fn run_repl_iocraft_dispatch(
     // On Windows PTYs that do not exit promptly, the join closure abandons
     // the thread after a bounded wait and process exit remains the fallback.
     (repl_join)();
+
+    // The cache panel retains the same lifecycle as the engine delegate.
+    // Release it before engine shutdown can drop the model client and drain
+    // its response recorders, rather than leaving them alive at process exit.
+    drop(ttl_lifecycle);
 
     // Unwrap the Arc and finalize telemetry. If the runner thread
     // still holds a clone, force-exit — session is already persisted.
@@ -4438,13 +4479,7 @@ fn run_repl_iocraft_dispatch(
 
     // Close through the engine seam before process exit so session-owned
     // background processes are killed and reaped, not left running.
-    let LiveCli {
-        engine_handle,
-        lifecycle,
-        ..
-    } = cli;
-    drop(lifecycle);
-    let _ = engine_handle.shutdown(Duration::from_secs(5));
+    cli.shutdown();
 
     // The iocraft render loop thread may still be alive (it blocks on
     // terminal events). Persistent state and engine teardown are complete.
@@ -4804,6 +4839,17 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
 }
 
 impl LiveCli {
+    /// Both REPLs await the same engine teardown before the process can exit.
+    fn shutdown(self) {
+        let Self {
+            engine_handle,
+            lifecycle,
+            ..
+        } = self;
+        drop(lifecycle);
+        let _ = engine_handle.shutdown(Duration::from_secs(5));
+    }
+
     /// True when the async REPL (queue mode) is active. In this mode the
     /// render thread owns stdin via iocraft, so interactive widgets
     /// (FuzzySelect, Select) cannot be used on the runner thread.
@@ -4834,16 +4880,12 @@ impl LiveCli {
 
     fn new(
         model: String,
-        enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
+        persisted: Option<(SessionHandle, Session)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // The engine always builds with tools enabled for the interactive
-        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
-        // seam doesn't model (SessionEngine is single-purpose here).
-        let _ = enable_tools;
         let system_prompt = startup::measure("system_prompt", build_system_prompt)?;
         let cwd = env::current_dir()?;
         let sudocode_config =
@@ -4864,21 +4906,40 @@ impl LiveCli {
         let mcp_servers = std::collections::BTreeMap::new();
         let engine = Arc::new(
             startup::measure("engine_build", || {
-                SessionEngine::build(
-                    &cwd,
-                    &mcp_servers,
-                    runtime::SystemPromptOverrides::default(),
-                    // The REPL always uses memory; the per-session switch is an
-                    // ACP-client knob (`_meta.sudocode.memory`).
-                    runtime::memory::MemoryMode::Enabled,
-                    system_prompt,
-                    model.clone(),
-                    Some(model),
-                    allowed_tools,
-                    Some(permission_mode),
-                    reasoning_effort,
-                    auth_mode,
-                )
+                if let Some((handle, mut session)) = persisted {
+                    session.mode = runtime::SessionMode::Interactive;
+                    SessionEngine::open_persisted(
+                        &cwd,
+                        handle,
+                        session,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model.clone(),
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                } else {
+                    SessionEngine::build(
+                        &cwd,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        // The REPL always uses memory; the per-session switch is an
+                        // ACP-client knob (`_meta.sudocode.memory`).
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model.clone(),
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                }
             })
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
         );
@@ -4891,7 +4952,7 @@ impl LiveCli {
         // (same pattern the todo store uses). Skip if the caller already set it
         // (tests point it at a temp path).
         if std::env::var_os("SUDOCODE_PLAN_FILE").is_none() {
-            let session_id = lifecycle.session_snapshot().session_id;
+            let session_id = lifecycle.session_handle().id;
             let sanitized: String = session_id
                 .chars()
                 .map(|c| {
@@ -5980,6 +6041,14 @@ impl LiveCli {
         self.lifecycle.persist().map_err(Into::into)
     }
 
+    /// A deleted Session is already retired; closing it must not save it again.
+    fn persist_before_shutdown(&self) -> Result<(), Box<dyn std::error::Error>> {
+        match self.lifecycle.persist() {
+            Err(error) if error == "session_deleted" => Ok(()),
+            result => result.map_err(Into::into),
+        }
+    }
+
     /// `!<command>` bash mode. Runs the command in the user's shell, prints
     /// the result under the echoed input, and appends the exchange to the
     /// transcript as user messages (CC's `<bash-input>` / `<bash-stdout>` /
@@ -6388,18 +6457,6 @@ impl LiveCli {
         self.lifecycle.resume_session(&session_ref)?;
         self.undone_tool_use_ids.clear();
         Ok(true)
-    }
-
-    /// Resume a pre-resolved session (for `--resume` at startup). The engine
-    /// reloads it by reference and swaps it in.
-    fn replace_with_session(
-        &mut self,
-        _session: runtime::Session,
-        handle: SessionHandle,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.lifecycle.resume_session(&handle.id)?;
-        self.undone_tool_use_ids.clear();
-        Ok(())
     }
 
     fn handle_config_set(

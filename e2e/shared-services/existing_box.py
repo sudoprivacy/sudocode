@@ -84,19 +84,28 @@ def run(args, root):
     receipt = {'daemonSha256': sha(args.daemon), 'scodeSha256': sha(args.scode),
         'liveFleetTouched': False, 'haAccepted': False, 'domainJoinAccepted': False}
 
-    def grpc(method, payload, raft=False):
+    def grpc(method, payload, raft=False, zones=False):
         proto = Path(__file__).with_name('cluster-info.proto') if raft else (
+            Path(__file__).with_name('zone-status.proto') if zones else
             Path(__file__).resolve().parents[2] / 'rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto')
         command = [str(args.grpcurl), '-max-time', '3', '-cacert', str(data / 'tls/ca.pem'),
             '-cert', str(data / 'tls/node.pem'), '-key', str(data / 'tls/node-key.pem'),
             '-servername', 'nexus-node', '-import-path', str(proto.parent), '-proto', proto.name, '-d', json.dumps(payload),
-            endpoint, ('nexus.raft.ZoneApiService/' if raft else 'nexus.grpc.vfs.NexusVFSService/') + method]
+            endpoint, ('nexus.raft.ZoneApiService/' if raft else 'nexus.grpc.vfs.ZoneRuntimeService/' if zones
+                       else 'nexus.grpc.vfs.NexusVFSService/') + method]
         result = subprocess.run(command, capture_output=True, timeout=5)
         if result.returncode:
             with (root / 'grpc-errors.log').open('ab') as output:
                 output.write(result.stderr)
             result.check_returncode()
         return json.loads(result.stdout)
+
+    def peer_messaging_resident():
+        # Readiness loads the zone that holds /agents before it is published.
+        # Without that, a restart reports ready while the zone is still
+        # HOSTED_NOT_RESIDENT, and the first client read pays the whole load.
+        presence = grpc('ZoneStatus', {'zone_id': 'sharedzone'}, zones=True).get('presence')
+        assert presence == 'RESIDENT', presence
 
     def membership():
         return {zone: grpc('GetClusterInfo', {'zone_id': zone}, True)
@@ -211,7 +220,8 @@ def run(args, root):
             assert 'error' in broker(method), method
         assert not (root / 'wrong-data').exists()
         assert not (services / 'runtimes').exists(), 'Recovery downloaded another native version'
-        wait_until(durable_body_is_readable)
+        peer_messaging_resident()
+        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
         after = wait_until(membership)
         for zone, old in before.items():
             assert after[zone]['nodeId'] == old['nodeId']
@@ -237,7 +247,8 @@ def run(args, root):
         children.append(discovery)
         assert restarted['instance'] != old_instance
         assert restarted['persistedNodeId'] == profile['nodeId']
-        wait_until(durable_body_is_readable)
+        peer_messaging_resident()
+        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
         print('PASS: acknowledged exact-target operator termination and recovery preserve state', flush=True)
         receipt.update(nodeId=profile['nodeId'], before=before, after=after,
             ownerPid=discovery['supervisor_pid'], nexusPid=discovery['nexus_pid'], status='PASS')

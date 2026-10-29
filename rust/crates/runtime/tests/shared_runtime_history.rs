@@ -116,7 +116,31 @@ impl Drop for Fixture {
         if std::thread::panicking() {
             eprintln!("Retained runtime history evidence: {}", self.0.display());
         } else {
-            std::fs::remove_dir_all(&self.0).unwrap();
+            // Still a failure, never retried or ignored: something writing
+            // here after every handle was dropped means a runtime did not shut
+            // down cleanly. Name what was left so the writer can be found.
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                let mut left = Vec::new();
+                let mut pending = vec![self.0.clone()];
+                while let Some(dir) = pending.pop() {
+                    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            pending.push(path.clone());
+                        }
+                        left.push(
+                            path.strip_prefix(&self.0)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string(),
+                        );
+                    }
+                }
+                panic!(
+                    "removing {} failed: {error}; still present after every handle was dropped: {left:?}",
+                    self.0.display()
+                );
+            }
         }
     }
 }
@@ -124,6 +148,130 @@ impl Drop for Fixture {
 struct RunningTurn {
     root: PathBuf,
     thread: Option<thread::JoinHandle<Session>>,
+}
+
+const DATA_DIR_CASE: &str = "explicit_data_dir_reclaims_external_session_without_workspace_writes";
+const DATA_DIR_CHILD: &str = "SCODE_DATA_DIR_CLEANUP_CHILD";
+const DATA_DIR_ROOT: &str = "SCODE_DATA_DIR_CLEANUP_ROOT";
+
+struct CleanupClient(std::process::Child);
+
+impl Drop for CleanupClient {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn cleanup_client(root: &Path, role: &str) -> CleanupClient {
+    CleanupClient(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", DATA_DIR_CASE, "--nocapture", "--test-threads=1"])
+            .env(DATA_DIR_CHILD, role)
+            .env(DATA_DIR_ROOT, root)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn explicit_data_dir_reclaims_external_session_without_workspace_writes() {
+    std::env::set_var("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1");
+    if let Ok(role) = std::env::var(DATA_DIR_CHILD) {
+        data_dir_client(
+            &PathBuf::from(std::env::var_os(DATA_DIR_ROOT).unwrap()),
+            &role,
+        );
+        return;
+    }
+    for deletion in ["delete-journal", "delete-store"] {
+        let root = std::env::temp_dir().join(format!("scode-data-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir(root.join("external")).unwrap();
+        let _fixture = Fixture(root.clone());
+        let workspace = root.join("workspace");
+        let path = root.join("external/transcript.jsonl");
+        let seed = Session::new().with_workspace_root(&workspace);
+        std::fs::write(&path, seed.to_json().unwrap().render()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let mut owner = cleanup_client(&root, "owner");
+        wait_for(&root.join("ready"));
+        let mut deleter = cleanup_client(&root, deletion);
+        assert!(deleter.0.wait().unwrap().success());
+        assert!(root.join("deleted").exists());
+        assert!(path.exists(), "a live writer still owns the transcript");
+        assert!(!workspace.join(".scode").exists());
+        let references: Vec<_> = std::fs::read_dir(root.join("data/sessions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join(".cleanup"))
+            .collect();
+        assert_eq!(references.len(), 1);
+        assert_eq!(std::fs::read_dir(&references[0]).unwrap().count(), 1);
+        // Abrupt process death releases its native locks. No process remains
+        // that could run the deleter's in-memory scheduler.
+        owner.0.kill().unwrap();
+        owner.0.wait().unwrap();
+        assert!(path.exists());
+        let mut restarted = cleanup_client(&root, "restart");
+        assert!(restarted.0.wait().unwrap().success());
+        assert!(!path.exists());
+        assert!(path.with_extension("completions.json").exists());
+        assert_eq!(std::fs::read_dir(&references[0]).unwrap().count(), 0);
+        assert!(!workspace.join(".scode").exists());
+    }
+}
+
+fn data_dir_client(root: &Path, role: &str) {
+    let workspace = root.join("workspace");
+    #[cfg(unix)]
+    assert!(
+        std::fs::write(workspace.join("must-stay-read-only"), b"probe").is_err(),
+        "the actual test process must respect workspace write permissions"
+    );
+    let store = runtime::SessionStore::from_data_dir(root.join("data"), &workspace).unwrap();
+    let path = root.join("external/transcript.jsonl");
+    if role == "restart" {
+        let deadline = Instant::now() + WAIT;
+        while path.exists()
+            || std::fs::read_dir(store.sessions_dir().join(".cleanup"))
+                .unwrap()
+                .next()
+                .is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "ordinary startup did not reclaim the external Session"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    }
+    if role == "delete-store" {
+        store.delete_session(&path).unwrap();
+    } else {
+        let mut session = store.load_session(path.to_str().unwrap()).unwrap().session;
+        session.activate_persistence().unwrap();
+        let journal =
+            runtime::subagent_completion::CompletionJournal::open(&session, &workspace, true)
+                .unwrap();
+        if role == "owner" {
+            std::fs::write(root.join("ready"), b"ready").unwrap();
+            wait_for(&root.join("stop"));
+            drop(journal);
+            return;
+        }
+        assert_eq!(role, "delete-journal");
+        journal
+            .purge(&journal.storage_ref(), "data-dir-delete")
+            .unwrap();
+    }
+    std::fs::write(root.join("deleted"), b"deleted").unwrap();
 }
 
 #[test]
@@ -217,22 +365,24 @@ fn assert_rejected_migrations_preserve_source(
     )
     .unwrap();
     runtime::subagent_completion::CompletionJournal::purge_stored(
-        &StdFsBackend,
+        std::sync::Arc::new(StdFsBackend),
         path,
         &deleted.session_id,
         cwd,
         binding["storageRef"].as_str().unwrap(),
         "legacy-migration-deleted",
+        None,
     )
     .unwrap();
-    let mut rejected = Session::load_from_path(path).unwrap();
-    assert!(rejected
-        .activate_persistence()
+    assert!(Session::load_from_path(path)
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
-    assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
-    assert_eq!(legacy_archives(directory).as_slice(), archives);
+    assert!(!path.exists());
+    assert!(
+        legacy_archives(directory).is_empty(),
+        "owned migration backups retire with their Session"
+    );
 }
 
 fn legacy_archives(directory: &Path) -> Vec<PathBuf> {
@@ -286,6 +436,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     std::fs::create_dir(&root).unwrap();
     let fixture = Fixture(root.clone());
     let path = root.join("history.jsonl");
+    let store_root = root.join("configured-session-store");
     let seed = Session::new()
         .with_workspace_root(&root)
         .with_persistence_path(&path);
@@ -295,7 +446,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .build()
         .unwrap();
     let (mut a, requests) = runtime(
-        load(&path, false),
+        load(&path, false).with_session_store_root(&store_root),
         vec![answer("A_BEFORE_REFRESH"), answer("A_AFTER_REFRESH")],
         StaticToolExecutor::new(),
     );
@@ -315,6 +466,7 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .unwrap();
     assert!(transcript(load(&path, false).messages()).contains("B_PRIVATE_AFTER_A"));
     a.refresh_compaction_source().unwrap();
+    assert_eq!(a.session().session_store_root(), Some(store_root.as_path()));
     assert!(Arc::ptr_eq(
         &writer,
         &a.session().completion_writer().unwrap()
@@ -329,8 +481,45 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     let restored = load(&path, false);
     assert!(transcript(restored.messages()).contains("A_AFTER_REFRESH"));
     assert!(!transcript(restored.messages()).contains("B_PRIVATE_AFTER_A"));
+    let journal =
+        runtime::subagent_completion::CompletionJournal::open(a.session(), &root, true).unwrap();
+    journal
+        .purge(&journal.storage_ref(), "delete-after-refresh")
+        .unwrap();
+    assert!(store_root.join(".cleanup").is_dir());
+    assert_eq!(
+        a.refresh_compaction_source().unwrap_err().to_string(),
+        "session_deleted"
+    );
+    assert_eq!(
+        a.ensure_session_persistence_allowed()
+            .unwrap_err()
+            .to_string(),
+        "session_deleted"
+    );
+    drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
+    // Deleted while writer `a` was alive, so reclaiming the Session was left to
+    // the process-wide session-cleanup worker, which retries every second and
+    // takes file locks (creating lock files) inside this fixture. Now that the
+    // last writer has retired, the reclaim must finish: it removes the durable
+    // reference and the transcript. Removing the fixture before then raced the
+    // worker's retry (ENOTEMPTY on Linux).
+    let references = store_root.join(".cleanup");
+    let deadline = Instant::now() + WAIT;
+    while std::fs::read_dir(&references)
+        .map(|entries| entries.flatten().next().is_some())
+        .unwrap_or(false)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the deleted Session was never reclaimed after its last writer retired: {}",
+            references.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!path.exists(), "reclaim removes the deleted transcript");
     drop(fixture);
 }
 

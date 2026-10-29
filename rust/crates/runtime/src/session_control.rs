@@ -65,12 +65,10 @@ impl SessionStore {
         // not a code change to remember here.
         let sessions_root = match fs.managed_root(crate::fs_backend::ManagedRoot::Sessions) {
             Some(root) => PathBuf::from(root),
-            None => canonical_cwd
-                .join(".scode")
-                .join("sessions")
-                .join(workspace_fingerprint(&canonical_cwd)),
+            None => default_sessions_root(&canonical_cwd),
         };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
+        crate::session_cleanup::discover(Arc::clone(&fs), &sessions_root);
         Ok(Self {
             sessions_root,
             workspace_root: canonical_cwd,
@@ -114,6 +112,7 @@ impl SessionStore {
                 .join(workspace_fingerprint(&canonical_workspace)),
         };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
+        crate::session_cleanup::discover(Arc::clone(&fs), &sessions_root);
         Ok(Self {
             sessions_root,
             workspace_root: canonical_workspace,
@@ -307,7 +306,8 @@ impl SessionStore {
     ) -> Result<LoadedManagedSession, SessionControlError> {
         let handle = self.resolve_reference(reference)?;
         let session = Session::load_from_path_with(&*self.fs, &handle.path)?
-            .with_fs_backend(Arc::clone(&self.fs));
+            .with_fs_backend(Arc::clone(&self.fs))
+            .with_session_store_root(&self.sessions_root);
         self.validate_loaded_session(&handle.path, &session)?;
         Ok(LoadedManagedSession {
             handle: SessionHandle {
@@ -316,6 +316,34 @@ impl SessionStore {
             },
             session,
         })
+    }
+
+    /// Delete the resolved Session through its own backend. The runtime keeps
+    /// the durable tombstone and resumes any cleanup waiting for live clients.
+    pub fn delete_session(&self, path: &Path) -> Result<(), SessionControlError> {
+        let (session_id, cwd) =
+            crate::subagent_completion::CompletionJournal::storage_identity(self.fs.as_ref(), path)
+                .map_err(SessionControlError::Format)?;
+        let binding = crate::subagent_completion::CompletionJournal::probe(
+            self.fs.as_ref(),
+            path,
+            &session_id,
+            &cwd,
+        )
+        .map_err(SessionControlError::Format)?;
+        crate::subagent_completion::CompletionJournal::purge_stored(
+            Arc::clone(&self.fs),
+            path,
+            &session_id,
+            &cwd,
+            binding["storageRef"].as_str().ok_or_else(|| {
+                SessionControlError::Format("missing completion storage identity".into())
+            })?,
+            "native-session-delete",
+            Some(&self.sessions_root),
+        )
+        .map_err(SessionControlError::Format)?;
+        Ok(())
     }
 
     pub fn fork_session(
@@ -334,7 +362,8 @@ impl SessionStore {
             .and_then(|fork| fork.branch_name.clone());
         let forked = forked
             .with_persistence_path(handle.path.clone())
-            .with_fs_backend(Arc::clone(&self.fs));
+            .with_fs_backend(Arc::clone(&self.fs))
+            .with_session_store_root(&self.sessions_root);
         forked.save_fork_to_path(session, &handle.path)?;
         Ok(ForkedManagedSession {
             parent_session_id,
@@ -425,6 +454,17 @@ impl SessionStore {
             } else {
                 continue;
             };
+            // An unreadable binding belongs to this entry's existing load-error
+            // path, so one damaged Session cannot prevent listing healthy ones.
+            if matches!(
+                crate::subagent_completion::deleted_storage(self.fs.as_ref(), &path),
+                Ok(true)
+            ) {
+                if let Err(error) = crate::session_cleanup::resume(Arc::clone(&self.fs), &path) {
+                    tracing::warn!(%error, "Deleted Session remains queued for cleanup");
+                }
+                continue;
+            }
             let modified_epoch_millis = self
                 .fs
                 .stat(&path.to_string_lossy())
@@ -463,11 +503,7 @@ impl SessionStore {
                     }
                 }
                 Err(error) => ManagedSessionSummary {
-                    id: path
-                        .file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
+                    id: session_id_from_path(&path).unwrap_or_else(|| "unknown".into()),
                     path,
                     updated_at_ms: 0,
                     modified_epoch_millis,
@@ -506,6 +542,13 @@ pub const LATEST_SESSION_REFERENCE: &str = "latest";
 
 /// Fixed transcript member name inside a per-session directory.
 pub const TRANSCRIPT_FILE: &str = "transcript.jsonl";
+
+pub(crate) fn default_sessions_root(workspace: &Path) -> PathBuf {
+    workspace
+        .join(".scode")
+        .join("sessions")
+        .join(workspace_fingerprint(workspace))
+}
 
 /// Join the LEGACY flat on-disk name `<sessions_root>/<session_id>.<ext>`.
 /// Retained only for backward-compatible reads of sessions created before the

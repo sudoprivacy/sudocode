@@ -70,6 +70,8 @@ mod remote;
 pub mod response_archive;
 pub mod sandbox;
 mod session;
+mod session_backup;
+mod session_cleanup;
 pub mod session_control;
 pub mod session_history;
 pub mod session_writer;

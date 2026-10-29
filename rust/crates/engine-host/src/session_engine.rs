@@ -361,7 +361,7 @@ impl SessionEngine {
     pub fn open_persisted(
         cwd: &Path,
         handle: SessionHandle,
-        session: runtime::Session,
+        mut session: runtime::Session,
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
         memory: runtime::memory::MemoryMode,
@@ -378,6 +378,7 @@ impl SessionEngine {
         // Model resolution on resume follows Claude Code: the config is the
         // single source of truth. See [`resume_model_from_config_ssot`].
         let resolved_model = resume_model_from_config_ssot(model_flag_raw.as_deref(), &model);
+        session.model = Some(resolved_model.clone());
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
@@ -1299,6 +1300,7 @@ impl engine_core::EngineDelegate for SessionEngine {
         // shared journal binding before releasing the session's writer.
         let _ = self.background_tasks.clone().with_completion(None);
         let session = self.lock_session();
+        session.runtime.api_client().flush_response_captures();
         let path = session.handle.path.clone();
         if session.runtime.ensure_session_persistence_allowed().is_ok() {
             let _ = session.runtime.session().save_to_path(&path);

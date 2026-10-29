@@ -702,7 +702,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: sudoprivacy/sudograph
-          ref: 3cfe8eca3b7c463f6c2c29323b429c4af91db75a
+          ref: 15beeb830f7d30cc9f495337eca678d4604603b8
           path: .sudocode/acceptance/compiler
           persist-credentials: false
       - name: Accept installed compiler context in the actual release CLI

@@ -9,6 +9,9 @@ import type { CodexAutojoin, CodexAgentClaim } from '../src/codexAutojoin';
 const root = path.resolve(__dirname,'../..');
 const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(),'codex-autojoin-'));
+const workspaceAlias = path.join(directory,'workspace-alias');
+fs.symlinkSync(directory,workspaceAlias,'junction');
+let nativeWorkspace = workspaceAlias;
 const journal = path.join(directory,'acp.jsonl');
 const calls: Array<{method:string}> = [];
 const enrollments: CodexAgentClaim[] = [];
@@ -22,7 +25,7 @@ for(const [key,value] of Object.entries(process.env))if(value!==undefined && key
 server.on('connection',socket=>socket.on('message',bytes=>{
   const call=JSON.parse(bytes.toString());calls.push(call);
   if(call.id===undefined)return;
-  const thread={id:call.params?.threadId,cwd:directory,status:{type:'idle'},
+  const thread={id:call.params?.threadId,cwd:nativeWorkspace,status:{type:'idle'},
     parentThreadId:null as string|null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true};
   if(thread.id===ids[2]){thread.threadSource='subagent';thread.parentThreadId=ids[0];}
   if(thread.id===ids[3])thread.threadSource='guardian_review';
@@ -60,8 +63,10 @@ async function main() {
   const originalSession=owner.connectionFor(ids[0]).sessionId;
   loaded=[ids[1],ids[2],ids[3]];await owner.refresh();
   assert.throws(()=>owner!.connectionFor(ids[0]),/authenticated/);
+  nativeWorkspace=fs.realpathSync.native(directory);
   loaded=ids.slice(0,4);await owner.refresh();
   assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
+  assert.equal(enrollments[0].workspace,workspaceAlias,'canonical lookup must preserve the original issuance input');
   assert.equal(enrollments.length,2,'unload/reload reuses the committed identity/profile');
   loaded.push(ids[4],ids[5]);await owner.refresh();
   assert.equal(owner.status().find(row=>row.threadId===ids[4])?.state,'recovery_required');
@@ -88,8 +93,25 @@ async function main() {
   assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,2,'no replay on restart');
   assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
   assert.ok(!calls.some(row=>['thread/start','thread/resume','turn/start'].includes(row.method)));
+  // Accept an OS path alias, but never adopt its new target after it moves.
+  const beforeRetarget=enrollments.length;
+  const otherWorkspace=path.join(directory,'another-workspace');fs.mkdirSync(otherWorkspace);
+  loaded=loaded.filter(id=>id!==ids[0]);await owner.refresh();
+  fs.unlinkSync(workspaceAlias);fs.symlinkSync(otherWorkspace,workspaceAlias,'junction');
+  loaded.push(ids[0]);await owner.refresh();
+  assert.throws(()=>owner!.connectionFor(ids[0]),/workspace differs/);
+  loaded=loaded.filter(id=>id!==ids[0]);await owner.refresh();
+  fs.unlinkSync(workspaceAlias);fs.symlinkSync(directory,workspaceAlias,'junction');
+  loaded.push(ids[0]);await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
+  assert.equal(enrollments.length,beforeRetarget,'path recovery cannot re-enroll or change the operation');
   await owner.close();owner=undefined;
-  console.log('PASS native autojoin processes: root filtering, distinct identities, exact routing, unload/reload, restart, ambiguous enrollment, wrong actor refusal and no inference/replay');
+  const bindingFile=path.join(config.stateDirectory,ids[0]+'.json');
+  const legacy=JSON.parse(fs.readFileSync(bindingFile,'utf8'));delete legacy.canonicalWorkspace;
+  fs.writeFileSync(bindingFile,JSON.stringify(legacy));
+  await assert.rejects(connectCodexAutojoin(config),/canonical workspace; operator migration required/);
+  assert.equal(enrollments.length,beforeRetarget);
+  console.log('PASS native autojoin processes: root filtering, distinct identities, exact routing, canonical workspace alias and retarget refusal, unload/reload, restart, legacy recovery, ambiguous enrollment, wrong actor refusal and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   await owner?.close();

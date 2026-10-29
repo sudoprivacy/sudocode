@@ -104,7 +104,13 @@ has no Node, credential or issuer and cannot fulfill that deployment gate.
 ## Durable state and recovery
 
 The private binding file `<threadId>.json` contains the original actor, operation,
-workspace and state. A new random actor is independent of the native thread ID,
+workspace, canonical workspace and state. The original enrollment workspace
+bytes stay unchanged; canonical filesystem resolution accepts aliases such as
+macOS `/var` and `/private/var` across unload/resume. The frozen canonical path
+also rejects an alias redirected to another workspace. Older preview bindings
+without that field require operator migration after verifying the original
+workspace; the bridge never replaces their identity or enrollment operation.
+A new random actor is independent of the native thread ID,
 session ID and profile. The original claim is written and synced before invoking
 the adapter. Atomic replacement publishes ready profile references. POSIX also
 syncs the containing directory; this does not claim equivalent directory-sync
@@ -126,6 +132,7 @@ are not automatically replayed.
 
 For an existing fixed-session Agent, the operator may prepare a **ready** binding
 with its existing actor and ACP profile before the announced migration window.
+Set `canonicalWorkspace` from the verified workspace's native real path.
 The same actor cannot be assigned to two thread bindings. Stop the previous
 owner naturally before the new owner loads that profile. Merely installing the
 global entry does not retire a private launch-time override or old receiver.

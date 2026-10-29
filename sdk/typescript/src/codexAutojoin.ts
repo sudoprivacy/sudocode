@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { connectCodex, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
@@ -39,6 +39,8 @@ export interface CodexAutojoinConfig {
 
 type State = 'pending' | 'provisioning' | 'ready' | 'recovery_required';
 interface Binding extends CodexAgentClaim {
+  /** Freeze the resolved workspace path while preserving the original claim bytes. */
+  canonicalWorkspace: string;
   state: State;
   configFile?: string;
 }
@@ -79,6 +81,11 @@ function identifier(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f-]{36}$/.test(value);
 }
 
+function canonicalWorkspace(value: unknown): string {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) throw new Error('An absolute workspace is required');
+  return realpathSync.native(value);
+}
+
 /** One composition owner per native endpoint. The caller fences that owner;
  * individual MCP clients must not each run this inventory/receiver loop.
  * Lifetime is the loaded native root, including work that outlives a frontend.
@@ -112,6 +119,9 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   };
   for (const file of readdirSync(config.stateDirectory).filter(file => file.endsWith('.json'))) {
     const binding = JSON.parse(readFileSync(path.join(config.stateDirectory, file), 'utf8')) as Binding;
+    if (typeof binding.canonicalWorkspace !== 'string' || !path.isAbsolute(binding.canonicalWorkspace)) {
+      throw new Error(`Durable Codex binding lacks a canonical workspace; operator migration required: ${file}`);
+    }
     if (!identifier(binding.threadId) || file !== `${binding.threadId}.json` || binding.version !== 1
         || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(binding.actor) || !identifier(binding.operationId)
         || !path.isAbsolute(binding.workspace) || seenActors.has(binding.actor)
@@ -134,7 +144,8 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     let binding = bindings.get(thread.id);
     if (!binding) {
       binding = { version: 1, actor: `codex-${randomUUID().replaceAll('-', '')}`,
-        operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd, state: 'pending' };
+        operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd,
+        canonicalWorkspace: canonicalWorkspace(thread.cwd), state: 'pending' };
       // Persist the original operation BEFORE asking any enrollment authority.
       save(binding);
       bindings.set(thread.id, binding);
@@ -142,7 +153,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     const owner: Owner = { binding };
     owners.set(thread.id, owner);
     try {
-      if (binding.workspace !== thread.cwd) throw new Error('Native root workspace differs from its durable binding');
+      if (canonicalWorkspace(thread.cwd) !== binding.canonicalWorkspace
+          || canonicalWorkspace(binding.workspace) !== binding.canonicalWorkspace) {
+        throw new Error('Native root workspace differs from its durable binding');
+      }
       if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
       if (binding.state === 'pending') {
         binding.state = 'provisioning';
@@ -162,7 +176,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         }
       }
       const profile = JSON.parse(readFileSync(binding.configFile!, 'utf8')) as ScodeAcpConfig;
-      if (profile.workspace !== thread.cwd || !profile.acpSessionId?.trim()) {
+      if (canonicalWorkspace(profile.workspace) !== binding.canonicalWorkspace || !profile.acpSessionId?.trim()) {
         throw new Error('Autoconnect requires this root workspace and an existing ACP session; no fresh-session fallback');
       }
       let callback: CodexCallback | undefined;

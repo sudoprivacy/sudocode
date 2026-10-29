@@ -249,6 +249,19 @@ Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
 
+The protected runner's `acceptance_plan` is the shared source for local/CI
+responsibilities. Local check output includes `ACCEPTANCE_PLAN` JSON, signed
+receipts bind that plan, and the required `Local acceptance` status names the
+local and CI targets. Preview the current selection without running or signing
+tests with `python .github/scripts/local_acceptance.py plan`. These receipts
+establish source coverage; deployment and enrollment require separate acceptance.
+
+The metadata gate currently emits both the legacy native `checks`/`platforms`
+fields and a complete `matrix`; existing native job names remain stable. This
+allows protected metadata code to land before a later workflow/profile switch.
+SDK tests still use the package workflow's four hosts until that switch lands;
+the planner's support for SDK targets alone does not enable the mandatory profile.
+
 The ACP package workflow runs integration journeys on all four PR hosts. Main
 still builds and packages its exact merged revision on those hosts, while
 reusing the PR's integration result. A newer head cancels an obsolete package

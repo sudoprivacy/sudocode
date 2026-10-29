@@ -14,7 +14,8 @@ jobs:
   publish:
     name: Publish verified local and cross-platform acceptance
     if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group'
-    runs-on: ubuntu-latest
+    # Keep this read-only verification/publication off the busy Linux pool.
+    runs-on: windows-latest
     permissions:
       contents: read
       actions: read
@@ -27,7 +28,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Independently verify the head, signature, policy and completed run
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .github/local-acceptance/publish.py
+        run: python .github/local-acceptance/publish.py

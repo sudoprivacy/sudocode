@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import urllib.parse
 import urllib.request
 
@@ -92,7 +93,7 @@ def main():
             if run["path"].split("@")[0] != ".github/workflows/local-acceptance-publish.yml" or run["event"] != "workflow_run" or run["conclusion"] not in (None, "success"):
                 raise RuntimeError("Acceptance status was not produced by the trusted publisher")
             print(f"Carried PR #{pull['number']} {head[:12]} from publisher run {identifier}")
-        subprocess.run(["python3", str(ROOT / ".github/scripts/check_pr_history.py"),
+        subprocess.run([sys.executable, str(ROOT / ".github/scripts/check_pr_history.py"),
                         group["base_sha"], group["head_sha"]], cwd=ROOT, check=True)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
         stream.write("needed=" + ("true" if native else "false") + "\n")

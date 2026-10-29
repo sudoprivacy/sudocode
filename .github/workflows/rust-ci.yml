@@ -191,30 +191,8 @@ jobs:
       - name: Exercise real Git boundary violations and scanner failures
         run: python3 e2e/engine-boundary/run.py
 
-      - name: Resolve the locked Nexus protocol source
-        id: nexus-protocol
-        run: |
-          python3 - <<'PY'
-          import os, pathlib, re, tomllib
-          packages = tomllib.loads(pathlib.Path('rust/Cargo.lock').read_text())['package']
-          sources = {p['source'] for p in packages if p.get('source', '').startswith('git+https://github.com/nexi-lab/nexus-vfs?')}
-          if len(sources) != 1:
-              raise SystemExit('Expected exactly one locked Nexus source')
-          revision = next(iter(sources)).rsplit('#', 1)[-1]
-          if not re.fullmatch('[a-f0-9]{40}', revision):
-              raise SystemExit('Invalid locked Nexus revision')
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'revision={revision}\n')
-          PY
-      - uses: actions/checkout@v4
-        with:
-          repository: nexi-lab/nexus-vfs
-          ref: ${{ steps.nexus-protocol.outputs.revision }}
-          path: .nexus-protocol-source
-          sparse-checkout: proto/nexus/grpc/vfs
-          persist-credentials: false
-      - name: Vendored vfs.proto must match the locked Nexus revision
-        run: diff -u --strip-trailing-cr .nexus-protocol-source/proto/nexus/grpc/vfs/vfs.proto rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto
+      # The required one-nexus-vfs-pin job already resolves the single locked
+      # revision and compares these exact protocol bytes against upstream.
 
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit

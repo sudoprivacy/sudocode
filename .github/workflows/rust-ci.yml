@@ -393,12 +393,37 @@ jobs:
           path: ${{ runner.temp }}/scode-resize-logs/
           if-no-files-found: warn
 
+  shared-services:
+    if: *queue_ci
+    uses: ./.github/workflows/shared-services.yml
+
+  integration-gate:
+    # A dependency failure normally skips its dependants, and skipped required
+    # checks count as passing. Always evaluate the actual integration results.
+    if: ${{ always() && !inputs.render_performance && !inputs.live_only && !inputs.cache_only && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: [a2a-live, shared-services]
+    name: nexus-A2A live (real daemon)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every integrated service journey to succeed
+        working-directory: .
+        shell: bash
+        env:
+          A2A_RESULT: ${{ needs.a2a-live.result }}
+          SERVICES_RESULT: ${{ needs.shared-services.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$A2A_RESULT" != success || "$SERVICES_RESULT" != success ]]; then
+            echo "::error::Integrated acceptance did not succeed: A2A=$A2A_RESULT shared-services=$SERVICES_RESULT"
+            exit 1
+          fi
+
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
     # once, rather than repeating on the PR and on push/main too.
     if: *queue_ci
     needs: one-nexus-vfs-pin
-    name: nexus-A2A live (real daemon)
+    name: nexus-A2A journeys (real daemon)
     runs-on: ubuntu-latest
     env: *workspace_ci_env
     # The workflow default is `rust`; the harness lives at the repo root.

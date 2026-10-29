@@ -174,6 +174,11 @@ acceptance use the same cadence; shared-service acceptance uses Linux PR feedbac
 and all four supported hosts in the queue. Real provider acceptance stays on
 `main` and manual dispatch.
 
+The required `nexus-A2A live (real daemon)` check waits for both the real-daemon
+journeys and the reusable four-host shared-service workflow on the integrated
+commit. It explicitly fails if either result fails, is cancelled or is skipped;
+an independent optional workflow is not a merge gate.
+
 Coverage counts distinct user journeys, not repetitions across events or
 operating systems. Cache-prefix and compaction tests stay in the full workspace
 suite; they no longer run twice in one job. Standalone vendored Mermaid tests

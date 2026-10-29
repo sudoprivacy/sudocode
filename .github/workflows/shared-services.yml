@@ -8,11 +8,13 @@ on:
       - 'rust/**'
       - 'e2e/shared-services/**'
       - '.github/workflows/shared-services.yml'
-  merge_group:
+  # The required Rust CI integration gate owns queue scheduling and awaits this
+  # reusable workflow. A separate merge_group run would not block the queue.
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
-  group: shared-services-${{ github.event.pull_request.number || github.ref }}
+  group: shared-services-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

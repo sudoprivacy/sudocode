@@ -365,7 +365,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       # Seconds, no build: this is the invariant the co-host rests on, and it is
       # cheap enough to answer before anything compiles.

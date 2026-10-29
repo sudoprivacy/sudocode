@@ -21,20 +21,6 @@ on:
   push:
     tags:
       - 'nexusd-cohost-v*'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
-    paths:
-      - .github/workflows/release-nexusd-cohost.yml
-      - rust/Cargo.toml
-      - rust/Cargo.lock
-      - rust/vendor/**
-      - rust/crates/nexusd-cohost/**
-      - rust/crates/engine-acp/**
-      - rust/crates/engine-host/**
-      - rust/crates/runtime/**
-      - rust/crates/api/**
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -45,11 +31,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   build:
-    # Not on draft PRs; see the heavy-job note in rust-ci.yml.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -159,6 +145,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
 
       # `NEXUSD_BUILD_VERSION` is what `--version` prints after the binary's own
       # name, so it is where this build states which revs it carries. Without it the

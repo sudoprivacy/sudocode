@@ -1,0 +1,114 @@
+name: Local and cross-platform acceptance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proof:
+    name: Verify local acceptance
+    if: github.event_name == 'merge_group' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    outputs:
+      needed: ${{ steps.proof.outputs.needed }}
+      checks: ${{ steps.proof.outputs.checks }}
+      platforms: ${{ steps.proof.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify signed local evidence and select missing native hosts
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/local-acceptance/gate.py
+
+  native:
+    name: Complement local host (${{ matrix.os }})
+    needs: proof
+    if: needs.proof.outputs.needed == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.proof.outputs.platforms) }}
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .trusted-acceptance
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Install acceptance observer dependencies
+        run: python -m pip install psutil jsonschema
+      - name: Run the same native commands on the missing platform
+        env:
+          ACCEPTANCE_NATIVE_CHECKS: ${{ needs.proof.outputs.checks }}
+          ACCEPTANCE_BASE: ${{ github.event.pull_request.base.sha }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
+        run: python .trusted-acceptance/.github/local-acceptance/cross_platform.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cross-platform-${{ matrix.os }}
+          path: ${{ runner.temp }}/local-acceptance
+          if-no-files-found: error
+          retention-days: 7
+
+  acceptance:
+    name: Cross-platform acceptance result
+    if: always() && (github.event_name == 'merge_group' || !github.event.pull_request.draft)
+    needs: [proof, native]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require verified evidence and every applicable native job
+        env:
+          PROOF_RESULT: ${{ needs.proof.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          NATIVE_NEEDED: ${{ needs.proof.outputs.needed }}
+        run: |
+          test "$PROOF_RESULT" = success
+          if [ "$NATIVE_NEEDED" = true ]; then
+            test "$NATIVE_RESULT" = success
+          else
+            test "$NATIVE_RESULT" = skipped
+          fi

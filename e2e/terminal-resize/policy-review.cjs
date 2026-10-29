@@ -5,6 +5,16 @@ const path = require('node:path');
 const missingApproval = 'Rendering benchmark policy/harness changed. A maintainer must approve this exact commit, then rerun the gate.';
 const adminApprovalMarker = '<!-- scode-render-harness-admin-approval -->';
 
+/** Integration tests do not change the measured binary; its driver still does. */
+function affectsPerformance(name) {
+  if (name.startsWith('e2e/terminal-resize/')
+    || name === '.github/workflows/render-performance.yml'
+    || name === '.github/workflows/render-publish.yml'
+    || name.startsWith('rust/crates/rusty-sudocode-cli/tests/common/')
+    || name === 'rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs') return true;
+  return name.startsWith('rust/') && !/^rust\/crates\/[^/]+\/tests\//.test(name);
+}
+
 module.exports = async function review({ github, context, core, root, output }) {
   const { owner, repo } = context.repo;
   const policyPath = 'e2e/terminal-resize/performance-policy.json';
@@ -38,9 +48,6 @@ module.exports = async function review({ github, context, core, root, output }) 
       owner, repo, pull_number: pr.number, per_page: 100,
     });
     if (files.length !== current.data.changed_files) throw new Error('incomplete PR file list');
-    const affectsPerformance = name => name.startsWith('rust/')
-      || name.startsWith('e2e/terminal-resize/') || name === '.github/workflows/render-performance.yml'
-      || name === '.github/workflows/render-publish.yml';
     isNeeded = files.some(file => affectsPerformance(file.filename)
       || (file.previous_filename && affectsPerformance(file.previous_filename)));
     const protectedPath = name => name === '.github/workflows/render-performance.yml'

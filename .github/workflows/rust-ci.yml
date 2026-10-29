@@ -37,7 +37,7 @@ on:
       - spec/cache_usage_fixtures.json
       - spec/cache_usage_fixtures.schema.json
   pull_request:
-    # `ready_for_review` starts the full run when a draft is marked ready.
+    # Native suites run through local-acceptance plus complementary hosts.
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
@@ -71,19 +71,22 @@ on:
       - spec/prompt_cache_observations.json
       - spec/cache_usage_fixtures.json
       - spec/cache_usage_fixtures.schema.json
-  # The merge queue tests the group that will become main: no path filter,
-  # every required check reports.
+  # Keep integrity checks and the real daemon on the integrated queue tree.
   merge_group:
   workflow_dispatch:
     inputs:
-      render_performance:
-        description: 'Run release rendering calibration before enabling the required gate'
-        type: boolean
-        default: false
       live_only:
         description: 'Run genuine ACP and Linux/Windows model acceptance only; normal PR gates remain unchanged'
         type: boolean
         default: false
+      cache_only:
+        description: 'Validate dependency cache publication without E2E or provider calls'
+        type: boolean
+        default: false
+      cache_linux_only:
+        description: 'Limit manual cache validation to Linux'
+        type: boolean
+        default: true
 
 concurrency:
   group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -97,18 +100,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rendering-calibration:
-    if: github.event_name == 'workflow_dispatch' && inputs.render_performance
-    permissions:
-      contents: read
-      pull-requests: read
-      statuses: write
-    uses: ./.github/workflows/render-performance.yml
+  dependency-cache:
+    # Main has an independent publisher that survives a newer main push.
+    # Manual cache-only runs validate miss/hit in their own branch scope.
+    if: github.event_name == 'workflow_dispatch' && inputs.cache_only
+    uses: ./.github/workflows/ci-dependency-cache.yml
     with:
-      profile: core
+      linux_only: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_linux_only }}
 
   release-mirror:
-    if: &standard_ci ${{ !inputs.render_performance && !inputs.live_only }}
+    if: &standard_ci ${{ !inputs.live_only && !inputs.cache_only }}
     name: release mirror recovery
     runs-on: ubuntu-latest
     defaults:
@@ -146,9 +147,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check generated cache metrics
@@ -218,192 +216,17 @@ jobs:
       - name: Vendored vfs.proto must match the locked Nexus revision
         run: diff -u --strip-trailing-cr .nexus-protocol-source/proto/nexus/grpc/vfs/vfs.proto rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto
 
-  test-workspace:
-    # Heavy jobs skip draft PRs: agents iterate on drafts, and every push
-    # cancelled a run that had already spent its runner time. A skipped matrix
-    # job never expands its name, so the per-OS required checks stay "expected"
-    # on a draft instead of reporting success. Marking the PR ready runs them
-    # on the same commit, and the merge queue runs them again on the commit
-    # that becomes main.
-    if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    name: cargo test --workspace (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    env:
-      SCODE_TEST_BACKEND: mock
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps: &test_workspace_steps
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Reuse unchanged CLI builds and refresh Git metadata
-        env:
-          BUILD_METADATA_EVIDENCE: ${{ runner.temp }}/scode-build-metadata
-        run: python ../e2e/build-metadata/run.py
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-      - name: Widen the Windows ephemeral port range
-        # The PTY steps run back to back on one VM, and every mock server binds
-        # 127.0.0.1:0. Ports left in TIME_WAIT accumulate across steps until
-        # Windows' default 16,384-port dynamic range runs out, and bind fails
-        # with WSAENOBUFS (10055) in whichever test happens to be next — as it
-        # did in a merge-queue group, ejecting an unrelated PR. Raise the
-        # ceiling once for the job rather than retrying binds in every test.
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 set dynamicport tcp start=10000 num=55535
-          netsh int ipv4 show dynamicport tcp
-      - name: Pinned Codex Mermaid upstream tests
-        # The pinned upstream crate has a standalone lockfile and is excluded
-        # from workspace membership. Keep its original suite in every OS gate.
-        # This step shares the existing cache and adds no separate CI job.
-        run: cargo test --locked --manifest-path vendor/codex-mermaid/Cargo.toml --target-dir target
-      - name: PTY native bracketed paste
-        # Run the complete input journey on the actual OS PTY, including
-        # ConPTY. A platform exclusion cannot count as Windows acceptance.
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test -p rusty-sudocode-cli --test pty_bracketed_paste -- --nocapture
-      - name: PTY prefix and scoped-context contract
-        # Exercise the real CLI and capture its final HTTP requests. Pin the
-        # mock transport so a live-backend override cannot skip these checks.
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety -- --nocapture
-      - name: PTY sub-agent resume and completion workflow
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_subagent_workflow -- --nocapture
-      - name: PTY host takeover and explicit return of tool control
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test -p rusty-sudocode-cli --test pty_tool_pause -- --nocapture
-      - name: PTY default code colors match Codex
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_codex_colors --test pty_text_layout -- --nocapture
-      - name: PTY Markdown plan review and automatic execution
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --workspace --test pty_plan_markdown -- --nocapture
-      - name: PTY explicit default model overrides configuration
-        # This checks CLI precedence and the actual request model, independent
-        # of a provider's file-tool decisions or availability.
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test -p rusty-sudocode-cli --test pty_model_flag_priority -- --test-threads=1 --nocapture
-      - name: Stderr capture handoff under pipe backpressure
-        run: cargo test -p rusty-sudocode-cli --test stderr_capture_process -- --nocapture
-      - name: Run workspace tests
-        # Keep panic diagnostics visible if a Windows PTY aborts before libtest
-        # can print its captured failure output.
-        env:
-          RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
-        run: cargo test --workspace --features engine-acp/mailbox
-
-  test-workspace-macos:
-    # macOS is the scarcest runner pool (about 5 slots shared by every
-    # sudoprivacy repo). It runs in the merge queue and on main, never on a
-    # pull request: nothing reaches main without passing it on the exact
-    # merge commit, and the queue cannot be bypassed. On a pull request the
-    # job is skipped by `if`, which still reports the required check (as
-    # skipped) without allocating a runner. Same steps as `test-workspace`.
-    if: ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' }}
-    name: cargo test --workspace (macos-latest)
-    runs-on: macos-latest
-    steps: *test_workspace_steps
-
-  terminal-resize:
-    if: *full_ci
-    name: Real terminal resize (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install the pinned Unix terminal model
-        if: runner.os != 'Windows'
-        working-directory: .
-        run: npm ci --prefix e2e/terminal-resize
-      - name: Cache the pinned Windows terminal host
-        if: runner.os == 'Windows'
-        id: terminal-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/scode-terminal-host
-          key: scode-terminal-windows-x64-07f806f999227108933c2e30515b26eecc1fda74
-      - name: Install the pinned Windows terminal host
-        if: runner.os == 'Windows' && steps.terminal-cache.outputs.cache-hit != 'true'
-        working-directory: .
-        shell: pwsh
-        run: python e2e/terminal-resize/setup_windows.py "$env:RUNNER_TEMP/scode-terminal-host"
-      - name: Verify bounded downloads and checksum rejection with the real archive
-        if: runner.os == 'Windows'
-        working-directory: .
-        shell: pwsh
-        run: python e2e/terminal-resize/check_windows_setup.py "$env:RUNNER_TEMP/scode-terminal-host/host.zip"
-      - name: Select the Windows terminal runtime
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "SCODE_TERMINAL_HOST=$env:RUNNER_TEMP/scode-terminal-host/Code.exe" >> $env:GITHUB_ENV
-          "SCODE_TERMINAL_MODULES=$env:RUNNER_TEMP/scode-terminal-host/07f806f999/resources/app/node_modules.asar" >> $env:GITHUB_ENV
-      - name: Preserve history and input through actual PTY resize
-        env:
-          SCODE_TEST_BACKEND: mock
-          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
-        run: cargo test -p rusty-sudocode-cli --test pty_chrome_resize -- --ignored --nocapture
-      - name: Preserve streaming prose handoff, native history and drafts
-        env:
-          SCODE_TEST_BACKEND: mock
-          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
-        run: cargo test -p rusty-sudocode-cli --test pty_prose_preview -- --ignored --nocapture
-      - name: Answer palette queries through the ready Unix terminal peer
-        if: runner.os != 'Windows'
-        env:
-          SCODE_TEST_BACKEND: mock
-          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
-        run: cargo test -p rusty-sudocode-cli --test pty_codex_colors -- --ignored --nocapture
-      - name: Preserve full review documents in native scrollback
-        env:
-          SCODE_TEST_BACKEND: mock
-          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
-        run: cargo test -p rusty-sudocode-cli --test pty_review_scrollback -- --ignored --nocapture
-      - name: Retain terminal buffer and wire traces
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scode-terminal-resize-${{ matrix.os }}
-          path: ${{ runner.temp }}/scode-resize-logs/
-          if-no-files-found: warn
-
   a2a-live:
-    if: *full_ci
+    # The real daemon and cross-node journeys gate the integrated queue commit
+    # once, rather than repeating on the PR and on push/main too.
+    if: github.event_name == 'merge_group'
     needs: one-nexus-vfs-pin
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     # The workflow default is `rust`; the harness lives at the repo root.
     defaults:
       run:
@@ -414,6 +237,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
       # The one thing unit tests structurally cannot reach: an envelope moving
       # through a real gRPC server and a real DT_STREAM, and a blocking tail
       # woken by a real write. `ensure_inbox` shipped broken for exactly that
@@ -610,128 +436,6 @@ jobs:
           fi
           echo "vendored vfs.proto matches pinned nexus-vfs $NEXUS_PROTO_COMMIT"
 
-  bench-compile:
-    if: *full_ci
-    name: cargo bench --no-run (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-      - name: Compile benches (catches API drift without paying full sample cost)
-        run: cargo bench --workspace --no-run
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build release CLI for startup acceptance
-        run: cargo build --release -p rusty-sudocode-cli --bin scode
-      - name: PTY response logs preserve release streaming and resume
-        env:
-          SCODE_TEST_BACKEND: mock
-        run: cargo test --release -p rusty-sudocode-cli --test pty_model_stream_close raw_stream_capture_keeps_streaming_and_resume_responsive -- --exact --nocapture
-      - uses: actions/setup-node@v4
-        if: runner.os == 'Linux'
-        with:
-          node-version: '22'
-      - name: Install the shared terminal observer for the viewport experiment
-        if: runner.os == 'Linux'
-        run: npm ci --prefix ../e2e/terminal-resize
-      - name: Compile the explicit viewport measurement driver
-        if: runner.os == 'Linux'
-        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport --no-run --message-format=json-render-diagnostics > target/prompt-viewport-driver.jsonl
-      - name: Install the browser for viewport painting and native selection
-        if: runner.os == 'Linux'
-        run: ../e2e/terminal-resize/node_modules/.bin/playwright install --with-deps chromium
-      - name: Verify viewport painting, wheel input and native selection
-        if: runner.os == 'Linux'
-        env:
-          SCODE_VIEWPORT_MEASURE_DIR: ${{ runner.temp }}/prompt-viewport-browser
-        run: cargo test --release --locked -p rusty-sudocode-cli --test pty_prompt_viewport viewport_browser_interaction -- --ignored --exact --nocapture
-      - name: Compare the opt-in viewport against normal input with unchanged budgets
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          driver=$(python -c 'import json; from pathlib import Path; records=[json.loads(line) for line in Path("target/prompt-viewport-driver.jsonl").read_text().splitlines()]; paths=[row["executable"] for row in records if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="pty_prompt_viewport" and row.get("executable")]; assert len(paths)==1, paths; print(paths[0])')
-          python ../scripts/benchmark_prompt_viewport.py --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-measurements"
-          python ../scripts/benchmark_prompt_viewport.py --observer browser --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-browser-comparison"
-      - name: Retain viewport samples and failed terminal traces
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: prompt-viewport-measurements
-          path: ${{ runner.temp }}/prompt-viewport-measurements/
-          # Both successful screenshots and original failures are reviewable.
-          if-no-files-found: warn
-      - name: Retain viewport browser screenshots and selection evidence
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: prompt-viewport-browser
-          path: ${{ runner.temp }}/prompt-viewport-browser/
-          if-no-files-found: warn
-      - name: Retain paired browser CPU, memory and painted-key measurements
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: prompt-viewport-browser-comparison
-          path: ${{ runner.temp }}/prompt-viewport-browser-comparison/
-          if-no-files-found: warn
-      - name: Check complete process startup budget
-        shell: bash
-        run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100 --report target/startup.json
-      - name: Retain Windows release CLI for local acceptance
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: scode-windows-ci-${{ github.sha }}
-          path: rust/target/release/scode.exe
-          if-no-files-found: error
-          retention-days: 3
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: startup-${{ matrix.os }}
-          path: rust/target/startup.json
-          if-no-files-found: warn
-
-  clippy-workspace:
-    if: *full_ci
-    name: cargo clippy --workspace (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps: &clippy_workspace_steps
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-      - name: Run workspace clippy
-        run: cargo clippy --workspace
-
-  clippy-workspace-macos:
-    # macOS is the scarcest runner pool (about 5 slots shared by every
-    # sudoprivacy repo). It runs in the merge queue and on main, never on a
-    # pull request: nothing reaches main without passing it on the exact
-    # merge commit, and the queue cannot be bypassed. On a pull request the
-    # job is skipped by `if`, which still reports the required check (as
-    # skipped) without allocating a runner. Same steps as `clippy-workspace`.
-    if: ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' }}
-    name: cargo clippy --workspace (macos-latest)
-    runs-on: macos-latest
-    steps: *clippy_workspace_steps
-
   live-api-smoke:
     name: Live API smoke test
     timeout-minutes: 30
@@ -743,11 +447,13 @@ jobs:
     # can only be started by someone with write access, so the token secret is
     # never exposed to a fork's code.
     if: >-
-      !inputs.render_performance &&
+      !inputs.cache_only &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
       SUDOCODE_API_READ_TIMEOUT: &live_idle_seconds '90'
       SCODE_LIVE_MODEL: &live_model gpt-6-luna
       # The native credential selects a verified provider independently of GPT.
@@ -760,6 +466,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
       - name: Inspect the provider's real usage contract
         working-directory: .
         env:
@@ -841,7 +550,7 @@ jobs:
 
   provider-probe-contract:
     name: Live provider probe contract
-    if: ${{ !inputs.render_performance }}
+    if: ${{ !inputs.cache_only }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -856,7 +565,7 @@ jobs:
   live-model-pty:
     name: Live model PTY (${{ matrix.os }})
     if: >-
-      !inputs.render_performance &&
+      !inputs.cache_only &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     strategy:
@@ -866,6 +575,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
       PROXY_BASE_URL: https://api.sudorouter.ai/v1
       SCODE_TEST_BACKEND: live
       SUDOCODE_API_READ_TIMEOUT: *live_idle_seconds
@@ -882,6 +593,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
       - name: Configure the live provider profiles
         shell: bash
         env:

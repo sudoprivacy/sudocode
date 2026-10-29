@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "repository": "sudoprivacy/sudocode",
+  "namespace": "sudocode-local-acceptance",
+  "checks": {
+    "preflight": {
+      "include": [
+        "**"
+      ]
+    },
+    "guard-contract": {
+      "include": [
+        ".github/local-acceptance/**",
+        ".github/scripts/local_acceptance.py",
+        "e2e/local-acceptance/**",
+        "spec/local_acceptance*.json",
+        ".github/workflows/local-acceptance*.yml"
+      ]
+    },
+    "native-workspace": {
+      "include": [
+        "rust/**",
+        "e2e/**"
+      ],
+      "exclude": [
+        "e2e/local-acceptance/**",
+        "**/*.md"
+      ]
+    },
+    "native-resize": {
+      "include": [
+        "rust/crates/rusty-sudocode-cli/src/**",
+        "rust/crates/engine-core/src/**",
+        "rust/crates/rusty-sudocode-cli/tests/pty_chrome_resize.rs",
+        "rust/crates/rusty-sudocode-cli/tests/pty_prose_preview.rs",
+        "rust/crates/rusty-sudocode-cli/tests/pty_review_scrollback.rs",
+        "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "e2e/terminal-resize/**",
+        "rust/Cargo.lock"
+      ],
+      "exclude": [
+        "**/*.md"
+      ]
+    },
+    "rendering": {
+      "include": [
+        "rust/Cargo.toml",
+        "rust/Cargo.lock",
+        "rust/.cargo/**",
+        "rust/crates/*/Cargo.toml",
+        "rust/crates/*/build.rs",
+        "rust/crates/*/src/**",
+        "rust/vendor/**",
+        "rust/crates/rusty-sudocode-cli/src/**",
+        "rust/crates/engine-core/src/**",
+        "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs",
+        "rust/crates/rusty-sudocode-cli/Cargo.toml",
+        "e2e/terminal-resize/**"
+      ],
+      "exclude": [
+        "**/*.md"
+      ]
+    },
+    "browser": {
+      "include": [
+        "rust/Cargo.toml",
+        "rust/Cargo.lock",
+        "rust/.cargo/**",
+        "rust/crates/*/Cargo.toml",
+        "rust/crates/*/build.rs",
+        "rust/crates/*/src/**",
+        "rust/vendor/**",
+        "rust/crates/rusty-sudocode-cli/src/**",
+        "rust/crates/engine-core/src/**",
+        "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
+        "rust/crates/rusty-sudocode-cli/Cargo.toml",
+        "e2e/terminal-resize/**"
+      ],
+      "exclude": [
+        "**/*.md"
+      ]
+    },
+    "native-release": {
+      "include": [
+        "rust/Cargo.toml",
+        "rust/Cargo.lock",
+        "rust/.cargo/**",
+        "rust/crates/*/Cargo.toml",
+        "rust/crates/*/build.rs",
+        "rust/crates/*/src/**",
+        "rust/vendor/**",
+        "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
+        "e2e/startup/**"
+      ],
+      "exclude": [
+        "**/*.md"
+      ]
+    },
+    "native-services": {
+      "include": [
+        "rust/Cargo.toml",
+        "rust/Cargo.lock",
+        "rust/.cargo/**",
+        "rust/crates/*/Cargo.toml",
+        "rust/crates/*/build.rs",
+        "rust/crates/*/src/**",
+        "rust/vendor/**",
+        "e2e/shared-services/**"
+      ],
+      "exclude": [
+        "**/*.md"
+      ]
+    },
+    "native-cohost": {
+      "include": [
+        "rust/Cargo.toml",
+        "rust/Cargo.lock",
+        "rust/vendor/**",
+        "rust/crates/nexusd-cohost/**",
+        "rust/crates/engine-acp/**",
+        "rust/crates/engine-host/**",
+        "rust/crates/runtime/**",
+        "rust/crates/api/**"
+      ],
+      "exclude": [
+        "rust/crates/*/tests/**",
+        "**/*.md"
+      ]
+    }
+  }
+}

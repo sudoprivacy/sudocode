@@ -86,6 +86,13 @@ function canonicalWorkspace(value: unknown): string {
   return realpathSync.native(value);
 }
 
+function assertWorkspace(binding: Binding, workspace: unknown): void {
+  if (canonicalWorkspace(workspace) !== binding.canonicalWorkspace
+      || canonicalWorkspace(binding.workspace) !== binding.canonicalWorkspace) {
+    throw new Error('Native root workspace differs from its durable binding');
+  }
+}
+
 /** One composition owner per native endpoint. The caller fences that owner;
  * individual MCP clients must not each run this inventory/receiver loop.
  * Lifetime is the loaded native root, including work that outlives a frontend.
@@ -153,10 +160,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     const owner: Owner = { binding };
     owners.set(thread.id, owner);
     try {
-      if (canonicalWorkspace(thread.cwd) !== binding.canonicalWorkspace
-          || canonicalWorkspace(binding.workspace) !== binding.canonicalWorkspace) {
-        throw new Error('Native root workspace differs from its durable binding');
-      }
+      assertWorkspace(binding,thread.cwd);
       if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
       if (binding.state === 'pending') {
         binding.state = 'provisioning';
@@ -176,7 +180,8 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         }
       }
       const profile = JSON.parse(readFileSync(binding.configFile!, 'utf8')) as ScodeAcpConfig;
-      if (canonicalWorkspace(profile.workspace) !== binding.canonicalWorkspace || !profile.acpSessionId?.trim()) {
+      assertWorkspace(binding,profile.workspace);
+      if (!profile.acpSessionId?.trim()) {
         throw new Error('Autoconnect requires this root workspace and an existing ACP session; no fresh-session fallback');
       }
       let callback: CodexCallback | undefined;
@@ -202,7 +207,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       owner.callback = callback;
       for(const notification of pending)callback.receive(notification);
       void connection.exited.then(exit => {
-        owner.error = `Owned scode exited ${exit.code}/${exit.signal}; no automatic task or send replay`;
+        owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; no automatic task or send replay`;
       });
       if (closed) await stopOwner(owner);
     } catch (error) {
@@ -230,10 +235,17 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         }
       }
       for (const id of loaded) {
-        if (closed || owners.has(id)) continue;
+        if (closed) break;
+        const owner = owners.get(id);
+        if (owner?.error) continue;
         const {thread} = await native.request<{thread: Thread}>('thread/read', {threadId:id,includeTurns:false});
         if (thread.id !== id || !path.isAbsolute(thread.cwd)) throw new Error('Native inventory identity mismatch');
-        if (rootThread(thread)) await open(thread);
+        if (!rootThread(thread)) {
+          if (owner) {owners.delete(id);await stopOwner(owner);}
+        } else if (owner) {
+          try {assertWorkspace(owner.binding,thread.cwd);}
+          catch (error) {owner.error=String(error);await stopOwner(owner);report(error);}
+        } else await open(thread);
       }
       inventoryError = undefined;
     }).catch(error=>{inventoryError=String(error);report(error);});

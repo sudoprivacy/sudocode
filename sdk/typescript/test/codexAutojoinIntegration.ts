@@ -103,6 +103,12 @@ async function main() {
   // Accept an OS path alias, but never adopt its new target after it moves.
   const beforeRetarget=enrollments.length;
   const otherWorkspace=path.join(directory,'another-workspace');fs.mkdirSync(otherWorkspace);
+  nativeWorkspace=otherWorkspace;await owner.refresh();
+  assert.throws(()=>owner!.connectionFor(ids[0]),/workspace differs/,'cached connections must not bypass workspace binding');
+  nativeWorkspace=fs.realpathSync.native(directory);
+  loaded=loaded.filter(id=>id!==ids[0]&&id!==ids[1]);await owner.refresh();
+  loaded.push(ids[0],ids[1]);await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
   loaded=loaded.filter(id=>id!==ids[0]);await owner.refresh();
   fs.unlinkSync(workspaceAlias);fs.symlinkSync(otherWorkspace,workspaceAlias,'junction');
   loaded.push(ids[0]);await owner.refresh();

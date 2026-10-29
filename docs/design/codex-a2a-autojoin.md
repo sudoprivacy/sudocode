@@ -110,8 +110,10 @@ The private binding file `<threadId>.json` contains the original actor, operatio
 workspace, canonical workspace and state. The original enrollment workspace
 bytes stay unchanged; canonical filesystem resolution accepts aliases such as
 macOS `/var` and `/private/var` across unload/resume. The frozen canonical path
-also rejects an alias redirected to another workspace. Older preview bindings
-without that field require operator migration after verifying the original
+also rejects an alias redirected to another workspace.
+The shared inventory refresh applies the same workspace check to cached
+connections before admitting another tool, not only during first attachment.
+Older preview bindings without that field require operator migration after verifying the original
 workspace; the bridge never replaces their identity or enrollment operation.
 A new random actor is independent of the native thread ID,
 session ID and profile. The original claim is written and synced before invoking

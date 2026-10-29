@@ -96,6 +96,73 @@ def selected(policy, paths):
                    for p in paths)]
 
 
+NATIVE_TARGETS = {
+    "linux": {"system": "linux", "runner": "ubuntu-latest", "label": "Linux"},
+    "linux-x64": {"system": "linux", "architecture": "x64", "runner": "ubuntu-latest", "label": "Linux x64"},
+    "linux-arm64": {"system": "linux", "architecture": "arm64", "runner": "ubuntu-24.04-arm", "label": "Linux ARM64"},
+    "macos": {"system": "macos", "runner": "macos-latest", "label": "macOS"},
+    "windows": {"system": "windows", "runner": "windows-latest", "label": "Windows"},
+}
+DEFAULT_NATIVE_TARGETS = ["linux", "macos", "windows"]
+
+
+def acceptance_plan(policy, names, author):
+    """One plan drives local receipts, missing-host CI and agent-visible reports."""
+    architecture = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(
+        author["architecture"].lower(), author["architecture"].lower())
+    if author["system"] not in {"linux", "macos", "windows"}:
+        raise RuntimeError("Unknown author platform; no CI coverage may be inferred")
+    jobs = {}
+    local_targets = []
+    for name in names:
+        if not name.startswith("native-"):
+            continue
+        targets = policy["checks"][name].get("targets", DEFAULT_NATIVE_TARGETS)
+        if not isinstance(targets, list) or not targets or any(not isinstance(target, str) for target in targets):
+            raise RuntimeError(f"Invalid acceptance targets for {name}")
+        if len(targets) != len(set(targets)):
+            raise RuntimeError(f"Duplicate acceptance targets for {name}")
+        covered = []
+        for identifier in targets:
+            if identifier not in NATIVE_TARGETS:
+                raise RuntimeError(f"Unknown acceptance target: {identifier}")
+            target = NATIVE_TARGETS[identifier]
+            if target["system"] == author["system"] and target.get("architecture", architecture) == architecture:
+                covered.append(identifier)
+                continue
+            family = "sdk" if name == "native-sdk" else "native"
+            key = family, target["runner"]
+            if key not in jobs:
+                jobs[key] = {"os": target["runner"], "family": family, "checks": [], "targets": [],
+                             "name": (f"Complement local host ({target['runner']})" if family == "native" else
+                                      f"Complement local host ({family}, {target['runner']})"),
+                             "node": "20" if family == "sdk" else "22", "timeout": 15 if family == "sdk" else 90}
+            if name not in jobs[key]["checks"]:
+                jobs[key]["checks"].append(name)
+            if identifier not in jobs[key]["targets"]:
+                jobs[key]["targets"].append(identifier)
+        if not covered:
+            raise RuntimeError(f"Author host does not cover a required target of {name}: {author}")
+        local_targets.append({"check": name, "targets": covered})
+    return {"version": 1, "scope": "source-acceptance", "author": author,
+            "local_checks": list(names), "local_targets": local_targets,
+            "ci": list(jobs.values()), "deployment_verified": False}
+
+
+def report_plan(plan):
+    label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
+    lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
+    for job in plan["ci"]:
+        lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
+                     f"{', '.join(job['checks'])} ({job['os']})")
+    lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
+    print("\n".join(lines), flush=True)
+    print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+            stream.write("## Acceptance responsibilities\n\n" + "\n".join("- " + line for line in lines) + "\n")
+
+
 def clean(head):
     if value("rev-parse", "HEAD") != head:
         raise RuntimeError("HEAD changed during acceptance")
@@ -341,6 +408,10 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
         for command in commands:
             if command.get("exit_code") != 0 or not command.get("command") or len(command.get("log_sha256", "")) != 64:
                 raise RuntimeError(f"Incomplete/failed command in {name}")
+    plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
+    if receipt.get("plan", plan) != plan:
+        raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
+    report_plan(plan)
     print(f"Verified {head[:12]} on {signer['platform']} ({signer_id}): {', '.join(required)}", flush=True)
     return receipt
 
@@ -393,6 +464,8 @@ def check(args):
     needed = selected(load_policy(policy_ref), changed_paths(base, head))
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
+    plan = acceptance_plan(load_policy(policy_ref), needed, host())
+    report_plan(plan)
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
@@ -402,6 +475,7 @@ def check(args):
     if output == ROOT or ROOT in output.parents:
         raise RuntimeError("Keep acceptance outputs outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
+    (output / "plan.json").write_bytes(canonical(plan))
     profiles = output / "protected_profiles.py"
     profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
     spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
@@ -416,7 +490,7 @@ def check(args):
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
                "commands_sha256": commands_hash(policy_ref),
-               "finished_at": int(time.time()), "checks": results}
+               "finished_at": int(time.time()), "checks": results, "plan": plan}
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))
     signature = payload.with_suffix(".json.sig")
@@ -598,11 +672,14 @@ def main():
     global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="operation", required=True)
-    for name in ["check", "verify"]:
+    for name in ["check", "verify", "plan"]:
         command = sub.add_parser(name)
         command.add_argument("--head")
         command.add_argument("--base", default="origin/main")
         command.add_argument("--policy-ref", default="origin/main")
+        if name == "plan":
+            command.add_argument("--host", choices=["linux", "macos", "windows"])
+            command.add_argument("--architecture")
         if name == "check":
             command.add_argument("--output")
             command.add_argument("--publish", action="store_true")
@@ -626,7 +703,18 @@ def main():
         # Installed runners live outside a worktree. Their caller's checkout,
         # not the installation directory, supplies the exact tested sources.
         ROOT = Path(value("rev-parse", "--show-toplevel", root=Path.cwd()))
-        if args.operation == "verify":
+        if args.operation == "plan":
+            head = value("rev-parse", args.head or "HEAD")
+            base = value("merge-base", args.base, head)
+            author = host()
+            if args.host:
+                author["system"] = args.host
+            if args.architecture:
+                author["architecture"] = args.architecture
+            report_plan(acceptance_plan(load_policy(args.policy_ref),
+                        selected(load_policy(args.policy_ref), changed_paths(base, head)), author))
+            print("Preview only: a plan is not a successful or signed test result.")
+        elif args.operation == "verify":
             head = value("rev-parse", args.head or "HEAD")
             trusted = args.policy_ref
             policy_ref = authorized_policy(head, args.base, trusted) if trusted == "origin/main" else trusted

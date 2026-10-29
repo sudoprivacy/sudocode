@@ -700,6 +700,41 @@ jobs:
           name: startup-${{ matrix.os }}
           path: rust/target/startup.json
           if-no-files-found: warn
+      - name: Compare renderer changes with the viewport enabled in both builds
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          VIEWPORT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # Run after candidate acceptance. Reuse the build directory only after
+        # freezing the candidate and driver; no later step builds or tests it.
+        run: |
+          set -euo pipefail
+          [[ "$VIEWPORT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$VIEWPORT_BASE_SHA"
+          base_dependency=$(git show "$VIEWPORT_BASE_SHA:rust/crates/rusty-sudocode-cli/Cargo.toml" | rg '^iocraft\s*=')
+          candidate_dependency=$(rg '^iocraft\s*=' crates/rusty-sudocode-cli/Cargo.toml)
+          if [[ "$base_dependency" == "$candidate_dependency" ]] && git diff --quiet "$VIEWPORT_BASE_SHA" HEAD -- 'crates/rusty-sudocode-cli/src/render*' 'crates/rusty-sudocode-cli/src/repl_ui*'; then
+            echo 'Renderer inputs are unchanged; source comparison is not needed.'
+            exit 0
+          fi
+          candidate="$RUNNER_TEMP/scode-viewport-candidate"
+          cp target/release/scode "$candidate"
+          driver=$(python -c 'import json; from pathlib import Path; rows=[json.loads(line) for line in Path("target/prompt-viewport-driver.jsonl").read_text().splitlines()]; paths=[row["executable"] for row in rows if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="pty_prompt_viewport" and row.get("executable")]; assert len(paths)==1, paths; print(paths[0])')
+          cp "$driver" "$RUNNER_TEMP/scode-viewport-driver"
+          base_tree="$RUNNER_TEMP/scode-viewport-base"
+          git worktree add --detach "$base_tree" "$VIEWPORT_BASE_SHA"
+          cargo build --release --locked --manifest-path "$base_tree/rust/Cargo.toml" --target-dir "$PWD/target" -p rusty-sudocode-cli --bin scode
+          python ../scripts/benchmark_prompt_viewport.py --baseline target/release/scode --binary "$candidate" --driver "$RUNNER_TEMP/scode-viewport-driver" --output "$RUNNER_TEMP/prompt-viewport-source-headless"
+          python ../scripts/benchmark_prompt_viewport.py --observer browser --baseline target/release/scode --binary "$candidate" --driver "$RUNNER_TEMP/scode-viewport-driver" --output "$RUNNER_TEMP/prompt-viewport-source-browser"
+      - name: Retain renderer before and after samples
+        if: always() && runner.os == 'Linux' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-source-comparison
+          path: |
+            ${{ runner.temp }}/prompt-viewport-source-headless/
+            ${{ runner.temp }}/prompt-viewport-source-browser/
+          if-no-files-found: warn
 
   clippy-workspace:
     if: *full_ci

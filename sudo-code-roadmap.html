@@ -2032,7 +2032,7 @@ namespace for the new TUI work.</p>
 
 <section id="prompt-viewport-experiment">
 <h5>Bounded inline prompt viewport experiment — 2026-10-27</h5>
-<p><strong>Experimental; not validated or enabled by default.</strong> Reviewing an
+<p><strong>Experimental; off by default.</strong> Reviewing an
 earlier answer while composing a queued follow-up currently moves the editor out
 of view in native terminal scrollback. Evaluate an opt-in inline conversation
 viewport with a fixed composer, a
@@ -2047,6 +2047,10 @@ not approval for dashboards, split panes, a new renderer dependency or a
   do not enter alternate-screen mode.</li>
   <li>Keep immutable rendered history in a disposable disk spool, with bounded
   visible-row caches. Typing must not scan or rewrap accumulated history.</li>
+  <li>Retain unchanged renderer layout and prepared styled-text lines, with
+  explicit cache limits and invalidation for content, styles and width.
+  Measure the enabled feature before and after optimization, as well as
+  enabled/disabled costs; preserve the four visual effects and existing budgets.</li>
   <li>Anchor reading to content while new output arrives. Keep prompt headers
   presentation-only and preserve the draft through scroll and resize.</li>
   <li>Reuse semantic prompt styling and the existing Unicode/ANSI layout code;

@@ -111,6 +111,17 @@ def run(args, root):
         return {zone: grpc('GetClusterInfo', {'zone_id': zone}, True)
                 for zone in ['root', 'sharedzone', '__control__']}
 
+    def initial_readiness():
+        members = membership()
+        # Membership is available while bootstrap is still publishing mounts.
+        # Load the actual replicated prefix inside the existing startup budget
+        # before the first business write gets its independent RPC deadline.
+        prefix = grpc('Stat', {'path': '/agents'})
+        if not prefix.get('found') or not prefix.get('isDirectory'):
+            return None
+        presence = grpc('ZoneStatus', {'zone_id': 'sharedzone'}, zones=True).get('presence')
+        return members if presence == 'RESIDENT' else None
+
     def cli(arguments, expected=True, environment=None):
         result = subprocess.run([str(args.scode), *arguments], env=environment or env,
             cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=55)
@@ -135,7 +146,7 @@ def run(args, root):
 
     try:
         wait_until(lambda: data.joinpath('tls/node.pem').is_file())
-        before = wait_until(membership)
+        before = wait_until(initial_readiness)
         assert all(item['nodeId'] == before['root']['nodeId'] for item in before.values())
         marker = base64.b64encode('original durable Box body 中文\x00'.encode()).decode()
         grpc('Write', {'path': '/agents/lifecycle-proof', 'content': marker})

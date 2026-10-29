@@ -1,5 +1,11 @@
 # Native Codex attachment through the shared ACP bridge
 
+This is the candidate implementation contract. Rollout ownership and final
+acceptance remain in the [integration handoff, draft #1101](https://github.com/sudoprivacy/sudocode/pull/1101).
+In particular, this candidate's loaded-runtime lifetime must be reconciled with
+that handoff's frontend-retirement requirement before installation. It does not
+claim that retained inventory proves frontend presence.
+
 The intended user workflow is one machine setup followed by ordinary new or
 resumed Codex sessions in any trusted workspace. No model prompt is needed to
 join. Existing workspace instructions, approvals, model settings, Node ownership
@@ -25,6 +31,13 @@ Inventory is read through the existing native proxy. A qualifying thread has
 `canAcceptDirectInput=true` and an idle/active status. Missing fields fail closed.
 Subagents, guardian reviews and feature workers are excluded. `source=cli` is
 not a root discriminator: actual CLI roots can report `source=vscode`.
+
+The configured native endpoint must already be discoverable through the native
+proxy. The private fixture explicitly starts its own server; that does not
+prove normal embedded CLI startup is discoverable. Qualification of the native
+daemon-management entry and actual production launch modes remains a rollout
+gate. The config initializer only prepares a global MCP command, not a complete
+installer or a native daemon migration.
 
 Tools select the binding using native host `_meta.threadId`, never a sender or
 thread argument supplied to the tool. Real-native acceptance deliberately

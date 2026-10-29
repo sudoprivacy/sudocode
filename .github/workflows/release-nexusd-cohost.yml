@@ -21,20 +21,6 @@ on:
   push:
     tags:
       - 'nexusd-cohost-v*'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
-    paths:
-      - .github/workflows/release-nexusd-cohost.yml
-      - rust/Cargo.toml
-      - rust/Cargo.lock
-      - rust/vendor/**
-      - rust/crates/nexusd-cohost/**
-      - rust/crates/engine-acp/**
-      - rust/crates/engine-host/**
-      - rust/crates/runtime/**
-      - rust/crates/api/**
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -50,8 +36,6 @@ env:
 
 jobs:
   build:
-    # Not on draft PRs; see the heavy-job note in rust-ci.yml.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60

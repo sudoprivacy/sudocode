@@ -5,6 +5,11 @@
       "actor": "elfenlieds7",
       "platform": "windows",
       "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEA1PXNVFwUUBEAaMQe7GCVzjPvQu85gFL4A+bWEPyvu"
+    },
+    "elfenlieds7-macos-local": {
+      "actor": "elfenlieds7",
+      "platform": "macos",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGRh8eWUbTt1iTxrYf24Hh+JYLY7p/Jl8/3mwmMfTlzc"
     }
   }
 }

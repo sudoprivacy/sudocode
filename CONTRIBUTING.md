@@ -197,6 +197,9 @@ scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Hosted complementary builds use up to two compiler workers. That hosted-only
+limit is applied after cache restore; local author builds keep one worker and
+all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
@@ -220,6 +223,9 @@ Provider tests on main run only for changed provider inputs, and real-daemon
 queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays
 available for gateway diagnosis.
+CLI integration-test-only edits retain native PTYs and the existing provider
+checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
+CLI manifests, production source and daemon harness edits still select it.
 
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider
@@ -227,6 +233,13 @@ probe checks. Its first failing step blocks its daemon/provider dependents.
 PRs always start this job, including SDK-only changes; path filters cannot leave
 a required status pending. The queue's protected acceptance gate still checks
 the combined Git history. No unique product test is removed by this consolidation.
+After merge, main reuses those completed integrity checks. Its lightweight
+preflight still resolves the pinned protocol and changed-input scope needed by
+the existing daemon/provider jobs. PR, queue and explicit runs retain the full
+preflight; no product assertion is removed.
+Signature verification and status publication use Windows runners, with an
+explicit Python interpreter, to avoid two extra admissions to the busy Linux
+pool. This metadata placement does not replace native Linux or macOS tests.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat

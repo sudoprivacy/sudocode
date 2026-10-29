@@ -37,6 +37,18 @@ an unrelated workflow edit alone no longer starts two browser release builds.
 
 ## Dependency cache within the existing quota
 
+Complementary native jobs use the same cache environment as the main publisher.
+`rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
+default prefix list; `env-vars: ImageOS` does not replace that list. Keep
+`CARGO_TERM_COLOR=always` and the two debug settings aligned. The action itself
+sets `CARGO_INCREMENTAL=0`; the trusted command runner applies its one-job limit
+after restore so that scheduling does not split an otherwise identical cache.
+This fixes a key mismatch, not a measured cache-hit-rate claim.
+
+The boundary job no longer downloads and compares `vfs.proto` a second time.
+The required pin job retains the exact pinned-revision byte comparison once per
+event. This removes duplicate validation without removing the protocol guard.
+
 Keep the repository's 10 GB cache limit. Only a main-branch publisher writes
 the shared Rust dependency caches; PRs, merge groups, release and provider jobs
 read them. A PR or merge-group cache is isolated from unrelated PRs, so those

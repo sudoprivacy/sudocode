@@ -1,5 +1,7 @@
 //! Step budgets stop execution through the real CLI and shared provider builder.
 mod common;
+#[path = "support/request_dumps.rs"]
+mod request_dumps;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;
 
@@ -272,7 +274,7 @@ console.log(state.step === 5 ? 'DONE' : `NEXT_COMMAND: node step.cjs ${turn} ${s
         let mut paths: Vec<_> = fs::read_dir(&captured)
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .filter(|path| wire_requests::is_inference_request_dump(path))
+            .filter(|path| request_dumps::is_inference_request_dump(path))
             .collect();
         paths.sort();
         let requests: Vec<serde_json::Value> = paths

@@ -164,6 +164,38 @@ depend on Unix-only mechanisms (SIGINT/ESC signal delivery, `sh -c` /
 `python3` subprocesses, the ACP stdio subprocess handshake) are still
 `#[cfg(unix)]`-gated.
 
+CI runs the full deterministic workspace suite once on Linux for a ready PR,
+then on Linux, macOS and Windows in the merge queue. The queue tests the commit
+that becomes `main`; a push to `main` does not repeat those full suites.
+Windows/macOS required check names remain present as skipped jobs on PRs.
+Draft PRs allocate no heavy runners. Manual dispatch and the existing experimental
+branch pushes retain three-platform validation. Native terminal resize and release
+acceptance use the same cadence; shared-service acceptance uses Linux PR feedback
+and all four supported hosts in the queue. Real provider acceptance stays on
+`main` and manual dispatch.
+
+The required `nexus-A2A live (real daemon)` check waits for both the real-daemon
+journeys and the reusable four-host shared-service workflow on the integrated
+commit. It explicitly fails if either result fails, is cancelled or is skipped;
+an independent optional workflow is not a merge gate.
+
+Coverage counts distinct user journeys, not repetitions across events or
+operating systems. Cache-prefix and compaction tests stay in the full workspace
+suite; they no longer run twice in one job. Standalone vendored Mermaid tests
+remain explicit because Cargo excludes that crate from the workspace.
+
+Rust dependency caches stay within the existing repository quota. One main
+publisher per supported host shares the Cargo sources and compiled dependencies
+across jobs; PRs and merge groups read those caches without publishing isolated
+copies. Exact key hits skip main's cache maintenance build; misses compile
+without running tests. Dev/test builds omit disposable debug symbols and retain
+debug assertions. Release profile settings stay unchanged. Cache-only manual
+dispatch performs no provider calls. See the
+[CI workload audit](docs/ci-workload-audit-20261029.md) for tradeoffs and evidence.
+Benchmark entry points are type-checked in the workspace job without linking an
+extra optimized copy of every test. See the
+[CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.
+
 ### Mock parity harness — optional
 
 The deterministic mock at `mock-anthropic-service` and the harness
@@ -614,9 +646,9 @@ sections and cached rendering; session snapshots survive compact/resume/fork.
 Do not refresh file-derived context as a side effect of compaction.
 
 Run `SCODE_TEST_BACKEND=mock cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety`
-from `rust/` after changing these paths. The **PTY prefix and scoped-context
-contract** CI step runs both suites on Linux, macOS, and Windows before the full
-workspace suite. These PTYs capture HTTP bodies after
+from `rust/` after changing these paths. CI includes both suites in the full
+workspace run: Linux PR feedback, then Linux, macOS and Windows on the integrated
+merge-queue commit. These PTYs capture HTTP bodies after
 provider conversion and compare the stable prefix through retries, discovery,
 compaction, forks, and restart. They also exercise explicit prompt replacement.
 The scoped-context cases verify config roots, CLI package discovery, layered

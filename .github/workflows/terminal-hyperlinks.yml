@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
-    paths: ['rust/**', 'e2e/terminal-resize/**', '.github/workflows/**']
+    paths: ['rust/**', 'e2e/terminal-resize/**', '.github/workflows/terminal-hyperlinks.yml']
   workflow_dispatch:
 
 permissions:
@@ -46,6 +46,10 @@ jobs:
         run: |
           cargo build --locked --release --manifest-path browser-baseline/rust/Cargo.toml --target-dir "$RUNNER_TEMP/browser-base" -p rusty-sudocode-cli
           cargo test --locked --release --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/browser-candidate" -p rusty-sudocode-cli --test pty_hyperlinks --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/browser-driver.jsonl"
+          # A test-driver build can replace scode with a dev-dependency feature
+          # graph. Restore the normal release graph before freezing the pair;
+          # no build follows this step. The compiled driver remains usable.
+          cargo build --locked --release --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/browser-candidate" -p rusty-sudocode-cli --bin scode
           python3 - <<'PY'
           import json, os
           from pathlib import Path

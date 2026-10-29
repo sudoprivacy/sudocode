@@ -47,6 +47,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   build:
@@ -121,6 +123,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
 
       # `NEXUSD_BUILD_VERSION` is what `--version` prints after the binary's own
       # name, so it is where this build states which revs it carries. Without it the

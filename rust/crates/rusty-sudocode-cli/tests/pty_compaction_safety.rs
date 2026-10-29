@@ -2987,20 +2987,12 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
         "typed turn landed",
     );
     cli.send("\r").unwrap();
-    cli.expect("Context compaction failed")
-        .unwrap_or_else(|error| {
-            panic!(
-                "{error}\n{}\nrequests: {:?}",
-                cli.render(common::screen_contents),
-                provider
-                    .requests
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(is_compaction_request)
-                    .collect::<Vec<_>>()
-            );
-        });
+    common::expect_screen(
+        &cli,
+        |screen| common::screen_contains(screen, "Context compaction failed"),
+        Duration::from_secs(30),
+        "the completed turn must display the automatic compaction failure",
+    );
     cli.send("/exit\r").unwrap();
     cli.expect_eof().unwrap();
     let after = Session::load_from_path(&path).unwrap();

@@ -329,6 +329,20 @@ not a 7x latency claim: commands now run sequentially, and runner queue delay
 still needs measurement. No independent product assertion or deadline changed.
 Required contexts migrate only after the new job has an actual hosted pass.
 
+Main pushes reuse pre-merge integrity checks instead of repeating formatting,
+schemas, docs, architecture, release-mirror fixtures and provider-probe fixtures.
+The protocol pin and changed-input scope remain unconditional because downstream
+daemon/provider jobs consume their outputs. PR, queue, experimental pushes and
+explicit runs retain their existing preflight checks. This saves repeated setup
+and commands after each merge; it does not itself shorten the PR critical path.
+
+The real Git enforcement fixture clears repository-local environment variables
+exported by a caller's hook before creating its temporary repositories. Its
+acceptance run deliberately inherits another temporary repository's Git directory,
+worktree, index and injected config, then verifies that caller's HEAD, index,
+config and source remain unchanged. This protects ordinary managed pushes as
+well as direct fixture execution.
+
 The first hosted consolidated preflight passed all steps in 29 seconds after
 about 5m45s of queue wait (run 40906797832). Its actual success allowed the
 required contexts to become `CI preflight`, `Local acceptance` and the unchanged

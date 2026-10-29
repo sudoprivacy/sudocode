@@ -233,6 +233,10 @@ probe checks. Its first failing step blocks its daemon/provider dependents.
 PRs always start this job, including SDK-only changes; path filters cannot leave
 a required status pending. The queue's protected acceptance gate still checks
 the combined Git history. No unique product test is removed by this consolidation.
+After merge, main reuses those completed integrity checks. Its lightweight
+preflight still resolves the pinned protocol and changed-input scope needed by
+the existing daemon/provider jobs. PR, queue and explicit runs retain the full
+preflight; no product assertion is removed.
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.

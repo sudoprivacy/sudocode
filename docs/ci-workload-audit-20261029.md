@@ -359,6 +359,13 @@ docs, common helpers, specs, manifests, deletion and a move into production.
 No test target is deleted; unchanged target executions are omitted for this
 specific input class. Its hosted latency benefit still requires observation.
 
+Before extracting the repeatedly compiled PTY helpers, enroll their shared
+test-crate path as a native resize input. Existing broad Rust source rules
+already retain workspace, rendering/browser and release acceptance. A real
+Git change at the shared helper path verifies the selected native profiles.
+This policy preparation does not claim the helper extraction has landed, and
+does not remove an existing scenario or input guard.
+
 ## One shared preflight instead of seven short runners
 
 Combine format/schema, docs, architecture boundary, pinned protocol, release

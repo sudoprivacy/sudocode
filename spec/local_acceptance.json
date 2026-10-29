@@ -30,6 +30,7 @@
     },
     "native-resize": {
       "include": [
+        "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_chrome_resize.rs",

@@ -754,6 +754,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps: &clippy_workspace_steps
       - uses: actions/checkout@v4
+      - name: Install the shared protobuf compiler for all features
+        uses: ./.github/actions/setup-protoc
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

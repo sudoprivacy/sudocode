@@ -372,7 +372,10 @@ latency improvement.
 
 The shared executor's one-worker default protects the author's foreground
 desktop. The complementary hosted wrapper overrides only the compiler worker
-count, up to two available CPUs, after restoring dependencies. This removes an
+count to the available hosted CPUs after restoring dependencies. This removes an
 unnecessary hosted build throttle without changing cache keys, source profiles,
 test concurrency, assertions or deadlines. Local/manual execution remains one
 worker. Actual hosted build-time benefit requires a comparable native run.
+GitHub's public standard Linux/Windows runners currently provide four CPUs,
+and ARM macOS provides three. The earlier two-worker hosted cap left that
+capacity unused. See [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).

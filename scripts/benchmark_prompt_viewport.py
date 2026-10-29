@@ -1,4 +1,4 @@
-"""Compare the opt-in viewport with the same release binary's normal REPL.
+"""Compare viewport costs against normal input or a previous release binary.
 
 This additional workload uses the existing paired evaluator and budgets. The
 browser observer also measures painted keys and browser resources. It does not
@@ -26,6 +26,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path,
+                        help="compare two binaries with the viewport enabled in both")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--observer", choices=["headless", "browser"], default="headless")
     args = parser.parse_args()
@@ -39,10 +41,13 @@ def main():
     metrics = headless_metrics if args.observer == "headless" else {
         "input_history_parsed_p95_ms", "input_history_frame_p95_ms", "terminal_cpu_ms",
         "terminal_rss_peak_mib", "terminal_rss_growth_mib"}
+    comparison = "Before/after binaries, viewport enabled in both" if args.baseline else "Same release binary, experiment disabled/enabled"
     comparison_policy = dict(policy, cases={"viewport": {}})
     controls, comparisons = {"viewport": []}, {"viewport": []}
     report = {"status": "running", "samples": [], "policy": policy, "observer": args.observer,
+              "comparison": comparison,
               "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
+              "baseline_sha256": hashlib.sha256(args.baseline.read_bytes()).hexdigest() if args.baseline else None,
               "driver_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
               "harness_sha256": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in [
                   "scripts/benchmark_prompt_viewport.py",
@@ -53,11 +58,13 @@ def main():
                   "e2e/terminal-resize/gui-policy.json", "e2e/terminal-resize/gui.html",
                   "e2e/terminal-resize/resources.cjs",
               ]},
-              "measurement": "Same binary, enabled/disabled. Headless CPU/output comparisons cover identical typing phases; extra scrolling and total costs remain in every sample. Browser painting includes two animation frames and PNG readback; RSS uses phase samples and per-process high-water values where available."}
+              "measurement": f"{comparison}. Headless CPU/output comparisons cover identical typing phases; extra scrolling and total costs remain in every sample. Browser painting includes two animation frames and PNG readback; RSS uses phase samples and per-process high-water values where available."}
 
     def sample(stage, number, side, enabled):
+        binary = args.baseline if args.baseline and (stage == "aa" or side == "base") else args.binary
+        enabled = enabled or args.baseline is not None
         location = args.output / f"{stage}-{number:02d}-{side}"
-        env = dict(os.environ, SCODE_TEST_BIN=str(args.binary.resolve()),
+        env = dict(os.environ, SCODE_TEST_BIN=str(binary.resolve()),
                    SCODE_TEST_BACKEND="mock", SCODE_VIEWPORT_MEASURE_ENABLED=str(int(enabled)),
                    SCODE_VIEWPORT_MEASURE_DIR=str(location.resolve()))
         print(f"{location.name}: viewport={enabled}", flush=True)
@@ -85,7 +92,9 @@ def main():
             assert value["metrics"]["scroll_p95_ms"] <= policy["metrics"]["input_history_p95_ms"]["limit"], "scroll input exceeds the existing interaction budget"
             assert value["metrics"]["scroll_cpu_ms"] <= policy["metrics"]["cpu_ms"]["limit"], "scroll work exceeds the existing CPU budget"
             assert value["metrics"]["scroll_wire_kib"] <= policy["metrics"]["wire_kib"]["limit"], "scroll work exceeds the existing output budget"
-        report["samples"].append({"stage": stage, "round": number, "side": side, "data": value})
+        report["samples"].append({"stage": stage, "round": number, "side": side,
+                                  "binary_sha256": report["baseline_sha256"] if binary == args.baseline else report["binary_sha256"],
+                                  "data": value})
         return value
 
     try:
@@ -115,10 +124,11 @@ def main():
     finally:
         (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     lines = ["## Inline prompt viewport", "", f"Result: **{report['status']}**", "",
-             f"Same release binary, experiment disabled/enabled; observer: {args.observer}. Existing budgets are unchanged. Headless CPU/output comparisons use shared typing phases; browser CPU/memory cover the complete browser workflow.", ""]
+             f"{comparison}; observer: {args.observer}. Existing budgets are unchanged. Headless CPU/output comparisons use shared typing phases; browser CPU/memory cover the complete browser workflow.", ""]
+    left_label, right_label = ("Before", "After") if args.baseline else ("Disabled", "Enabled")
     lines.extend(f"- {failure}" for failure in report.get("failures", []))
     if report.get("metrics"):
-        lines.extend(["| Shared workload metric | Disabled | Enabled | Result |",
+        lines.extend([f"| Shared workload metric | {left_label} | {right_label} | Result |",
                       "| --- | ---: | ---: | --- |"])
         for row in report["metrics"]:
             lines.append(f"| {row['metric']} | {row['baseline']:.2f} | {row['candidate']:.2f} | {row['result']} |")
@@ -126,7 +136,7 @@ def main():
                     if sample["stage"] == "ab" and sample["side"] == side]
              for side in ["base", "candidate"]}
     if all(final.values()) and args.observer == "headless":
-        lines.extend(["", "| Complete workload / additional interaction | Disabled | Enabled |",
+        lines.extend(["", f"| Complete workload / additional interaction | {left_label} | {right_label} |",
                       "| --- | ---: | ---: |"])
         for metric in ["total_cpu_ms", "total_wire_kib", "scroll_cpu_ms", "scroll_wire_kib",
                        "input_reading_p95_ms"]:
@@ -134,7 +144,8 @@ def main():
             right = statistics.median(value[metric] for value in final["candidate"])
             lines.append(f"| {metric} | {left:.2f} | {right:.2f} |")
         scroll = statistics.median(value["scroll_p95_ms"] for value in final["candidate"])
-        lines.extend(["", f"Twenty wheel events: enabled scroll P95 **{scroll:.2f} ms**. The disabled REPL has no application history viewport."])
+        note = "" if args.baseline else " The disabled REPL has no application history viewport."
+        lines.extend(["", f"Twenty wheel events: candidate scroll P95 **{scroll:.2f} ms**.{note}"])
     summary = "\n".join(lines) + "\n"
     (args.output / "summary.md").write_text(summary, encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):

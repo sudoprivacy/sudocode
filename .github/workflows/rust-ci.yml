@@ -630,7 +630,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build release CLI for startup acceptance
-        run: cargo build --release -p rusty-sudocode-cli --bin scode
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p rusty-sudocode-cli --bin scode
+          binary="$RUNNER_TEMP/scode-release/scode${{ runner.os == 'Windows' && '.exe' || '' }}"
+          mkdir -p "$(dirname "$binary")"
+          cp "target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }}" "$binary"
+          echo "SCODE_TEST_BIN=$binary" >> "$GITHUB_ENV"
       - name: PTY response logs preserve release streaming and resume
         env:
           SCODE_TEST_BACKEND: mock
@@ -659,8 +666,8 @@ jobs:
         run: |
           set -euo pipefail
           driver=$(python -c 'import json; from pathlib import Path; records=[json.loads(line) for line in Path("target/prompt-viewport-driver.jsonl").read_text().splitlines()]; paths=[row["executable"] for row in records if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="pty_prompt_viewport" and row.get("executable")]; assert len(paths)==1, paths; print(paths[0])')
-          python ../scripts/benchmark_prompt_viewport.py --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-measurements"
-          python ../scripts/benchmark_prompt_viewport.py --observer browser --driver "$driver" --binary target/release/scode --output "$RUNNER_TEMP/prompt-viewport-browser-comparison"
+          python ../scripts/benchmark_prompt_viewport.py --driver "$driver" --binary "$SCODE_TEST_BIN" --output "$RUNNER_TEMP/prompt-viewport-measurements"
+          python ../scripts/benchmark_prompt_viewport.py --observer browser --driver "$driver" --binary "$SCODE_TEST_BIN" --output "$RUNNER_TEMP/prompt-viewport-browser-comparison"
       - name: Retain viewport samples and failed terminal traces
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
@@ -685,13 +692,13 @@ jobs:
           if-no-files-found: warn
       - name: Check complete process startup budget
         shell: bash
-        run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100 --report target/startup.json
+        run: python ../e2e/startup/run.py --bin "$SCODE_TEST_BIN" --budget-ms 100 --report target/startup.json
       - name: Retain Windows release CLI for local acceptance
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: scode-windows-ci-${{ github.sha }}
-          path: rust/target/release/scode.exe
+          path: ${{ env.SCODE_TEST_BIN }}
           if-no-files-found: error
           retention-days: 3
       - uses: actions/upload-artifact@v4
@@ -699,6 +706,42 @@ jobs:
         with:
           name: startup-${{ matrix.os }}
           path: rust/target/startup.json
+          if-no-files-found: warn
+      - name: Compare renderer changes with the viewport enabled in both builds
+        if: runner.os == 'Linux' && github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'viewport-performance-comparison')
+        shell: bash
+        env:
+          VIEWPORT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # An opt-in diagnostic, separate from the automatic on/off budget gate.
+        # Freeze the candidate and use an isolated baseline target directory.
+        run: |
+          set -euo pipefail
+          [[ "$VIEWPORT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$VIEWPORT_BASE_SHA"
+          base_dependency=$(git show "$VIEWPORT_BASE_SHA:rust/crates/rusty-sudocode-cli/Cargo.toml" | rg '^iocraft\s*=')
+          candidate_dependency=$(rg '^iocraft\s*=' crates/rusty-sudocode-cli/Cargo.toml)
+          if [[ "$base_dependency" == "$candidate_dependency" ]] && git diff --quiet "$VIEWPORT_BASE_SHA" HEAD -- 'crates/rusty-sudocode-cli/src/render*' 'crates/rusty-sudocode-cli/src/repl_ui*'; then
+            echo 'Renderer inputs are unchanged; source comparison is not needed.'
+            exit 0
+          fi
+          candidate="$RUNNER_TEMP/scode-viewport-candidate"
+          cp "$SCODE_TEST_BIN" "$candidate"
+          driver=$(python -c 'import json; from pathlib import Path; rows=[json.loads(line) for line in Path("target/prompt-viewport-driver.jsonl").read_text().splitlines()]; paths=[row["executable"] for row in rows if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="pty_prompt_viewport" and row.get("executable")]; assert len(paths)==1, paths; print(paths[0])')
+          cp "$driver" "$RUNNER_TEMP/scode-viewport-driver"
+          base_tree="$RUNNER_TEMP/scode-viewport-base"
+          git worktree add --detach "$base_tree" "$VIEWPORT_BASE_SHA"
+          base_target="$RUNNER_TEMP/scode-viewport-base-target"
+          cargo build --release --locked --manifest-path "$base_tree/rust/Cargo.toml" --target-dir "$base_target" -p rusty-sudocode-cli --bin scode
+          python ../scripts/benchmark_prompt_viewport.py --baseline "$base_target/release/scode" --binary "$candidate" --driver "$RUNNER_TEMP/scode-viewport-driver" --output "$RUNNER_TEMP/prompt-viewport-source-headless"
+          python ../scripts/benchmark_prompt_viewport.py --observer browser --baseline "$base_target/release/scode" --binary "$candidate" --driver "$RUNNER_TEMP/scode-viewport-driver" --output "$RUNNER_TEMP/prompt-viewport-source-browser"
+      - name: Retain renderer before and after samples
+        if: always() && runner.os == 'Linux' && github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'viewport-performance-comparison')
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-viewport-source-comparison
+          path: |
+            ${{ runner.temp }}/prompt-viewport-source-headless/
+            ${{ runner.temp }}/prompt-viewport-source-browser/
           if-no-files-found: warn
 
   clippy-workspace:

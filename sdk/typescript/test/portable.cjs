@@ -47,6 +47,19 @@ void [connectScode, sendScodeMessage, runScodeMcp, connectCodex, forwardScodeToC
     assert.equal(fs.statSync(config).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.dirname(config)).mode & 0o777, 0o700);
   }
+  const autoConfig=path.join(directory,'private/codex-network.json');
+  const initCodex=[entry,'--init-codex','--config',autoConfig,'--native-codex',process.execPath,
+    '--enrollment',JSON.stringify([process.execPath,'operator-owned-adapter.cjs']),'--peers','["fixture-peer"]'];
+  const prepared=JSON.parse(run(process.execPath,initCodex));
+  assert.equal(prepared.installed,false);
+  assert.deepEqual(prepared.registrationArgv,[process.execPath,'mcp','add','nexus_scode','--',process.execPath,entry,'--codex','--config',autoConfig]);
+  const autoBytes=fs.readFileSync(autoConfig);
+  const auto=JSON.parse(autoBytes);
+  assert.equal(auto.mode,'codex-autojoin');assert.match(auto.endpoint.token,/^[0-9a-f]{64}$/);
+  assert.equal(auto.acpSessionId,undefined,'global config must not bind every root to one session');
+  assert.equal(auto.workspace,undefined,'global config must not infer identity from a workspace');
+  assert.throws(()=>run(process.execPath,initCodex,{stdio:'pipe'}),/EEXIST/);
+  assert.deepEqual(fs.readFileSync(autoConfig),autoBytes);
   const output = run(process.execPath, [path.join(root, 'dist/testing/mcpIntegration.cjs'), entry]);
   process.stdout.write(output);
   process.stdout.write(run(process.execPath, [path.join(root, 'dist/testing/codexConnectionIntegration.cjs'), path.join(modules, '@sudocode/acp/dist/index.cjs')]));

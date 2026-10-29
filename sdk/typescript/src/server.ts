@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
+import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp } from './codexMcp';
 import { shutdownCommand } from './lifecycle';
 
 interface Manifest {
@@ -39,11 +40,15 @@ async function main(): Promise<void> {
     config: { type: 'string' }, help: { type: 'boolean' }, version: { type: 'boolean' },
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
+    codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
+    'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
   } });
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
       + 'scode-acp-bridge --verify | --version\n'
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
+      + 'scode-acp-bridge --init-codex --config FILE --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES [--port 23262]\n'
+      + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'Uses the shared scode ACP/MCP implementation; no Hydra application, tmux or Nexus daemon is started.');
     return;
   }
@@ -53,6 +58,13 @@ async function main(): Promise<void> {
   }
   if (values.verify) { verify(); return; }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
+  if(values['init-codex']){
+    if(values.init||values.codex||values['codex-owner']||values.scode||values.workspace||values['session-id'])throw new Error('Select one initializer mode');
+    console.log(JSON.stringify(prepareCodexMcp(values.config,values['native-codex']??'',JSON.parse(values.enrollment??'null'),
+      JSON.parse(values.peers??'null'),__filename,values.port===undefined?undefined:Number(values.port))));
+    return;
+  }
+  if(values['native-codex']||values.enrollment||values.peers||values.port)throw new Error('Codex initializer fields require --init-codex');
   if (values.init) {
     const executable = values.scode;
     const workspace = values.workspace;
@@ -76,7 +88,10 @@ async function main(): Promise<void> {
   for (const [signal, exit] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
     process.once(signal, () => { void shutdownCommand().finally(() => process.exit(exit)); });
   }
-  await runScodeMcp(values.config);
+  if(values.codex && values['codex-owner'])throw new Error('Select one Codex entry mode');
+  if(values['codex-owner'])await runCodexMcpOwner(values.config);
+  else if(values.codex)await runCodexMcp(values.config,__filename);
+  else await runScodeMcp(values.config);
 }
 
 void main().catch(error => { console.error(String(error)); process.exitCode = 1; });

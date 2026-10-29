@@ -1,0 +1,133 @@
+# Native Codex attachment through the shared ACP bridge
+
+The intended user workflow is one machine setup followed by ordinary new or
+resumed Codex sessions in any trusted workspace. No model prompt is needed to
+join. Existing workspace instructions, approvals, model settings, Node ownership
+and Agent credentials remain under their existing owners.
+
+## Ownership and routing
+
+Native Codex 0.163.0 starts an MCP process for each root. A real two-TUI test
+shows that initialize has neither a thread ID nor `CODEX_THREAD_ID`; same-cwd
+roots have identical startup contexts. Binding by cwd, inherited environment,
+PID or a static profile therefore cannot distinguish these roots.
+
+All global stdio entries connect to one authenticated loopback owner. Exclusive
+TCP binding elects it; a private random token and the exact config hash prevent
+an entry from adopting another configuration on that port. Each entry forwards
+the standard MCP stream; it has no Agent receiver. The owner reuses
+`connectCodex`, `connectScode`, `registerScodeMcpTools`, the direct A2A helpers and
+the existing callback implementation. There is one native observer and one
+scode connection per Agent. No Nexus daemon, CA or credential issuer is added.
+
+Inventory is read through the existing native proxy. A qualifying thread has
+`threadSource=user`, `parentThreadId=null`, `ephemeral=false`,
+`canAcceptDirectInput=true` and an idle/active status. Missing fields fail closed.
+Subagents, guardian reviews and feature workers are excluded. `source=cli` is
+not a root discriminator: actual CLI roots can report `source=vscode`.
+
+Tools select the binding using native host `_meta.threadId`, never a sender or
+thread argument supplied to the tool. Real-native acceptance deliberately
+passes a conflicting thread ID to `mcpServer/tool/call`; the host overwrites it
+and each resulting native audit identifies the correct Agent. Outgoing command
+audits retain that native-thread correlation. The shared send path keeps its
+real output, policy, approvals, actor audit and conservative Unknown semantics.
+
+Ownership follows **loaded native root runtimes**, including work that outlives
+a frontend. This does not establish whether a TUI window is currently visible.
+An unloaded root closes its owned scode; loading it again uses the saved profile.
+When the native proxy exits, all of this owner's scode connections close. The
+shared owner exits after its last MCP connection closes. It never stops the
+native server or the Nexus Node.
+
+## Existing enrollment capability
+
+`enrollmentArgv` is an explicit operator-owned executable/argv, run without a
+shell. Its stdin receives exactly one public claim:
+
+```json
+{
+  "version": 1,
+  "actor": "codex-<random 32 hex digits>",
+  "operationId": "<stable UUID>",
+  "threadId": "<native UUID>",
+  "workspace": "<actual native absolute cwd>"
+}
+```
+
+It returns one bounded JSON response, then exits:
+
+```json
+{"actor":"<same actor>","configFile":"<absolute private ACP profile>"}
+```
+
+The adapter must use the installation's existing authenticated claim/issuance
+authority. The adapter owns authorized enrollment, an explicitly selected Agent
+context, and creation/persistence of that Agent's ACP session before returning.
+Its profile contains the actual workspace, full scode argv and an **existing**
+`acpSessionId`. It must not return Node or CA authority to the bridge. It must not
+use `allow_existing`, silently rename/remint after an uncertain request, or treat
+directory visibility as proof of successful issuance. Credential files remain
+in the existing Agent credential store; the bridge persists only binding and
+profile references.
+
+Before accepting a binding, the bridge executes the real `agent_list` helper
+and requires native audit to match the intended Agent and ACP session, with the
+Node namespace root (`""`). A copied profile or workspace-disk namespace fails
+before any send. Peer callbacks remain subject to the configured peer allowlist.
+
+The bridge provides this adapter boundary, not a second issuer. Deployment
+requires the Node owner to supply and qualify an actual authorized adapter.
+The committed adapter under `test/fixtures` is strictly a protocol fixture; it
+has no Node, credential or issuer and cannot fulfill that deployment gate.
+
+## Durable state and recovery
+
+The private binding file `<threadId>.json` contains the original actor, operation,
+workspace and state. A new random actor is independent of the native thread ID,
+session ID and profile. The original claim is written and synced before invoking
+the adapter. Atomic replacement publishes ready profile references. POSIX also
+syncs the containing directory; this does not claim equivalent directory-sync
+durability on Windows or power-loss acceptance.
+
+| State | Meaning | Next action |
+|---|---|---|
+| provisioning | Original operation saved; adapter may be in flight | No second operation |
+| ready | Exact existing profile selected | Load its ACP session; never create a replacement |
+| recovery_required | Issuance outcome or response is uncertain | Operator resolves the original actor/op; no automatic retry or remint |
+
+A restarted owner turns an interrupted provisioning record into
+`recovery_required`. A failed ready profile keeps its actor/profile and reports
+disconnected. Refresh, unload/reload and restart do not replay sends. Logs and
+status distinguish attachment from directory visibility; an unavailable native
+inventory prevents tool admission. Callback errors remain pending/Unknown and
+are not automatically replayed.
+
+For an existing fixed-session Agent, the operator may prepare a **ready** binding
+with its existing actor and ACP profile before the announced migration window.
+The same actor cannot be assigned to two thread bindings. Stop the previous
+owner naturally before the new owner loads that profile. Merely installing the
+global entry does not retire a private launch-time override or old receiver.
+
+## Validation and activation
+
+`npm test` runs real proxy/ACP processes for root filtering, same-cwd identity
+separation, unload/reload, owner restart, ambiguous enrollment, wrong-actor
+rejection, exact direct sends, absence of inner prompts and absence of retries.
+Offline package tests verify exclusive private configuration and a global MCP
+registration command without installing it.
+
+`npm run test:codex-lifecycle -- --codex /absolute/native --output /private/evidence
+--autojoin` uses two actual native TUIs in an isolated Codex home. Their normal
+MCP startup elects one owner, creates two fixture-bound Agents, and routes real
+native MCP calls independently with zero model requests. Use `--case
+cancelled-resume` or `--case completed-resume` for retained-history acceptance.
+`--mcp-context` separately records the bounded actual initialize context, without
+reading credentials. A loopback mock supplies any explicit seed response.
+
+These tests do not establish authorized Node enrollment, real Node append or
+cross-host receipt. Those require the supplied operator adapter and an exact
+CLI/daemon pair on Mac and Windows. Keep active sessions and the shared Node
+running until the migration coordinator announces a window. Preserve old
+versioned files/configuration for rollback; never recreate a global resolver or
+per-worktree scode launcher as part of this attachment work.

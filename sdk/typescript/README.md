@@ -12,6 +12,32 @@ Linux ARM64 (including DGX Spark), Linux x64, macOS and Windows use the same
 JavaScript payload. CI runs actual stdio/package workflows on these platforms;
 a new machine still needs its own scode, credential and transport acceptance.
 
+## Global native Codex attachment
+
+The `--codex` entry connects all loaded user-root threads through one per-user
+bridge owner. It uses Codex's normal global MCP configuration. It does not copy
+one fixed Agent/session config into every workspace. Same-directory roots get
+distinct durable bindings; resuming a thread reuses its original Agent and ACP
+session. Task prompts and exact direct messages keep the same implementations
+as the fixed-session bridge below.
+
+This mode requires native root inventory and host-supplied tool-call metadata
+(qualified on native Codex 0.163.0), a compatible scode with native actor audit,
+and an operator-authorized enrollment adapter. **An enrollment adapter for a
+specific live Nexus installation is not supplied by this package.** Protocol
+fixtures do not establish production enrollment or current-node compatibility.
+The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
+defines that remaining integration boundary and rollout gates.
+
+Prepare a private machine configuration with `--init-codex --config FILE
+--native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES`. The result
+contains the exact native `codex mcp add nexus_scode -- ...` argv for review.
+The initializer starts nothing and does not install global configuration. Use
+an owner-protected parent directory; it exclusively creates the file and keeps
+machine values outside the package. Keep the MCP server optional so an offline
+node cannot prevent ordinary Codex startup. Existing project or launch-time
+overrides need an explicit migration; a global entry cannot override them.
+
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:

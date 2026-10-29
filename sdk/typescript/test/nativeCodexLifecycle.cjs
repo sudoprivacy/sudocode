@@ -10,7 +10,7 @@ const { once } = require('node:events');
 const { parseArgs } = require('node:util');
 const options = parseArgs({ options: {
   codex: {type:'string'}, output: {type:'string'}, case: {type:'string',default:'idle'},
-  driver: {type:'string'}, 'temp-root': {type:'string'}, help: {type:'boolean'},
+  driver: {type:'string'}, 'temp-root': {type:'string'}, 'mcp-context': {type:'boolean'}, autojoin: {type:'boolean'}, help: {type:'boolean'},
 } }).values;
 if (options.help) {
   console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>]');
@@ -133,11 +133,28 @@ const closeTui = async own => {
   try {
     endpoint.listen(0,'127.0.0.1'); await once(endpoint,'listening');
     const apiPort=endpoint.address().port;
+    let autojoinConfig;
+    if(options.autojoin){
+      const listener=require('node:net').createServer();listener.listen(0,'127.0.0.1');await once(listener,'listening');
+      const port=listener.address().port;await new Promise(resolve=>listener.close(resolve));
+      autojoinConfig=path.join(root,'autojoin.json');
+      fs.writeFileSync(autojoinConfig,JSON.stringify({version:1,mode:'codex-autojoin',
+        native:{codexArgv:configured.codexArgv,socket:selectedSocket,env:childEnv},
+        stateDirectory:path.join(root,'bindings'),auditLog:path.join(root,'autojoin-audit.jsonl'),peers:[],
+        enrollmentArgv:[process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
+        endpoint:{port,token:crypto.randomBytes(32).toString('hex')},
+      }),{mode:0o600});
+    }
     fs.writeFileSync(path.join(isolatedHome,'config.toml'),
       'model = "gpt-5.4"\nmodel_provider = "lifecycle_fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n'+
       '[features]\napps = false\nplugins = false\n[analytics]\nenabled = false\n[model_providers.lifecycle_fixture]\nname = "No inference lifecycle fixture"\n'+
       'base_url = "http://127.0.0.1:'+apiPort+'/v1"\nwire_api = "responses"\nenv_key = "NATIVE_LIFECYCLE_FIXTURE_KEY"\n'+
-      '[projects.'+JSON.stringify(workspace)+']\ntrust_level = "trusted"\n', {mode:0o600});
+      '[projects.'+JSON.stringify(workspace)+']\ntrust_level = "trusted"\n'+
+      (options['mcp-context'] ? '[mcp_servers.context_probe]\ncommand = '+JSON.stringify(process.execPath)+
+        '\nargs = ['+JSON.stringify(path.join(__dirname,'fixtures/mcpStartupContext.cjs'))+']\nrequired = true\n'+
+        '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
+      (options.autojoin ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
+        '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
     native=spawn(configured.codexArgv[0],[...configured.codexArgv.slice(1),'app-server','--listen','unix://'],
       {cwd:workspace,env:childEnv,stdio:['ignore','ignore','pipe']});
     nativeExited=once(native,'close');
@@ -187,6 +204,7 @@ const closeTui = async own => {
         assert.equal(fs.realpathSync(thread.cwd),fs.realpathSync(workspace));assert.equal(thread.status.type,'idle');
         receipt.created.push({id,cwd:thread.cwd,status:thread.status,source:thread.source,
           hasParentField:Object.hasOwn(thread,'parentThreadId'),parentThreadId:thread.parentThreadId??null,
+          threadSource:thread.threadSource,ephemeral:thread.ephemeral,
           canAcceptDirectInput:thread.canAcceptDirectInput??null});
       }
       assert.notEqual(...receipt.created.map(thread=>thread.id));
@@ -195,6 +213,44 @@ const closeTui = async own => {
       assert(receipt.created.every(thread=>receipt.startedSeenByObserver.includes(thread.id)));
       assert.equal(receipt.modelRequests.length,0);
       receipt.modelRequestsBeforeSeed=0;
+      if(options['mcp-context']){
+        await waitUntil(()=>fs.readdirSync(root).some(name=>name.startsWith('mcp-context-')),10000,'MCP startup context');
+        receipt.mcpStartupContext=fs.readdirSync(root).filter(name=>name.startsWith('mcp-context-'))
+          .map(name=>JSON.parse(fs.readFileSync(path.join(root,name),'utf8')));
+      }
+      if(options.autojoin){
+        const claims=path.join(root,'claims.jsonl');
+        await waitUntil(()=>fs.existsSync(claims)&&fs.readFileSync(claims,'utf8').trim().split('\n').length===2,15000,'two independent autojoin claims');
+        receipt.autojoinClaims=fs.readFileSync(claims,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+        assert.equal(new Set(receipt.autojoinClaims.map(claim=>claim.actor)).size,2,'same-cwd roots need distinct Agents');
+        assert.deepEqual(receipt.autojoinClaims.map(claim=>claim.threadId).sort(),receipt.inventory.slice().sort());
+        assert(receipt.autojoinClaims.every(claim=>!claim.actor.includes(claim.threadId)),'Agent name is not a transcript id');
+        const log=path.join(root,'acp.jsonl');
+        await waitUntil(()=>fs.existsSync(log)&&fs.readFileSync(log,'utf8').trim().split('\n').filter(line=>JSON.parse(line).method==='_sudocode/a2a/agent_list').length===2,10000,'authenticated ACP identity checks');
+        receipt.autojoinAcp=fs.readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+        assert.equal(new Set(receipt.autojoinAcp.map(call=>call.pid)).size,2,'one receiver owner per distinct Agent');
+        assert(!receipt.autojoinAcp.some(call=>call.method==='session/prompt'),'autojoin must not start the inner model');
+        receipt.autojoinTools=[];
+        for(const claim of receipt.autojoinClaims){
+          // Actual native MCP routing overwrites a conflicting caller _meta.
+          const result=await request(observer,'native MCP routing','mcpServer/tool/call',{
+            threadId:claim.threadId,server:'nexus_auto',tool:'scode_send',
+            arguments:{to:'fixture-peer',message:'Exact automatic root 🧪\n\u0000',summary:'root binding'},
+            _meta:{threadId:receipt.autojoinClaims.find(other=>other!==claim).threadId},
+          });
+          assert.equal(result.isError,false,JSON.stringify(result));
+          assert.equal(JSON.parse(result.content[0].text).routing.sender,claim.actor);
+          receipt.autojoinTools.push({threadId:claim.threadId,result});
+        }
+        const audit=fs.readFileSync(path.join(root,'autojoin-audit.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+        receipt.autojoinOwner=audit.filter(row=>row.phase==='listening');
+        assert.equal(receipt.autojoinOwner.length,1,'racing MCP entries elect one observer/receiver owner');
+        receipt.autojoinCommandAudit=audit.filter(row=>row.phase==='returned');
+        assert.equal(receipt.autojoinCommandAudit.length,2);
+        assert(receipt.autojoinCommandAudit.every(row=>receipt.autojoinClaims.some(claim=>
+          row.nativeThreadId===claim.threadId&&row.nativeAudit.actor===claim.actor)));
+        assert.equal(receipt.modelRequests.length,0,'autojoin must not start the native model');
+      }
       if(seededResume){
         const original=receipt.created[0];
         // Control the fixture name before seeding so the TUI does not create an
@@ -275,6 +331,14 @@ const closeTui = async own => {
       // Windows maps SIGTERM to TerminateProcess too; its signal name cannot
       // establish graceful shutdown, even without reaching the SIGKILL phase.
       if(process.platform==='win32' || native.signalCode==='SIGKILL')receipt.notProven=[...new Set([...(receipt.notProven??[]),'graceful native server shutdown'])];
+    }
+    if(receipt.autojoinOwner){
+      try{
+        await waitUntil(()=>receipt.autojoinOwner.every(owner=>{
+          try{process.kill(owner.pid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}
+        }),10000,'last MCP entry closes its shared owner');
+        receipt.cleanup.push('shared autojoin owner exited');
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     await new Promise(resolve=>endpoint.close(resolve));
     receipt.nativeStderr=nativeStderr;

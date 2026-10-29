@@ -10,7 +10,7 @@ permissions:
 jobs:
   native-process-evidence:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 75
     env:
       CARGO_TERM_COLOR: always
       SCODE_TEST_BACKEND: mock

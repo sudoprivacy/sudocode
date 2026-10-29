@@ -38,7 +38,9 @@ on:
       - spec/cache_usage_fixtures.schema.json
   pull_request:
     # Native suites run through local-acceptance plus complementary hosts.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # These checks do not depend on draft state. Promoting the same head must
+    # not repeat a completed preflight; native acceptance owns its ready event.
+    types: [opened, synchronize, reopened]
     branches:
       - main
     # Every PR needs the shared preflight status, including SDK-only edits.

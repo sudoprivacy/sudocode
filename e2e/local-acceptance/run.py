@@ -78,6 +78,7 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False),
              ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True),
+             ("rust/crates/pty-harness/src/lib.rs", True, True),
              ("e2e/shared-services/check.py", False, True)]
     for index, (path, live, daemon) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
@@ -88,6 +89,18 @@ def scope_acceptance(directory):
         command("git", "commit", "-m", f"input {index}", cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
         expect_native_targets(base, ["pty_file_operations"] if path.endswith("/tests/pty_file_operations.rs") else None)
+        if path == "rust/crates/pty-harness/src/lib.rs":
+            # The helper implementation may move out of tests/common. Its new
+            # path must still select real native terminal acceptance.
+            policy = SOURCE / "spec/local_acceptance.json"
+            code = ('import importlib.util,json,subprocess,sys; '
+                    'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
+                    'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                    'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
+                    'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
+            selected = json.loads(command(sys.executable, "-c", code,
+                SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
+            assert {"native-workspace", "native-resize", "rendering", "browser", "native-release"}.issubset(selected)
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:

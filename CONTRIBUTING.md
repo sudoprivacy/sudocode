@@ -232,6 +232,8 @@ those test targets with the same mailbox feature. Unchanged metadata, Mermaid,
 benchmark and production Clippy commands are reused. Shared helpers, fixtures,
 specs, source, manifests, target deletion and moves across those boundaries
 keep full workspace acceptance. All other selected native/local profiles remain.
+Shared PTY helper sources also select native terminal resize acceptance, whether
+they live under CLI `tests/common` or the test-only `rust/crates/pty-harness` path.
 
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider

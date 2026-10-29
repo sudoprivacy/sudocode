@@ -785,9 +785,11 @@ sections and cached rendering; session snapshots survive compact/resume/fork.
 Do not refresh file-derived context as a side effect of compaction.
 
 Run `SCODE_TEST_BACKEND=mock cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety`
-from `rust/` after changing these paths. CI includes both suites in the full
-workspace run: Linux PR feedback, then Linux, macOS and Windows on the integrated
-merge-queue commit. These PTYs capture HTTP bodies after
+from `rust/` after changing these paths. The native workspace profile includes
+both suites: the author runs their own platform and complementary CI supplies
+the remaining hosts according to the protected acceptance plan. The merge queue
+carries those exact-head results instead of repeating the workspace suites.
+These PTYs capture HTTP bodies after
 provider conversion and compare the stable prefix through retries, discovery,
 compaction, forks, and restart. They also exercise explicit prompt replacement.
 The scoped-context cases verify config roots, CLI package discovery, layered
@@ -857,9 +859,10 @@ relevant) `README.md`. When adding a new crate:
 Before opening a PR:
 
 - [ ] Branch off the latest `main`.
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- [ ] `cargo test --workspace` passes locally.
+- [ ] The managed hook ran every check selected by the protected acceptance
+      plan on the author's platform and produced a valid exact-head receipt.
+      Use its printed commands and local/CI responsibilities; do not infer a
+      full Rust build from this checklist for documentation or SDK-only edits.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen

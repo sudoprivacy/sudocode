@@ -3,7 +3,7 @@
 //! The model-capabilities table is compiled into the binary, so any model it
 //! has never heard of silently inherits the table's `default` entry — and a
 //! provider whose real ceiling is lower rejects every request
-//! (`qwen-flash` on DashScope: `Range of max_tokens should be [1, 32768]`
+//! (`qwen-flash` on `DashScope`: `Range of max_tokens should be [1, 32768]`
 //! against sudocode's default 64000). These cases pin the config-side patch.
 //!
 //! The overrides are process-global (they seed the capabilities SSOT), which

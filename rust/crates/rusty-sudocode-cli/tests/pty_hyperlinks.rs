@@ -16,19 +16,26 @@ fn document() -> String {
          [UnsafeLink](javascript:alert) [FileLink](file:///tmp/not-opened)\n\n",
     );
     text.push_str("[QueryLink](https://example.com/search?q=a;b#fragment)\n\n");
-    text.push_str(&format!(
-        "[SemicolonLink](https://example.com/{}tail)\n\n",
-        "part;".repeat(32)
-    ));
-    text.push_str(&format!("[LongDestination]({long})\n\n"));
-    text.push_str(&format!(
-        "[OversizedDestination](https://example.com/{})\n\n",
-        "x".repeat(8192)
-    ));
+    let _ = std::fmt::Write::write_fmt(
+        &mut text,
+        format_args!(
+            "[SemicolonLink](https://example.com/{}tail)\n\n",
+            "part;".repeat(32)
+        ),
+    );
+    let _ = std::fmt::Write::write_fmt(&mut text, format_args!("[LongDestination]({long})\n\n"));
+    let _ = std::fmt::Write::write_fmt(
+        &mut text,
+        format_args!(
+            "[OversizedDestination](https://example.com/{})\n\n",
+            "x".repeat(8192)
+        ),
+    );
     for i in 0..64 {
-        text.push_str(&format!(
-            "[DenseLink{i:02}](https://example.com/dense/{i}) "
-        ));
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!("[DenseLink{i:02}](https://example.com/dense/{i}) "),
+        );
     }
     text.push_str("\n\nLinkBodyEND.");
     text

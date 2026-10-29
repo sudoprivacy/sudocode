@@ -17,7 +17,7 @@
 //! 2. Record `captured_message_count()` baseline — the mock server's
 //!    request counter, which is our sole source of truth for "how many
 //!    LLM turns actually happened".
-//! 3. Send prompt A → mock returns bash tool_use, `sleep 30` starts.
+//! 3. Send prompt A → mock returns bash `tool_use`, `sleep 30` starts.
 //! 4. Wait for `interrupt-start` — turn A is really in-flight at the
 //!    runner thread.
 //! 5. Send prompts B, C, D during A's turn. Coordinator's

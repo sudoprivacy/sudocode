@@ -4,3 +4,7 @@ Commit: 790d818d67ef091166bada894e1694cb543792bb
 Local change: expose Windows Job active-process accounting for bounded termination confirmation.
 Local change: configure Unix async process groups through std::process::Command,
 matching the synchronous backend without an unnecessary pre_exec callback.
+Local change: make builder lifetimes explicit, remove an unused private Unix
+trait duplicate and explicitly discard the completed async reaper control value.
+Local change: explicitly discard Windows async reaper control values while
+preserving error propagation and wait/try-wait behavior.

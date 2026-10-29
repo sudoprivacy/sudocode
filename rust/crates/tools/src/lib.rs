@@ -16,7 +16,7 @@ pub mod testing {
     pub fn run_multi_turn_loop_for_test<F>(
         agent_id: &str,
         workspace_root: &Path,
-        abort_signal: HookAbortSignal,
+        abort_signal: &HookAbortSignal,
         initial_prompt: String,
         max_multi_turns: usize,
         run_turn_fn: F,
@@ -37,7 +37,7 @@ pub mod testing {
     /// Drive the production receive loop over a caller-owned mailbox backend.
     pub fn run_multi_turn_loop_in_mailbox_for_test<F>(
         mailbox: &runtime::mailbox::Mailbox,
-        abort_signal: HookAbortSignal,
+        abort_signal: &HookAbortSignal,
         initial_prompt: String,
         max_multi_turns: usize,
         run_turn_fn: F,
@@ -55,7 +55,7 @@ pub mod testing {
     }
 
     /// Test seam for `prepare_agent_job`. Callers just want to fire
-    /// the side effect (Verification -> reset_streak); the manifest
+    /// the side effect (Verification -> `reset_streak`); the manifest
     /// return value is discarded because the test env has no real
     /// workspace to spawn into. Returns `Ok(())` when the job was
     /// prepared successfully (i.e. the reset side-effect fired),
@@ -74,7 +74,7 @@ pub mod testing {
             auth_mode: None,
             permission_mode: None,
         };
-        crate::prepare_agent_job(input, None, runtime::host_fs_arc().clone()).map(|_| ())
+        crate::prepare_agent_job(input, None, runtime::host_fs_arc()).map(|_| ())
     }
 
     /// Test seam for `prepare_agent_job` on a GIVEN filesystem, returning the
@@ -87,7 +87,7 @@ pub mod testing {
     /// difference — which is how the store kept being read with `std::fs` after
     /// its root moved into the VFS.
     pub fn prepare_agent_job_on(
-        fs: std::sync::Arc<dyn runtime::FsBackend>,
+        fs: &std::sync::Arc<dyn runtime::FsBackend>,
         subagent_type: &str,
         prompt: &str,
     ) -> Result<PreparedPaths, String> {
@@ -121,10 +121,11 @@ pub mod testing {
     }
 
     /// Test seam for `build_forked_messages`. Produces the same
-    /// ConversationMessage list that a real fork spawn would inject
+    /// `ConversationMessage` list that a real fork spawn would inject
     /// into its child's Session before the first API turn — the
     /// callers just want to inspect the shape for
     /// prompt-cache-prefix assertions.
+    #[must_use]
     pub fn build_forked_messages_for_test(
         directive: &str,
         parent_assistant: &runtime::ConversationMessage,
@@ -149,8 +150,9 @@ pub mod testing {
         }
     }
 
-    /// Seed a bare-minimum AgentOutput manifest on disk for the
+    /// Seed a bare-minimum `AgentOutput` manifest on disk for the
     /// telemetry-pipeline tests. Returns the path to the JSON file.
+    #[must_use]
     pub fn seed_agent_manifest_for_test(
         dir: &std::path::Path,
         agent_id: &str,
@@ -190,7 +192,7 @@ pub mod testing {
     }
 
     /// Test seam for `record_full_result_path` — mirrors the private
-    /// helper used by the AgentSummary sidecar path.
+    /// helper used by the `AgentSummary` sidecar path.
     pub fn record_full_result_path_for_test(
         manifest_path: &std::path::Path,
         full_path: &std::path::Path,
@@ -303,9 +305,10 @@ fn global_cron_registry() -> &'static CronRegistry {
     // overrides the path (tests point it at a temp file; it is cron-only,
     // so isolating cron never perturbs other config-home consumers).
     REGISTRY.get_or_init(|| {
-        let path = std::env::var_os("SUDOCODE_CRON_STORE")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| runtime::default_config_home().join("crons.json"));
+        let path = std::env::var_os("SUDOCODE_CRON_STORE").map_or_else(
+            || runtime::default_config_home().join("crons.json"),
+            std::path::PathBuf::from,
+        );
         CronRegistry::open(path)
     })
 }
@@ -518,7 +521,7 @@ pub struct ToolSpec {
     pub required_permission: PermissionMode,
 }
 
-/// The single ToolSpec → wire `ToolDefinition` mapping. Both the CLI path
+/// The single `ToolSpec` → wire `ToolDefinition` mapping. Both the CLI path
 /// (`GlobalToolRegistry::definitions`) and the co-host path
 /// (`ProviderRuntimeClient::stream` via `tool_specs_for_allowed_tools`) go
 /// through here, so the spec→definition shape has one SSOT.
@@ -808,13 +811,13 @@ impl GlobalToolRegistry {
     }
 
     /// Return all tool definitions for the API `tools` array. Before the first
-    /// ToolSearch, core tools have `defer_loading: false` and everything else
+    /// `ToolSearch`, core tools have `defer_loading: false` and everything else
     /// has `true` — the API knows those schemas but doesn't count them against
-    /// context. After the first ToolSearch, every tool is active.
+    /// context. After the first `ToolSearch`, every tool is active.
     /// Requires the `advanced-tool-use` beta header.
     ///
     /// `discovered_tools` comes from [`extract_discovered_tool_names`], which
-    /// reads the names out of past ToolSearch results. That is the whole reveal
+    /// reads the names out of past `ToolSearch` results. That is the whole reveal
     /// mechanism: the flag flipping here is what puts a searched-for tool's
     /// schema on the wire. See [`convert_messages`] for why it is not also done
     /// with in-band `tool_reference` blocks.
@@ -824,7 +827,7 @@ impl GlobalToolRegistry {
     /// the very front of the cached prefix, so flipping a single `defer_loading`
     /// invalidates every token behind it — the system blocks and the entire
     /// message history — and the provider re-bills that rebuild at write price.
-    /// Per-tool reveal costs one full rebuild per ToolSearch, each larger than
+    /// Per-tool reveal costs one full rebuild per `ToolSearch`, each larger than
     /// the last; a session that searches five times pays five. The first
     /// discovery is the only one that buys anything, because it is the one that
     /// says the model has reached past the core set. After it, the cheapest
@@ -1800,12 +1803,10 @@ pub fn declare_no_cron_ticker(reason: &'static str) {
 /// user/host surface) is untouched.
 pub fn cron_tools_disabled() -> bool {
     NO_CRON_TICKER_REASON.get().is_some()
-        || std::env::var("SUDOCODE_DISABLE_CRON_TOOLS")
-            .map(|v| {
-                let v = v.trim();
-                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
+        || std::env::var("SUDOCODE_DISABLE_CRON_TOOLS").is_ok_and(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
 }
 
 /// The refusal a cron call gets on a host that will not fire it.
@@ -1908,44 +1909,17 @@ fn execute_tool_with_enforcer(
             "tool `{name}` is not available in coordinator mode; delegate write-side work to a worker via `agent_spawn(...)` (or use `send` to continue an existing worker)."
         ));
     }
+    let call = ToolInvocation {
+        enforcer,
+        name,
+        input,
+        abort_signal,
+        ctx,
+        fs,
+    };
     match name {
-        "bash" => {
-            // Parse input to get the command for permission classification
-            let bash_input: BashCommandInput = from_value(input)?;
-            let classified_mode = classify_bash_permission(&bash_input.command);
-            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_bash(
-                bash_input,
-                abort_signal,
-                ctx.and_then(|ctx| {
-                    ctx.background_tasks.as_ref().map(|tasks| {
-                        tasks.for_tool(ctx.assistant_message_id(), ctx.tool_use_id.as_deref())
-                    })
-                })
-                .as_ref(),
-            )
-        }
-        "Monitor" => {
-            let monitor_input: MonitorInput = from_value(input)?;
-            // A watch runs arbitrary shell, so it is gated exactly like bash.
-            let classified_mode = classify_bash_permission(&monitor_input.command);
-            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            // Scoped to this tool call exactly like `bash`: the launcher calls
-            // `prepare_terminal`, which REQUIRES the tool identity to register
-            // the terminal in the completion journal. Without `for_tool` the
-            // launch fails outright ("terminal tool identity missing") in any
-            // session that has a journal bound — so a watch has to carry the
-            // same identity a background command does.
-            run_monitor(
-                monitor_input,
-                ctx.and_then(|ctx| {
-                    ctx.background_tasks.as_ref().map(|tasks| {
-                        tasks.for_tool(ctx.assistant_message_id(), ctx.tool_use_id.as_deref())
-                    })
-                })
-                .as_ref(),
-            )
-        }
+        "bash" => call.run_bash(),
+        "Monitor" => call.run_monitor(),
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             from_value::<ReadFileInput>(input).and_then(|input| run_read_file(input, fs))
@@ -1994,27 +1968,12 @@ fn execute_tool_with_enforcer(
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "write_plan" => {
-            from_value::<WritePlanInput>(input).and_then(|input| run_write_plan(input, fs))
+            from_value::<WritePlanInput>(input).and_then(|input| run_write_plan(&input, fs))
         }
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "PowerShell" => {
-            // Parse input to get the command for permission classification
-            let ps_input: PowerShellInput = from_value(input)?;
-            let classified_mode = classify_powershell_permission(&ps_input.command);
-            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_powershell(
-                ps_input,
-                abort_signal,
-                ctx.and_then(|ctx| {
-                    ctx.background_tasks.as_ref().map(|tasks| {
-                        tasks.for_tool(ctx.assistant_message_id(), ctx.tool_use_id.as_deref())
-                    })
-                })
-                .as_ref(),
-            )
-        }
+        "PowerShell" => call.run_powershell(),
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
@@ -2028,78 +1987,9 @@ fn execute_tool_with_enforcer(
             from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, fs))
         }
         // The pid.* family — agent process control.
-        "pid_kill" => {
-            let input = normalize_pid_input(input);
-            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
-                if let Some(id) = input
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| tasks.get(id).is_some())
-                {
-                    tasks.stop(id)?;
-                    let status = tasks
-                        .get(id)
-                        .map_or("unavailable", |task| task.status.label());
-                    return to_pretty_json(json!({"pid": id, "status": status}));
-                }
-            }
-            from_value::<TaskIdInput>(&input).and_then(|input| run_pid_kill(input, fs.as_ref()))
-        }
-        "pid_status" => {
-            let input = normalize_pid_input(input);
-            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
-                if let Some(id) = input.get("task_id").and_then(Value::as_str) {
-                    if let Some(result) = tasks.durable_terminal(id)? {
-                        return to_pretty_json(result);
-                    }
-                }
-                if let Some(task) = input
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| tasks.get(id))
-                {
-                    if task.kind == runtime::background_tasks::BackgroundTaskKind::Terminal {
-                        return background_shell_result(&task, false);
-                    }
-                }
-            }
-            run_pid_status(input, fs.as_ref())
-        }
-        "pid_output" => {
-            let input = normalize_pid_output_input(input);
-            let parsed: TaskOutputInput = from_value(&input)?;
-            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
-                if let Some(id) = parsed.agent_id.as_deref().or(parsed.task_id.as_deref()) {
-                    if let Some(result) = tasks.durable_terminal(id)? {
-                        if result["retrieval_status"] == "success"
-                            || result["status"] == "execution_unconfirmed"
-                            || tasks.get(id).is_none()
-                        {
-                            return to_pretty_json(result);
-                        }
-                    }
-                    if tasks.get(id).is_some_and(|t| {
-                        t.kind == runtime::background_tasks::BackgroundTaskKind::Terminal
-                    }) {
-                        let timeout = if parsed.block {
-                            Duration::from_millis(
-                                parsed.timeout_ms.min(agent_await_timeout_cap_ms()),
-                            )
-                        } else {
-                            Duration::ZERO
-                        };
-                        let task = tasks
-                            .wait(id, timeout, abort_signal)
-                            .ok_or_else(|| format!("pid not found: {id}"))?;
-                        if let Some(result) = tasks.durable_terminal(id)? {
-                            return to_pretty_json(result);
-                        }
-                        return background_shell_result(&task, parsed.block);
-                    }
-                }
-            }
-            run_pid_output(parsed, fs.as_ref())
-        }
+        "pid_kill" => call.kill_pid(),
+        "pid_status" => call.pid_status(),
+        "pid_output" => call.pid_output(),
         "agent_list" => run_agent_list(input, fs.as_ref()),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
@@ -2197,7 +2087,11 @@ fn run_ask_user_question_v2(
     out: &mut impl Write,
     reader: &mut impl BufRead,
 ) -> Result<String, String> {
-    let (title, description, questions) = normalize_ask_user_question_input(input)?;
+    let NormalizedQuestions {
+        title,
+        description,
+        questions,
+    } = normalize_ask_user_question_input(input)?;
 
     if let Some(title) = &title {
         writeln!(out, "\n[Question Set] {title}").map_err(|e| e.to_string())?;
@@ -2228,9 +2122,7 @@ fn run_ask_user_question_v2(
 
         answers.push(AskUserQuestionAnswer {
             id: item.id.clone(),
-            value: matched_option
-                .map(|option| option.value.clone())
-                .unwrap_or_else(|| answer.clone()),
+            value: matched_option.map_or_else(|| answer.clone(), |option| option.value.clone()),
             label: matched_option
                 .map(|option| option.label.clone())
                 .or_else(|| (!answer.is_empty()).then_some(answer)),
@@ -2259,7 +2151,7 @@ fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
     // depend on process-global store state and raced across tests).
     for todo in &todos {
         if todo.status == TodoStatus::Completed {
-            runtime::verification_watcher::record_completion_by_id(&todo.content);
+            let _ = runtime::verification_watcher::record_completion_by_id(&todo.content);
         }
     }
     let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
@@ -2276,12 +2168,14 @@ fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
 ///
 /// The key is spelled once, beside the `run_todo_write` that writes it, so a
 /// renderer reading the list back cannot drift from the tool that produced it.
+#[must_use]
 pub fn todos_from_tool_result(output: &str) -> Option<Vec<runtime::Todo>> {
     let value: Value = serde_json::from_str(output).ok()?;
     serde_json::from_value(value.get("todos")?.clone()).ok()
 }
 
 /// Decode the bounded result of `set_tip` through the existing tool-result seam.
+#[must_use]
 pub fn tip_from_tool_result(output: &str) -> Option<runtime::tips::Tip> {
     let value: Value = serde_json::from_str(output).ok()?;
     let tip: runtime::tips::Tip = serde_json::from_value(value.get("tip")?.clone()).ok()?;
@@ -2289,7 +2183,7 @@ pub fn tip_from_tool_result(output: &str) -> Option<runtime::tips::Tip> {
     Some(tip)
 }
 
-fn run_pid_status(input: Value, fs: &dyn FsBackend) -> Result<String, String> {
+fn run_pid_status(input: &Value, fs: &dyn FsBackend) -> Result<String, String> {
     let pid = input
         .get("task_id")
         .or_else(|| input.get("pid"))
@@ -2366,7 +2260,9 @@ pub fn list_agent_snapshots_from_store_with(
     };
     let mut out = Vec::new();
     for entry in listing {
-        if entry.is_dir || !entry.name.ends_with(".json") {
+        if entry.is_dir
+            || std::path::Path::new(&entry.name).extension() != Some(std::ffi::OsStr::new("json"))
+        {
             continue;
         }
         let path = store_path(&store, &entry.name, fs);
@@ -2464,7 +2360,7 @@ pub fn collect_agent_list(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(%error, agent = %row.name, "peer description unavailable")
+                    tracing::warn!(%error, agent = %row.name, "peer description unavailable");
                 }
             }
         }
@@ -2476,6 +2372,7 @@ pub fn collect_agent_list(
 /// without a real backend. `peers` are the addressable names in the session's
 /// peer namespace, self excluded. `subagents` are saved snapshots;
 /// `active_tasks` supplies runtime evidence.
+#[must_use]
 pub fn merge_agent_list(
     peers: &[String],
     subagents: Vec<AgentSnapshot>,
@@ -2780,7 +2677,7 @@ pub fn recover_subagent_completion(
     let mut event = source.clone();
     event.phase = SubagentPhase::Finished;
     event.status = Some(manifest.status.clone());
-    event.completed_at = manifest.completed_at.clone();
+    event.completed_at.clone_from(&manifest.completed_at);
     event.completion_notification = Some(render_manifest_task_notification(&manifest));
     Ok(Some(event))
 }
@@ -2824,10 +2721,10 @@ fn compute_notification_duration_ms(manifest: &AgentOutput) -> Option<u64> {
     Some(delta.saturating_mul(1000))
 }
 
-/// Snake_case wire projection of an [`AgentOutput`] manifest that
+/// `Snake_case` wire projection of an [`AgentOutput`] manifest that
 /// the LLM sees via `TaskOutput`. Separate from the manifest's own
 /// on-disk camelCase serde shape because the LLM contract is
-/// snake_case (see coordinator prompt + `pty_agent_summary.rs`) and
+/// `snake_case` (see coordinator prompt + `pty_agent_summary.rs`) and
 /// changing the on-disk format would break every existing session's
 /// resume.
 ///
@@ -2838,7 +2735,7 @@ fn compute_notification_duration_ms(manifest: &AgentOutput) -> Option<u64> {
 /// [`build_agent_output_view`], which uses an EXHAUSTIVE pattern
 /// destructure of `AgentOutput`. When a future commit adds a new
 /// field to the manifest, the destructure fails to compile → the
-/// developer is forced to decide "expose in TaskOutput or not?"
+/// developer is forced to decide "expose in `TaskOutput` or not?"
 /// instead of silently omitting it (which is what caused
 /// `resultFullPath` to be missing for 4 commits).
 #[derive(Serialize)]
@@ -3153,7 +3050,7 @@ fn resolve_sender(input: &SendMessageInput, mailbox: &runtime::mailbox::Mailbox)
 /// Every branch of `send` — point-to-point, broadcast, the structured kinds —
 /// funnels here, so this is the one place that turns a recipient into a
 /// destination: the name goes through the session's convention, and the same
-/// call reaches a JSONL file or a replicated DT_STREAM depending on what the
+/// call reaches a JSONL file or a replicated `DT_STREAM` depending on what the
 /// session is.
 ///
 /// The mailbox is a parameter rather than something this resolves, because a
@@ -3192,7 +3089,7 @@ fn write_envelope(
         request_id: request_id.map(str::to_string),
     };
     let mut envelope = envelope;
-    envelope.to = recipient_sanitized.clone();
+    envelope.to.clone_from(&recipient_sanitized);
     // The path the convention resolved, not a reconstruction of it. It reaches
     // the model as `mailbox_path`, so it has to be where the envelope actually
     // went — under nexus that is a replicated stream, not a file.
@@ -3296,209 +3193,10 @@ fn run_send_message(
 
     // ── Plain text branch ──────────────────────────────────────────
     if let Some(text) = input.message.as_str() {
-        // Broadcast
-        if input.to == "*" {
-            let summary = input.summary.as_deref();
-            // Enumerated through the session's mailbox, so "everyone" means
-            // everyone in the namespace the message would actually go to. A
-            // convention that cannot enumerate says so rather than answering
-            // "nobody" — a broadcast reporting success over zero recipients is
-            // the silent kind of failure.
-            let mut recipients = mailbox.list_recipients()?;
-            // Never echo to sender.
-            recipients.retain(|r| r != &sender);
-            if recipients.is_empty() {
-                return to_pretty_json(json!({
-                    "success": true,
-                    "message": "No teammates to broadcast to (empty inbox directory)",
-                    "recipients": [],
-                }));
-            }
-            for r in &recipients {
-                write_envelope(
-                    &mailbox,
-                    r,
-                    &input,
-                    text,
-                    summary,
-                    mailbox_kinds::MESSAGE,
-                    None,
-                )?;
-            }
-            return to_pretty_json(json!({
-                "success": true,
-                "message": format!(
-                    "Message broadcast to {} teammate(s): {}",
-                    recipients.len(),
-                    recipients.join(", ")
-                ),
-                "recipients": recipients,
-                "routing": {
-                    "sender": sender,
-                    "target": "@team",
-                    "summary": summary,
-                    "content": text,
-                }
-            }));
-        }
-        // Point-to-point plain text
-        if input.summary.as_deref().unwrap_or("").trim().is_empty() {
-            return Err("summary is required when message is a string".to_string());
-        }
-        let path = write_envelope(
-            &mailbox,
-            &input.to,
-            &input,
-            text,
-            input.summary.as_deref(),
-            mailbox_kinds::MESSAGE,
-            None,
-        )?;
-        return to_pretty_json(json!({
-            "success": true,
-            "message": format!("Message sent to {}'s inbox", input.to),
-            "routing": {
-                "sender": sender,
-                "target": format!("@{}", input.to),
-                "summary": input.summary,
-                "content": text,
-                "mailbox_path": path.display().to_string(),
-            }
-        }));
+        return send_plain_message(&input, &mailbox, &sender, text);
     }
 
-    // ── Structured branch ──────────────────────────────────────────
-    if input.to == "*" {
-        return Err("structured messages cannot be broadcast (to: \"*\")".to_string());
-    }
-    let obj = input
-        .message
-        .as_object()
-        .ok_or_else(|| "message must be a string or a structured object".to_string())?;
-    let msg_type = obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "structured message requires a `type` field".to_string())?;
-
-    match msg_type {
-        "shutdown_request" => {
-            let reason = obj.get("reason").and_then(|v| v.as_str());
-            let request_id = generate_request_id("shutdown", &input.to);
-            let body = json!({
-                "type": "shutdown_request",
-                "request_id": request_id,
-                "from": sender,
-                "reason": reason,
-            })
-            .to_string();
-            write_envelope(
-                &mailbox,
-                &input.to,
-                &input,
-                &body,
-                None,
-                mailbox_kinds::SHUTDOWN_REQUEST,
-                Some(&request_id),
-            )?;
-            // Live delivery: mirrors CC-fork's
-            // `handleShutdownApproval` → `task.abortController.abort()`
-            // path in `src/tools/SendMessageTool/SendMessageTool.ts:357`.
-            // A background subagent whose HookAbortSignal is registered
-            // here stops on its next `abort_signal.is_aborted()` check
-            // in the tool loop — no polling required. Foreground /
-            // synchronous subagents already share the parent's abort
-            // signal; the registry lookup for those may return the
-            // parent's signal, which is safe because the parent is
-            // itself the caller.
-            let aborted = abort_registered_agent(&input.to);
-            to_pretty_json(json!({
-                "success": true,
-                "message": format!("Shutdown request sent to {}. Request ID: {}", input.to, request_id),
-                "request_id": request_id,
-                "target": input.to,
-                "live_abort_signaled": aborted,
-            }))
-        }
-        "shutdown_response" => {
-            if input.to != TEAM_LEAD_NAME {
-                return Err(format!("shutdown_response must be sent to \"{TEAM_LEAD_NAME}\""));
-            }
-            let request_id = obj
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "shutdown_response requires `request_id`".to_string())?;
-            let approve = obj.get("approve").and_then(|v| v.as_bool()).unwrap_or(false);
-            let reason = obj.get("reason").and_then(|v| v.as_str());
-            if !approve && reason.map(str::trim).unwrap_or("").is_empty() {
-                return Err(
-                    "reason is required when rejecting a shutdown request".to_string(),
-                );
-            }
-            let body = json!({
-                "type": "shutdown_response",
-                "request_id": request_id,
-                "from": sender,
-                "approve": approve,
-                "reason": reason,
-            })
-            .to_string();
-            write_envelope(
-                &mailbox,
-                &input.to,
-                &input,
-                &body,
-                None,
-                mailbox_kinds::SHUTDOWN_RESPONSE,
-                Some(request_id),
-            )?;
-            to_pretty_json(json!({
-                "success": true,
-                "message": if approve {
-                    format!("Shutdown approved. Sent confirmation to {}.", input.to)
-                } else {
-                    format!("Shutdown rejected. Reason sent to {}.", input.to)
-                },
-                "request_id": request_id,
-            }))
-        }
-        "plan_approval_response" => {
-            let request_id = obj
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "plan_approval_response requires `request_id`".to_string())?;
-            let approve = obj.get("approve").and_then(|v| v.as_bool()).unwrap_or(false);
-            let feedback = obj.get("feedback").and_then(|v| v.as_str());
-            let body = json!({
-                "type": "plan_approval_response",
-                "request_id": request_id,
-                "from": sender,
-                "approve": approve,
-                "feedback": feedback,
-            })
-            .to_string();
-            write_envelope(
-                &mailbox,
-                &input.to,
-                &input,
-                &body,
-                None,
-                mailbox_kinds::PLAN_APPROVAL_RESPONSE,
-                Some(request_id),
-            )?;
-            to_pretty_json(json!({
-                "success": true,
-                "message": if approve {
-                    format!("Plan approved for {}. They will receive the approval.", input.to)
-                } else {
-                    format!("Plan rejected for {}.", input.to)
-                },
-                "request_id": request_id,
-            }))
-        }
-        other => Err(format!(
-            "unknown structured message type: {other} (expected one of: shutdown_request, shutdown_response, plan_approval_response)"
-        )),
-    }
+    send_structured_message(&input, &mailbox, &sender)
 }
 
 // ── Agent runtime registry ────────────────────────────────────
@@ -3562,6 +3260,7 @@ pub fn unregister_agent_abort_signal(agent_id: &str) {
 }
 
 /// Cancel a registered task. Returns whether its signal was found.
+#[must_use]
 pub fn abort_registered_agent(agent_id: &str) -> bool {
     if let Ok(guard) = global_agent_runtimes().lock() {
         if let Some(runtime) = guard.get(agent_id) {
@@ -3615,7 +3314,7 @@ struct MonitorInput {
 /// cancellation contract and one process group. The only thing `Monitor` adds
 /// is the intent: the model is told to end its turn and wait to be notified.
 fn run_monitor(
-    input: MonitorInput,
+    input: &MonitorInput,
     tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> Result<String, String> {
     let cwd = runtime::current_workspace_root_or_default();
@@ -3792,10 +3491,7 @@ fn git_ref_exists(reference: &str) -> bool {
     if let Ok(root) = current_workspace_root() {
         command.current_dir(root);
     }
-    command
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    command.output().is_ok_and(|output| output.status.success())
 }
 
 fn git_stdout(args: &[&str]) -> Option<String> {
@@ -3872,7 +3568,7 @@ fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, Str
 }
 
 /// Page an offloaded oversized tool result back into context. The model
-/// supplies only the opaque tool_use `id` from the `<persisted-output>`
+/// supplies only the opaque `tool_use` `id` from the `<persisted-output>`
 /// marker; the physical file (`<session-dir>/tool-results/<id>`) is resolved
 /// here from the trusted dispatch context and never crosses the model
 /// boundary. Retrieval is a **byte window** (`offset`/`limit` in bytes, `limit`
@@ -3943,6 +3639,10 @@ fn seek_tool_output(
     pattern: &str,
     input: &ReadToolOutputInput,
 ) -> Result<String, String> {
+    // Byte offsets of every line boundary (real or escaped), ascending.
+    static NEWLINE_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\n|\\n").unwrap());
+
     /// Matches returned when the caller omits `limit`.
     const DEFAULT_MATCHES: usize = 50;
     /// Hard ceiling on matches per call.
@@ -3957,9 +3657,6 @@ fn seek_tool_output(
     let max = input.limit.unwrap_or(DEFAULT_MATCHES).clamp(1, MAX_MATCHES);
     let start_at = input.offset.unwrap_or(0);
 
-    // Byte offsets of every line boundary (real or escaped), ascending.
-    static NEWLINE_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"\n|\\n").unwrap());
     let boundaries: Vec<(usize, usize)> = NEWLINE_RE
         .find_iter(content)
         .map(|m| (m.start(), m.end()))
@@ -4210,7 +3907,7 @@ fn compose_optional_task_framing(
     Some(compose_task_framing(context, constraints, acceptance))
 }
 
-fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
+fn run_write_plan(input: &WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     let content = input.content.trim();
     if content.is_empty() {
         return Err(String::from(
@@ -4311,12 +4008,12 @@ fn is_within_workspace(path: &str) -> bool {
 }
 
 fn run_powershell(
-    input: PowerShellInput,
+    input: &PowerShellInput,
     abort_signal: Option<&HookAbortSignal>,
     tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> Result<String, String> {
     to_pretty_json(
-        execute_powershell_in_session(&input, abort_signal, tasks)
+        execute_powershell_in_session(input, abort_signal, tasks)
             .map_err(|error| error.to_string())?
             .model_output(),
     )
@@ -4552,11 +4249,21 @@ struct AskUserQuestionResult {
     answers: Vec<AskUserQuestionAnswer>,
 }
 
+struct NormalizedQuestions {
+    title: Option<String>,
+    description: Option<String>,
+    questions: Vec<AskUserQuestionItem>,
+}
+
 fn normalize_ask_user_question_input(
     input: AskUserQuestionInput,
-) -> Result<(Option<String>, Option<String>, Vec<AskUserQuestionItem>), String> {
+) -> Result<NormalizedQuestions, String> {
     if !input.questions.is_empty() {
-        return Ok((input.title, input.description, input.questions));
+        return Ok(NormalizedQuestions {
+            title: input.title,
+            description: input.description,
+            questions: input.questions,
+        });
     }
 
     let question = input
@@ -4578,10 +4285,10 @@ fn normalize_ask_user_question_input(
         })
         .collect::<Vec<_>>();
 
-    Ok((
-        input.title,
-        input.description,
-        vec![AskUserQuestionItem {
+    Ok(NormalizedQuestions {
+        title: input.title,
+        description: input.description,
+        questions: vec![AskUserQuestionItem {
             id: "q1".to_string(),
             prompt: question,
             kind: Some(if options.is_empty() {
@@ -4594,7 +4301,7 @@ fn normalize_ask_user_question_input(
             custom_input_hint: None,
             options,
         }],
-    ))
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -4777,7 +4484,7 @@ struct AgentOutput {
         skip_serializing_if = "Option::is_none"
     )]
     total_tokens: Option<u64>,
-    /// Count of tool_use blocks the sub-agent's assistant messages
+    /// Count of `tool_use` blocks the sub-agent's assistant messages
     /// emitted, summed across every multi-turn iteration.
     #[serde(rename = "toolUses", default, skip_serializing_if = "Option::is_none")]
     tool_uses: Option<u64>,
@@ -4830,7 +4537,7 @@ struct AgentJob {
     /// via [`Session::with_messages`] before the first API call. Empty for
     /// every non-fork spawn; populated by the fork rebuild in a follow-up
     /// commit with the parent's assistant message + placeholder
-    /// tool_results (mirroring CC-fork's `buildForkedMessages`).
+    /// `tool_results` (mirroring CC-fork's `buildForkedMessages`).
     inherited_messages: Vec<ConversationMessage>,
     /// Everything this child inherits from the turn that spawned it, already
     /// resolved by [`ParentExecution::for_child`]. One field rather than three
@@ -5222,7 +4929,7 @@ struct TavilyResult {
 
 fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let started = Instant::now();
-    let client = build_http_client()?;
+    let client = build_http_client();
     let request_url = normalize_fetch_url(&input.url)?;
     let (code, code_text, final_url, content_type, body) = block_on_http(async {
         let response = client
@@ -5360,7 +5067,7 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     })
 }
 
-fn build_http_client() -> Result<reqwest::Client, String> {
+fn build_http_client() -> reqwest::Client {
     use std::sync::OnceLock;
 
     // Reuse one async client (and its connection pool) across every call, as
@@ -5374,7 +5081,7 @@ fn build_http_client() -> Result<reqwest::Client, String> {
             .build()
             .expect("failed to build the shared HTTP client")
     });
-    Ok(client.clone())
+    client.clone()
 }
 
 /// Shared, process-lifetime current-thread Tokio runtime used to drive the
@@ -5384,7 +5091,7 @@ fn build_http_client() -> Result<reqwest::Client, String> {
 /// background thread ("reqwest-internal-sync-runtime") parked inside the mio
 /// IOCP wait (`ZwRemoveIoCompletionEx`). On Windows that thread — or the
 /// per-call IOCP teardown when the blocking client is dropped — races with
-/// process exit and intermittently fastfails with STATUS_STACK_BUFFER_OVERRUN
+/// process exit and intermittently fastfails with `STATUS_STACK_BUFFER_OVERRUN`
 /// (0xC0000409): the flaky `tools` test-binary teardown crash.
 ///
 /// A current-thread runtime instead polls its IOCP driver inline during
@@ -5442,7 +5149,7 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
 }
 
 fn execute_duckduckgo_search(input: &WebSearchInput) -> Result<Vec<SearchHit>, String> {
-    let client = build_http_client()?;
+    let client = build_http_client();
     let search_url = build_search_url(&input.query)?;
     let (final_url, html) = block_on_http(async {
         let response = client
@@ -5468,7 +5175,7 @@ fn execute_bocha_search(
     api_url: &str,
     api_key: &str,
 ) -> Result<Vec<SearchHit>, String> {
-    let client = build_http_client()?;
+    let client = build_http_client();
     let mut body = serde_json::json!({
         "query": input.query,
         "summary": true,
@@ -5554,7 +5261,7 @@ fn execute_tavily_search(
     api_url: &str,
     api_key: &str,
 ) -> Result<Vec<SearchHit>, String> {
-    let client = build_http_client()?;
+    let client = build_http_client();
 
     let mut body = serde_json::json!({
         "query": input.query,
@@ -5920,70 +5627,15 @@ struct PreparedAgent {
 fn prepare_agent_job(
     mut input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
-    fs: Arc<dyn FsBackend>,
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<PreparedAgent, String> {
-    if input.description.trim().is_empty() {
-        return Err(String::from("description must not be empty"));
-    }
-    if input.prompt.trim().is_empty() {
-        return Err(String::from("prompt must not be empty"));
-    }
-
-    // Frame the task the same way write_plan structures a plan: prepend the
-    // shared Context/Constraints/Acceptance sections (required schema params) to
-    // the child's prompt so the sub-agent receives a fully-framed task. Skip for
-    // a fork child, which inherits the parent's context rather than a fresh task.
-    if normalize_subagent_type(input.subagent_type.as_deref()) != "fork"
-        && !(input.context.trim().is_empty()
-            && input.constraints.trim().is_empty()
-            && input.acceptance.trim().is_empty())
-    {
-        let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
-        input.prompt = format!("{framing}\n{}", input.prompt);
-    }
-
-    let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
+    let normalized_subagent_type = prepare_agent_prompt(&mut input, ctx)?;
     let is_fork = normalized_subagent_type == "fork";
     let background = input.run_in_background.unwrap_or(true);
-
-    // Verification-streak reset: whenever the model dispatches a
-    // Verification sub-agent, zero the process-global streak counter
-    // (`runtime::verification_watcher`) so the nudge that fired at
-    // 3-completions-in-a-row doesn't re-fire until another streak
-    // accumulates. Placed BEFORE the fork-recursion guard so the
-    // reset happens even if the Verification spawn is unreachable
-    // for some other unrelated reason later in this function — the
-    // signal is "the model tried to verify", not "the spawn
-    // succeeded".
-    if normalized_subagent_type == "Verification" {
-        runtime::verification_watcher::reset_streak();
-    }
-
-    // Fork recursion guard: mirrors CC-fork's `isInForkChild(messages)`
-    // in forkSubagent.ts. A fork child's session already carries the
-    // fork boilerplate tag in its first user message, so scanning ctx's
-    // parent_session_messages catches nested fork spawn attempts before
-    // any state is allocated.
-    if is_fork && ctx.map_or(false, ToolDispatchContext::is_inside_fork_child) {
-        return Err(String::from(
-            "recursive fork detected: fork subagent may not spawn further fork children",
-        ));
-    }
-    if is_fork
-        && ctx
-            .and_then(|c| c.parent_assistant_message.as_ref())
-            .is_none()
-    {
-        return Err(String::from(
-            "fork subagent requires a parent assistant message context (only spawnable from an in-flight tool loop)",
-        ));
-    }
-
     let agent_id = make_agent_id();
     let output_dir = agent_store_dir(fs.as_ref())?;
     fs.create_dir_all(&output_dir.to_string_lossy())
         .map_err(|error| error.to_string())?;
-    sweep_orphaned_tmp_files(&output_dir, fs.as_ref());
     let output_file = store_path(&output_dir, &format!("{agent_id}.md"), fs.as_ref());
     let manifest_file = store_path(&output_dir, &format!("{agent_id}.json"), fs.as_ref());
 
@@ -6095,7 +5747,7 @@ fn prepare_agent_job(
         .and_then(|c| c.parent_permission_mode)
         .unwrap_or(PermissionMode::WorkspaceWrite);
     let job = AgentJob {
-        fs: Arc::clone(&fs),
+        fs: Arc::clone(fs),
         manifest: manifest.clone(),
         prompt: prompt_body,
         system_prompt,
@@ -6146,7 +5798,7 @@ fn execute_agent_with_spawn_and_context<F>(
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, fs)?;
     global_agent_registry().register(&manifest.agent_id);
     let subagent = job.subagent.clone();
     if let Err(error) = spawn_fn(job) {
@@ -6236,7 +5888,7 @@ fn execute_agent_inline_with_work<W>(
 where
     W: FnOnce(AgentJob) -> Result<String, String> + Send + 'static,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, fs)?;
     let subagent = job.subagent.clone();
     let registration = register_agent_job(&job)?;
     let Some(threshold) = auto_background_threshold() else {
@@ -6402,7 +6054,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     let mut permission_sink = job.permission_sink.clone();
     let final_text = run_multi_turn_loop(
         &mailbox,
-        job.abort_signal.clone(),
+        &job.abort_signal,
         job.prompt.clone(),
         subagent_max_multi_turns(),
         |prompt| {
@@ -6474,7 +6126,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
 /// - `tool_uses` counts every `ToolUse` content block across every
 ///   assistant message this turn produced. A single tool-loop
 ///   iteration typically emits ONE `ToolUse`, but the count is exact
-///   so parallel tool_use invocations (rare but valid) don't
+///   so parallel `tool_use` invocations (rare but valid) don't
 ///   under-report.
 fn telemetry_from_turn(summary: &runtime::TurnSummary) -> (u64, u64) {
     let usage = summary.turn_usage;
@@ -6608,7 +6260,7 @@ pub fn agent_summary_threshold_chars() -> Option<usize> {
 /// something than nothing).
 ///
 /// The summarizer reuses the sub-agent's provider config (same
-/// Spin a summarizer ConversationRuntime that reuses `job`'s
+/// Spin a summarizer `ConversationRuntime` that reuses `job`'s
 /// provider config + auth but has an empty tool set + a specialized
 /// system prompt, then run ONE turn asking for a ≤500-word summary.
 fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, String> {
@@ -6684,7 +6336,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
 /// inside a single `run_turn`.
 fn run_multi_turn_loop<F>(
     mailbox: &runtime::mailbox::Mailbox,
-    abort_signal: HookAbortSignal,
+    abort_signal: &HookAbortSignal,
     initial_prompt: String,
     max_multi_turns: usize,
     mut run_turn_fn: F,
@@ -6733,7 +6385,7 @@ where
 }
 
 /// Run one `ConversationRuntime::run_turn` call, handling the
-/// tokio-nesting dance (block_in_place would panic on the
+/// tokio-nesting dance (`block_in_place` would panic on the
 /// `current_thread` runtime used by the MCP entry path).
 ///
 /// Extracted from the pre-multi-turn version of
@@ -6941,33 +6593,11 @@ fn agent_permission_policy(mode: PermissionMode) -> PermissionPolicy {
         })
 }
 
-/// Best-effort removal of `*.tmp` files left behind by a previous crash between
-/// `fs::write` and `fs::rename` in `write_agent_manifest`. Called once per agent
-/// launch so the directory stays clean without a separate startup sweep.
-fn sweep_orphaned_tmp_files(dir: &std::path::Path, fs: &dyn FsBackend) {
-    let Ok(entries) = fs.readdir(&dir.to_string_lossy()) else {
-        return;
-    };
-    for entry in entries {
-        if entry.is_dir || !entry.name.ends_with(".tmp") {
-            continue;
-        }
-        let _ = fs.delete(&store_path(dir, &entry.name, fs).to_string_lossy());
-    }
-}
-
 fn write_agent_manifest(manifest: &AgentOutput, fs: &dyn FsBackend) -> Result<(), String> {
     let mut normalized = manifest.clone();
     normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
     let json = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
-    // Write to a temp file then rename for atomic visibility — prevents a reader
-    // seeing a partially-written file during truncate-then-write. Both halves go
-    // through `fs`: a rename is only atomic within one filesystem, and these two
-    // paths are in whichever one the store is rooted on.
-    let tmp_path = format!("{}.tmp", normalized.manifest_file);
-    fs.write(&tmp_path, json.as_bytes())
-        .map_err(|e| e.to_string())?;
-    fs.rename(&tmp_path, &normalized.manifest_file)
+    fs.write_atomic(&normalized.manifest_file, json.as_bytes())
         .map_err(|e| e.to_string())
 }
 
@@ -7013,7 +6643,7 @@ fn persist_agent_terminal_state(
 /// Terminal-state persistence with optional run telemetry.
 ///
 /// Key behaviour: starts by re-reading the on-disk manifest so any
-/// mid-run mutations (result_full_path from AgentSummary, telemetry
+/// mid-run mutations (`result_full_path` from `AgentSummary`, telemetry
 /// updates from earlier turns) are preserved instead of clobbered by
 /// the in-memory `manifest` snapshot the caller was holding. Falls
 /// back to the caller-supplied manifest if the disk read fails (fresh
@@ -8197,7 +7827,7 @@ impl ProviderRuntimeClient {
             (allow_tools && !self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
         let chain = &self.chain;
-        let mut last_error: Option<ApiError> = None;
+        let mut last_error: Option<Box<ApiError>> = None;
         for (index, entry) in chain.iter().enumerate() {
             // The converted history and session fields survive provider retries.
             message_request.model.clone_from(&entry.model);
@@ -8230,7 +7860,7 @@ impl ProviderRuntimeClient {
 async fn stream_with_provider(
     client: &ProviderClient,
     message_request: &MessageRequest,
-) -> Result<Vec<AssistantEvent>, ApiError> {
+) -> Result<Vec<AssistantEvent>, Box<ApiError>> {
     let mut stream = client.stream_message(message_request, None).await?;
     let mut events = Vec::new();
     let mut pending_tools: BTreeMap<u32, (String, String, String, Option<String>)> =
@@ -8454,8 +8084,8 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
 }
 
 /// Scan conversation history for tool names the model has already
-/// discovered via ToolSearch. Returns the set of tool names that
-/// appeared in ToolSearch result `matches` arrays. Only whether this set is
+/// discovered via `ToolSearch`. Returns the set of tool names that
+/// appeared in `ToolSearch` result `matches` arrays. Only whether this set is
 /// EMPTY decides anything: the first non-empty result clears `defer_loading`
 /// for every deferred tool at once (see
 /// [`GlobalToolRegistry::core_definitions`] for why one reveal is cheaper than
@@ -8463,6 +8093,7 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
 /// compaction.
 ///
 /// Mirrors CC's `extractDiscoveredToolNames()`.
+#[must_use]
 pub fn extract_discovered_tool_names(messages: &[ConversationMessage]) -> BTreeSet<String> {
     let mut discovered = BTreeSet::new();
     for message in messages {
@@ -8617,7 +8248,7 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 /// Tools always visible in the API `tools` array — the LLM sees their
 /// full schema on every turn. Everything else is "deferred": listed by
 /// name in `<available-deferred-tools>` and discovered via `ToolSearch`.
-/// The FIRST ToolSearch clears `defer_loading` on all of them at once (see
+/// The FIRST `ToolSearch` clears `defer_loading` on all of them at once (see
 /// [`GlobalToolRegistry::core_definitions`]), so the next request carries every
 /// schema and the model calls any of them directly.
 const CORE_TOOLS: &[&str] = &[
@@ -8674,6 +8305,7 @@ const CORE_TOOLS: &[&str] = &[
     "WebFetch",
 ];
 
+#[must_use]
 pub fn is_core_tool(name: &str) -> bool {
     // Compatibility aliases must share their canonical tool's visibility.
     // Otherwise `Agent` is advertised as deferred even though it dispatches to
@@ -8688,31 +8320,39 @@ fn deferred_tool_specs() -> Vec<ToolSpec> {
         .collect()
 }
 
+fn select_tool_specs(
+    selection: &str,
+    max_results: usize,
+    specs: &[SearchableToolSpec],
+) -> Vec<String> {
+    selection
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .filter_map(|wanted| {
+            // Try the name as asked, then the canonical tool it aliases.
+            // `select:` is an exact match, so without this a CC-trained
+            // model asking for `select:SendMessage` — the spelling the
+            // alias table exists to absorb — gets an empty result and no
+            // way to learn the name it should have used.
+            let asked = canonical_tool_token(wanted);
+            let aliased = alias_token(&asked);
+            specs
+                .iter()
+                .find(|spec| {
+                    let token = canonical_tool_token(&spec.name);
+                    token == asked || token == aliased
+                })
+                .map(|spec| spec.name.clone())
+        })
+        .take(max_results)
+        .collect()
+}
+
 fn search_tool_specs(query: &str, max_results: usize, specs: &[SearchableToolSpec]) -> Vec<String> {
     let lowered = query.to_lowercase();
     if let Some(selection) = lowered.strip_prefix("select:") {
-        return selection
-            .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .filter_map(|wanted| {
-                // Try the name as asked, then the canonical tool it aliases.
-                // `select:` is an exact match, so without this a CC-trained
-                // model asking for `select:SendMessage` — the spelling the
-                // alias table exists to absorb — gets an empty result and no
-                // way to learn the name it should have used.
-                let asked = canonical_tool_token(wanted);
-                let aliased = alias_token(&asked);
-                specs
-                    .iter()
-                    .find(|spec| {
-                        let token = canonical_tool_token(&spec.name);
-                        token == asked || token == aliased
-                    })
-                    .map(|spec| spec.name.clone())
-            })
-            .take(max_results)
-            .collect();
+        return select_tool_specs(selection, max_results, specs);
     }
 
     // Fast path: exact name match (case-insensitive). CC returns immediately
@@ -8898,7 +8538,7 @@ fn store_path(dir: &std::path::Path, name: &str, fs: &dyn FsBackend) -> std::pat
 }
 
 /// Persist the sub-agent's conversation session to disk, keyed by its unique
-/// agent_id, so `pid_output` can read the result and it is available for debug.
+/// `agent_id`, so `pid_output` can read the result and it is available for debug.
 /// It is never resumed by name - sub-agents are throwaway (or forked).
 fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsBackend) {
     let Ok(store) = agent_store_dir(fs) else {
@@ -9035,7 +8675,7 @@ fn is_builtin_subagent(name: &str) -> bool {
 /// `sudoprivacy/claude-code`'s `src/constants/xml.ts`.
 const FORK_DIRECTIVE_PREFIX: &str = "Your directive: ";
 
-/// Placeholder text used for every tool_result block in the fork
+/// Placeholder text used for every `tool_result` block in the fork
 /// child's inherited user message. Must be byte-identical across all
 /// fork children so their API request prefixes share the prompt cache.
 /// Mirrors `FORK_PLACEHOLDER_RESULT` in `forkSubagent.ts`.
@@ -9047,12 +8687,12 @@ const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background
 ///
 /// The rules text is verbatim (character-identical to the fork port,
 /// modulo tool names — sudocode uses lowercase `bash`/`read_file` where
-/// CC uses TitleCase). Keeping it verbatim matters because the tag
+/// CC uses `TitleCase`). Keeping it verbatim matters because the tag
 /// scanned by [`ToolDispatchContext::is_inside_fork_child`] must match
 /// exactly.
 fn build_fork_child_message(directive: &str) -> String {
     format!(
-        "<{tag}>
+        "<{FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
 
 You are a forked worker process. You are NOT the main agent.
@@ -9075,12 +8715,9 @@ Output format (plain text labels, not markdown headers):
   Key files: <relevant file paths — include for research tasks>
   Files changed: <list with commit hash — include only if you modified files>
   Issues: <list — include only if there are issues to flag>
-</{tag}>
+</{FORK_BOILERPLATE_TAG}>
 
-{prefix}{directive}",
-        tag = FORK_BOILERPLATE_TAG,
-        prefix = FORK_DIRECTIVE_PREFIX,
-        directive = directive
+{FORK_DIRECTIVE_PREFIX}{directive}"
     )
 }
 
@@ -9090,10 +8727,10 @@ Output format (plain text labels, not markdown headers):
 ///
 /// Shape (matches CC-fork for byte-identical prompt-cache prefixes):
 /// - `[parent_assistant, user(placeholder_results..., directive)]`
-///   when the parent's assistant message contains any tool_use blocks.
+///   when the parent's assistant message contains any `tool_use` blocks.
 /// - `[user(directive)]` when it doesn't (defensive fallback — the
-///   fork path is only reachable via an Agent tool_use, so the parent
-///   assistant MUST have at least one tool_use in practice; falling
+///   fork path is only reachable via an Agent `tool_use`, so the parent
+///   assistant MUST have at least one `tool_use` in practice; falling
 ///   back here matches CC-fork's own `if (toolUseBlocks.length === 0)`
 ///   branch).
 ///
@@ -9288,6 +8925,18 @@ struct ConfigSettingSpec {
     accepts: Option<&'static [&'static str]>,
 }
 
+impl ConfigSettingSpec {
+    const fn new(scope: ConfigScope, kind: ConfigKind, path: &'static [&'static str]) -> Self {
+        Self {
+            scope,
+            kind,
+            path,
+            options: None,
+            accepts: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ConfigKind {
     Boolean,
@@ -9296,144 +8945,91 @@ enum ConfigKind {
 
 fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
     Some(match setting {
-        "theme" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::String,
-            path: &["theme"],
-            options: None,
-            accepts: None,
-        },
+        "theme" => ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["theme"]),
         // Per-project selector for which named account (under `auth_modes`) to
         // use. Scope = Settings (project `settings.local.json`, gitignored): a
         // reference only — the account itself (base_url + key) stays defined
         // once in the global `sudocode.json` (single source of truth).
-        "auth_profile" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::String,
-            path: &["auth_profile"],
-            options: None,
-            accepts: None,
-        },
+        "auth_profile" => {
+            ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["auth_profile"])
+        }
         "editorMode" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::String,
-            path: &["editorMode"],
             options: Some(&["default", "vim", "emacs"]),
-            accepts: None,
+            ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["editorMode"])
         },
-        "verbose" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::Boolean,
-            path: &["verbose"],
-            options: None,
-            accepts: None,
-        },
-        "preferredNotifChannel" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::String,
-            path: &["preferredNotifChannel"],
-            options: None,
-            accepts: None,
-        },
-        "autoCompactEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::Boolean,
-            path: &["autoCompactEnabled"],
-            options: None,
-            accepts: None,
-        },
-        "autoDreamEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::Boolean,
-            path: &["autoDreamEnabled"],
-            options: None,
-            accepts: None,
-        },
-        "fileCheckpointingEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::Boolean,
-            path: &["fileCheckpointingEnabled"],
-            options: None,
-            accepts: None,
-        },
-        "showTurnDuration" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::Boolean,
-            path: &["showTurnDuration"],
-            options: None,
-            accepts: None,
-        },
-        "terminalProgressBarEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::Boolean,
-            path: &["terminalProgressBarEnabled"],
-            options: None,
-            accepts: None,
-        },
-        "todoFeatureEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::Boolean,
-            path: &["todoFeatureEnabled"],
-            options: None,
-            accepts: None,
-        },
-        "model" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::String,
-            path: &["model"],
-            options: None,
-            accepts: None,
-        },
-        "alwaysThinkingEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::Boolean,
-            path: &["alwaysThinkingEnabled"],
-            options: None,
-            accepts: None,
-        },
+        "verbose" => ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::Boolean, &["verbose"]),
+        "preferredNotifChannel" => ConfigSettingSpec::new(
+            ConfigScope::Global,
+            ConfigKind::String,
+            &["preferredNotifChannel"],
+        ),
+        "autoCompactEnabled" => ConfigSettingSpec::new(
+            ConfigScope::Global,
+            ConfigKind::Boolean,
+            &["autoCompactEnabled"],
+        ),
+        "autoDreamEnabled" => ConfigSettingSpec::new(
+            ConfigScope::Settings,
+            ConfigKind::Boolean,
+            &["autoDreamEnabled"],
+        ),
+        "fileCheckpointingEnabled" => ConfigSettingSpec::new(
+            ConfigScope::Global,
+            ConfigKind::Boolean,
+            &["fileCheckpointingEnabled"],
+        ),
+        "showTurnDuration" => ConfigSettingSpec::new(
+            ConfigScope::Global,
+            ConfigKind::Boolean,
+            &["showTurnDuration"],
+        ),
+        "terminalProgressBarEnabled" => ConfigSettingSpec::new(
+            ConfigScope::Global,
+            ConfigKind::Boolean,
+            &["terminalProgressBarEnabled"],
+        ),
+        "todoFeatureEnabled" => ConfigSettingSpec::new(
+            ConfigScope::Global,
+            ConfigKind::Boolean,
+            &["todoFeatureEnabled"],
+        ),
+        "model" => ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["model"]),
+        "alwaysThinkingEnabled" => ConfigSettingSpec::new(
+            ConfigScope::Settings,
+            ConfigKind::Boolean,
+            &["alwaysThinkingEnabled"],
+        ),
         "effortLevel" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::String,
-            path: &["effortLevel"],
             options: Some(&["auto", "low", "medium", "high", "xhigh"]),
-            accepts: None,
+            ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["effortLevel"])
         },
         // Options from the parser's own table, not a copy. This list offered
         // four of the seven spellings and the config UI offered a different
         // three, so which names existed depended on where you looked.
         "permissions.defaultMode" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::String,
-            path: &["permissions", "defaultMode"],
             options: Some(runtime::PERMISSION_MODE_OPTIONS),
             accepts: Some(runtime::PERMISSION_MODE_ACCEPTED),
+            ..ConfigSettingSpec::new(
+                ConfigScope::Settings,
+                ConfigKind::String,
+                &["permissions", "defaultMode"],
+            )
         },
-        "language" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::String,
-            path: &["language"],
-            options: None,
-            accepts: None,
-        },
+        "language" => {
+            ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["language"])
+        }
         "teammateMode" => ConfigSettingSpec {
-            scope: ConfigScope::Global,
-            kind: ConfigKind::String,
-            path: &["teammateMode"],
             options: Some(&["tmux", "in-process", "auto"]),
-            accepts: None,
+            ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["teammateMode"])
         },
         // This process's mailbox identity — the name peers address and the
         // inbox the receiver polls. Settings scope (per-project settings file):
         // a sub-agent belongs to its parent scode, so the name is project-scoped
         // rather than machine-wide. Unset → `runtime::mailbox::local_agent_name`
         // derives one from the workspace path.
-        "agentName" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::String,
-            path: &["agentName"],
-            options: None,
-            accepts: None,
-        },
+        "agentName" => {
+            ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["agentName"])
+        }
         _ => return None,
     })
 }
@@ -9541,15 +9137,6 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
     }
     let map = entry.as_object_mut().expect("object inserted");
     set_nested_value(map, rest, new_value);
-}
-
-#[cfg(test)]
-#[allow(clippy::needless_pass_by_value)]
-fn execute_powershell(
-    input: PowerShellInput,
-    abort_signal: Option<&HookAbortSignal>,
-) -> std::io::Result<runtime::BashCommandOutput> {
-    execute_powershell_in_session(&input, abort_signal, None)
 }
 
 fn execute_powershell_in_session(
@@ -9866,34 +9453,40 @@ fn drain_budget_for(timeout_ms: u64) -> Duration {
 
 #[cfg(test)]
 mod shell_group_tests {
-    use super::{drain_budget_for, run_in_process_group, ShellOutcome};
+    use super::drain_budget_for;
+    #[cfg(unix)]
+    use super::{run_in_process_group, ShellOutcome};
+    #[cfg(unix)]
     use runtime::HookAbortSignal;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     #[test]
     fn drain_budget_clamps_to_floor_for_tiny_timeouts() {
         // A 100ms timeout still gets at least 2s drain budget so a flushing pipe
         // is not artificially truncated.
-        assert_eq!(drain_budget_for(100), Duration::from_millis(2_000));
+        assert_eq!(drain_budget_for(100), Duration::from_secs(2));
     }
 
     #[test]
     fn drain_budget_scales_with_timeout() {
         // 16s timeout -> 4s drain (= timeout / 4).
-        assert_eq!(drain_budget_for(16_000), Duration::from_millis(4_000));
+        assert_eq!(drain_budget_for(16_000), Duration::from_secs(4));
     }
 
     #[test]
     fn drain_budget_caps_at_ceiling() {
         // Very long timeouts cap the drain at 10s — the polling loop already
         // enforced the real deadline; this is just cleanup.
-        assert_eq!(drain_budget_for(600_000), Duration::from_millis(10_000));
+        assert_eq!(drain_budget_for(600_000), Duration::from_secs(10));
     }
 
+    #[cfg(unix)]
     fn bash_available() -> bool {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file()))
-            .unwrap_or(false)
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file())
+        })
     }
 
     #[cfg(unix)]
@@ -10227,10 +9820,9 @@ mod tests {
         extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
         normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
-        push_output_block, run_ask_user_question_v2, search_tool_specs, sweep_orphaned_tmp_files,
-        AgentInput, AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
-        GlobalToolRegistry, LaneEventName, LaneFailureClass, SearchableToolSpec,
-        SubagentToolExecutor,
+        push_output_block, run_ask_user_question_v2, search_tool_specs, AgentInput, AgentJob,
+        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        LaneEventName, LaneFailureClass, SearchableToolSpec, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -10284,7 +9876,10 @@ mod tests {
         let session = Session::new().with_persistence_path(session_file.clone());
 
         let id = "tu_readmore_1";
-        let body: String = (0..1000).map(|i| format!("line-{i}\n")).collect();
+        let body: String = (0..1000).fold(String::new(), |mut fixture_text, i| {
+            let _ = std::fmt::Write::write_fmt(&mut fixture_text, format_args!("line-{i}\n"));
+            fixture_text
+        });
         session
             .offload_tool_result(id, body.as_bytes())
             .expect("offload should write");
@@ -10430,7 +10025,7 @@ mod tests {
     }
 
     /// A host that owns scheduling (sudowork runs its own scheduler and never
-    /// ticks scode's crons.json) sets SUDOCODE_DISABLE_CRON_TOOLS so the agent
+    /// ticks scode's crons.json) sets `SUDOCODE_DISABLE_CRON_TOOLS` so the agent
     /// cannot "schedule" a task that would persist but never fire — an orphan.
     #[test]
     fn cron_tools_hidden_when_host_owns_scheduling() {
@@ -10732,7 +10327,7 @@ mod tests {
         assert!(result.is_err(), "whitespace-only tokens should be rejected");
 
         // Multiple empty strings
-        let result = registry.normalize_allowed_tools(&["".to_string(), "  ".to_string()]);
+        let result = registry.normalize_allowed_tools(&[String::new(), "  ".to_string()]);
         assert!(result.is_err(), "all-empty values should be rejected");
     }
 
@@ -11270,7 +10865,10 @@ mod tests {
         let result =
             execute_tool("TodoWrite", &json!({ "todos": [] })).expect("TodoWrite should succeed");
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["todos"].as_array().expect("todos array").is_empty());
+        assert_eq!(
+            output["todos"].as_array().expect("todos array").as_slice(),
+            [] as [serde_json::Value; 0]
+        );
 
         std::env::remove_var("SUDOCODE_TODO_STORE");
         let _ = std::fs::remove_file(&path);
@@ -11840,14 +11438,14 @@ mod tests {
         }
     }
 
-    /// A ToolSearch result crosses as text alone — no tool definitions beside it.
+    /// A `ToolSearch` result crosses as text alone — no tool definitions beside it.
     ///
     /// The inverse of this test shipped and was green: it asserted
     /// `text + 2 tool_references`, the exact shape the API refuses with
     /// `400 invalid_request_error — Tool definitions/code execution functions
     /// cannot be mixed with other content`. Nothing local could see it, because
     /// the constraint is the server's and the mock does not enforce it, so every
-    /// turn that followed a ToolSearch died in production while this passed.
+    /// turn that followed a `ToolSearch` died in production while this passed.
     ///
     /// Discovery does not need the references: `extract_discovered_tool_names`
     /// reads `matches` out of this same text, and a non-empty result is what
@@ -11889,9 +11487,8 @@ mod tests {
         });
         let converted = convert_messages(&messages);
         assert_eq!(converted.len(), 2);
-        let content = match &converted[1].content[0] {
-            api::InputContentBlock::ToolResult { content, .. } => content,
-            _ => panic!("expected ToolResult"),
+        let api::InputContentBlock::ToolResult { content, .. } = &converted[1].content[0] else {
+            panic!("expected ToolResult")
         };
         assert_eq!(
             content.len(),
@@ -11964,7 +11561,7 @@ mod tests {
         assert!(discovered.contains("CronList"));
     }
 
-    /// The first ToolSearch reveals EVERY deferred tool, and the second reveals
+    /// The first `ToolSearch` reveals EVERY deferred tool, and the second reveals
     /// nothing because there is nothing left.
     ///
     /// Per-tool reveal was the obvious reading of `defer_loading` and the
@@ -12066,7 +11663,7 @@ mod tests {
         assert_eq!(manifest.name, "ship-audit");
         assert_eq!(manifest.subagent_type.as_deref(), Some("Explore"));
         assert_eq!(manifest.status, "running");
-        assert!(!manifest.created_at.is_empty());
+        assert_ne!(manifest.created_at, "");
         assert!(manifest.started_at.is_some());
         assert!(manifest.completed_at.is_none());
         let contents = std::fs::read_to_string(&manifest.output_file).expect("agent file exists");
@@ -13731,24 +13328,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn sweep_orphaned_tmp_files_removes_tmp_and_leaves_json() {
-        let dir = temp_path("agent-sweep-tmp");
-        std::fs::create_dir_all(&dir).expect("create dir");
-
-        let tmp_path = dir.join("agent-123.json.tmp");
-        let json_path = dir.join("agent-123.json");
-        std::fs::write(&tmp_path, b"partial").expect("write tmp");
-        std::fs::write(&json_path, b"{}").expect("write json");
-
-        sweep_orphaned_tmp_files(&dir, runtime::host_fs());
-
-        assert!(!tmp_path.exists(), ".tmp file should be removed");
-        assert!(json_path.exists(), ".json file should be kept");
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     // `#[cfg(unix)]` because every command in this test (`printf 'hello'`,
     // `false`, `sleep`, etc.) is POSIX shell vocabulary; the bash tool
     // routes through `runtime::execute_bash` which calls `sh -c "..."`.
@@ -13938,7 +13517,7 @@ mod tests {
 
         let read_error = execute_tool("read_file", &json!({ "path": "missing.txt" }))
             .expect_err("missing file should fail");
-        assert!(!read_error.is_empty());
+        assert_ne!(read_error, "");
 
         let edit_once = execute_tool(
             "edit_file",
@@ -14021,7 +13600,7 @@ mod tests {
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
             .expect_err("invalid glob should fail");
-        assert!(!glob_error.is_empty());
+        assert_ne!(glob_error, "");
 
         let grep_content = execute_tool(
             "grep_search",
@@ -14059,7 +13638,7 @@ mod tests {
             &json!({ "pattern": "(alpha", "path": "nested" }),
         )
         .expect_err("invalid regex should fail");
-        assert!(!grep_error.is_empty());
+        assert_ne!(grep_error, "");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         let _ = fs::remove_dir_all(root);
@@ -14670,26 +14249,19 @@ printf 'pwsh:%s' "$1"
 
             let handle = thread::spawn(move || {
                 let _ = ready_tx.send(());
-                loop {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            // Check shutdown AFTER accept unblocks.
-                            if rx.try_recv().is_ok() {
-                                break;
-                            }
-                            let mut buffer = [0_u8; 4096];
-                            let size = match stream.read(&mut buffer) {
-                                Ok(n) => n,
-                                Err(_) => continue,
-                            };
-                            let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
-                            let request_line =
-                                request.lines().next().unwrap_or_default().to_string();
-                            let response = handler(&request_line);
-                            let _ = stream.write_all(response.to_bytes().as_slice());
-                        }
-                        Err(_) => break,
+                while let Ok((mut stream, _)) = listener.accept() {
+                    // Check shutdown AFTER accept unblocks.
+                    if rx.try_recv().is_ok() {
+                        break;
                     }
+                    let mut buffer = [0_u8; 4096];
+                    let Ok(size) = stream.read(&mut buffer) else {
+                        continue;
+                    };
+                    let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+                    let request_line = request.lines().next().unwrap_or_default().to_string();
+                    let response = handler(&request_line);
+                    let _ = stream.write_all(response.to_bytes().as_slice());
                 }
             });
 
@@ -14910,4 +14482,433 @@ printf 'pwsh:%s' "$1"
         assert!(super::compose_optional_task_framing(Some(""), Some("  "), None).is_none());
         assert!(super::compose_optional_task_framing(Some("ctx"), None, None).is_some());
     }
+}
+/// One canonical tool invocation and its session-scoped resources.
+struct ToolInvocation<'a> {
+    enforcer: Option<&'a PermissionEnforcer>,
+    name: &'a str,
+    input: &'a Value,
+    abort_signal: Option<&'a HookAbortSignal>,
+    ctx: Option<&'a ToolDispatchContext>,
+    fs: &'a Arc<dyn FsBackend>,
+}
+impl ToolInvocation<'_> {
+    fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
+        self.ctx.and_then(|ctx| {
+            ctx.background_tasks
+                .as_ref()
+                .map(|tasks| tasks.for_tool(ctx.assistant_message_id(), ctx.tool_use_id.as_deref()))
+        })
+    }
+    fn run_bash(&self) -> Result<String, String> {
+        let enforcer = self.enforcer;
+        let name = self.name;
+        let input = self.input;
+        let abort_signal = self.abort_signal;
+
+        // Parse input to get the command for permission classification
+        let bash_input: BashCommandInput = from_value(input)?;
+        let classified_mode = classify_bash_permission(&bash_input.command);
+        maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+        run_bash(bash_input, abort_signal, self.background_tasks().as_ref())
+    }
+    fn run_monitor(&self) -> Result<String, String> {
+        let enforcer = self.enforcer;
+        let name = self.name;
+        let input = self.input;
+
+        let monitor_input: MonitorInput = from_value(input)?;
+        // A watch runs arbitrary shell, so it is gated exactly like bash.
+        let classified_mode = classify_bash_permission(&monitor_input.command);
+        maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+        // Scoped to this tool call exactly like `bash`: the launcher calls
+        // `prepare_terminal`, which REQUIRES the tool identity to register
+        // the terminal in the completion journal. Without `for_tool` the
+        // launch fails outright ("terminal tool identity missing") in any
+        // session that has a journal bound — so a watch has to carry the
+        // same identity a background command does.
+        run_monitor(&monitor_input, self.background_tasks().as_ref())
+    }
+    fn run_powershell(&self) -> Result<String, String> {
+        let enforcer = self.enforcer;
+        let name = self.name;
+        let input = self.input;
+        let abort_signal = self.abort_signal;
+
+        // Parse input to get the command for permission classification
+        let ps_input: PowerShellInput = from_value(input)?;
+        let classified_mode = classify_powershell_permission(&ps_input.command);
+        maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+        run_powershell(&ps_input, abort_signal, self.background_tasks().as_ref())
+    }
+    fn kill_pid(&self) -> Result<String, String> {
+        let input = self.input;
+        let ctx = self.ctx;
+        let fs = self.fs;
+
+        let input = normalize_pid_input(input);
+        if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+            if let Some(id) = input
+                .get("task_id")
+                .and_then(Value::as_str)
+                .filter(|id| tasks.get(id).is_some())
+            {
+                tasks.stop(id)?;
+                let status = tasks
+                    .get(id)
+                    .map_or("unavailable", |task| task.status.label());
+                return to_pretty_json(json!({"pid": id, "status": status}));
+            }
+        }
+        from_value::<TaskIdInput>(&input).and_then(|input| run_pid_kill(input, fs.as_ref()))
+    }
+    fn pid_status(&self) -> Result<String, String> {
+        let input = self.input;
+        let ctx = self.ctx;
+        let fs = self.fs;
+
+        let input = normalize_pid_input(input);
+        if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+            if let Some(id) = input.get("task_id").and_then(Value::as_str) {
+                if let Some(result) = tasks.durable_terminal(id)? {
+                    return to_pretty_json(result);
+                }
+            }
+            if let Some(task) = input
+                .get("task_id")
+                .and_then(Value::as_str)
+                .and_then(|id| tasks.get(id))
+            {
+                if task.kind == runtime::background_tasks::BackgroundTaskKind::Terminal {
+                    return background_shell_result(&task, false);
+                }
+            }
+        }
+        run_pid_status(&input, fs.as_ref())
+    }
+    fn pid_output(&self) -> Result<String, String> {
+        let input = self.input;
+        let abort_signal = self.abort_signal;
+        let ctx = self.ctx;
+        let fs = self.fs;
+
+        let input = normalize_pid_output_input(input);
+        let parsed: TaskOutputInput = from_value(&input)?;
+        if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+            if let Some(id) = parsed.agent_id.as_deref().or(parsed.task_id.as_deref()) {
+                if let Some(result) = tasks.durable_terminal(id)? {
+                    if result["retrieval_status"] == "success"
+                        || result["status"] == "execution_unconfirmed"
+                        || tasks.get(id).is_none()
+                    {
+                        return to_pretty_json(result);
+                    }
+                }
+                if tasks.get(id).is_some_and(|t| {
+                    t.kind == runtime::background_tasks::BackgroundTaskKind::Terminal
+                }) {
+                    let timeout = if parsed.block {
+                        Duration::from_millis(parsed.timeout_ms.min(agent_await_timeout_cap_ms()))
+                    } else {
+                        Duration::ZERO
+                    };
+                    let task = tasks
+                        .wait(id, timeout, abort_signal)
+                        .ok_or_else(|| format!("pid not found: {id}"))?;
+                    if let Some(result) = tasks.durable_terminal(id)? {
+                        return to_pretty_json(result);
+                    }
+                    return background_shell_result(&task, parsed.block);
+                }
+            }
+        }
+        run_pid_output(parsed, fs.as_ref())
+    }
+}
+
+fn send_plain_message(
+    input: &SendMessageInput,
+    mailbox: &runtime::mailbox::Mailbox,
+    sender: &str,
+    text: &str,
+) -> Result<String, String> {
+    // Broadcast
+    if input.to == "*" {
+        let summary = input.summary.as_deref();
+        // Enumerated through the session's mailbox, so "everyone" means
+        // everyone in the namespace the message would actually go to. A
+        // convention that cannot enumerate says so rather than answering
+        // "nobody" — a broadcast reporting success over zero recipients is
+        // the silent kind of failure.
+        let mut recipients = mailbox.list_recipients()?;
+        // Never echo to sender.
+        recipients.retain(|r| r != sender);
+        if recipients.is_empty() {
+            return to_pretty_json(json!({
+                "success": true,
+                "message": "No teammates to broadcast to (empty inbox directory)",
+                "recipients": [],
+            }));
+        }
+        for r in &recipients {
+            write_envelope(
+                mailbox,
+                r,
+                input,
+                text,
+                summary,
+                mailbox_kinds::MESSAGE,
+                None,
+            )?;
+        }
+        return to_pretty_json(json!({
+            "success": true,
+            "message": format!(
+                "Message broadcast to {} teammate(s): {}",
+                recipients.len(),
+                recipients.join(", ")
+            ),
+            "recipients": recipients,
+            "routing": {
+                "sender": sender,
+                "target": "@team",
+                "summary": summary,
+                "content": text,
+            }
+        }));
+    }
+    // Point-to-point plain text
+    if input.summary.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("summary is required when message is a string".to_string());
+    }
+    let path = write_envelope(
+        mailbox,
+        &input.to,
+        input,
+        text,
+        input.summary.as_deref(),
+        mailbox_kinds::MESSAGE,
+        None,
+    )?;
+    to_pretty_json(json!({
+        "success": true,
+        "message": format!("Message sent to {}'s inbox", input.to),
+        "routing": {
+            "sender": sender,
+            "target": format!("@{}", input.to),
+            "summary": input.summary,
+            "content": text,
+            "mailbox_path": path.display().to_string(),
+        }
+    }))
+}
+
+fn send_structured_message(
+    input: &SendMessageInput,
+    mailbox: &runtime::mailbox::Mailbox,
+    sender: &str,
+) -> Result<String, String> {
+    // ── Structured branch ──────────────────────────────────────────
+    if input.to == "*" {
+        return Err("structured messages cannot be broadcast (to: \"*\")".to_string());
+    }
+    let obj = input
+        .message
+        .as_object()
+        .ok_or_else(|| "message must be a string or a structured object".to_string())?;
+    let msg_type = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "structured message requires a `type` field".to_string())?;
+
+    match msg_type {
+        "shutdown_request" => send_shutdown_request(input, mailbox, sender, obj),
+        "shutdown_response" => {
+            if input.to != TEAM_LEAD_NAME {
+                return Err(format!("shutdown_response must be sent to \"{TEAM_LEAD_NAME}\""));
+            }
+            let request_id = obj
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "shutdown_response requires `request_id`".to_string())?;
+            let approve = obj.get("approve").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let reason = obj.get("reason").and_then(|v| v.as_str());
+            if !approve && reason.map_or("", str::trim).is_empty() {
+                return Err(
+                    "reason is required when rejecting a shutdown request".to_string(),
+                );
+            }
+            let body = json!({
+                "type": "shutdown_response",
+                "request_id": request_id,
+                "from": sender,
+                "approve": approve,
+                "reason": reason,
+            })
+            .to_string();
+            write_envelope(
+                mailbox,
+                &input.to,
+                input,
+                &body,
+                None,
+                mailbox_kinds::SHUTDOWN_RESPONSE,
+                Some(request_id),
+            )?;
+            to_pretty_json(json!({
+                "success": true,
+                "message": if approve {
+                    format!("Shutdown approved. Sent confirmation to {}.", input.to)
+                } else {
+                    format!("Shutdown rejected. Reason sent to {}.", input.to)
+                },
+                "request_id": request_id,
+            }))
+        }
+        "plan_approval_response" => {
+            let request_id = obj
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "plan_approval_response requires `request_id`".to_string())?;
+            let approve = obj.get("approve").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let feedback = obj.get("feedback").and_then(|v| v.as_str());
+            let body = json!({
+                "type": "plan_approval_response",
+                "request_id": request_id,
+                "from": sender,
+                "approve": approve,
+                "feedback": feedback,
+            })
+            .to_string();
+            write_envelope(
+                mailbox,
+                &input.to,
+                input,
+                &body,
+                None,
+                mailbox_kinds::PLAN_APPROVAL_RESPONSE,
+                Some(request_id),
+            )?;
+            to_pretty_json(json!({
+                "success": true,
+                "message": if approve {
+                    format!("Plan approved for {}. They will receive the approval.", input.to)
+                } else {
+                    format!("Plan rejected for {}.", input.to)
+                },
+                "request_id": request_id,
+            }))
+        }
+        other => Err(format!(
+            "unknown structured message type: {other} (expected one of: shutdown_request, shutdown_response, plan_approval_response)"
+        )),
+    }
+}
+
+fn send_shutdown_request(
+    input: &SendMessageInput,
+    mailbox: &runtime::mailbox::Mailbox,
+    sender: &str,
+    obj: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let reason = obj.get("reason").and_then(|v| v.as_str());
+    let request_id = generate_request_id("shutdown", &input.to);
+    let body = json!({
+        "type": "shutdown_request",
+        "request_id": request_id,
+        "from": sender,
+        "reason": reason,
+    })
+    .to_string();
+    write_envelope(
+        mailbox,
+        &input.to,
+        input,
+        &body,
+        None,
+        mailbox_kinds::SHUTDOWN_REQUEST,
+        Some(&request_id),
+    )?;
+    // Live delivery: mirrors CC-fork's
+    // `handleShutdownApproval` → `task.abortController.abort()`
+    // path in `src/tools/SendMessageTool/SendMessageTool.ts:357`.
+    // A background subagent whose HookAbortSignal is registered
+    // here stops on its next `abort_signal.is_aborted()` check
+    // in the tool loop — no polling required. Foreground /
+    // synchronous subagents already share the parent's abort
+    // signal; the registry lookup for those may return the
+    // parent's signal, which is safe because the parent is
+    // itself the caller.
+    let aborted = abort_registered_agent(&input.to);
+    to_pretty_json(json!({
+        "success": true,
+        "message": format!("Shutdown request sent to {}. Request ID: {}", input.to, request_id),
+        "request_id": request_id,
+        "target": input.to,
+        "live_abort_signaled": aborted,
+    }))
+}
+
+fn prepare_agent_prompt(
+    input: &mut AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+) -> Result<String, String> {
+    if input.description.trim().is_empty() {
+        return Err(String::from("description must not be empty"));
+    }
+    if input.prompt.trim().is_empty() {
+        return Err(String::from("prompt must not be empty"));
+    }
+
+    let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
+
+    // Frame the task the same way write_plan structures a plan: prepend the
+    // shared Context/Constraints/Acceptance sections (required schema params) to
+    // the child's prompt so the sub-agent receives a fully-framed task. Skip for
+    // a fork child, which inherits the parent's context rather than a fresh task.
+    if normalized_subagent_type != "fork"
+        && !(input.context.trim().is_empty()
+            && input.constraints.trim().is_empty()
+            && input.acceptance.trim().is_empty())
+    {
+        let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
+        input.prompt = format!("{framing}\n{}", input.prompt);
+    }
+
+    let is_fork = normalized_subagent_type == "fork";
+
+    // Verification-streak reset: whenever the model dispatches a
+    // Verification sub-agent, zero the process-global streak counter
+    // (`runtime::verification_watcher`) so the nudge that fired at
+    // 3-completions-in-a-row doesn't re-fire until another streak
+    // accumulates. Placed BEFORE the fork-recursion guard so the
+    // reset happens even if the Verification spawn is unreachable
+    // for some other unrelated reason later in this function — the
+    // signal is "the model tried to verify", not "the spawn
+    // succeeded".
+    if normalized_subagent_type == "Verification" {
+        runtime::verification_watcher::reset_streak();
+    }
+
+    // Fork recursion guard: mirrors CC-fork's `isInForkChild(messages)`
+    // in forkSubagent.ts. A fork child's session already carries the
+    // fork boilerplate tag in its first user message, so scanning ctx's
+    // parent_session_messages catches nested fork spawn attempts before
+    // any state is allocated.
+    if is_fork && ctx.is_some_and(ToolDispatchContext::is_inside_fork_child) {
+        return Err(String::from(
+            "recursive fork detected: fork subagent may not spawn further fork children",
+        ));
+    }
+    if is_fork
+        && ctx
+            .and_then(|c| c.parent_assistant_message.as_ref())
+            .is_none()
+    {
+        return Err(String::from(
+            "fork subagent requires a parent assistant message context (only spawnable from an in-flight tool loop)",
+        ));
+    }
+
+    Ok(normalized_subagent_type)
 }

@@ -4,7 +4,7 @@
 //! resumes from where that client last read, and a brand-new client seeks to
 //! the tail. Neither ever looks backwards. So when a message is known to have
 //! been delivered but nobody was there to see it, this is how you read it: the
-//! frames are durable in the DT_STREAM, it is only the client cursors that
+//! frames are durable in the `DT_STREAM`, it is only the client cursors that
 //! moved past them.
 //!
 //! ```text

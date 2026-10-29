@@ -234,17 +234,17 @@ fn print_waits_for_synchronous_agent_past_auto_background_threshold() {
         .flatten()
         .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "toolu_events_sync")
         .expect("parent must receive the delegated result");
-    let text = result["content"]
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
+    let text = result["content"].as_str().map_or_else(
+        || {
             result["content"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .filter_map(|block| block["text"].as_str())
                 .collect::<String>()
-        });
+        },
+        str::to_owned,
+    );
     let manifest: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(manifest["status"], "completed", "{manifest}");
     assert_eq!(

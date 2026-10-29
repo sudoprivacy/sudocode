@@ -401,7 +401,7 @@ pub fn tool_calling_supported(model_id: &str) -> Option<bool> {
 }
 
 /// Returns `true` if the model is known to accept image input. Used by the
-/// push_images path to decide whether to send the image natively or route it
+/// `push_images` path to decide whether to send the image natively or route it
 /// through a VLM-describe side-call (substituting a text description into the
 /// prompt).
 ///
@@ -429,7 +429,7 @@ pub fn vision_capable(model_id: &str) -> bool {
 /// `image_registry::capability`) fall back to sudocode's conservative
 /// defaults when either half is missing.
 ///
-/// Documented today (per sudorouter): Anthropic 5 MB / 8000 px, OpenAI 20 MB,
+/// Documented today (per sudorouter): Anthropic 5 MB / 8000 px, `OpenAI` 20 MB,
 /// Gemini ~7 MB. Not documented (returns None): Grok, Qwen-vl, Llama-4,
 /// Doubao — sudorouter will backfill as canonical numbers become available.
 #[must_use]
@@ -470,7 +470,7 @@ pub fn all_model_ids() -> Vec<String> {
 /// IDs not already covered (case-insensitive dedup).
 ///
 /// This is the DRY helper for all flat-list discovery surfaces
-/// (`get_model_info`, FuzzySelect picker). Call sites that need two-phase
+/// (`get_model_info`, `FuzzySelect` picker). Call sites that need two-phase
 /// formatting (config aliases with rich display vs. capabilities wire IDs)
 /// should use [`all_model_ids`] directly.
 #[inline]
@@ -549,14 +549,13 @@ pub fn max_output_tokens_or_default(model_id: &str) -> u32 {
 /// them would lose `endpoint_types`, which picks the wire format.
 pub fn load(config_home: &Path, backend: &dyn FsBackend) {
     let path = cache_path(config_home);
-    let file = match read_file(backend, &path) {
-        Some(from_disk) => bundled_over_disk(from_disk),
-        None => {
-            // First launch: seed with the bundled table.
-            let default = ModelCapabilitiesFile::default();
-            let _ = write_file(backend, &path, &default);
-            default
-        }
+    let file = if let Some(from_disk) = read_file(backend, &path) {
+        bundled_over_disk(from_disk)
+    } else {
+        // First launch: seed with the bundled table.
+        let default = ModelCapabilitiesFile::default();
+        let _ = write_file(backend, &path, &default);
+        default
     };
     // OnceLock::set fails silently if already set (e.g. test double-init).
     let _ = CAPABILITIES.set(file);
@@ -581,17 +580,17 @@ fn bundled_over_disk(from_disk: ModelCapabilitiesFile) -> ModelCapabilitiesFile 
     }
 }
 
-/// `is_stale` and `merge_and_write` used to live here: a 24h TTL on the file and
-/// a merge that folded a `/v1/models` response into it. Both are gone because
-/// neither had a caller outside tests once discovery moved to the per-route
-/// catalog, and their contract -- "the file holds refreshed data" -- is exactly
-/// the premise that let a stale per-model window outrank the binary's own table.
-/// A dead function stating a false invariant is worse than no function: the test
-/// that proved `merge_and_write` healed a fabricated window
-/// (`refresh_heals_a_stale_cache_instead_of_re_confirming_it`) passed for a day
-/// while the install it was written for stayed poisoned, because nothing called
-/// the function under test. The healing now happens in `load`, on the path that
-/// actually runs. `parse_api_response` below stays -- `model_discovery` uses it.
+// `is_stale` and `merge_and_write` used to live here: a 24h TTL on the file and
+// a merge that folded a `/v1/models` response into it. Both are gone because
+// neither had a caller outside tests once discovery moved to the per-route
+// catalog, and their contract -- "the file holds refreshed data" -- is exactly
+// the premise that let a stale per-model window outrank the binary's own table.
+// A dead function stating a false invariant is worse than no function: the test
+// that proved `merge_and_write` healed a fabricated window
+// (`refresh_heals_a_stale_cache_instead_of_re_confirming_it`) passed for a day
+// while the install it was written for stayed poisoned, because nothing called
+// the function under test. The healing now happens in `load`, on the path that
+// actually runs. `parse_api_response` below stays -- `model_discovery` uses it.
 
 /// A single model entry from the sudorouter `/v1/models` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,6 +611,7 @@ pub struct ApiModelEntry {
 }
 
 /// Parse the `/v1/models` API response JSON into a vec of model entries.
+#[must_use]
 pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
     let Some(data) = json.get("data").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -627,28 +627,28 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
                 .get("context_window")
                 .or_else(|| entry.get("context_length"))
                 .or_else(|| entry.get("max_input_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let max_output_tokens = entry
                 .get("max_output_tokens")
                 .or_else(|| entry.get("max_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let vision_supported = entry
                 .get("vision_supported")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .or_else(|| {
                     entry
                         .pointer("/capabilities/image_input/supported")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                 });
             let image_max_bytes = entry
                 .get("image_max_bytes")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let image_max_dimension = entry
                 .get("image_max_dimension")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let supported_endpoint_types = entry
                 .get("supported_endpoint_types")
@@ -668,7 +668,7 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
                 supported_endpoint_types,
                 tool_calling_supported: entry
                     .get("tool_calling_supported")
-                    .and_then(|v| v.as_bool()),
+                    .and_then(serde_json::Value::as_bool),
             })
         })
         .collect()
@@ -695,8 +695,7 @@ fn write_file(
     if let Some(parent) = path.parent() {
         backend.create_dir_all(&parent.to_string_lossy())?;
     }
-    let json = serde_json::to_string_pretty(file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(file).map_err(std::io::Error::other)?;
     backend.write_atomic(&path.to_string_lossy(), json.as_bytes())
 }
 
@@ -757,14 +756,14 @@ mod tests {
     fn parse_api_response_extracts_models_with_metadata() {
         let json = serde_json::json!({
             "data": [
-                { "id": "model-a", "context_window": 200000, "max_output_tokens": 32000 },
+                { "id": "model-a", "context_window": 200_000, "max_output_tokens": 32000 },
                 { "id": "model-b" },
-                { "id": "model-c", "context_window": 100000, "max_output_tokens": 8000 }
+                { "id": "model-c", "context_window": 100_000, "max_output_tokens": 8000 }
             ]
         });
         let entries = parse_api_response(&json);
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].context_window, Some(200000));
+        assert_eq!(entries[0].context_window, Some(200_000));
         assert!(entries[1].context_window.is_none());
     }
     /// The bundled table outranks a stale per-model entry in the file, and a

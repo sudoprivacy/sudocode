@@ -1,7 +1,7 @@
-//! PTY live e2e — SendMessage plain-text triggers subagent multi-turn resume.
+//! PTY live e2e — `SendMessage` plain-text triggers subagent multi-turn resume.
 //!
 //! Roadmap coverage: sub-agent CC-fork parity — deferred sub-commit
-//! from plan §4.1 that turns SendMessage from write-only-to-disk into
+//! from plan §4.1 that turns `SendMessage` from write-only-to-disk into
 //! a live delivery mechanism.
 //!
 //! ## What this exercises (long-workflow, data-flow chained)
@@ -111,14 +111,14 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
     // reached the subagent, or the multi-turn loop skipped it, or the
     // resume prompt was malformed, the sentinel WILL NOT be there.
     sess.expect(FOLLOW_UP_SENTINEL).unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("follow-up sentinel did not surface: {e}\nPTY:\n{screen}");
     });
 
     // Then clean exit.
     sess.set_default_timeout(long);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "scode did not exit after multi-turn chain: {e}\ntail: {tail}",
             tail = screen

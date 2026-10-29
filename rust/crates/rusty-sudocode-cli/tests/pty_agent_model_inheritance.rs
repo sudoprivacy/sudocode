@@ -59,7 +59,7 @@ fn subagent_and_result_summary_inherit_current_parent_model() {
         spawns.len(),
         1,
         "must actually delegate exactly once: {}",
-        cli.render(|screen| screen.contents())
+        cli.render(common::screen_contents)
     );
     let (parent_model, input) = &spawns[0];
     assert!(

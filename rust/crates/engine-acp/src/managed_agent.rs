@@ -19,6 +19,20 @@ use crate::acp_sdk_server::{
 
 type StateObserver = Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>;
 
+fn managed_session_config(prepared: &PreparedManagedAgent) -> SdkAcpConfig {
+    SdkAcpConfig {
+        agent_version: env!("CARGO_PKG_VERSION").into(),
+        model: prepared.model().to_string(),
+        model_flag_raw: Some(prepared.model().to_string()),
+        permission_mode_override: Some(runtime::PermissionMode::Prompt),
+        reasoning_effort: None,
+        allowed_tools: None,
+        auth_mode: None,
+        git_sha: None,
+        build_target: None,
+    }
+}
+
 struct Factory {
     prepared: Mutex<Option<PreparedManagedAgent>>,
     session_id: String,
@@ -61,11 +75,18 @@ impl HostedSessionFactory for Factory {
         Ok((Arc::new(engine), cwd))
     }
 
-    fn state_changed(&self, state: engine_core::EngineState, reason: Option<String>) {
+    fn state_changed(&self, state: engine_core::EngineState) {
+        let reason = match state {
+            engine_core::EngineState::AwaitingInput(reason) => Some(match reason {
+                engine_core::engine_events::InputReason::Permission => "permission".into(),
+                engine_core::engine_events::InputReason::Question => "question".into(),
+            }),
+            _ => None,
+        };
         let state = match state {
             engine_core::EngineState::Idle => AgentState::Ready,
             engine_core::EngineState::Running => AgentState::Busy,
-            engine_core::EngineState::AwaitingInput => AgentState::AwaitingInput,
+            engine_core::EngineState::AwaitingInput(_) => AgentState::AwaitingInput,
         };
         (self.observer)(state, reason);
     }
@@ -102,17 +123,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
         // This signal terminates the HOST. Turn cancellation belongs to each
         // SessionEngine and is reset only when that engine starts another turn.
         let stopped = prepared.abort_signal();
-        let config = SdkAcpConfig {
-            agent_version: env!("CARGO_PKG_VERSION").into(),
-            model: prepared.model().to_string(),
-            model_flag_raw: Some(prepared.model().to_string()),
-            permission_mode_override: Some(runtime::PermissionMode::Prompt),
-            reasoning_effort: None,
-            allowed_tools: None,
-            auth_mode: None,
-            git_sha: None,
-            build_target: None,
-        };
+        let config = managed_session_config(&prepared);
         let ctx = agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
         let mailbox = Arc::new(SessionMailbox::open(
             kernel,
@@ -158,7 +169,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
                                     stop.abort();
                                     registry.cancel_all();
                                     let error = match result {
-                                        Ok(Ok(Some(SessionPayload::Closed { reason }))) | Ok(Err(reason)) => reason,
+                                        Ok(Ok(Some(SessionPayload::Closed { reason })) | Err(reason)) => reason,
                                         Err(error) => error.to_string(),
                                         _ => unreachable!(),
                                     };

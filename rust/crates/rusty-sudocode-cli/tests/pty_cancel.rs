@@ -75,7 +75,7 @@ fn esc_cancels_turn_in_repl() {
     sess.send("\r").expect("submit exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
@@ -100,7 +100,7 @@ fn resume_seeds_history_for_up_arrow() {
     // Session 1: submit a prompt, then exit.
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     let turn_timeout = if env.is_live() {
-        Duration::from_secs(60)
+        Duration::from_mins(1)
     } else {
         Duration::from_secs(15)
     };
@@ -121,7 +121,7 @@ fn resume_seeds_history_for_up_arrow() {
 
     // Wait for the resumed REPL prompt.
     sess2.expect("❯").unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("should see prompt after resume: {e}\nPTY screen:\n{screen}");
     });
 
@@ -129,7 +129,7 @@ fn resume_seeds_history_for_up_arrow() {
     sess2.send("\x1b[A").expect("send Up arrow");
     std::thread::sleep(Duration::from_millis(500));
 
-    let screen = sess2.render(|s| s.contents());
+    let screen = sess2.render(common::screen_contents);
     assert!(
         screen.contains("say hello world") || screen.contains("single_turn_text"),
         "↑ after resume should recall the previous prompt from history.\n\
@@ -141,7 +141,7 @@ fn resume_seeds_history_for_up_arrow() {
     std::thread::sleep(Duration::from_millis(100));
     sess2.send("/exit\r").expect("send exit");
     let exit = sess2.expect_eof().unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);

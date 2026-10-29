@@ -33,7 +33,7 @@ const BUDGET: Duration = Duration::from_secs(30);
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }
@@ -100,6 +100,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         .expect("\u{276f}")
         .expect("the second REPL should start");
     expect_on_screen(&mut second, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line_cleared(&second, BUDGET, "redelivery prompt ready");
     assert_eq!(
         position(),
         0,
@@ -146,7 +147,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     let exit = second.expect_eof().unwrap_or_else(|error| {
         panic!(
             "the REPL did not exit: {error:?}\nPTY:\n{}",
-            second.render(|screen| screen.contents())
+            second.render(common::screen_contents)
         );
     });
     assert_eq!(exit, 0);

@@ -22,8 +22,7 @@ use runtime::mailbox::{local_agent_name, InboxConvention, Mailbox};
 fn tmp_root(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let p = std::env::temp_dir().join(format!("pair-{label}-{nanos}-{}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     p
@@ -69,7 +68,10 @@ fn a_sends_to_b_over_shared_pair_root() {
 
     // A conversation nobody wrote to stays empty — no cross-talk between
     // pairs, which is the property per-pair transcripts buy.
-    assert!(bob.read_conversation("carol").unwrap().is_empty());
+    assert_eq!(
+        bob.read_conversation("carol").unwrap(),
+        [] as [runtime::agent_mailbox::MailboxEnvelope; 0]
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

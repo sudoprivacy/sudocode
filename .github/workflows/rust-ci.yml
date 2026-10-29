@@ -718,7 +718,7 @@ jobs:
         with:
           workspaces: rust -> target
       - name: Run workspace clippy
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
 
   clippy-workspace-macos:
     # macOS is the scarcest runner pool (about 5 slots shared by every

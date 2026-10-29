@@ -53,9 +53,9 @@ pub fn assign_agent_color(agent_id: &str) -> Option<&'static str> {
 fn portable_hash(bytes: &[u8]) -> u32 {
     let mut h: i32 = 0;
     for &b in bytes {
-        h = h.wrapping_shl(5).wrapping_sub(h).wrapping_add(b as i32);
+        h = h.wrapping_shl(5).wrapping_sub(h).wrapping_add(i32::from(b));
     }
-    (h as i64).unsigned_abs() as u32
+    h.unsigned_abs()
 }
 
 #[cfg(test)]

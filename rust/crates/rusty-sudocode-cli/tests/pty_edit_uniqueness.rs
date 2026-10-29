@@ -37,30 +37,11 @@ fn ambiguous_edits_preserve_bytes_and_can_be_repaired() {
         "edit_file",
     ]);
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "initial prompt");
-    let mut run_batch = |label: &str, calls: Vec<serde_json::Value>| {
-        let prompt = env.prompt(
-            &format!(
-                "Perform the {label} edits exactly as specified. TOOL_BATCH:{}",
-                serde_json::to_string(&calls).unwrap()
-            ),
-            "tool_concurrency",
-        );
-        let marker = common::turn_status_marker(&sess);
-        sess.send(&prompt).unwrap();
-        common::expect_screen_settled(
-            &sess,
-            |s| common::input_line_of(s).contains(label),
-            common::DEFAULT_TIMEOUT,
-            "edit batch pasted",
-        );
-        sess.send("\r").unwrap();
-        common::expect_turn_complete_after(&sess, &marker, env.timeout(), label);
-    };
     let mut ambiguous: Vec<_> = fixtures.iter().map(|(path, _, old, ..)| json!({"id": format!("ambiguous-{path}"), "name": "edit_file", "input": {"path": path, "old_string": old, "new_string": "WRONG"}})).collect();
     for is_all in [false, true] {
         ambiguous.push(json!({"id": format!("empty-{is_all}"), "name": "edit_file", "input": {"path": "empty.txt", "old_string": "", "new_string": "WRONG", "replace_all": is_all}}));
     }
-    run_batch("reject ambiguous and empty", ambiguous);
+    run_edit_batch(&env, &mut sess, "reject ambiguous and empty", &ambiguous);
     for (path, content, ..) in fixtures {
         assert_eq!(
             fs::read(env.workspace_root().join(path)).unwrap(),
@@ -71,7 +52,7 @@ fn ambiguous_edits_preserve_bytes_and_can_be_repaired() {
         fs::read_to_string(env.workspace_root().join("empty.txt")).unwrap(),
         "untouched"
     );
-    run_batch("repair with unique context", fixtures.iter().map(|(path, _, _, old, new)| json!({"id": format!("unique-{path}"), "name": "edit_file", "input": {"path": path, "old_string": old, "new_string": new}})).collect());
+    run_edit_batch(&env, &mut sess, "repair with unique context", &fixtures.iter().map(|(path, _, _, old, new)| json!({"id": format!("unique-{path}"), "name": "edit_file", "input": {"path": path, "old_string": old, "new_string": new}})).collect::<Vec<_>>());
     assert_eq!(
         fs::read_to_string(env.workspace_root().join("lf.txt")).unwrap(),
         "head\n修复\n重复\ntail\n"
@@ -84,9 +65,11 @@ fn ambiguous_edits_preserve_bytes_and_can_be_repaired() {
         fs::read_to_string(env.workspace_root().join("overlap.txt")).unwrap(),
         "fixed"
     );
-    run_batch(
+    run_edit_batch(
+        &env,
+        &mut sess,
         "replace every remaining occurrence",
-        vec![
+        &[
             json!({"id": "all", "name": "edit_file", "input": {"path": "lf.txt", "old_string": "\n", "new_string": "|", "replace_all": true}}),
         ],
     );
@@ -96,6 +79,69 @@ fn ambiguous_edits_preserve_bytes_and_can_be_repaired() {
     );
     sess.send("/exit\r").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);
+    assert_saved_edit_results(&env);
+}
+
+#[test]
+fn live_model_recovers_with_unique_context() {
+    let env = TestEnv::new("edit-unique-context-live");
+    if !env.is_live() {
+        return;
+    }
+    fs::write(
+        env.workspace_root().join("repeat.txt"),
+        "first=alpha\nsecond=alpha\n",
+    )
+    .unwrap();
+    let prompt = "In repeat.txt change only second=alpha to second=omega using edit_file. Include enough surrounding context to uniquely match; preserve the first line. Read back and verify the final content, then say EDIT_VERIFIED.";
+    let mut sess = env.spawn(&[
+        "-p",
+        "--permission-mode",
+        "danger-full-access",
+        "--allowedTools",
+        "read_file,edit_file",
+        prompt,
+    ]);
+    sess.set_default_timeout(common::LIVE_TURN_BUDGET);
+    let exit = sess.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "live edit did not finish: {error}; screen: {}",
+            sess.render(common::screen_contents)
+        )
+    });
+    assert_eq!(exit, 0);
+    assert_eq!(
+        fs::read_to_string(env.workspace_root().join("repeat.txt")).unwrap(),
+        "first=alpha\nsecond=omega\n"
+    );
+}
+
+fn run_edit_batch(
+    env: &TestEnv,
+    sess: &mut pty_expect::PtySession,
+    label: &str,
+    calls: &[serde_json::Value],
+) {
+    let prompt = env.prompt(
+        &format!(
+            "Perform the {label} edits exactly as specified. TOOL_BATCH:{}",
+            serde_json::to_string(calls).unwrap()
+        ),
+        "tool_concurrency",
+    );
+    let marker = common::turn_status_marker(sess);
+    sess.send(&prompt).unwrap();
+    common::expect_screen_settled(
+        sess,
+        |s| common::input_line_of(s).contains(label),
+        common::DEFAULT_TIMEOUT,
+        "edit batch pasted",
+    );
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(sess, &marker, env.timeout(), label);
+}
+
+fn assert_saved_edit_results(env: &TestEnv) {
     let saved = SessionStore::from_cwd(env.workspace_root())
         .unwrap()
         .load_session("latest")
@@ -131,38 +177,4 @@ fn ambiguous_edits_preserve_bytes_and_can_be_repaired() {
             assert!(!is_error, "{id}: {output}");
         }
     }
-}
-
-#[test]
-fn live_model_recovers_with_unique_context() {
-    let env = TestEnv::new("edit-unique-context-live");
-    if !env.is_live() {
-        return;
-    }
-    fs::write(
-        env.workspace_root().join("repeat.txt"),
-        "first=alpha\nsecond=alpha\n",
-    )
-    .unwrap();
-    let prompt = "In repeat.txt change only second=alpha to second=omega using edit_file. Include enough surrounding context to uniquely match; preserve the first line. Read back and verify the final content, then say EDIT_VERIFIED.";
-    let mut sess = env.spawn(&[
-        "-p",
-        "--permission-mode",
-        "danger-full-access",
-        "--allowedTools",
-        "read_file,edit_file",
-        prompt,
-    ]);
-    sess.set_default_timeout(common::LIVE_TURN_BUDGET);
-    let exit = sess.expect_eof().unwrap_or_else(|error| {
-        panic!(
-            "live edit did not finish: {error}; screen: {}",
-            sess.render(|screen| screen.contents())
-        )
-    });
-    assert_eq!(exit, 0);
-    assert_eq!(
-        fs::read_to_string(env.workspace_root().join("repeat.txt")).unwrap(),
-        "first=alpha\nsecond=omega\n"
-    );
 }

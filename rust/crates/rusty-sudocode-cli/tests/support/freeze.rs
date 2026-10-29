@@ -70,8 +70,11 @@ pub fn freeze(pid: u32) -> io::Result<FreezeGuard> {
 fn freeze_pid(pid: u32) -> io::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
-    kill(Pid::from_raw(pid as i32), Signal::SIGSTOP)
-        .map_err(|e| io::Error::other(format!("SIGSTOP {pid}: {e}")))?;
+    kill(
+        Pid::from_raw(i32::try_from(pid).expect("OS PID fits i32")),
+        Signal::SIGSTOP,
+    )
+    .map_err(|e| io::Error::other(format!("SIGSTOP {pid}: {e}")))?;
     wait_until_stopped(pid)
 }
 
@@ -79,8 +82,11 @@ fn freeze_pid(pid: u32) -> io::Result<()> {
 fn resume_pid(pid: u32) -> io::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
-    kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
-        .map_err(|e| io::Error::other(format!("SIGCONT {pid}: {e}")))
+    kill(
+        Pid::from_raw(i32::try_from(pid).expect("OS PID fits i32")),
+        Signal::SIGCONT,
+    )
+    .map_err(|e| io::Error::other(format!("SIGCONT {pid}: {e}")))
 }
 
 /// Confirm the kernel has actually stopped the process. `ps` reports a stopped

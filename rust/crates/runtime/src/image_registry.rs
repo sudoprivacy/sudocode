@@ -56,12 +56,11 @@ pub struct ImageCapability {
 /// falls back to sudocode's hard-coded `MAX_IMAGE_BYTES` / `MAX_IMAGE_DIMENSION`.
 #[must_use]
 pub fn capability_for(active_model: Option<&str>) -> ImageCapability {
-    let (per_model_bytes, per_model_dim) = active_model
-        .map(crate::model_capabilities::per_model_image_cap)
-        .unwrap_or((None, None));
+    let (per_model_bytes, per_model_dim) =
+        active_model.map_or((None, None), crate::model_capabilities::per_model_image_cap);
+    let max_bytes = u32::try_from(MAX_IMAGE_BYTES).expect("image limit fits u32");
     ImageCapability {
-        max_bytes: per_model_bytes
-            .map_or(MAX_IMAGE_BYTES as u32, |b| b.min(MAX_IMAGE_BYTES as u32)),
+        max_bytes: per_model_bytes.map_or(max_bytes, |bytes| bytes.min(max_bytes)),
         max_dimension: per_model_dim.map_or(MAX_IMAGE_DIMENSION, |d| d.min(MAX_IMAGE_DIMENSION)),
         downsample_target_bytes: DOWNSAMPLE_TARGET_BYTES,
         auto_handles_oversized: true,
@@ -387,13 +386,13 @@ mod tests {
         // Create a tiny 2x2 RGBA image.
         let rgba = vec![255u8; 2 * 2 * 4];
         let registered = registry.register_rgba(2, 2, &rgba).unwrap();
-        assert!(!registered.hash.is_empty());
+        assert_ne!(registered.hash, "");
         assert_eq!(registered.mime_type, "image/png");
         assert!(registered.path.exists());
 
         let (b64, mime) = registry.load(&registered.hash).unwrap();
         assert_eq!(mime, "image/png");
-        assert!(!b64.is_empty());
+        assert_ne!(b64, "");
     }
 
     #[test]
@@ -416,7 +415,7 @@ mod tests {
     /// Regression guard for the new `downsample_image` Err branch.
     /// White 1000x1000 RGBA compresses easily under the 5MB cap, so
     /// this exercises the success branch (returns Ok with JPEG bytes
-    /// well under the cap). The Err branch (PR-E's ImageTooLargeError)
+    /// well under the cap). The Err branch (PR-E's `ImageTooLargeError`)
     /// requires high-entropy pixel data at near-maximum dimensions to
     /// trip; cheaply unit-testable variants of that are unstable
     /// across JPEG encoder versions, so the type-level contract for
@@ -455,8 +454,8 @@ mod tests {
         );
     }
 
-    /// Direct contract test for the ImageTooLargeError typed-detection
-    /// helper. Boundary callers (e.g. push_images in
+    /// Direct contract test for the `ImageTooLargeError` typed-detection
+    /// helper. Boundary callers (e.g. `push_images` in
     /// rusty-sudocode-cli/src/main.rs) rely on `is_image_too_large` to
     /// substitute a `ContentBlock::Text` placeholder; regression guard
     /// against accidentally breaking the downcast contract (e.g. by

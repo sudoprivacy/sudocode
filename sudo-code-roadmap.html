@@ -2414,6 +2414,85 @@ The <a href="https://s.shareone.vip/s/nexus-integration-architecture">Nexus inte
 owns transport and runtime service boundaries. This section tracks implementation
 and acceptance against those references.</p>
 
+<h3 id="agent-runtime-status">Agent discovery: inspect runtime status without reading sessions</h3>
+
+<p><b>Requested behavior.</b> Extend <code>agent_list</code> with small, explicit
+runtime observations. A peer can be doing foreground work, waiting for an actual
+input request, or idle after its turn; background work is independent. CLI and
+cohost consume the same engine facts. No session scan, model request, terminal
+scrape, or inference from silence is part of discovery.</p>
+
+<p><b>Verified foundation.</b> The engine's <code>EngineState</code> owns foreground
+transitions, including management and direct tools. An outstanding input request
+has a typed permission/question reason; independent tools may continue while it
+waits. <code>BackgroundTasks</code> already owns shell and child-agent tasks and
+real tool-operation leases. The task browser consumes this registry. Nexus
+0.8.23 adds owner-authorized <code>managed_agent.list_sessions_v1</code> snapshots
+that preserve multiple managed instances of one Agent and SID. It is a node-local
+enumeration, not a complete cross-node presence directory.</p>
+
+<table>
+<thead><tr><th>Observation</th><th>Authority and meaning</th></tr></thead>
+<tbody>
+<tr><td>Agent name and SID</td><td>Durable identity and history, respectively.
+Neither establishes a running instance. One Agent or SID may have several
+instances; do not flatten their states into one last-writer-wins value.</td></tr>
+<tr><td>Runtime identity</td><td>An opaque, host-scoped instance handle. Preserve
+the host/node routing identity, PID and incarnation together. A PID alone is
+reusable. A managed channel generation is distinct from a SID and must be
+validated by its owning host.</td></tr>
+<tr><td>Online observation</td><td>The runtime host's registration and live
+instance ownership. Include query scope and freshness. An unreachable host,
+unsupported backend, expired observation, or authorization boundary yields
+unknown, not offline. Absence can establish offline only within an explicitly
+complete, authoritative scope. Directory existence is not liveness.</td></tr>
+<tr><td>Foreground state and input reason</td><td>Read the shared engine state.
+Only an actual permission/question request means awaiting input; an ordinary
+question in the final answer leaves the turn idle. Thinking-end, message-end,
+stalled-stream timers and recent output do not end a turn. A host that only
+reports attach/exit cannot claim to report foreground activity.</td></tr>
+<tr><td>Background tasks</td><td>Count background-marked running/stopping
+Terminal and Agent records from <code>BackgroundTasks</code>, with execution
+unconfirmed reported separately. Read metadata without copying output tails,
+reading manifests, or replacing the browser's event sink.</td></tr>
+<tr><td>Outstanding tool operations</td><td>Use the same registry's actual worker
+leases, including workers surviving caller cancellation. Keep this count
+separate from background tasks. A status read is observational; it never grants
+human control or replaces the existing pause/fence protocol.</td></tr>
+</tbody>
+</table>
+
+<p><b>Implementation boundary.</b> The common engine status command and
+<a href="docs/acp.md#runtime-status-extension-v1">ACP status extension</a> expose
+one lightweight snapshot through the existing command/event seam. Host adapters
+consume those facts; neither reimplements turn detection. Native CLI routing
+belongs in the local transient runtime layer, with OS-released instance
+ownership and an incarnation-safe query endpoint. An attached CLI registers
+through its node's external-runtime interface without making node availability
+a startup dependency or falling back to another peer namespace. Cohost retains
+the existing Nexus AgentRegistry as its runtime authority. Node routing and
+cross-node discovery belong to Nexus; do not replicate mutable status into
+Agent/SID transcripts or treat the attention-only state stream as a full
+runtime registry.</p>
+
+<p><b>Nexus contract still required.</b> External updates, heartbeats and teardown
+must validate the registered incarnation and carry the typed waiting reason.
+Discovery must expose supported observations, node scope and instance identity,
+including externally registered CLI processes. A remote directory must route
+to the authoritative runtime host and retain unknown/freshness semantics across
+disconnects. The released generic <code>agent_update_state</code> takes a PID
+and state only; the managed-only listing does not satisfy these requirements.</p>
+
+<p><b>Connected acceptance.</b> Drive real CLI PTYs and production cohost engines:
+quiet running tool; explicit question with a sibling tool completing before the
+answer; permission allow/deny/cancel; idle foreground with a live background
+shell and child agent; cancellation with a real worker still stopping; normal
+exit, crash and PID reuse; two instances of one Agent/SID; and owner-denied,
+disconnected and unsupported observations. Repeat discovery across two real
+nodes and verify exact instance identity and actual file/message results.
+Include a configured-but-offline node startup check. Retain structured traces
+outside temporary fixtures; a passing retry does not erase a failed run.</p>
+
 <h3 id="shared-sid-implementation">Shared SID: append history, restore a context chain</h3>
 
 <p><b>CCB validation.</b> The official

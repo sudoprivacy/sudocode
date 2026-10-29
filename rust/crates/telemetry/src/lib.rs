@@ -1,6 +1,4 @@
 use std::fmt::{Debug, Formatter};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,8 +8,10 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+mod jsonl_file;
 mod response_capture;
 mod retry_diagnostics;
+use jsonl_file::{JsonlFile, Rotation};
 pub use response_capture::{
     ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder,
 };
@@ -332,49 +332,35 @@ impl TelemetrySink for MemoryTelemetrySink {
     }
 }
 
+/// Raw JSONL events with whole-record appends shared across processes.
 pub struct JsonlTelemetrySink {
-    path: PathBuf,
-    file: Mutex<File>,
+    file: JsonlFile,
 }
 
 impl Debug for JsonlTelemetrySink {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JsonlTelemetrySink")
-            .field("path", &self.path)
+            .field("path", &self.path())
             .finish_non_exhaustive()
     }
 }
 
 impl JsonlTelemetrySink {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
-            path,
-            file: Mutex::new(file),
+            file: JsonlFile::new(path.as_ref(), None)?,
         })
     }
 
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.path
+        self.file.path()
     }
 }
 
 impl TelemetrySink for JsonlTelemetrySink {
     fn record(&self, event: TelemetryEvent) {
-        let Ok(line) = serde_json::to_string(&event) else {
-            return;
-        };
-        let mut file = self
-            .file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = writeln!(file, "{line}");
-        let _ = file.flush();
+        let _ = self.file.append_json(&event);
     }
 }
 
@@ -386,15 +372,16 @@ impl TelemetrySink for JsonlTelemetrySink {
 /// - Otherwise, writes to ~/.nexus/logs/scode.log (standalone mode)
 ///
 /// Supports log rotation when file exceeds 10MB, keeping up to 3 rotated files.
+/// Processes sharing a path coordinate complete records and rotation through
+/// one persistent sibling lock file, and always append to the active data file.
 pub struct SudoclawLogSink {
-    path: PathBuf,
-    file: Mutex<File>,
+    file: JsonlFile,
 }
 
 impl Debug for SudoclawLogSink {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SudoclawLogSink")
-            .field("path", &self.path)
+            .field("path", &self.path())
             .finish_non_exhaustive()
     }
 }
@@ -408,14 +395,14 @@ impl SudoclawLogSink {
 
     /// Creates a new `SudoclawLogSink` with a specific path.
     pub fn with_path(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
-            path,
-            file: Mutex::new(file),
+            file: JsonlFile::new(
+                path.as_ref(),
+                Some(Rotation {
+                    max_bytes: SUDOCLAW_LOG_ROTATE_AFTER_BYTES,
+                    retained_files: SUDOCLAW_LOG_MAX_ROTATED_FILES,
+                }),
+            )?,
         })
     }
 
@@ -455,42 +442,7 @@ impl SudoclawLogSink {
     /// Returns the path to the log file.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Rotates the log file, keeping up to `SUDOCLAW_LOG_MAX_ROTATED_FILES` rotated files.
-    fn rotate_log_file(&self) -> Result<(), std::io::Error> {
-        // Remove the oldest rotated file if it exists
-        let oldest_rotated = format!("{}.{}", self.path.display(), SUDOCLAW_LOG_MAX_ROTATED_FILES);
-        if Path::new(&oldest_rotated).exists() {
-            std::fs::remove_file(&oldest_rotated)?;
-        }
-
-        // Shift existing rotated files
-        for i in (1..SUDOCLAW_LOG_MAX_ROTATED_FILES).rev() {
-            let current = format!("{}.{}", self.path.display(), i);
-            let next = format!("{}.{}", self.path.display(), i + 1);
-            if Path::new(&current).exists() {
-                std::fs::rename(&current, &next)?;
-            }
-        }
-
-        // Rename current log to .1
-        let first_rotated = format!("{}.1", self.path.display());
-        std::fs::rename(&self.path, &first_rotated)?;
-
-        // Reopen the log file (it will be created on next write)
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        let mut file_guard = self
-            .file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *file_guard = file;
-
-        Ok(())
+        self.file.path()
     }
 }
 
@@ -498,43 +450,14 @@ impl SudoclawLogSink {
     /// Write through the same local serializer/rotation path, letting a caller
     /// with an existing diagnostic policy report IO failures without recursion.
     #[inline]
-    pub fn try_record(&self, event: TelemetryEvent) -> Result<(), std::io::Error> {
-        let log_entry = format_log_entry(&event);
-        let json = serde_json::to_string(&log_entry).map_err(std::io::Error::other)?;
-
-        // Acquire lock first to prevent race condition during rotation check
-        let mut file = self
-            .file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // Check for rotation while holding the lock
-        if let Ok(metadata) = std::fs::metadata(&self.path) {
-            if metadata.len() >= SUDOCLAW_LOG_ROTATE_AFTER_BYTES {
-                // Flush before rotation
-                let _ = file.flush();
-                // Release lock before rotation (rotate_log_file needs to acquire it)
-                drop(file);
-
-                // Perform rotation
-                self.rotate_log_file()?;
-
-                // Re-acquire lock after rotation
-                file = self
-                    .file
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
-        }
-
-        writeln!(file, "{json}")?;
-        file.flush()
+    pub fn try_record(&self, event: &TelemetryEvent) -> Result<(), std::io::Error> {
+        self.file.append_json(&format_log_entry(event))
     }
 }
 
 impl TelemetrySink for SudoclawLogSink {
     fn record(&self, event: TelemetryEvent) {
-        if let Err(error) = self.try_record(event) {
+        if let Err(error) = self.try_record(&event) {
             eprintln!("[scode telemetry] Failed to write log: {error}");
         }
     }

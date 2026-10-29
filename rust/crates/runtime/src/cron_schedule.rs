@@ -99,20 +99,19 @@ pub fn is_one_shot(entry: &CronEntry) -> bool {
 fn next_cron(expr5: &str, tz: Option<&str>, after_secs: u64) -> Option<u64> {
     let six = to_six_field(expr5)?;
     let schedule = cron::Schedule::from_str(&six).ok()?;
-    let after_utc = Utc.timestamp_opt(after_secs as i64, 0).single()?;
-    match tz {
-        Some(tzname) => {
-            let tz: Tz = tzname.parse().ok()?;
-            let after_tz = after_utc.with_timezone(&tz);
-            let next = schedule.after(&after_tz).next()?;
-            Some(next.with_timezone(&Utc).timestamp().max(0) as u64)
-        }
-        None => {
-            // No explicit tz → local machine time (matches CC's default).
-            let after_local = after_utc.with_timezone(&chrono::Local);
-            let next = schedule.after(&after_local).next()?;
-            Some(next.with_timezone(&Utc).timestamp().max(0) as u64)
-        }
+    let after_utc = Utc
+        .timestamp_opt(i64::try_from(after_secs).ok()?, 0)
+        .single()?;
+    if let Some(tzname) = tz {
+        let tz: Tz = tzname.parse().ok()?;
+        let after_tz = after_utc.with_timezone(&tz);
+        let next = schedule.after(&after_tz).next()?;
+        u64::try_from(next.with_timezone(&Utc).timestamp().max(0)).ok()
+    } else {
+        // No explicit tz → local machine time (matches CC's default).
+        let after_local = after_utc.with_timezone(&chrono::Local);
+        let next = schedule.after(&after_local).next()?;
+        u64::try_from(next.with_timezone(&Utc).timestamp().max(0)).ok()
     }
 }
 

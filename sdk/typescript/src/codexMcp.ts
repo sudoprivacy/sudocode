@@ -158,8 +158,11 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
         throw new Error('Local MCP owner configuration/authentication mismatch');
       }
       const server = new McpServer({name:'nexus-scode',version:'1.0.0'});
-      registerScodeMcpTools(server,extra=>{
+      registerScodeMcpTools(server,async extra=>{
         if(!network)throw new ScodeA2aError('Native inventory is not ready; no A2A command was submitted','not_submitted');
+        // A resumed root may precede the periodic poll. Finish its attachment
+        // before tool admission; this never retries an actual task or send.
+        await network.refresh();
         return {connection:network.connectionFor(extra._meta?.threadId),nativeThreadId:extra._meta?.threadId as string,
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],

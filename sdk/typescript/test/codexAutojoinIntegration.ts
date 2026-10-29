@@ -4,7 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { WebSocketServer } from 'ws';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CodexAutojoin, CodexAgentClaim } from '../src/codexAutojoin';
 const root = path.resolve(__dirname,'../..');
 const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
@@ -19,6 +22,9 @@ const ids = Array.from({length:7},()=>randomUUID());
 let offline = true;
 let loaded = ids.slice(0,4);
 let owner: CodexAutojoin | undefined;
+let mcp: Client | undefined;
+let holdReads = false;
+const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
 const proxyEnv: Record<string,string> = {SCODE_NATIVE_ENV_SENTINEL:'owned-proxy'};
 for(const [key,value] of Object.entries(process.env))if(value!==undefined && key!=='CODEX_THREAD_ID')proxyEnv[key]=value;
@@ -31,7 +37,8 @@ server.on('connection',socket=>socket.on('message',bytes=>{
   if(thread.id===ids[3])thread.threadSource='guardian_review';
   const result=call.method==='initialize'?{userAgent:'fixture'}:call.method==='thread/loaded/list'
     ?{data:loaded,nextCursor:null}:call.method==='thread/read'?{thread}:{};
-  socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,result}));
+  const reply = () => {if(socket.readyState===1)socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,result}));};
+  if(holdReads&&call.method==='thread/read')pendingReads.push(reply);else reply();
 }));
 const rows = () => fs.existsSync(journal)?fs.readFileSync(journal,'utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line)):[];
 async function main() {
@@ -111,10 +118,52 @@ async function main() {
   fs.writeFileSync(bindingFile,JSON.stringify(legacy));
   await assert.rejects(connectCodexAutojoin(config),/canonical workspace; operator migration required/);
   assert.equal(enrollments.length,beforeRetarget);
-  console.log('PASS native autojoin processes: root filtering, distinct identities, exact routing, canonical workspace alias and retarget refusal, unload/reload, restart, legacy recovery, ambiguous enrollment, wrong actor refusal and no inference/replay');
+
+  // A resumed root can become visible before the owner's periodic inventory.
+  // Its first real MCP call must wait for attachment, before any send begins.
+  loaded=[];
+  const reservation=createServer();reservation.listen(0,'127.0.0.1');await once(reservation,'listening');
+  const reserved=reservation.address();assert.ok(reserved&&typeof reserved!=='string');
+  await new Promise<void>(resolve=>reservation.close(()=>resolve()));
+  const mcpConfig=path.join(directory,'mcp.json');
+  fs.writeFileSync(mcpConfig,JSON.stringify({version:1,mode:'codex-autojoin',native:config.native,
+    stateDirectory:path.join(directory,'mcp-bindings'),auditLog:path.join(directory,'mcp-audit.jsonl'),peers:[],
+    enrollmentArgv:[process.execPath,path.join(root,'test/fixtures/codexAgentEnrollment.cjs'),directory],
+    endpoint:{port:reserved.port,token:'01'.repeat(32)},
+  }),{mode:0o600});
+  mcp=new Client({name:'autojoin-process-acceptance',version:'1'},{capabilities:{}});
+  await mcp.connect(new StdioClientTransport({command:process.execPath,args:[path.join(root,'dist/server.cjs'),
+    '--codex','--config',mcpConfig],stderr:'pipe'}));
+  const readyDeadline=Date.now()+10000;
+  for(;;){
+    const status=await mcp.callTool({name:'scode_status',arguments:{}});
+    const content=status.content as Array<{type:string;text:string}>;
+    if(JSON.parse(content[0].text).state==='observing')break;
+    assert.ok(Date.now()<readyDeadline,'MCP owner did not attach its native observer');
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  holdReads=true;loaded=[ids[0]];
+  const sending=mcp.callTool({name:'scode_send',arguments:{to:'fixture-peer',message:'first resumed send',summary:'one append'},
+    _meta:{threadId:ids[0]}});
+  const attachmentDeadline=Date.now()+3000;
+  while(!pendingReads.length){
+    assert.ok(Date.now()<attachmentDeadline,'MCP call did not resolve the newly loaded root');
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  assert.equal(await Promise.race([sending.then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),100))]),false,
+    'first MCP call must wait for its root attachment');
+  assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,2,'nothing appended while attachment was held');
+  holdReads=false;for(const reply of pendingReads.splice(0))reply();
+  assert.equal((await sending).isError,false);
+  assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,3,'resumed command appends exactly once');
+  assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
+  await mcp.close();mcp=undefined;
+  console.log('PASS native autojoin processes: root filtering, distinct identities, exact routing, canonical workspace alias and retarget refusal, unload/reload, first-MCP attachment readiness, restart, legacy recovery, ambiguous enrollment, wrong actor refusal and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
+  holdReads=false;for(const reply of pendingReads.splice(0))reply();
   await owner?.close();
+  await mcp?.close();
   await new Promise<void>(resolve=>server.close(()=>resolve()));
   fs.rmSync(directory,{recursive:true,force:true});
 });

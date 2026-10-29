@@ -40,7 +40,10 @@ gate. The config initializer only prepares a global MCP command, not a complete
 installer or a native daemon migration.
 
 Tools select the binding using native host `_meta.threadId`, never a sender or
-thread argument supplied to the tool. Real-native acceptance deliberately
+thread argument supplied to the tool. Each invocation refreshes native inventory
+before selecting the authenticated connection, so a resumed root's first call
+waits for its existing binding to load. This does not retry a task or send.
+Real-native acceptance deliberately
 passes a conflicting thread ID to `mcpServer/tool/call`; the host overwrites it
 and each resulting native audit identifies the correct Agent. Outgoing command
 audits retain that native-thread correlation. The shared send path keeps its

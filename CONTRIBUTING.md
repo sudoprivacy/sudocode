@@ -221,12 +221,19 @@ queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays
 available for gateway diagnosis.
 
+The required `CI preflight` job shares one checkout and tool setup for format,
+generated cache schemas, docs, history, boundary, release-mirror and provider
+probe checks. Its first failing step blocks its daemon/provider dependents.
+PRs always start this job, including SDK-only changes; path filters cannot leave
+a required status pending. The queue's protected acceptance gate still checks
+the combined Git history. No unique product test is removed by this consolidation.
+
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. A runtime interaction that
 exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
-Real provider/API acceptance on main is unchanged; mock transport results do not
+Real provider/API assertions on main are unchanged; mock transport results do not
 establish live cache hits. Cache-prefix, compaction and all existing workspace
 cases remain, including standalone vendored Mermaid and benchmark type checks.
 

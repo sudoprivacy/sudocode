@@ -364,6 +364,18 @@ fn assert_rejected_migrations_preserve_source(
         cwd,
     )
     .unwrap();
+    // An admitted recorder for an owned backup may still be finalizing when
+    // deletion publishes its tombstone. Hold its real native lock so physical
+    // reclaim must take the supported deferred path, independent of timing.
+    let recorder = StdFsBackend
+        .try_lock(
+            &archives[0]
+                .with_extension("responses.lock")
+                .to_string_lossy(),
+            30_000,
+        )
+        .unwrap()
+        .expect("the backup recorder lock is initially free");
     runtime::subagent_completion::CompletionJournal::purge_stored(
         std::sync::Arc::new(StdFsBackend),
         path,
@@ -378,6 +390,26 @@ fn assert_rejected_migrations_preserve_source(
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
+    assert!(
+        path.exists(),
+        "a live backup recorder defers physical reclaim"
+    );
+    assert_eq!(legacy_archives(directory).as_slice(), archives);
+    drop(recorder);
+    // purge_stored commits deletion, not synchronous physical reclamation. A
+    // concurrent cleanup worker can also own the SID barrier at its return.
+    // Observe actual completion within the same fixture budget; do not retry
+    // the deletion or call cleanup directly from the test.
+    let references = directory.join(".cleanup");
+    let deadline = Instant::now() + WAIT;
+    while std::fs::read_dir(&references).unwrap().next().is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the deleted migration was never reclaimed after its backup recorder retired: {}",
+            references.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(!path.exists());
     assert!(
         legacy_archives(directory).is_empty(),

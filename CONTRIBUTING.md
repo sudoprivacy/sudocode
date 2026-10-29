@@ -247,6 +247,12 @@ Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
 
+The ACP package workflow runs integration journeys on all four PR hosts. Main
+still builds and packages its exact merged revision on those hosts, while
+reusing the PR's integration result. A newer head cancels an obsolete package
+run for the same PR/ref. Unrelated workflow edits do not start three Rust cache
+publishers; Rust changes and changes to the publisher itself still do.
+
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. A runtime interaction that

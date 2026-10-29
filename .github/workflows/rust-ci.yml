@@ -216,12 +216,76 @@ jobs:
       - name: Vendored vfs.proto must match the locked Nexus revision
         run: diff -u --strip-trailing-cr .nexus-protocol-source/proto/nexus/grpc/vfs/vfs.proto rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto
 
+  clippy-workspace:
+    # Local/complementary acceptance owns the native suites. Preserve the
+    # stronger all-feature lint contract, including the integrated queue tree.
+    if: >-
+      !inputs.live_only && !inputs.cache_only &&
+      needs.one-nexus-vfs-pin.outputs.daemon_required == 'true' &&
+      (github.event_name == 'merge_group' ||
+       (github.event_name == 'pull_request' && !github.event.pull_request.draft))
+    needs: one-nexus-vfs-pin
+    name: cargo clippy --workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ./.github/actions/setup-protoc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Run workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+
+  integrated-acceptance:
+    # A required job must fail when a dependency fails or is unexpectedly
+    # skipped; GitHub treats a skipped required job as successful.
+    if: always() && github.event_name == 'merge_group'
+    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]
+    name: nexus-A2A live (real daemon)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Require native daemon acceptance and zero workspace warnings
+        env:
+          PIN_RESULT: ${{ needs.one-nexus-vfs-pin.result }}
+          NATIVE_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          A2A_RESULT: ${{ needs.a2a-live.result }}
+          CLIPPY_RESULT: ${{ needs.clippy-workspace.result }}
+        run: |
+          set -eu
+          test "$PIN_RESULT" = success
+          case "$NATIVE_REQUIRED" in
+            true) expected=success ;;
+            false) expected=skipped ;;
+            *) echo "::error::Missing native input decision"; exit 1 ;;
+          esac
+          if [ "$A2A_RESULT" != "$expected" ] || [ "$CLIPPY_RESULT" != "$expected" ]; then
+            echo "::error::Integrated acceptance requires $expected: daemon=$A2A_RESULT clippy=$CLIPPY_RESULT"
+            exit 1
+          fi
+
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
     # once, rather than repeating on the PR and on push/main too.
     if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.daemon_required == 'true'
     needs: one-nexus-vfs-pin
-    name: nexus-A2A live (real daemon)
+    name: nexus-A2A journeys (real daemon)
     runs-on: ubuntu-latest
     env:
       SCODE_TEST_BACKEND: mock

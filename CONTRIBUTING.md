@@ -222,8 +222,11 @@ available for gateway diagnosis.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
-the native suites on the combined merge-group tree. A runtime interaction that
-exists only in the combination of independently verified PRs is therefore outside
+the native suites on the combined merge-group tree. Rust-changing PRs also run
+strict all-target/all-feature Clippy on Linux; the queue runs that same strict
+check on Linux, Windows and macOS against the combined tree. The required daemon
+gate waits for those checks and rejects failed or unexpectedly skipped jobs.
+A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API acceptance on main is unchanged; mock transport results do not
 establish live cache hits. Cache-prefix, compaction and all existing workspace
@@ -485,7 +488,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
 cargo test --workspace
 ```
 
@@ -764,7 +767,7 @@ Before opening a PR:
 
 - [ ] Branch off the latest `main`.
 - [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+- [ ] `cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings` is clean.
 - [ ] `cargo test --workspace` passes locally.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).

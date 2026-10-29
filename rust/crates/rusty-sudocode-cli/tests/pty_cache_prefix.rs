@@ -731,14 +731,59 @@ fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
             .unwrap()
             .extend([message.to_string(), message.to_string()]);
         let mut cli = spawn(&env, &path);
+        if let Ok(columns) = std::env::var("SCODE_ERROR_OBSERVATION_PROBE_COLUMNS") {
+            cli.resize(40, columns.parse().unwrap()).unwrap();
+            common::expect_input_line_cleared(&cli, WAIT, "controlled error layout ready");
+        }
         cli.send("Continue despite the deliberately rejected request.\r")
             .unwrap();
-        cli.expect("recovery-test-rejection").unwrap();
+        probe_error_observation(&mut cli, &capture, &path, message, attempts, archives);
         common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
         assert_eq!(capture.bodies().len(), attempts);
         assert_eq!(repair_archives(&path).len(), archives);
         exit(&mut cli);
     }
+}
+
+fn probe_error_observation(
+    cli: &mut PtySession,
+    capture: &Capture,
+    path: &std::path::Path,
+    message: &str,
+    attempts: usize,
+    archives: usize,
+) {
+    let mode = std::env::var("SCODE_ERROR_OBSERVATION_PROBE_MODE").unwrap_or_else(|_| "raw".into());
+    let result = if mode == "screen" {
+        common::expect_screen(
+            cli,
+            |screen| common::screen_contains(screen, "recovery-test-rejection"),
+            common::DEFAULT_TIMEOUT,
+            "the actual rejection must be visible",
+        );
+        Ok(String::new())
+    } else {
+        cli.expect("recovery-test-rejection")
+    };
+    let screen = common::screen_tail(cli, 12000);
+    eprintln!(
+        "ERROR_PROBE_OBSERVATION {}",
+        json!({
+            "mode": mode,
+            "columns": std::env::var("SCODE_ERROR_OBSERVATION_PROBE_COLUMNS").ok(),
+            "message": message,
+            "raw_failed": result.is_err(),
+            "error": result.as_ref().err().map(ToString::to_string),
+            "visible": common::screen_contains(&screen, "recovery-test-rejection"),
+            "requests": capture.bodies().len(),
+            "expected_requests": attempts,
+            "archives": repair_archives(path).len(),
+            "expected_archives": archives,
+            "timeout_millis": common::DEFAULT_TIMEOUT.as_millis(),
+            "screen": screen
+        })
+    );
+    result.expect("original error observation");
 }
 
 #[test]

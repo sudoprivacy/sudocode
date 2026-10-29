@@ -1,0 +1,97 @@
+name: Windows owned process diagnostics
+
+on:
+  push:
+    branches: [debug/pr1083-windows-owned-process]
+
+permissions:
+  contents: read
+
+jobs:
+  native-process-evidence:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: always
+      SCODE_TEST_BACKEND: mock
+      RUST_TEST_NOCAPTURE: '1'
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Observe unchanged ACP tests with native process evidence
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $evidence = Join-Path $env:RUNNER_TEMP 'owned-process-evidence'
+          New-Item -ItemType Directory -Force $evidence | Out-Null
+          $overall = 0
+          for ($iteration = 1; $iteration -le 3; $iteration++) {
+            $started = [DateTime]::UtcNow
+            $folder = Join-Path $evidence "attempt-$iteration"
+            New-Item -ItemType Directory -Force $folder | Out-Null
+            $log = Join-Path $folder 'acp.log'
+            cargo test --workspace --features engine-acp/mailbox --test acp_integration -- --nocapture 2>&1 | Tee-Object -FilePath $log
+            $testExit = $LASTEXITCODE
+            if ($testExit -ne 0) { $overall = 1 }
+            @{ iteration = $iteration; testExit = $testExit; started = $started.ToString('o'); ended = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json | Set-Content (Join-Path $folder 'result.json')
+            # Read only the failed PowerShell fixture's reported output, never
+            # unrelated shell logs, credentials or runner environment values.
+            $failure = Get-Content $log | Where-Object { $_ -match 'all three native PowerShell processes must start' }
+            foreach ($line in $failure) {
+              foreach ($match in [regex]::Matches($line, '"rawOutputPath": String\("([^"]+)"\)')) {
+                $path = ConvertFrom-Json ('"' + $match.Groups[1].Value + '"')
+                if (Test-Path -LiteralPath $path) {
+                  Copy-Item -LiteralPath $path -Destination (Join-Path $folder ([IO.Path]::GetFileName($path)))
+                }
+              }
+            }
+            $fixtures = Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'scode-acp-windows-task-job-*' | Where-Object { $_.CreationTimeUtc -ge $started }
+            foreach ($fixture in $fixtures) {
+              $copy = Join-Path $folder $fixture.Name
+              New-Item -ItemType Directory -Force $copy | Out-Null
+              Get-ChildItem $fixture.FullName -File | Where-Object { $_.Extension -in '.ps1', '.pid', '.tmp' } | Copy-Item -Destination $copy
+              Get-ChildItem $fixture.FullName -File -Recurse | Where-Object { $_.Extension -in '.json', '.jsonl' -and $_.Name -ne 'sudocode.json' } | ForEach-Object {
+                if (Select-String -LiteralPath $_.FullName -SimpleMatch 'windows-owned' -Quiet) {
+                  $relative = [IO.Path]::GetRelativePath($fixture.FullName, $_.FullName) -replace '[\\/]', '_'
+                  Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $copy $relative)
+                }
+              }
+            }
+            $processes = @(Get-CimInstance Win32_Process | Where-Object {
+              $_.Name -in 'pwsh.exe', 'powershell.exe' -and $_.CommandLine -match '(parent|child|grandchild)\.ps1' -and $_.CreationDate.ToUniversalTime() -ge $started
+            })
+            $processes | Select-Object ProcessId, ParentProcessId, CreationDate, ExecutablePath, CommandLine | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $folder 'fixture-processes.json')
+            $threads = foreach ($process in $processes) {
+              try {
+                foreach ($thread in (Get-Process -Id $process.ProcessId -ErrorAction Stop).Threads) {
+                  $wait = if ($thread.ThreadState -eq 'Wait') { $thread.WaitReason.ToString() } else { $null }
+                  @{ processId = $process.ProcessId; threadId = $thread.Id; state = $thread.ThreadState.ToString(); waitReason = $wait }
+                }
+              } catch { @{ processId = $process.ProcessId; error = $_.Exception.Message } }
+            }
+            @($threads) | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $folder 'fixture-threads.json')
+          }
+          exit $overall
+      - name: Retain all successes, failures and native fixture observations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-owned-process-evidence
+          path: ${{ runner.temp }}/owned-process-evidence
+          retention-days: 7
+          if-no-files-found: error

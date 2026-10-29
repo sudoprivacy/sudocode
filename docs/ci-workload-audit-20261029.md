@@ -37,6 +37,18 @@ an unrelated workflow edit alone no longer starts two browser release builds.
 
 ## Dependency cache within the existing quota
 
+Complementary native jobs use the same cache environment as the main publisher.
+`rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
+default prefix list; `env-vars: ImageOS` does not replace that list. Keep
+`CARGO_TERM_COLOR=always` and the two debug settings aligned. The action itself
+sets `CARGO_INCREMENTAL=0`; the trusted command runner applies its one-job limit
+after restore so that scheduling does not split an otherwise identical cache.
+This fixes a key mismatch, not a measured cache-hit-rate claim.
+
+The boundary job no longer downloads and compares `vfs.proto` a second time.
+The required pin job retains the exact pinned-revision byte comparison once per
+event. This removes duplicate validation without removing the protocol guard.
+
 Keep the repository's 10 GB cache limit. Only a main-branch publisher writes
 the shared Rust dependency caches; PRs, merge groups, release and provider jobs
 read them. A PR or merge-group cache is isolated from unrelated PRs, so those
@@ -266,3 +278,19 @@ respective checks; explicit provider dispatch remains explicit. The input
 selector is exercised against actual Git commits for docs, CI, Rust, daemon
 harness and cache-spec changes, through both push and merge-group payloads.
 No independent product case or budget is removed in this follow-up.
+
+## One shared preflight instead of seven short runners
+
+Combine format/schema, docs, architecture boundary, pinned protocol, release
+mirror, provider probe and PR-history jobs into the required `CI preflight`
+job. Keep their original commands and real Git/process scenarios. Share one
+checkout, one Python/Node/Rust environment and one queue admission; stop the
+job and its expensive daemon/provider dependents on its first failed step.
+The protected acceptance gate checks integrated queue history, so preflight
+does not repeat that same range. All PR paths trigger preflight, including
+SDK-only edits. Cache-only dispatch remains compile-only.
+
+This removes six hosted jobs per PR/queue event. It is a scheduling count,
+not a 7x latency claim: commands now run sequentially, and runner queue delay
+still needs measurement. No independent product assertion or deadline changed.
+Required contexts migrate only after the new job has an actual hosted pass.

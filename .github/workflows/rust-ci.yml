@@ -711,23 +711,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps: &clippy_workspace_steps
       - uses: actions/checkout@v4
-      - name: Install protoc (macOS)
-        if: runner.os == 'macOS'
-        working-directory: .
-        run: |
-          set -euo pipefail
-          PROTOC_VERSION=3.20.2
-          case "$(uname -m)" in
-            arm64) ARCH=aarch_64 ;;
-            x86_64) ARCH=x86_64 ;;
-            *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
-          esac
-          mkdir -p "$HOME/protoc"
-          curl -fsSL -o /tmp/protoc.zip \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-${ARCH}.zip"
-          unzip -o /tmp/protoc.zip -d "$HOME/protoc"
-          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/protoc/bin/protoc" --version
+      - name: Install the shared protobuf compiler for all features
+        uses: ./.github/actions/setup-protoc
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

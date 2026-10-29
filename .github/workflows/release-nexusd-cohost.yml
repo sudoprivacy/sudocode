@@ -26,6 +26,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/release-nexusd-cohost.yml
+      - .github/scripts/setup_protoc.py
+      - .github/actions/setup-protoc/**
       - rust/Cargo.toml
       - rust/Cargo.lock
       - rust/vendor/**
@@ -111,48 +113,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # raft-proto 0.7.0 / protobuf-build 0.14.1 rejects protoc >= 4.x with a
-      # faulty version check, so the pinned 3.20.2 is deliberate. Linux runners
-      # ship an accepted protoc in the base image; macOS and Windows have either
-      # none or one too new. (This is also why the `nexusd-cohost` bin sits behind
-      # `--features daemon`: without the gate every `--workspace` job on every PR
-      # would need this step.)
-      - name: Install protoc (macOS)
-        if: runner.os == 'macOS'
-        working-directory: .
-        run: |
-          set -euo pipefail
-          PROTOC_VERSION=3.20.2
-          case "$(uname -m)" in
-            arm64) ARCH=aarch_64 ;;
-            x86_64) ARCH=x86_64 ;;
-            *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
-          esac
-          mkdir -p "$HOME/protoc"
-          curl -fsSL -o /tmp/protoc.zip \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-${ARCH}.zip"
-          unzip -o /tmp/protoc.zip -d "$HOME/protoc"
-          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/protoc/bin/protoc" --version
-
-      - name: Install protoc (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        working-directory: .
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $protocVersion = '3.20.2'
-          $protocDir = Join-Path $env:USERPROFILE 'protoc'
-          New-Item -ItemType Directory -Force -Path $protocDir | Out-Null
-          $zipPath = Join-Path $env:RUNNER_TEMP 'protoc.zip'
-          Invoke-WebRequest -UseBasicParsing -Uri `
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip" `
-            -OutFile $zipPath
-          Expand-Archive -Force -Path $zipPath -DestinationPath $protocDir
-          $protocBinDir = Join-Path $protocDir 'bin'
-          Add-Content -Path $env:GITHUB_PATH -Value $protocBinDir
-          Add-Content -Path $env:GITHUB_ENV -Value "PROTOC=$(Join-Path $protocBinDir 'protoc.exe')"
-          & "$(Join-Path $protocBinDir 'protoc.exe')" --version
+      - name: Install the shared protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - uses: dtolnay/rust-toolchain@stable
 

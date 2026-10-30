@@ -303,7 +303,7 @@ def benchmark_storage(name):
 def benchmark_locked(name, root, output, base, command, target):
     # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
     # budget and sample assertions. Changing execution host changes none of them.
-    inputs = Path("/inputs")
+    inputs = root.parent
     work, targets = benchmark_storage(name)
     work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
@@ -321,8 +321,11 @@ def benchmark_locked(name, root, output, base, command, target):
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
                 "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
         shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+    # Share artifacts only with the same canonical source checkout. The copied
+    # production binaries above stay fixed when dev features build the drivers.
+    driver_target = targets / ("driver" if name == "rendering" else "candidate")
     log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
-                  "--target-dir", str(targets / "driver"), "-p", "rusty-sudocode-cli", "--test", driver_name,
+                  "--target-dir", str(driver_target), "-p", "rusty-sudocode-cli", "--test", driver_name,
                   "--no-run", "--message-format=json-render-diagnostics")
     messages = []
     for line in log.read_text(errors="replace").splitlines():
@@ -342,7 +345,7 @@ def benchmark_locked(name, root, output, base, command, target):
         # Move the existing viewport gates too; deleting the old release job
         # must not silently drop its headless/browser CPU and painting checks.
         manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = str(targets / "viewport-driver")
+        viewport_target = str(targets / "candidate")
         viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
                         "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
         log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,

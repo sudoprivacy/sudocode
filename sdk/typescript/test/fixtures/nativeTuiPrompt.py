@@ -2,4 +2,6 @@
 
 
 def update_prompt_visible(output):
-    return b'Update available' in output and b'Update now' in output
+    # Terminal writes can split the selected option. Refuse on the title before
+    # typing any close keys, rather than waiting for a complete dialog frame.
+    return b'Update available' in output

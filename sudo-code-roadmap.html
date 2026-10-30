@@ -258,6 +258,17 @@ PRs with complete file lists, this removes both profiles from 64 of the 225 PRs
 previously selecting them: 128 fewer profile invocations, or 28.4% of selected
 PRs. This is a static scope comparison, not measured latency savings. Local
 waiting and validation count toward author time before CI can start.</p>
+<p>Later local failures preserve SSH-signed checkpoints of already completed
+profiles when the source is still clean and unchanged. The installed push path
+automatically reuses compatible same-head, same-base, same-host evidence and its
+original log hashes. Custom output runs print an executable resume command.
+Only unfinished or changed profiles rerun. Checkpoints have a separate signature
+purpose and cannot substitute for full acceptance, publish a successful GitHub
+status or authorize a push. Abrupt termination may prevent a checkpoint.
+The actual Git/SSH regression exercises a successful native process followed by
+a failed rendering process, partial-note rejection, damaged logs, automatic
+discovery and a complete successful resume. This removes repeated validation
+without reducing product checks.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>

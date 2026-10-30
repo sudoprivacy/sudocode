@@ -638,6 +638,39 @@ def publish(head, envelope, remote):
         git("update-ref", "-d", temporary)
 
 
+def resume_checks(directory, head, base, policy_ref, output, needed):
+    """Reuse signed exact-source checks only while their commands and logs match."""
+    directory = Path(directory).resolve()
+    envelope = json.loads((directory / "envelope.json").read_text())
+    payload = base64.b64decode(envelope["payload"], validate=True)
+    if payload != (directory / "receipt.json").read_bytes():
+        raise RuntimeError("Resume receipt differs from its signed payload")
+    previous = json.loads(payload)
+    previous_policy = value("rev-parse", previous["commands_ref"])
+    if git("merge-base", "--is-ancestor", previous_policy, policy_ref, check=False).returncode:
+        raise RuntimeError("Resume policy is not an ancestor of the current protected policy")
+    previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=policy_ref)
+    if previous["host"] != host():
+        raise RuntimeError("Resume receipt belongs to a different native host")
+    reusable = {}
+    for name in needed:
+        if name not in previous["checks"] or not compatible_profile_commands(previous, policy_ref, [name]):
+            continue
+        logs = {path.name: path.read_bytes() for path in (directory / name).glob("*.log") if path.is_file()}
+        expected = {command["log_sha256"] for command in previous["checks"][name]}
+        if not expected.issubset({sha(contents) for contents in logs.values()}):
+            raise RuntimeError(f"Resume log missing or changed for {name}")
+        target = output / name
+        target.mkdir()
+        for filename, contents in logs.items():
+            if sha(contents) in expected:
+                (target / filename).write_bytes(contents)
+        reusable[name] = previous["checks"][name]
+    return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
+                      "commands_ref": previous_policy, "finished_at": previous["finished_at"],
+                      "profiles": sorted(reusable)}
+
+
 def check(args):
     import importlib.util
 
@@ -672,10 +705,17 @@ def check(args):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
+    reusable, resumed = {}, None
+    if getattr(args, "resume_from", None):
+        reusable, resumed = resume_checks(args.resume_from, head, base_ref, policy_ref, output, needed)
     results = {}
     for name in needed:
-        print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-        results[name] = module.run(name, ROOT, output / name, base, run_command)
+        if name in reusable:
+            print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+            results[name] = reusable[name]
+        else:
+            print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+            results[name] = module.run(name, ROOT, output / name, base, run_command)
     clean(head)
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
@@ -685,6 +725,8 @@ def check(args):
                "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
                "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
                "finished_at": int(time.time()), "checks": results, "plan": plan}
+    if resumed is not None:
+        receipt["resumed_from"] = resumed
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))
     signature = payload.with_suffix(".json.sig")
@@ -876,6 +918,8 @@ def main():
             command.add_argument("--architecture")
         if name == "check":
             command.add_argument("--output")
+            command.add_argument("--resume-from", type=Path,
+                                 help="Reuse unchanged checks from a signed exact-source output directory")
             command.add_argument("--publish", action="store_true")
             command.add_argument("--remote", default="origin")
     command = sub.add_parser("install")

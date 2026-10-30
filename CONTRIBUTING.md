@@ -218,6 +218,13 @@ authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
 checks on an enrolled host; forks need not receive repository secrets.
 
+After the protected commands change, `check --resume-from /path/to/previous/output`
+can reuse unchanged profiles from a signed run of the same commit, tree, base,
+native platform and architecture. The previous policy must belong to the current protected
+history, its signature must still verify, and the original logs must match their
+signed hashes. Changed profiles run again. The new receipt records which profiles
+were reused and retains their original command records and completion time.
+
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted
 summary job repeats those checks. Scheduling-only edits keep valid completed

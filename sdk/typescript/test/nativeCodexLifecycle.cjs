@@ -524,14 +524,25 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       if(managedPackageRoot && options.autojoin){
         for(const own of tuis)await closeTui(own);
         const pid=receipt.autojoinOwner[0].pid;
+        let ownerExitObservedAt;
         await waitUntil(()=>{
-          try{process.kill(pid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}
+          try{process.kill(pid,0);return false;}catch(error){
+            if(error.code==='ESRCH'){ownerExitObservedAt=new Date().toISOString();return true;}throw error;
+          }
         },15000,'shared owner retirement after native unload');
         const version=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','version'],
           {encoding:'utf8',env:childEnv,timeout:10000}));
         const loaded=(await request(observer,'retirement observation','thread/loaded/list',{})).data;
-        receipt.frontendRetirementObservation={ownerPid:pid,allTuisExitedNormally:true,
+        receipt.frontendRetirementObservation={ownerPid:pid,ownerExitObservedAt,observedAt:new Date().toISOString(),allTuisExitedNormally:true,
           nativeServerStillRunning:version.status==='running',ownerExitedBeforeNativeServer:true,loaded};
+        receipt.retirementRemainingThreads=[];
+        for(const threadId of loaded){
+          try{
+            const {thread}=await request(observer,'post-retirement diagnostic only','thread/read',{threadId,includeTurns:false});
+            receipt.retirementRemainingThreads.push({id:thread.id,status:thread.status,threadSource:thread.threadSource,
+              parentThreadId:thread.parentThreadId,ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput});
+          }catch(error){receipt.retirementRemainingThreads.push({id:threadId,error:String(error)});}
+        }
         assert.equal(version.status,'running');assert.deepEqual(loaded,[]);
       }
       receipt.result='PASS';
@@ -580,6 +591,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     await new Promise(resolve=>endpoint.close(resolve));
+    const ownerAudit=path.join(root,'autojoin-audit.jsonl');
+    if(fs.existsSync(ownerAudit))receipt.ownerLifecycle=fs.readFileSync(ownerAudit,'utf8').trim().split('\n')
+      .map(line=>JSON.parse(line)).filter(row=>row.provenance==='codex-autojoin-owner');
     receipt.nativeStderr=nativeStderr;
     const name='native-codex-lifecycle-'+receipt.at.replace(/[:.]/g,'')+'.receipt.json';
     fs.writeFileSync(path.join(evidence,name),JSON.stringify(receipt,null,2)+'\n',{mode:0o600,flag:'wx'});

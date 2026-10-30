@@ -250,9 +250,20 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     const startupModelRequests=receipt.modelRequests.length;
     if(managedPackageRoot){
       const settings=path.join(isolatedHome,'app-server-daemon','settings.json');
-      fs.mkdirSync(path.dirname(settings),{recursive:true,mode:0o700});
+      assert(!fs.existsSync(path.dirname(settings)),'The fixture must not precreate native private state');
+      // The official CLI owns the platform-specific private directory contract.
+      // A stop in this fresh isolated home creates its protected Windows DACL
+      // without starting a backend/updater or repairing an existing directory.
+      const prepared=spawnSync(configured.codexArgv[0],['app-server','daemon','stop'],
+        {cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
+      receipt.nativePrivateStatePreparation={action:'stop',status:prepared.status,
+        stdout:prepared.stdout,stderr:prepared.stderr,error:prepared.error?.message};
+      assert.equal(prepared.status,0,'native private-state preparation must succeed');
+      const stopped=JSON.parse(prepared.stdout);
+      assert.equal(stopped.status,'notRunning','A fresh fixture must never stop an existing backend');
+      assert(path.resolve(stopped.managedCodexPath).startsWith(path.resolve(isolatedHome)+path.sep));
       fs.writeFileSync(settings,JSON.stringify({remoteControlEnabled:false,
-        updater:{autoUpdateEnabled:false},shutdownGraceSeconds:5}),{mode:0o600});
+        updater:{autoUpdateEnabled:false},shutdownGraceSeconds:5}),{mode:0o600,flag:'wx'});
       receipt.managedStartupAttempted=true;
       receipt.oneTimeNativePreparation=[];
       // Explicit one-time preparation, then the ordinary cold CLI must acquire

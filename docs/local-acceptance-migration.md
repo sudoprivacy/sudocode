@@ -8,8 +8,7 @@ python -m pip install psutil jsonschema
 python .github/scripts/local_acceptance.py install --signer DEVICE_ID --key /absolute/path/to/private-key
 ```
 
-The current Windows desktop is enrolled and installed. Other computers enroll
-their own public Ed25519 device key through review of
+Each computer enrolls its own public Ed25519 device key through review of
 `spec/local_acceptance_signers.json`; keep the private key on that computer.
 No always-on Mac, remote login or local runner service is needed.
 
@@ -18,6 +17,14 @@ No always-on Mac, remote login or local runner service is needed.
 | Windows | Windows | Linux and macOS |
 | macOS | macOS | Linux and Windows |
 | Linux | Linux | Windows and macOS |
+
+SDK acceptance additionally requires Linux x64 and ARM64. A Linux author supplies
+their own CPU target, and CI supplies the other alongside the missing OS hosts.
+The policy-driven plan, not this table, selects jobs. Push output prints it as
+both text and `ACCEPTANCE_PLAN` JSON; CI summaries and the `Local acceptance`
+status expose the split directly. Preview with
+`python .github/scripts/local_acceptance.py plan`. A preview attests no tests;
+even a successful signed source receipt does not establish deployed-system health.
 
 The pre-push hook selects applicable checks, runs them, publishes signed Git
 notes and then allows the branch push. Existing branches use the protected

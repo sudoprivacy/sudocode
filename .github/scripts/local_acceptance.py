@@ -9,24 +9,31 @@ No candidate code is executed by the GitHub verification job.
 import argparse
 import ast
 import base64
+import copy
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
 
 
 NOTE_REF = "refs/notes/local-acceptance"
 POLICY = "spec/local_acceptance.json"
 SIGNERS = "spec/local_acceptance_signers.json"
 NAMESPACE = "sudocode-local-acceptance"
+AUTHORIZATION_CONTEXT = "Acceptance contract authorization"
+CONTRACT_UPDATE_COMMAND = ('python "$(git rev-parse --path-format=absolute --git-common-dir)/'
+                           'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin')
 ROOT = Path(__file__).resolve().parents[2]
 MSVC_ENV = None
 
@@ -60,22 +67,203 @@ def load_policy(ref):
 
 
 def contract_hash(ref):
-    paths = [POLICY, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
+    paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
              ".github/workflows/local-acceptance-publish.yml"]
     paths += value("ls-tree", "-r", "--name-only", ref, ".github/local-acceptance").splitlines()
     return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
+
+
+def executor_source(ref):
+    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+    return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
 
 
 def commands_hash(ref):
     # Scheduling, publication and selection edits do not change a completed
     # command's evidence. Bind actual executors/images, then require the current
     # selected check set to be covered. New commands still require a real run.
-    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
-    function = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
-    executor = "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
     paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
-    return sha(canonical({"executor": sha(executor.encode()), **{p: sha(tracked(ref, p)) for p in paths}}))
+    return sha(canonical({"executor": sha(executor_source(ref).encode()),
+                          **{p: sha(tracked(ref, p)) for p in paths}}))
+
+
+def profile_ast_value(value):
+    """Serialize semantic AST fields independently of Python's dump formatting."""
+    if isinstance(value, ast.AST):
+        return {"node": type(value).__name__, "fields": {
+            name: profile_ast_value(field) for name, field in ast.iter_fields(value)
+            if field is not None and not (isinstance(field, list) and not field)
+        }}
+    if isinstance(value, list):
+        return [profile_ast_value(item) for item in value]
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, complex):
+        return {"complex": [value.real, value.imag]}
+    if value is Ellipsis:
+        return {"ellipsis": True}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise RuntimeError(f"Unsupported acceptance AST value: {type(value).__name__}")
+
+
+def profile_commands_hashes(ref, names):
+    """Bind each literal dispatch branch and all common code without importing it."""
+    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
+    executor = sha(executor_source(ref).encode())
+    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    result = {}
+    for name in names:
+        projected = copy.deepcopy(module)
+        dispatcher = next(node for node in projected.body
+                          if isinstance(node, ast.FunctionDef) and node.name == "run")
+        parameter = dispatcher.args.args[0].arg
+
+        def project(node):
+            test = node.test if isinstance(node, ast.If) else None
+            if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
+                    or test.left.id != parameter or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq)
+                    or len(test.comparators) != 1 or not isinstance(test.comparators[0], ast.Constant)
+                    or not isinstance(test.comparators[0].value, str)):
+                return [node]
+            tail = project(node.orelse[0]) if len(node.orelse) == 1 else node.orelse
+            if test.comparators[0].value != name:
+                return tail
+            node.orelse = tail
+            return [node]
+
+        # If the dispatcher rewrites its profile parameter, its branches may
+        # cease to be disjoint. Keep the whole module in that conservative case.
+        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                         for node in ast.walk(dispatcher))
+        if not reassigned:
+            dispatcher.body = [child for node in dispatcher.body for child in project(node)]
+        result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
+    return result
+
+
+def reachable_profile_commands_hashes(ref, names):
+    """Keep import effects and bind helpers reachable from each selected dispatch."""
+    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
+    executor = sha(executor_source(ref).encode())
+    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    result = {}
+    # Reflection can find a function without a static Name reference. Retain
+    # the complete module rather than guessing which code it might execute.
+    reflection_names = {"globals", "locals", "vars", "dir", "eval", "exec", "getattr", "__import__", "__builtins__"}
+    reflected = any((isinstance(node, ast.Name) and node.id in reflection_names)
+                    or (isinstance(node, ast.Attribute) and node.attr in reflection_names
+                        | {"__dict__", "__globals__", "modules", "f_globals", "f_locals", "_getframe", "get_objects"})
+                    for node in ast.walk(module))
+    for name in names:
+        projected = copy.deepcopy(module)
+        dispatcher = next(node for node in projected.body
+                          if isinstance(node, ast.FunctionDef) and node.name == "run")
+        parameter = dispatcher.args.args[0].arg
+
+        def project(node):
+            test = node.test if isinstance(node, ast.If) else None
+            if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
+                    or test.left.id != parameter or len(test.ops) != 1 or len(test.comparators) != 1):
+                return [node]
+            expected = test.comparators[0]
+            if isinstance(expected, ast.Constant) and isinstance(expected.value, str):
+                values = [expected.value]
+            elif isinstance(expected, (ast.Set, ast.List, ast.Tuple)) and all(
+                    isinstance(item, ast.Constant) and isinstance(item.value, str) for item in expected.elts):
+                values = [item.value for item in expected.elts]
+            else:
+                return [node]
+            operation = test.ops[0]
+            if isinstance(operation, (ast.Eq, ast.NotEq)) and isinstance(expected, ast.Constant):
+                matched = name == expected.value
+            elif isinstance(operation, (ast.In, ast.NotIn)) and not isinstance(expected, ast.Constant):
+                matched = name in values
+            else:
+                return [node]
+            if isinstance(operation, (ast.NotEq, ast.NotIn)):
+                matched = not matched
+            return [child for item in (node.body if matched else node.orelse) for child in project(item)]
+
+        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                         for node in ast.walk(dispatcher))
+        if not reflected and not reassigned:
+            dispatcher.body = [child for node in dispatcher.body for child in project(node)]
+            functions = {node.name: node for node in projected.body if isinstance(node, ast.FunctionDef)}
+            # Decorators/default expressions can execute at import time. Keep
+            # those definitions even if the selected branch does not call them.
+            roots = [node for node in projected.body if not isinstance(node, ast.FunctionDef)
+                     or node.name == "run" or node.decorator_list or node.args.defaults or node.args.kw_defaults
+                     or node.returns is not None or any(argument.annotation is not None for argument in (
+                         node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                         + [argument for argument in [node.args.vararg, node.args.kwarg] if argument]))
+                     or getattr(node, "type_params", [])]
+            pending = roots[:]
+            retained = {node.name for node in roots if isinstance(node, ast.FunctionDef)}
+            while pending:
+                references = {node.id for node in ast.walk(pending.pop())
+                              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+                for reference in references & functions.keys() - retained:
+                    retained.add(reference)
+                    pending.append(functions[reference])
+            projected.body = [node for node in projected.body
+                              if not isinstance(node, ast.FunctionDef) or node.name in retained]
+        result[name] = sha(canonical({"version": 2, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
+    return result
+
+
+def attested_commands_ref(receipt):
+    """Find immutable source that matches the signed complete execution hash."""
+    candidates = ([receipt["commands_ref"]] if "commands_ref" in receipt
+                  else [receipt["head"], receipt["base"]])
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not re.fullmatch(r"[a-f0-9]{40}", candidate):
+            continue
+        try:
+            if receipt.get("commands_sha256") == commands_hash(candidate):
+                return candidate
+        except (RuntimeError, subprocess.CalledProcessError, StopIteration):
+            continue
+    return None
+
+
+def compatible_profile_commands(receipt, policy_ref, required):
+    recorded = receipt.get("profile_commands_sha256")
+    try:
+        previous = attested_commands_ref(receipt)
+        if "commands_ref" in receipt and previous is None:
+            return False
+        if "profile_commands_sha256" not in receipt:
+            if previous is None:
+                return False
+            recorded = profile_commands_hashes(previous, required)
+        if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
+            return False
+        current = profile_commands_hashes(policy_ref, required)
+        if "reachable_profile_commands_sha256" not in receipt and all(
+                recorded.get(name) == current[name] for name in required):
+            return True
+        # A changed recipe is recovered from attested source, never from a
+        # supplied hash alone. This also validates both maps on new receipts.
+        if previous is None:
+            return False
+        original = profile_commands_hashes(previous, required)
+        if not all(recorded.get(name) == original[name] for name in required):
+            return False
+        original_reachable = reachable_profile_commands_hashes(previous, required)
+        if "reachable_profile_commands_sha256" in receipt:
+            reachable = receipt["reachable_profile_commands_sha256"]
+            if not isinstance(reachable, dict) or any(
+                    reachable.get(name) != original_reachable[name] for name in required):
+                return False
+        expected = reachable_profile_commands_hashes(policy_ref, required)
+        return all(original_reachable[name] == expected[name] for name in required)
+    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError):
+        return False
 
 
 def changed_paths(base, head):
@@ -89,6 +277,73 @@ def selected(policy, paths):
             if name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in paths)]
+
+
+NATIVE_TARGETS = {
+    "linux": {"system": "linux", "runner": "ubuntu-latest", "label": "Linux"},
+    "linux-x64": {"system": "linux", "architecture": "x64", "runner": "ubuntu-latest", "label": "Linux x64"},
+    "linux-arm64": {"system": "linux", "architecture": "arm64", "runner": "ubuntu-24.04-arm", "label": "Linux ARM64"},
+    "macos": {"system": "macos", "runner": "macos-latest", "label": "macOS"},
+    "windows": {"system": "windows", "runner": "windows-latest", "label": "Windows"},
+}
+DEFAULT_NATIVE_TARGETS = ["linux", "macos", "windows"]
+
+
+def acceptance_plan(policy, names, author):
+    """One plan drives local receipts, missing-host CI and agent-visible reports."""
+    architecture = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(
+        author["architecture"].lower(), author["architecture"].lower())
+    if author["system"] not in {"linux", "macos", "windows"}:
+        raise RuntimeError("Unknown author platform; no CI coverage may be inferred")
+    jobs = {}
+    local_targets = []
+    for name in names:
+        if not name.startswith("native-"):
+            continue
+        targets = policy["checks"][name].get("targets", DEFAULT_NATIVE_TARGETS)
+        if not isinstance(targets, list) or not targets or any(not isinstance(target, str) for target in targets):
+            raise RuntimeError(f"Invalid acceptance targets for {name}")
+        if len(targets) != len(set(targets)):
+            raise RuntimeError(f"Duplicate acceptance targets for {name}")
+        covered = []
+        for identifier in targets:
+            if identifier not in NATIVE_TARGETS:
+                raise RuntimeError(f"Unknown acceptance target: {identifier}")
+            target = NATIVE_TARGETS[identifier]
+            if target["system"] == author["system"] and target.get("architecture", architecture) == architecture:
+                covered.append(identifier)
+                continue
+            family = "sdk" if name == "native-sdk" else "native"
+            key = family, target["runner"]
+            if key not in jobs:
+                jobs[key] = {"os": target["runner"], "family": family, "checks": [], "targets": [],
+                             "name": (f"Complement local host ({target['runner']})" if family == "native" else
+                                      f"Complement local host ({family}, {target['runner']})"),
+                             "node": "20" if family == "sdk" else "22", "timeout": 15 if family == "sdk" else 90}
+            if name not in jobs[key]["checks"]:
+                jobs[key]["checks"].append(name)
+            if identifier not in jobs[key]["targets"]:
+                jobs[key]["targets"].append(identifier)
+        if not covered:
+            raise RuntimeError(f"Author host does not cover a required target of {name}: {author}")
+        local_targets.append({"check": name, "targets": covered})
+    return {"version": 1, "scope": "source-acceptance", "author": author,
+            "local_checks": list(names), "local_targets": local_targets,
+            "ci": list(jobs.values()), "deployment_verified": False}
+
+
+def report_plan(plan):
+    label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
+    lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
+    for job in plan["ci"]:
+        lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
+                     f"{', '.join(job['checks'])} ({job['os']})")
+    lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
+    print("\n".join(lines), flush=True)
+    print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+            stream.write("## Acceptance responsibilities\n\n" + "\n".join("- " + line for line in lines) + "\n")
 
 
 def clean(head):
@@ -107,16 +362,97 @@ def host():
     return {"system": system, "architecture": platform.machine().lower()}
 
 
+def changed_contract_files(head, base):
+    protected = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
+                 ".github/workflows/local-acceptance-publish.yml"]
+    return sorted(path for path in changed_paths(value("merge-base", base, head), head)
+                  if path in protected or path.startswith(".github/local-acceptance/"))
+
+
 def check_contract_changes(head, base, policy_ref):
     # An existing PR need not merge main merely to acquire newly added hook
-    # files. It uses the protected runner. Deliberate contract edits remain a
-    # maintainer-reviewed bootstrap rather than a self-approved policy change.
-    paths = changed_paths(value("merge-base", base, head), head)
-    protected = [POLICY, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
-                 ".github/workflows/local-acceptance-publish.yml"]
-    if any(path in protected or path.startswith(".github/local-acceptance/") for path in paths):
+    # files. It uses the protected runner. All candidate contract edits,
+    # including additional checks, are blocked from authorizing themselves.
+    changed = changed_contract_files(head, base)
+    if changed:
         if contract_hash(head) != contract_hash(policy_ref):
-            raise RuntimeError("Candidate changes the protected acceptance contract; maintainer bootstrap required")
+            raise RuntimeError(
+                "Candidate changes the protected acceptance contract. "
+                f"Changed protected files: {json.dumps(changed)}. "
+                f"Trusted policy: {policy_ref} ({value('rev-parse', policy_ref)}). "
+                "Normal acceptance/push blocks every contract change, including added checks; "
+                "the candidate cannot authorize its own check definitions. "
+                f"Next: {CONTRACT_UPDATE_COMMAND}. "
+                "That command requires a GitHub repository maintain/admin actor and an already enrolled signing device, "
+                "runs the candidate checks, and publishes exact-head contract authorization; CI still verifies all tests. "
+                "this is not a request for the end user to review code or approve this push. "
+                "See CONTRIBUTING.md#acceptance-contract-changes."
+            )
+
+
+def github_api(path, payload=None):
+    executable = shutil.which("gh") or "gh"
+    command = [executable, "api", path, "--method", "POST" if payload is not None else "GET"]
+    if os.name == "nt" and Path(executable).suffix.lower() in {".cmd", ".bat"}:
+        raise RuntimeError("Use the native GitHub CLI gh.exe for contract-update so API arguments avoid shell expansion")
+    if payload is not None:
+        command += ["--input", "-"]
+    try:
+        result = subprocess.run(command, cwd=ROOT, input=canonical(payload) if payload is not None else None,
+                                capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("GitHub contract authorization timed out after 60s. Retry contract-update; "
+                           "an existing valid exact-head receipt is reused.") from error
+    if result.returncode:
+        raise RuntimeError("GitHub contract authorization request failed: " + result.stderr.decode(errors="replace"))
+    return json.loads(result.stdout)
+
+
+def require_contract_maintainer(repository, actor, api=github_api):
+    permission = api(f"repos/{repository}/collaborators/{urllib.parse.quote(actor, safe='')}/permission")
+    if permission.get("role_name") not in {"maintain", "admin"} and permission.get("permission") != "admin":
+        raise RuntimeError(f"Contract update requires repository maintain/admin authority; {actor} has "
+                           f"{permission.get('role_name', permission.get('permission'))}. "
+                           "Ask an authorized repository maintainer or agent to run the printed contract-update command; "
+                           "the end user need not personally review code.")
+
+
+def authorization_description(head, trusted):
+    # Both full hashes fit GitHub's 140-character status description limit.
+    return f"v1 {contract_hash(trusted)} {contract_hash(head)}"
+
+
+def authorized_policy(head, base, trusted, api=github_api):
+    if not changed_contract_files(head, base) or contract_hash(head) == contract_hash(trusted):
+        return trusted
+    repository = load_policy(trusted)["repository"]
+    if load_policy(head)["repository"] != repository:
+        raise RuntimeError("Contract authorization cannot change this repository's identity")
+    statuses = []
+    for page in range(1, 101):
+        try:
+            batch = api(f"repos/{repository}/commits/{head}/statuses?per_page=100&page={page}")
+        except (RuntimeError, OSError, urllib.error.HTTPError) as error:
+            try:
+                check_contract_changes(head, base, trusted)
+            except RuntimeError as diagnostic:
+                raise RuntimeError(f"{diagnostic} Authorization lookup failed: {error}") from error
+            raise
+        statuses += [item for item in batch if item["context"] == AUTHORIZATION_CONTEXT]
+        if statuses or len(batch) < 100:
+            break
+    expected_url = f"https://github.com/{repository}/commit/{head}"
+    if not statuses:
+        check_contract_changes(head, base, trusted)
+    status = statuses[0]
+    if (status["state"] != "success" or status.get("description") != authorization_description(head, trusted)
+            or status.get("target_url") != expected_url):
+        raise RuntimeError(f"Contract authorization is stale or revoked. Next: {CONTRACT_UPDATE_COMMAND}. "
+                           "This rechecks the exact head and current trusted rules; "
+                           "it does not waive failed tests.")
+    require_contract_maintainer(repository, status["creator"]["login"], api)
+    print(f"Contract authorization by {status['creator']['login']} for {head[:12]} verified; tests remain required.", flush=True)
+    return head
 
 
 def run_command(command, cwd, log, env=None):
@@ -124,6 +460,10 @@ def run_command(command, cwd, log, env=None):
     import psutil
 
     environment = os.environ.copy()
+    # Acceptance exercises explicit TrueColor/Ansi256 and NoColor fixtures.
+    # A parent's output preference must not suppress the colored fixtures.
+    # An explicit command environment may still select NO_COLOR below.
+    environment.pop("NO_COLOR", None)
     if os.name == "nt" and not environment.get("LIB") and (
             Path(command[0]).stem.lower() == "cargo" or any("e2e/build-metadata/run.py" in str(arg) for arg in command)):
         global MSVC_ENV
@@ -201,11 +541,11 @@ def read_note(head, ref=NOTE_REF):
     return obj
 
 
-def verify_envelope(envelope, head, base, policy_ref):
+def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
     payload = base64.b64decode(envelope["payload"], validate=True)
     receipt = json.loads(payload)
     signer_id = envelope["signer"]
-    registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
+    registry = json.loads(tracked(signers_ref or policy_ref, SIGNERS))["signers"]
     signer = registry.get(signer_id)
     if not signer:
         raise RuntimeError(f"Unenrolled acceptance signer: {signer_id}")
@@ -226,7 +566,13 @@ def verify_envelope(envelope, head, base, policy_ref):
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
+    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
+    if not required:
+        raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+    if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
+            or (not compatible and "commands_sha256" in receipt)):
+        compatible = compatible_profile_commands(receipt, policy_ref, required)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and
@@ -239,7 +585,6 @@ def verify_envelope(envelope, head, base, policy_ref):
     if not compatible:
         raise RuntimeError("Acceptance commands changed; rerun local acceptance")
     check_contract_changes(head, base, policy_ref)
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
     checks = receipt.get("checks", {})
     if not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
@@ -249,15 +594,19 @@ def verify_envelope(envelope, head, base, policy_ref):
         for command in commands:
             if command.get("exit_code") != 0 or not command.get("command") or len(command.get("log_sha256", "")) != 64:
                 raise RuntimeError(f"Incomplete/failed command in {name}")
+    plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
+    if receipt.get("plan", plan) != plan:
+        raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
+    report_plan(plan)
     print(f"Verified {head[:12]} on {signer['platform']} ({signer_id}): {', '.join(required)}", flush=True)
     return receipt
 
 
-def verify(head, base, policy_ref, note_ref=NOTE_REF):
+def verify(head, base, policy_ref, note_ref=NOTE_REF, signers_ref=None):
     errors = []
     for envelope in read_note(head, note_ref)["attestations"].values():
         try:
-            return verify_envelope(envelope, head, base, policy_ref)
+            return verify_envelope(envelope, head, base, policy_ref, signers_ref)
         except (RuntimeError, ValueError, KeyError) as error:
             errors.append(str(error))
     raise RuntimeError("No current valid local acceptance: " + ("; ".join(errors) or "signed note missing"))
@@ -299,6 +648,10 @@ def check(args):
     check_contract_changes(head, args.base, policy_ref)
     base = value("merge-base", args.base, head)
     needed = selected(load_policy(policy_ref), changed_paths(base, head))
+    if not needed:
+        raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
+    plan = acceptance_plan(load_policy(policy_ref), needed, host())
+    report_plan(plan)
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
@@ -308,6 +661,7 @@ def check(args):
     if output == ROOT or ROOT in output.parents:
         raise RuntimeError("Keep acceptance outputs outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
+    (output / "plan.json").write_bytes(canonical(plan))
     profiles = output / "protected_profiles.py"
     profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
     spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
@@ -322,7 +676,10 @@ def check(args):
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
                "commands_sha256": commands_hash(policy_ref),
-               "finished_at": int(time.time()), "checks": results}
+               "commands_ref": value("rev-parse", policy_ref),
+               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
+               "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
+               "finished_at": int(time.time()), "checks": results, "plan": plan}
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))
     signature = payload.with_suffix(".json.sig")
@@ -386,23 +743,132 @@ def pre_push(args):
         fetched = git("fetch", "--no-tags", args.remote, f"+{NOTE_REF}:{NOTE_REF}", check=False)
         if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
             raise RuntimeError(fetched.stderr.decode(errors="replace"))
+        if changed_contract_files(head, "origin/main") and contract_hash(head) != contract_hash("origin/main"):
+            try:
+                contract_remote(args.remote, load_policy("origin/main")["repository"])
+            except RuntimeError:
+                # Local bare fixtures and unrelated remotes cannot carry a
+                # GitHub maintainer's authorization for this repository.
+                check_contract_changes(head, "origin/main", "origin/main")
+        policy_ref = authorized_policy(head, "origin/main", "origin/main")
         try:
-            verify(head, "origin/main", "origin/main")
+            verify(head, "origin/main", policy_ref, signers_ref="origin/main")
         except RuntimeError:
-            # Use the installed protected runner, never a candidate's replacement.
-            check(argparse.Namespace(head=head, base="origin/main", policy_ref="origin/main",
-                                     output=None, publish=True, remote=args.remote))
+            if policy_ref != "origin/main":
+                # The exact candidate executor was authorized by the server.
+                run_candidate_checks(head, "origin/main", args.remote)
+            else:
+                check(argparse.Namespace(head=head, base="origin/main", policy_ref=policy_ref,
+                                         output=None, publish=True, remote=args.remote))
+
+
+def contract_actor(trusted):
+    repository = load_policy(trusted)["repository"]
+    actor = github_api("user")["login"]
+    require_contract_maintainer(repository, actor)
+    return repository, actor
+
+
+def contract_remote(remote, repository):
+    configured = value("config", "--get", f"remote.{remote}.url")
+    if configured not in {f"https://github.com/{repository}.git", f"git@github.com:{repository}.git",
+                          f"ssh://git@github.com/{repository}.git"}:
+        raise RuntimeError(f"Contract update remote must point to {repository}. Inspect git remote -v, "
+                           "then use contract-update --remote with that repository's remote name.")
+    return value("remote", "get-url", "--push", remote)
+
+
+def contract_pre_push(args):
+    """A one-invocation hook: require authority, exact sources and a real signed receipt."""
+    clean(args.head)
+    repository, actor = contract_actor(args.trusted)
+    updates = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
+    branch = value("symbolic-ref", "HEAD")
+    expected_url = contract_remote(args.remote, repository)
+    already_published = (not updates and value("ls-remote", args.remote, branch).split()[:1] == [args.head])
+    valid_update = len(updates) == 1 and len(updates[0]) == 4 and updates[0][:3] == [branch, args.head, branch]
+    if (args.url != expected_url or branch == "refs/heads/main" or not (valid_update or already_published)):
+        raise RuntimeError("Contract update must push exactly the checked-out non-main branch to its protected GitHub repository")
+    # Recheck authority and the signed input immediately at the actual push.
+    verify(args.head, args.trusted, args.head, signers_ref=args.trusted)
+    print(f"Exact-head contract push authorized for {actor}; native CI is still required.", flush=True)
+
+
+def contract_update(args):
+    head = value("rev-parse", "HEAD")
+    clean(head)
+    git("fetch", "--no-tags", args.remote, "+refs/heads/main:refs/remotes/origin/main")
+    trusted = value("rev-parse", "origin/main")
+    repository, actor = contract_actor(trusted)
+    if load_policy(head)["repository"] != repository:
+        raise RuntimeError("Contract authorization cannot change this repository's identity")
+    branch = value("symbolic-ref", "--short", "HEAD")
+    contract_remote(args.remote, repository)
+    if branch == "main":
+        raise RuntimeError("Use a non-main branch for contract-update")
+    if git("merge-base", "--is-ancestor", trusted, head, check=False).returncode:
+        raise RuntimeError("Trusted main advanced. Integrate origin/main while preserving other changes, then rerun contract-update.")
+    if not changed_contract_files(head, trusted):
+        raise RuntimeError("No protected contract files changed. Next: git push --set-upstream origin HEAD")
+    signer = value("config", "localAcceptance.signer")
+    if signer not in json.loads(tracked(trusted, SIGNERS))["signers"]:
+        raise RuntimeError("Use an already enrolled signing device to authorize a contract update, including new device enrollment.")
+    print(f"Contract update by {actor}: head {head}, trusted main {trusted}; all selected local checks remain required.", flush=True)
+    fetched = git("fetch", "--no-tags", args.remote, f"+{NOTE_REF}:{NOTE_REF}", check=False)
+    if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
+        raise RuntimeError(fetched.stderr.decode(errors="replace"))
+    try:
+        verify(head, trusted, head, signers_ref=trusted)
+    except RuntimeError:
+        run_candidate_checks(head, trusted, args.remote, args.output)
+    with tempfile.TemporaryDirectory(prefix="scode-contract-push-") as temporary:
+        hook = Path(temporary) / "pre-push"
+        interpreter = shlex.quote(sys.executable.replace("\\", "/"))
+        helper = shlex.quote(str(Path(__file__).resolve()).replace("\\", "/"))
+        hook.write_text(f'#!/bin/sh\nexec {interpreter} {helper} contract-pre-push --head {head} --trusted {trusted} "$@"\n',
+                        encoding="utf-8", newline="\n")
+        hook.chmod(0o755)
+        git("-c", f"core.hooksPath={temporary}", "push", "--set-upstream", args.remote,
+            f"refs/heads/{branch}:refs/heads/{branch}")
+    try:
+        status = github_api(f"repos/{repository}/statuses/{head}", {
+            "state": "success", "context": AUTHORIZATION_CONTEXT,
+            "description": authorization_description(head, trusted),
+            "target_url": f"https://github.com/{repository}/commit/{head}",
+        })
+        if status["creator"]["login"] != actor:
+            raise RuntimeError("GitHub authorization actor changed during publication")
+    except RuntimeError as error:
+        raise RuntimeError("Branch was pushed, but contract authorization is incomplete. Rerun contract-update; "
+                           "the existing exact-head signed receipt will be reused. " + str(error)) from error
+    print(f"Contract authorization published for {head}. Local acceptance and all complementary CI checks must still pass.\n"
+          f"Next: gh pr create --draft --base main --head {branch} (or inspect the existing PR).", flush=True)
+
+
+def run_candidate_checks(head, trusted, remote, output=None):
+    # A contract update can change run_command itself. Execute that exact
+    # checked-out runner after authority verification, not this older copy.
+    command = [sys.executable, str(ROOT / ".github/scripts/local_acceptance.py"), "check",
+               "--head", head, "--base", trusted, "--policy-ref", head, "--publish", "--remote", remote]
+    if output:
+        command += ["--output", output]
+    subprocess.run(command, cwd=ROOT, check=True)
+    git("fetch", "--no-tags", remote, f"+{NOTE_REF}:{NOTE_REF}")
+    verify(head, trusted, head, signers_ref=trusted)
 
 
 def main():
     global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="operation", required=True)
-    for name in ["check", "verify"]:
+    for name in ["check", "verify", "plan"]:
         command = sub.add_parser(name)
         command.add_argument("--head")
         command.add_argument("--base", default="origin/main")
         command.add_argument("--policy-ref", default="origin/main")
+        if name == "plan":
+            command.add_argument("--host", choices=["linux", "macos", "windows"])
+            command.add_argument("--architecture")
         if name == "check":
             command.add_argument("--output")
             command.add_argument("--publish", action="store_true")
@@ -413,17 +879,45 @@ def main():
     command = sub.add_parser("pre-push")
     command.add_argument("remote")
     command.add_argument("url")
+    command = sub.add_parser("contract-update", help="Run and publish an exact-head contract update as a repository maintainer")
+    command.add_argument("--remote", default="origin")
+    command.add_argument("--output")
+    command = sub.add_parser("contract-pre-push", help=argparse.SUPPRESS)
+    command.add_argument("--head", required=True)
+    command.add_argument("--trusted", required=True)
+    command.add_argument("remote")
+    command.add_argument("url")
     args = parser.parse_args()
     try:
         # Installed runners live outside a worktree. Their caller's checkout,
         # not the installation directory, supplies the exact tested sources.
         ROOT = Path(value("rev-parse", "--show-toplevel", root=Path.cwd()))
-        if args.operation == "verify":
-            verify(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
+        if args.operation == "plan":
+            head = value("rev-parse", args.head or "HEAD")
+            base = value("merge-base", args.base, head)
+            author = host()
+            if args.host:
+                author["system"] = args.host
+            if args.architecture:
+                author["architecture"] = args.architecture
+            report_plan(acceptance_plan(load_policy(args.policy_ref),
+                        selected(load_policy(args.policy_ref), changed_paths(base, head)), author))
+            print("Preview only: a plan is not a successful or signed test result.")
+        elif args.operation == "verify":
+            head = value("rev-parse", args.head or "HEAD")
+            trusted = args.policy_ref
+            policy_ref = authorized_policy(head, args.base, trusted) if trusted == "origin/main" else trusted
+            verify(head, args.base, policy_ref, signers_ref=trusted)
         elif args.operation == "check":
+            if args.policy_ref == "origin/main":
+                args.policy_ref = authorized_policy(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
             check(args)
         elif args.operation == "install":
             install(args)
+        elif args.operation == "contract-update":
+            contract_update(args)
+        elif args.operation == "contract-pre-push":
+            contract_pre_push(args)
         else:
             pre_push(args)
     except (RuntimeError, subprocess.CalledProcessError, OSError, ValueError, KeyError) as error:

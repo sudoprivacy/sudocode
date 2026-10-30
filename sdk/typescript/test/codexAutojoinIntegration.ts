@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -25,6 +25,7 @@ let loaded = ids.slice(0,4);
 let owner: CodexAutojoin | undefined;
 let mcp: Client | undefined;
 let mcpOwnerPid: number | undefined;
+let auditFailureOwner: ChildProcess | undefined;
 let holdReads = false;
 let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
@@ -268,13 +269,60 @@ async function main() {
   assert.equal(enrollments.length,claimsBeforeImport);
   assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,4);
   assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
-  console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, first-MCP readiness and no inference/replay');
+  await owner.close();owner=undefined;
+
+  // A directory at the log path deterministically refuses append on every OS,
+  // including elevated test users. Startup must still fail before admission.
+  const auditFile=path.join(directory,'mcp-audit.jsonl');
+  const priorAudit=path.join(directory,'mcp-audit.previous.jsonl');
+  fs.renameSync(auditFile,priorAudit);fs.mkdirSync(auditFile);
+  const beforeAuditRefusal=calls.length;
+  assert.throws(()=>execFileSync(process.execPath,[path.join(root,'dist/server.cjs'),
+    '--codex-owner','--config',mcpConfig],{timeout:3000,stdio:['ignore','pipe','pipe']}),
+  /EISDIR|EACCES|EPERM/,'initial audit failure must refuse before native observation');
+  assert.equal(calls.length,beforeAuditRefusal);
+  fs.rmdirSync(auditFile);fs.renameSync(priorAudit,auditFile);
+
+  // The same failure AFTER successful startup is observation-only: native and
+  // ACP connections must close, the owner must exit successfully and release
+  // its exclusive endpoint, even when neither shutdown audit can be written.
+  const acpBeforeAuditFailure=rows().length;
+  auditFailureOwner=spawn(process.execPath,[path.join(root,'dist/server.cjs'),
+    '--codex-owner','--config',mcpConfig],{stdio:['ignore','ignore','pipe']});
+  const auditFailureExit=once(auditFailureOwner,'exit');
+  let auditFailureStderr='';auditFailureOwner.stderr!.on('data',bytes=>{auditFailureStderr+=String(bytes);});
+  const auditReadyDeadline=Date.now()+10000;
+  for(;;){
+    const observations=fs.readFileSync(auditFile,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+    if(observations.some(row=>row.pid===auditFailureOwner!.pid&&row.phase==='native_inventory'
+      &&row.roots.some((thread:{threadId:string;qualified:boolean})=>thread.threadId===legacyId&&thread.qualified)))break;
+    assert.ok(Date.now()<auditReadyDeadline,'owner did not attach before the audit failure');
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  fs.renameSync(auditFile,path.join(directory,'mcp-audit.before-failure.jsonl'));fs.mkdirSync(auditFile);
+  loaded=[];
+  let auditExitTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [code,signal]=await Promise.race([auditFailureExit,new Promise<never>((_,reject)=>{
+      auditExitTimer=setTimeout(()=>reject(new Error('audit failure prevented owner retirement')),12000);
+    })]);
+    assert.equal(code,0,auditFailureStderr);assert.equal(signal,null);
+  } finally {clearTimeout(auditExitTimer);}
+  auditFailureOwner=undefined;
+  assert.equal(server.clients.size,0,'shutdown must close the native observer despite failed logging');
+  const acpStarted=rows().slice(acpBeforeAuditFailure).find(row=>row.method==='session/load'&&row.sessionId===legacySession);
+  assert.ok(acpStarted,'the failure case must exercise an actual ACP child');
+  assert.throws(()=>process.kill(acpStarted.pid,0),{code:'ESRCH'},'shutdown must close its ACP child');
+  const released=createServer();released.listen(reserved.port,'127.0.0.1');await once(released,'listening');
+  await new Promise<void>(resolve=>released.close(()=>resolve()));
+  console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, initial audit refusal, audit-failure cleanup, first-MCP readiness and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   loaded=[];
   holdReads=false;for(const reply of pendingReads.splice(0))reply();
   await owner?.close();
   await mcp?.close();
+  if(auditFailureOwner?.exitCode===null){auditFailureOwner.kill('SIGKILL');await once(auditFailureOwner,'exit');}
   for(const client of server.clients)client.terminate();
   await new Promise<void>(resolve=>server.close(()=>resolve()));
   fs.rmSync(directory,{recursive:true,force:true});

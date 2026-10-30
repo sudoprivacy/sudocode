@@ -172,6 +172,9 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   })+'\n',{mode:0o600});
   // Audit failure must prevent opening the shared command endpoint.
   audit({phase:'starting',parentPid:process.ppid});
+  const observe = (entry: unknown) => {
+    try {audit(entry);} catch { /* Diagnostics cannot prevent runtime cleanup. */ }
+  };
   let network: CodexAutojoin | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
@@ -180,12 +183,12 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   let finish = () => {};
   const finished = new Promise<void>(resolve=>{finish=resolve;});
   const stop = (reason: string) => stopping ??= (async()=>{
-    audit({phase:'stopping',reason,agents:network?.status()??[]});
+    observe({phase:'stopping',reason,agents:network?.status()??[]});
     clearTimeout(idleTimer);
     listener.close();
     for(const socket of sockets)socket.destroy();
     await network?.close();
-    audit({phase:'stopped',reason});
+    observe({phase:'stopped',reason});
   })().finally(finish);
   const scheduleExit = () => {
     clearTimeout(idleTimer);
@@ -223,26 +226,23 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     })().catch(()=>socket.destroy());
   });
   await claimOwner(listener, config.endpoint.port);
-  audit({phase:'listening'});
   const onTerm = () => {void stop('SIGTERM');};
   const onInt = () => {void stop('SIGINT');};
-  const onCrash = (error: Error, origin: string) => {
-    try {audit({phase:'owner_crash',origin,error:String(error)});} catch { /* Monitor only. */ }
-  };
-  process.once('SIGTERM',onTerm);process.once('SIGINT',onInt);
-  process.on('uncaughtExceptionMonitor',onCrash);
-  scheduleExit();
+  const onCrash = (error: Error, origin: string) => observe({phase:'owner_crash',origin,error:String(error)});
   try {
+    audit({phase:'listening'});
+    process.once('SIGTERM',onTerm);process.once('SIGINT',onInt);
+    process.on('uncaughtExceptionMonitor',onCrash);
+    scheduleExit();
     network = await connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
       peerPolicy:config.peerPolicy,
       onClosed:()=>{void stop('native_connection_closed');},
       onInventory:observation=>{
         const value=JSON.stringify(observation);
-        if(value!==lastInventory){audit({phase:'native_inventory',...observation});lastInventory=value;}
+        if(value!==lastInventory){observe({phase:'native_inventory',...observation});lastInventory=value;}
       },
-      resolveAgent:claim=>enroll(config.enrollmentArgv,claim),onError:error=>{
-        try {audit({phase:'attachment_error',error:String(error)});} catch { /* No command submission. */ }
-      }});
+      resolveAgent:claim=>enroll(config.enrollmentArgv,claim),
+      onError:error=>observe({phase:'attachment_error',error:String(error)})});
     if(stopping)await network.close();
     await finished;
   } finally {

@@ -790,10 +790,11 @@ def perform_check(args, attempt):
     if previous:
         reusable, resumed = resume_checks(previous, head, base_ref, policy_ref, output, needed)
     prior_timing = (resumed or {}).get("timing")
+    prior_start = prior_timing.get("first_recorded_started_at") if isinstance(prior_timing, dict) else None
+    known_start = type(prior_start) in (int, float) and 0 < prior_start <= attempt["started_at"]
     timing = {"started_at": attempt["started_at"],
-              "first_recorded_started_at": min(attempt["started_at"], prior_timing["first_recorded_started_at"])
-              if prior_timing else attempt["started_at"],
-              "prior_timing_available": bool(prior_timing)}
+              "first_recorded_started_at": prior_start if known_start else attempt["started_at"],
+              "prior_timing_available": known_start}
     attempt["first_recorded_started_at"] = timing["first_recorded_started_at"]
     results = {}
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],

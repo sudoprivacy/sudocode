@@ -182,6 +182,16 @@ cancelled-resume` or `--case completed-resume` for retained-history acceptance.
 `--mcp-context` separately records the bounded actual initialize context, without
 reading credentials. A loopback mock supplies any explicit seed response.
 
+Add `--managed-package-root /absolute/path/to/@openai/codex` to exercise the
+official npm installation's ordinary daemon discovery. The same test first
+prepares its private home through official start/stop, then launches ordinary
+TUIs without a separately started server. It retains the original listener and
+resume deadlines, configures and reads back a fixture-only one-second unload
+delay, requires unload before actual resume, and verifies the bridge exits after
+root retirement while the native daemon remains alive. The default test mode
+continues to use an explicitly started isolated server. Neither mode selects a
+production retirement policy or adopts a live daemon.
+
 These tests do not establish authorized Node enrollment, real Node append or
 cross-host receipt. Those require the supplied operator adapter and an exact
 CLI/daemon pair on Mac and Windows. Keep active sessions and the shared Node

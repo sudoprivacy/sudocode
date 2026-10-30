@@ -4,16 +4,17 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn, execFileSync, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 
 const { parseArgs } = require('node:util');
 const options = parseArgs({ options: {
   codex: {type:'string'}, output: {type:'string'}, case: {type:'string',default:'idle'},
-  driver: {type:'string'}, 'temp-root': {type:'string'}, 'mcp-context': {type:'boolean'}, autojoin: {type:'boolean'}, help: {type:'boolean'},
+  driver: {type:'string'}, 'temp-root': {type:'string'}, 'mcp-context': {type:'boolean'}, autojoin: {type:'boolean'},
+  'managed-package-root': {type:'string'}, help: {type:'boolean'},
 } }).values;
 if (options.help) {
-  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>]');
+  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>]');
   process.exit(0);
 }
 const executable = options.codex ?? process.env.CODEX_TEST_BIN;
@@ -21,6 +22,9 @@ assert(executable && path.isAbsolute(executable) && fs.statSync(executable).isFi
 assert(!['.cmd','.bat','.ps1'].includes(path.extname(executable).toLowerCase()), 'Use the native executable under shell:false');
 assert(['idle','cancelled-resume','completed-resume'].includes(options.case), 'Unknown lifecycle case');
 assert(options.output, 'An explicit evidence output directory is required');
+const managedPackageRoot=options['managed-package-root'];
+if(managedPackageRoot)assert(path.isAbsolute(managedPackageRoot)
+  && fs.statSync(path.join(managedPackageRoot,'bin/codex.js')).isFile(),'Select the existing official npm package root');
 const evidence = path.resolve(options.output);
 fs.mkdirSync(evidence,{recursive:true,mode:0o700});
 const library = path.resolve(__dirname,'../dist/index.cjs');
@@ -53,7 +57,13 @@ Object.assign(childEnv,{CODEX_HOME:isolatedHome,HOME:userHome,USERPROFILE:userHo
   APPDATA:path.join(root,'roaming'),LOCALAPPDATA:path.join(root,'local'),
   NATIVE_LIFECYCLE_FIXTURE_KEY:'isolated-fixture-only',TERM:'xterm-256color',
   NO_PROXY:loopbackHosts,no_proxy:loopbackHosts});
+// Preserve the official npm wrapper's package context, only in this private
+// fixture home. No running user daemon or global configuration is adopted.
+if(managedPackageRoot)Object.assign(childEnv,{CODEX_MANAGED_BY_NPM:'1',CODEX_MANAGED_PACKAGE_ROOT:managedPackageRoot});
 const receipt = {
+  ordinaryManagedLaunch:!!managedPackageRoot,
+  ...(managedPackageRoot?{launcherWrapperSha256:crypto.createHash('sha256')
+    .update(fs.readFileSync(path.join(managedPackageRoot,'bin/codex.js'))).digest('hex')}:{}),
   at: new Date().toISOString(), scenario:options.case, platform:process.platform, driverArgv,
   probeSourceSha256:crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex'),
   source: buildManifest.sourceCommit, libraryBuildDirty: buildManifest.dirty,
@@ -146,6 +156,7 @@ const closeTui = async own => {
       }),{mode:0o600});
     }
     fs.writeFileSync(path.join(isolatedHome,'config.toml'),
+      (managedPackageRoot?'thread_unload_delay_secs = 1\n':'')+
       'model = "gpt-5.4"\nmodel_provider = "lifecycle_fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n'+
       '[features]\napps = false\nplugins = false\n[analytics]\nenabled = false\n[model_providers.lifecycle_fixture]\nname = "No inference lifecycle fixture"\n'+
       'base_url = "http://127.0.0.1:'+apiPort+'/v1"\nwire_api = "responses"\nenv_key = "NATIVE_LIFECYCLE_FIXTURE_KEY"\n'+
@@ -155,17 +166,36 @@ const closeTui = async own => {
         '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
       (options.autojoin ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
-    native=spawn(configured.codexArgv[0],[...configured.codexArgv.slice(1),'app-server','--listen','unix://'],
-      {cwd:workspace,env:childEnv,stdio:['ignore','ignore','pipe']});
-    nativeExited=once(native,'close');
-    native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
-    await waitUntil(()=>{
-      // Windows AF_UNIX entries cannot be stat'ed; listing does not open them.
-      // The actual canonical connection below still verifies the listener.
-      try{return fs.readdirSync(path.dirname(selectedSocket)).includes(path.basename(selectedSocket));}
-      catch(error){if(error.code==='ENOENT')return false;throw error;}
-    },10000,'isolated native listener');
-    const observer=await connect('observer',receipt.observerNotifications);
+    if(managedPackageRoot){
+      const settings=path.join(isolatedHome,'app-server-daemon','settings.json');
+      fs.mkdirSync(path.dirname(settings),{recursive:true,mode:0o700});
+      fs.writeFileSync(settings,JSON.stringify({remoteControlEnabled:false,
+        updater:{autoUpdateEnabled:false},shutdownGraceSeconds:5}),{mode:0o600});
+      receipt.managedStartupAttempted=true;
+      receipt.oneTimeNativePreparation=[];
+      // Explicit one-time preparation, then the ordinary cold CLI must acquire
+      // its own default daemon within the original listener deadline.
+      for(const action of ['start','stop']){
+        const before=Date.now();
+        const result=spawnSync(configured.codexArgv[0],['app-server','daemon',action],
+          {cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
+        receipt.oneTimeNativePreparation.push({action,elapsedMs:Date.now()-before,status:result.status,
+          stdout:result.stdout,stderr:result.stderr,error:result.error?.message});
+        assert.equal(result.status,0,'one-time native preparation '+action+' must succeed');
+        const value=JSON.parse(result.stdout);
+        assert(fs.realpathSync(value.managedCodexPath).startsWith(fs.realpathSync(isolatedHome)+path.sep));
+        if(action==='start'){
+          receipt.preparedNativeSha256=crypto.createHash('sha256').update(fs.readFileSync(value.managedCodexPath)).digest('hex');
+          receipt.preparedNativeVersion=value.managedCodexVersion;
+        }
+      }
+      assert(!fs.existsSync(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
+    }else{
+      native=spawn(configured.codexArgv[0],[...configured.codexArgv.slice(1),'app-server','--listen','unix://'],
+        {cwd:workspace,env:childEnv,stdio:['ignore','ignore','pipe']});
+      nativeExited=once(native,'close');
+      native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
+    }
     {
       const spawnTui = async (label,args=[]) => {
         const driver=spawn(driverArgv[0],[...driverArgv.slice(1),configured.codexArgv[0],
@@ -178,6 +208,22 @@ const closeTui = async own => {
         return own;
       };
       for(const label of ['first','second'])await spawnTui(label);
+      await waitUntil(()=>{
+        // Windows AF_UNIX entries cannot be stat'ed; the canonical connection
+        // below verifies readiness after this non-opening directory check.
+        try{return fs.readdirSync(path.dirname(selectedSocket)).includes(path.basename(selectedSocket));}
+        catch(error){if(error.code==='ENOENT')return false;throw error;}
+      },10000,'isolated native listener');
+      const observer=await connect('observer',receipt.observerNotifications);
+      if(managedPackageRoot){
+        receipt.nativeManagedVersion=JSON.parse(execFileSync(configured.codexArgv[0],
+          ['app-server','daemon','version'],{encoding:'utf8',env:childEnv,timeout:10000}));
+        assert.equal(fs.realpathSync(receipt.nativeManagedVersion.socketPath),fs.realpathSync(selectedSocket));
+        const read=await request(observer,'test unload configuration','config/read',{includeLayers:false});
+        receipt.experimentalUnloadConfiguration={requestedSeconds:1,readSeconds:read.config.thread_unload_delay_secs??null,
+          scope:'fixture only; does not select production retirement policy'};
+        assert.equal(receipt.experimentalUnloadConfiguration.readSeconds,1);
+      }
       let inventory;
       let loadedThreads=[];
       receipt.readiness=[];
@@ -284,6 +330,13 @@ const closeTui = async own => {
         receipt.cleanup=[];
         for(const own of tuis)await closeTui(own);
         receipt.loadedAfterFrontendClose=(await request(observer,'observer','thread/loaded/list',{})).data;
+        if(managedPackageRoot){
+          await bounded((async()=>{
+            while((await request(observer,'native unload before resume','thread/loaded/list',{})).data.includes(original.id))
+              await new Promise(resolve=>setTimeout(resolve,100));
+          })(),5000,'native unload before actual resume');
+          receipt.originalRootUnloadedBeforeResume=true;
+        }
         phase='resume';
         const resumer=await spawnTui('resume',['resume',original.id]);
         const readyEnd=Date.now()+15000;
@@ -317,6 +370,19 @@ const closeTui = async own => {
         }
         await closeTui(resumer);
       }
+      if(managedPackageRoot && options.autojoin){
+        for(const own of tuis)await closeTui(own);
+        const pid=receipt.autojoinOwner[0].pid;
+        await waitUntil(()=>{
+          try{process.kill(pid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}
+        },15000,'shared owner retirement after native unload');
+        const version=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','version'],
+          {encoding:'utf8',env:childEnv,timeout:10000}));
+        const loaded=(await request(observer,'retirement observation','thread/loaded/list',{})).data;
+        receipt.frontendRetirementObservation={ownerPid:pid,allTuisExitedNormally:true,
+          nativeServerStillRunning:version.status==='running',ownerExitedBeforeNativeServer:true,loaded};
+        assert.equal(version.status,'running');assert.deepEqual(loaded,[]);
+      }
       receipt.result='PASS';
       receipt.notProven=[...(seededResume?[]:['existing-history resume']),...(cancelledResume?['completed assistant-history resume']:[]),
         'automatic authenticated Nexus enrollment',...(process.platform==='win32'?[]:['Windows actual TUI/default endpoint']),
@@ -335,6 +401,15 @@ const closeTui = async own => {
     for(const client of connections.reverse()){
       try{await client.close();receipt.cleanup.push('own proxy closed');}
       catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
+    }
+    if(receipt.managedStartupAttempted){
+      try{
+        const stopped=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','stop'],
+          {encoding:'utf8',env:childEnv,timeout:15000}));
+        receipt.cleanup.push({isolatedManagedDaemonStop:stopped});
+        assert(['stopped','notRunning'].includes(stopped.status));
+        receipt.notProven=[...new Set([...(receipt.notProven??[]),'graceful native server shutdown (official stop requested)'])];
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     if(native){
       native.kill('SIGTERM');

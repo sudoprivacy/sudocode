@@ -49,6 +49,16 @@ workspaces. Preparation refuses a running global owner or an existing mapping.
 It does not start a receiver; the previous owner must exit in the coordinated
 window before the normal global entry loads that same actor/session.
 
+To qualify ordinary native startup after its one-time machine preparation, run
+the existing lifecycle test with `--autojoin --managed-package-root
+/absolute/path/to/@openai/codex` as well as `--codex`, `--output` and the selected
+`--case`. This uses only a private Codex home: official daemon start/stop prepares
+that home, then ordinary TUIs start their default daemon themselves. The test
+requires original-thread unload/resume, unchanged actor/SID, zero resume model
+requests and bridge retirement while the native server stays running. Its
+one-second unload setting is fixture-only; it does not select a production
+retirement policy. No Nexus enrollment or production frontend is used.
+
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:

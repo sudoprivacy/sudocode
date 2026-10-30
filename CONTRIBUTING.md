@@ -368,8 +368,11 @@ scoped deployment acceptance still exercises the actual installed system.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
-the native suites on the combined merge-group tree. A runtime interaction that
-exists only in the combination of independently verified PRs is therefore outside
+the native suites on the combined merge-group tree. Rust-changing PRs also run
+strict all-target/all-feature Clippy on Linux; the queue runs that same strict
+check on Linux, Windows and macOS against the combined tree. The required daemon
+gate waits for those checks and rejects failed or unexpectedly skipped jobs.
+A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions on main are unchanged; mock transport results do not
 establish live cache hits. Cache-prefix, compaction and all existing workspace
@@ -669,7 +672,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
 cargo test --workspace
 ```
 
@@ -953,6 +956,7 @@ Before opening a PR:
       plan on the author's platform and produced a valid exact-head receipt.
       Use its printed commands and local/CI responsibilities; do not infer a
       full Rust build from this checklist for documentation or SDK-only edits.
+- [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings`; the queue runs it on all three native platforms.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen

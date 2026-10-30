@@ -345,6 +345,9 @@ def acceptance_plan(policy, names, author):
 def report_plan(plan):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
+    performance = [name for name in ["rendering", "browser"] if name in plan["local_checks"]]
+    lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
+                 "none selected; indirect performance effects outside the selected inputs are not measured."))
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")

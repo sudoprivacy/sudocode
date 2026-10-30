@@ -310,6 +310,10 @@ negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build
 the product. Product native acceptance and complementary CI hosts are unchanged.
+The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
+archive converts line endings. It accepts the reconstruction only when SHA256
+matches the original protected pin; changed content still fails. Its private Git
+repository disables automatic line-ending conversion without changing author settings.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted

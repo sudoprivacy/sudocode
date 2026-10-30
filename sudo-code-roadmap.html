@@ -309,6 +309,10 @@ the guard fingerprint without invalidating unrelated completed native profiles.
 The container takes no shared benchmark lease. In a same-source probe, the full
 matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
 single trials concern infrastructure validation, not production PR latency.</p>
+<p>The guard fixture handles Windows archive CRLF conversion by reconstructing
+only bytes that exactly match each original protected SHA256 pin. Its private
+Git fixture keeps those bytes unchanged. Production pin checks and author Git
+configuration stay unchanged; modified content is still rejected.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>

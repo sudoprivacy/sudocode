@@ -340,6 +340,9 @@ jobs:
       - name: Exercise real Git histories
         if: *full_preflight
         run: python3 e2e/pr-history/run.py
+      - name: Exercise queue cancellation completion races
+        if: *full_preflight
+        run: python3 e2e/local-acceptance/queue_maintenance_acceptance.py
       - name: Every committed shell script must be executable
         if: *full_preflight
         shell: bash

@@ -478,7 +478,8 @@ def run_command(command, cwd, log, env=None):
     # An explicit command environment may still select NO_COLOR below.
     environment.pop("NO_COLOR", None)
     if os.name == "nt" and not environment.get("LIB") and (
-            Path(command[0]).stem.lower() in {"cargo", "cargo-nextest"} or any("e2e/build-metadata/run.py" in str(arg) for arg in command)):
+            Path(command[0]).stem.lower() in {"cargo", "cargo-nextest"} or any(
+                path in str(arg) for arg in command for path in ("e2e/build-metadata/run.py", "e2e/startup/run.py"))):
         global MSVC_ENV
         if MSVC_ENV is None:
             configured = git("config", "--get", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()

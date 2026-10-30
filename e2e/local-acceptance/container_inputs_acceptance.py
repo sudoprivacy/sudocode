@@ -129,7 +129,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         observed = json.loads((evidence / "observed.json").read_text())
         assert observed["sources"] == expected["sources"]
         assert provenance["candidate"] == candidate and provenance["policy"] == policy_ref
-        assert provenance["baseline"] == (baseline if policy_ref == protected else protected)
+        assert provenance["baseline"] == (baseline if profile == "rendering" and policy_ref == protected else protected)
         actual_run = next(row["command"] for row in commands[::-1]
                           if docker_operation(row, "run"))
         assert provenance["image_id"] in actual_run and provenance["image_tag"] not in actual_run
@@ -140,6 +140,21 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         first = launch("protected-policy", protected, {"policy": "main-policy", "sources": {
             "candidate": "candidate-policy", "baseline": "baseline", "trusted": "main-policy"}},
             images_cache=invocation_images)
+        # Two independent invocations may export identical contexts while the
+        # first still needs its captured image for another profile.
+        another = launch("another-invocation-protected-policy", protected,
+            {"policy": "main-policy", "sources": {
+                "candidate": "candidate-policy", "baseline": "baseline", "trusted": "main-policy"}},
+            images_cache={})
+        builds = sum(docker_operation(row, "build") for row in commands)
+        retained = launch("reuse-first-after-another-build", protected,
+            {"policy": "main-policy", "sources": {
+                "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "main-policy"}},
+            profile="browser", images_cache=invocation_images)
+        assert retained["image_id"] == first["image_id"] and retained["image_reused"]
+        assert sum(docker_operation(row, "build") for row in commands) == builds
+        assert first["image_tag"] != another["image_tag"], "Independent invocations share an image tag"
+        print("PASS: another real BuildKit export cannot remove the first invocation's captured image", flush=True)
         candidate_expected = {"policy": "candidate-policy", "sources": {
             "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}}
         second = launch("candidate-policy-ref-and-tag-change", candidate, candidate_expected,
@@ -184,8 +199,8 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: an actually removed cached image fails before running or rebuilding a replacement", flush=True)
         else:
             raise AssertionError("A removed immutable image was silently replaced")
-        result = {"status": "PASS", "cases": 5,
-            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected and candidate policies select their own image/driver/baseline. Actual HEAD/origin/main movement and a real tag replacement cannot change captured inputs. A second profile reuses its invocation's actual built image without another build. Wrong-policy and actually removed images are rejected. Infrastructure only; no product benchmark coverage."}
+        result = {"status": "PASS", "cases": 6,
+            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected and candidate policies select their own image/driver/baseline. Actual HEAD/origin/main movement and a real tag replacement cannot change captured inputs. Independent real BuildKit exports retain distinct references; a second profile reuses its invocation's actual built image without another build. Wrong-policy and actually removed images are rejected. Infrastructure only; no product benchmark coverage."}
     finally:
         (output / "commands.json").write_text(json.dumps(commands, indent=2))
         # All tags and IDs below were produced by this UUID-labelled fixture.

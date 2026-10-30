@@ -321,7 +321,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "66ba35a4a5fd75c16a872eff61032489b30a50de23e0e0d2055d3c6b1c34981e"
+    expected = "819ea1ba1656f50066033adafb5fc6b0412c2e75812fadf19026940a9b9b73fe"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
@@ -417,11 +417,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
     digest = context_hash.hexdigest()
-    image = f"sudocode-local-acceptance:{digest[:24]}"
     image_receipt = output / "image-id.txt"
     # A check invocation owns this map. Reuse only its actual build result,
     # never a mutable tag or an image left by another acceptance invocation.
     cached = images.get(digest) if images is not None else None
+    # BuildKit can discard the previous image index when another build exports
+    # the same tag. Keep an independent reference until this invocation finishes.
+    image = (cached["image_tag"] if cached is not None
+             else f"sudocode-local-acceptance:{digest[:24]}-{os.urandom(16).hex()}")
     if cached is None:
         command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
                 extra={"DOCKER_BUILDKIT": "1"})
@@ -437,7 +440,7 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         command("docker", "image", "inspect", "--format", "{{.Id}}", image_id)
         image_receipt.write_text(image_id + "\n")
     elif images is not None:
-        images[digest] = {"image_id": image_id, "build_receipt": build_receipt}
+        images[digest] = {"image_id": image_id, "image_tag": image, "build_receipt": build_receipt}
     (output / "container-provenance.json").write_text(json.dumps({
         "candidate": candidate, "baseline": reference, "policy": protected,
         "image_id": image_id, "image_tag": image, "context_sha256": digest,

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { connectCodex, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
+import { connectCodex, CodexRequestError, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
 import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
 import { connectScode, type ScodeConnection, type SessionNotification } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
@@ -168,30 +168,52 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       report(error);
     }
   };
+  const loadedIds = async () => {
+    const loaded = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await native.request<{data: string[]; nextCursor: string | null}>('thread/loaded/list', {cursor});
+      if (!Array.isArray(page.data) || page.data.some(id => !identifier(id))
+          || (page.nextCursor !== null && typeof page.nextCursor !== 'string')) throw new Error('Invalid native root inventory');
+      for (const id of page.data) loaded.add(id);
+      if (page.nextCursor && page.nextCursor === cursor) throw new Error('Native inventory cursor did not advance');
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return loaded;
+  };
   const refresh = () => {
     chain = chain.then(async () => {
       if (closed) return;
-      const loaded = new Set<string>();
-      let cursor: string | undefined;
-      do {
-        const page = await native.request<{data: string[]; nextCursor: string | null}>('thread/loaded/list', {cursor});
-        if (!Array.isArray(page.data) || page.data.some(id => !identifier(id))
-            || (page.nextCursor !== null && typeof page.nextCursor !== 'string')) throw new Error('Invalid native root inventory');
-        for (const id of page.data) loaded.add(id);
-        if (page.nextCursor && page.nextCursor === cursor) throw new Error('Native inventory cursor did not advance');
-        cursor = page.nextCursor ?? undefined;
-      } while (cursor);
+      const loaded = await loadedIds();
+      const threads = new Map<string, Thread>();
+      for (const id of loaded) {
+        if (closed) return;
+        let thread: Thread;
+        try {
+          ({thread} = await native.request<{thread: Thread}>('thread/read', {threadId:id,includeTurns:false}));
+        } catch (error) {
+          const rpc = error instanceof CodexRequestError ? error.rpcError as {code?: unknown; message?: unknown} : undefined;
+          // Native unload can race this read after a successful inventory.
+          // Only an exact native refusal plus fresh confirmed absence permits
+          // retirement. Other failures still invalidate the whole snapshot.
+          // These are read-only observations; no command/enrollment is retried.
+          if (rpc?.code !== -32600 || rpc.message !== `thread not loaded: ${id}`
+              || (await loadedIds()).has(id)) throw error;
+          loaded.delete(id);
+          continue;
+        }
+        if (thread.id !== id || !path.isAbsolute(thread.cwd)) throw new Error('Native inventory identity mismatch');
+        threads.set(id,thread);
+      }
       for (const [id, owner] of owners) {
         if (!loaded.has(id) || (owner.retryAt!==undefined && performance.now()>=owner.retryAt)) {
           owners.delete(id); await stopOwner(owner);
         }
       }
-      for (const id of loaded) {
+      for (const [id,thread] of threads) {
         if (closed) break;
         const owner = owners.get(id);
         if (owner?.error) continue;
-        const {thread} = await native.request<{thread: Thread}>('thread/read', {threadId:id,includeTurns:false});
-        if (thread.id !== id || !path.isAbsolute(thread.cwd)) throw new Error('Native inventory identity mismatch');
         if (!rootThread(thread)) {
           if (owner) {owners.delete(id);await stopOwner(owner);}
         } else if (owner) {

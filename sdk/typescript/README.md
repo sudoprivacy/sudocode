@@ -56,6 +56,10 @@ Use `--native-argv JSON_ARGV` instead of `--native-codex` when the official
 installation uses an interpreter and wrapper. The full argv is preserved for
 both proxy connections and MCP registration; it is never passed through a
 shell. Keep that installation's native package context intact.
+If native unload races inventory inspection, only its exact unloaded-thread
+refusal plus a fresh complete inventory confirming absence permits retirement.
+Other inspection errors refuse the command. This reads state again; it never
+resubmits a tool call or an enrollment operation.
 The initializer starts nothing and does not install global configuration. Use
 an owner-protected parent directory; it exclusively creates the file and keeps
 machine values outside the package. Keep the MCP server optional so an offline

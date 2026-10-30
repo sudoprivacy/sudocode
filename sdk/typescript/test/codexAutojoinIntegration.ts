@@ -26,6 +26,7 @@ let owner: CodexAutojoin | undefined;
 let mcp: Client | undefined;
 let mcpOwnerPid: number | undefined;
 let holdReads = false;
+let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
 const proxyEnv: Record<string,string> = {SCODE_NATIVE_ENV_SENTINEL:'owned-proxy'};
@@ -33,6 +34,12 @@ for(const [key,value] of Object.entries(process.env))if(value!==undefined && key
 server.on('connection',socket=>socket.on('message',bytes=>{
   const call=JSON.parse(bytes.toString());calls.push(call);
   if(call.id===undefined)return;
+  const retiring=retiringRead;
+  if(call.method==='thread/read'&&retiring&&call.params.threadId===retiring.id){
+    if(retiring.absent)loaded=loaded.filter(id=>id!==retiring.id);
+    socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,error:{code:-32600,message:`thread not loaded: ${retiring.id}`}}));
+    return;
+  }
   const thread={id:call.params?.threadId,cwd:nativeWorkspace,status:{type:'idle'},
     parentThreadId:null as string|null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true};
   if(thread.id===ids[2]){thread.threadSource='subagent';thread.parentThreadId=ids[0];}
@@ -70,6 +77,19 @@ async function main() {
     assert.equal(JSON.parse(result.content).routing.sender,row.actor);
   }
   const originalSession=owner.connectionFor(ids[0]).sessionId;
+  // A real proxy round trip retires another root between list and read. Its
+  // confirmed absence must not invalidate a still-loaded root or resend tools.
+  retiringRead={id:ids[1],absent:true};await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
+  assert.throws(()=>owner!.connectionFor(ids[1]),/authenticated/);
+  assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,2);
+  retiringRead=undefined;loaded.push(ids[1]);await owner.refresh();
+  assert.equal(enrollments.length,2,'retirement reuses the original identity');
+  retiringRead={id:ids[1],absent:false};await owner.refresh();
+  assert.throws(()=>owner!.connectionFor(ids[0]),/inventory unavailable/,
+    'an inconsistent still-listed root must fail closed, not be discarded');
+  retiringRead=undefined;await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
   loaded=[ids[1],ids[2],ids[3]];await owner.refresh();
   assert.throws(()=>owner!.connectionFor(ids[0]),/authenticated/);
   nativeWorkspace=fs.realpathSync.native(directory);

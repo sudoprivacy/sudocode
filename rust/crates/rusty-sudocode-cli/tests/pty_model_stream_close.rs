@@ -705,6 +705,28 @@ fn capture_session_paths(env: &TestEnv) -> (std::path::PathBuf, std::path::PathB
 }
 
 #[test]
+fn raw_stream_capture_many_turns_finalizes_every_response_before_exit() {
+    let env = TestEnv::new_mock("response-log-many-turns");
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    let log = env.workspace_root().join("capture-events.jsonl");
+    let variables = [("SCODE_LOG_PATH", log.to_str().unwrap())];
+    let mut cli = env.spawn_with_env(&[], &variables);
+    common::expect_input_line_cleared(&cli, env.timeout(), "capture prompt");
+    for turn in 0..20 {
+        let marker = common::turn_status_marker(&cli);
+        cli.send(&format!("Report stream result {turn}\r")).unwrap();
+        common::expect_turn_complete_after(&cli, &marker, env.timeout(), "capture turn complete");
+    }
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let (path, directory) = capture_session_paths(&env);
+    assert_capture_session(&path, 20);
+    assert_raw_capture_files(&directory, 20, &log);
+    assert_eq!(provider.bodies.lock().unwrap().len(), 20);
+}
+
+#[test]
 fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
     let mut cases = [
         ("response-log-perf-off", false, 0),

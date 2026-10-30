@@ -8,6 +8,17 @@
         "**"
       ]
     },
+    "guard-contract": {
+      "include": [
+        ".github/local-acceptance/**",
+        ".github/scripts/local_acceptance.py",
+        "e2e/local-acceptance/**",
+        "spec/local_acceptance*.json",
+        ".github/workflows/local-acceptance*.yml",
+        ".github/workflows/acp-client.yml",
+        ".github/scripts/ci_input_scope.py"
+      ]
+    },
     "native-guard": {
       "include": [
         ".github/local-acceptance/**",

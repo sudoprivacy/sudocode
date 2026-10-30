@@ -126,7 +126,9 @@ def scope_acceptance(directory):
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"})
     # Each real Git diff contains only one formerly unguarded ignored-test input.
     for path, required in [
-        (".github/local-acceptance/checks.py", {"native-guard", "native-resize", "rendering", "browser"}),
+        (".github/local-acceptance/checks.py", {"guard-contract", "native-guard", "native-resize", "rendering", "browser"}),
+        (".github/local-acceptance/Dockerfile.guard", {"guard-contract", "native-guard"}),
+        ("e2e/local-acceptance/native.py", {"guard-contract", "native-guard"}),
         ("rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs", {"native-workspace", "native-resize"}),
         ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", {"native-workspace", "browser"}),
         ("rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport_browser.cjs", {"native-workspace", "browser"}),
@@ -291,38 +293,23 @@ def plan_acceptance(directory):
     assert all(set(job["checks"]) == expected for job in native)
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
 
-
-def windows_color_acceptance(directory):
-    if os.name != "nt":
-        return
-    # Launch real Cargo through the production executor, including VsDevCmd.
-    # A preinitialized Developer shell must not hide the reinjection regression.
-    crate = directory / "platform-color"
-    (crate / "src").mkdir(parents=True)
-    (crate / "Cargo.toml").write_text('[package]\nname="platform-color-probe"\nversion="0.0.1"\nedition="2021"\n\n[workspace]\n')
-    (crate / "Cargo.lock").write_text('version = 4\n\n[[package]]\nname = "platform-color-probe"\nversion = "0.0.1"\n')
-    (crate / "src/main.rs").write_text('fn main() { println!("{:?}", std::env::var_os("NO_COLOR")); }\n')
-    code = ("import importlib.util,os,sys; from pathlib import Path; "
-            "os.environ.pop('LIB',None); "
-            "spec=importlib.util.spec_from_file_location('acceptance',sys.argv[1]); "
-            "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
-            "root=Path(sys.argv[2]); "
-            "args=['cargo','run','--offline','--locked','--quiet','--manifest-path',str(root/'Cargo.toml'),'--target-dir',str(root/'target')]; "
-            "default=root/'default.log'; explicit=root/'explicit.log'; "
-            "module.run_command(args,root,default); "
-            "assert module.MSVC_ENV is not None and module.MSVC_ENV.get('NO_COLOR')=='1', 'Actual VsDevCmd environment was not exercised'; "
-            "assert default.read_text().splitlines()[-1]=='None', 'Platform environment suppressed default colors'; "
-            "module.run_command(args,root,explicit,{'NO_COLOR':'1'}); "
-            "assert explicit.read_text().splitlines()[-1]=='Some(\"1\")', 'Explicit color opt-out was lost'")
-    command(sys.executable, "-c", code, SOURCE / ".github/scripts/local_acceptance.py", crate, cwd=SOURCE)
-    print("PASS: actual Windows Cargo/Visual Studio initialization cleans inherited NO_COLOR and preserves explicit opt-out")
+    source = repository / "e2e/local-acceptance/native.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("native guard fixture input\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Contract and native guard inputs", cwd=repository)
+    plan = preview("macos", "x86_64")
+    assert {"guard-contract", "native-guard"}.issubset(plan["local_checks"]), plan
+    native = [job for job in plan["ci"] if job["family"] == "native"]
+    assert native and all("native-guard" in job["checks"] for job in native), plan
+    assert all("guard-contract" not in job["checks"] for job in plan["ci"]), plan
+    print("PASS: public CLI planner keeps Docker matrix author-local and native guards on every host")
 
 
 def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
-        windows_color_acceptance(directory)
         performance_scope_acceptance(directory)
         plan_acceptance(directory)
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))

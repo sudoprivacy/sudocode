@@ -78,12 +78,34 @@ async function run(config) {
       && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
       && fixture.viewport().split('\n').some(row => /^\s*⏵⏵ danger-full-access(?:\s|$)/u.test(row))
       && performance.now() - fixture.lastData >= 300, config.cols);
-    const screen = page.locator('.xterm-screen');
+    const readback = await page.context().newCDPSession(page);
+    report.environment.pngReadback = { method: 'Page.captureScreenshot', optimizeForSpeed: true };
+    report.paint_observations = [];
     const painted = async () => {
-      await page.evaluate(() => fixture.frame());
-      // Capture the terminal pixels without locator.screenshot's extra
-      // actionability/stability wait, which is unrelated to terminal painting.
-      return page.screenshot({ clip: await screen.boundingBox(), animations: 'disabled' });
+      const started = performance.now();
+      const { clip, frameMs, boundsMs } = await page.evaluate(async () => {
+        const began = performance.now();
+        await document.fonts.ready;
+        await fixture.frame();
+        const framed = performance.now();
+        if (document.getAnimations().some(animation => animation.playState === 'running')) {
+          throw new Error('Terminal painting measurements require non-animated CSS');
+        }
+        const clip = fixture.pixelBounds();
+        return { clip, frameMs: framed - began, boundsMs: performance.now() - framed };
+      });
+      assert(clip.width > 0 && clip.height > 0, 'missing terminal pixel bounds');
+      const ready = performance.now();
+      // Read the completed PNG directly. Generic page screenshots prepare
+      // animation/caret state and repeat layout work before capturing pixels.
+      const { data } = await readback.send('Page.captureScreenshot', {
+        format: 'png', clip: { ...clip, scale: 1 },
+        captureBeyondViewport: false, optimizeForSpeed: true,
+      });
+      report.paint_observations.push({ frame_ms: frameMs, bounds_ms: boundsMs,
+        ready_rpc_ms: ready - started, readback_ms: performance.now() - ready,
+        total_ms: performance.now() - started });
+      return Buffer.from(data, 'base64');
     };
     const progress = label => fs.writeFileSync(path.join(config.logRoot, 'progress.txt'), label);
     const resources = async label => {

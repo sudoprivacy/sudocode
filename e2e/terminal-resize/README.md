@@ -123,11 +123,18 @@ before browser keyboard dispatch and ends after xterm parses the expected cells,
 two animation frames and a PNG capture. Each typed character must change pixels.
 This is a conservative rendering/readback measurement, including automation and
 capture overhead; it does not measure physical keyboard/display scanout latency.
+The observer waits for fonts and two animation frames, then reads a PNG of the
+same terminal bounds through Chromium CDP with fast lossless compression.
+The fixture disables decorative scrollbar transitions and rejects other running
+CSS animations. Per-capture frame, bounds and PNG
+readback timings remain in the report, and the readback mode is part of the
+browser cohort identity. The settled frame supplies fresh pixel bounds through
+the same geometry provider used by link and selection hit testing.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,
-then samples 20 keys with pixel evidence. This keeps P95 from depending on only
-two scheduler-tail observations. Sampling counts and the delay schedule are
+then samples 20 keys with pixel evidence. Parsed P95 uses the larger independent
+burst; painted P95 retains its separate readback workload. Sampling counts and the delay schedule are
 owned by `gui-policy.json` and shared by the observer and completeness checks.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same

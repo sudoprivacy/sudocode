@@ -31,14 +31,14 @@ def fixture_environment():
 FIXTURE_ENV = fixture_environment()
 
 
-def command(*args, cwd, success=True, error=None):
+def command(*args, cwd, success=True, error=None, stderr=False):
     result = subprocess.run(list(map(str, args)), cwd=cwd, capture_output=True,
                             text=True, encoding="utf-8", errors="replace", env=FIXTURE_ENV)
     if (result.returncode == 0) != success:
         raise RuntimeError(f"Unexpected exit {result.returncode}: {args}\n{result.stdout}\n{result.stderr}")
     if error is not None:
         assert error in result.stderr, result.stderr
-    return result.stdout.strip()
+    return (result.stderr if stderr else result.stdout).strip()
 
 
 def scope_acceptance(directory):

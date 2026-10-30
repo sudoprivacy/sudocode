@@ -137,7 +137,8 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
-        command(sys.executable, "e2e/local-acceptance/run.py")
+        command(sys.executable, "e2e/local-acceptance/resume_acceptance.py", "--host-smoke")
+        contract_container(root, output, command)
         command(sys.executable, "e2e/local-acceptance/nextest.py",
                 "--output", str(output / "nextest-executor"))
     elif name == "native-sdk":
@@ -254,6 +255,40 @@ def run(name, root, output, base, execute):
     if not results:
         raise RuntimeError(f"No command ran for required check: {name}")
     return results
+
+
+def contract_container(root, output, command):
+    """Keep the full decision matrix local without serial Windows Git startup costs."""
+    try:
+        policy_ref, candidate_ref = run.execution_refs
+    except AttributeError:
+        policy_ref = candidate_ref = None
+    def revision(ref):
+        return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
+    protected = revision(policy_ref or "origin/main")
+    candidate = revision(candidate_ref or "HEAD")
+    context = output / "guard-image"
+    context.mkdir()
+    inputs_hash = hashlib.sha256()
+    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
+        contents = subprocess.check_output(["git", "show", f"{protected}:.github/local-acceptance/{name}"], cwd=root)
+        (context / destination).write_bytes(contents)
+        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    image_receipt = output / "guard-image-id.txt"
+    command("docker", "build", "--iidfile", str(image_receipt), "--tag",
+            "sudocode-contract-guard:" + inputs_hash.hexdigest()[:24], str(context),
+            extra={"DOCKER_BUILDKIT": "1"})
+    image = image_receipt.read_text().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise RuntimeError("Contract image build did not return an immutable image ID")
+    inputs = output / "guard-inputs"
+    snapshot(root, candidate, inputs)
+    (output / "guard-provenance.json").write_text(json.dumps({
+        "candidate": candidate, "policy": protected, "image_id": image,
+        "context_sha256": inputs_hash.hexdigest()}, indent=2))
+    # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
+    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
+            "--mount", f"type=bind,source={inputs},target=/inputs,readonly", image)
 
 
 def snapshot(root, ref, destination):

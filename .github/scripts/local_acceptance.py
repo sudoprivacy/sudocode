@@ -86,7 +86,23 @@ def commands_hash(ref):
     # selected check set to be covered. New commands still require a real run.
     paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
     return sha(canonical({"executor": sha(executor_source(ref).encode()),
-                          **{p: sha(tracked(ref, p)) for p in paths}}))
+                          **{p: sha(tracked(ref, p)) for p in paths}, **guard_image_inputs(ref)}))
+
+
+def guard_image_inputs(ref):
+    """Bind guard image inputs while retaining exact hashes for historical recipes."""
+    inputs = {}
+    for path in [".github/local-acceptance/Dockerfile.guard", ".github/local-acceptance/guard.py"]:
+        result = git("show", f"{ref}:{path}", check=False)
+        if not result.returncode:
+            inputs[path] = sha(result.stdout)
+    return inputs
+
+
+def profile_images(ref):
+    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    guard = guard_image_inputs(ref)
+    return {"default": image, "guard-contract": sha(canonical({"base": image, **guard})) if guard else image}
 
 
 def profile_ast_value(value):
@@ -113,7 +129,7 @@ def profile_commands_hashes(ref, names):
     """Bind each literal dispatch branch and all common code without importing it."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
     executor = sha(executor_source(ref).encode())
-    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    images = profile_images(ref)
     result = {}
     for name in names:
         projected = copy.deepcopy(module)
@@ -140,7 +156,7 @@ def profile_commands_hashes(ref, names):
                          for node in ast.walk(dispatcher))
         if not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
-        result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
+        result[name] = sha(canonical({"version": 1, "executor": executor, "image": images.get(name, images["default"]),
                                      "profile": profile_ast_value(projected)}))
     return result
 
@@ -149,7 +165,7 @@ def reachable_profile_commands_hashes(ref, names):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
     executor = sha(executor_source(ref).encode())
-    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    images = profile_images(ref)
     result = {}
     # Reflection can find a function without a static Name reference. Retain
     # the complete module rather than guessing which code it might execute.
@@ -211,7 +227,7 @@ def reachable_profile_commands_hashes(ref, names):
                     pending.append(functions[reference])
             projected.body = [node for node in projected.body
                               if not isinstance(node, ast.FunctionDef) or node.name in retained]
-        result[name] = sha(canonical({"version": 2, "executor": executor, "image": image,
+        result[name] = sha(canonical({"version": 2, "executor": executor, "image": images.get(name, images["default"]),
                                      "profile": profile_ast_value(projected)}))
     return result
 

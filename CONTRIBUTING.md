@@ -250,6 +250,14 @@ host; custom output directories can use the printed `check --resume-from` comman
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
 An abrupt process termination can prevent checkpoint creation.
+For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
+in a private local Docker container. A native host smoke retains the actual failing
+process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
+native nextest/Cargo enforcement fixture also remains on the author OS. The full
+negative decision matrix is no longer repeated natively on Windows or macOS, so
+OS-specific negative hook paths have less coverage. The container uses its own
+temporary source/fixtures and does not take the shared performance lease or build
+the product. Product native acceptance and complementary CI hosts are unchanged.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted

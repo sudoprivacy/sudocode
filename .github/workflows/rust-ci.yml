@@ -691,6 +691,13 @@ jobs:
             cargo test -p rusty-sudocode-cli --test pty_file_operations edit_then_verify_on_disk -- --nocapture
           fi
           cargo test -p rusty-sudocode-cli --test pty_block_spacing -- --test-threads=1 --nocapture
+      - name: Deliver offline Nexus mail through Windows ConPTY and a real model
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: .
+        env:
+          SCODE_LIVE_MODEL: *live_model
+        run: bash e2e/nexus-a2a/run-live-offline.sh
       - name: Summarize live model routing evidence
         if: always()
         working-directory: .

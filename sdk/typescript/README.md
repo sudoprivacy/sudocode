@@ -12,6 +12,53 @@ Linux ARM64 (including DGX Spark), Linux x64, macOS and Windows use the same
 JavaScript payload. CI runs actual stdio/package workflows on these platforms;
 a new machine still needs its own scode, credential and transport acceptance.
 
+## Global native Codex attachment
+
+The `--codex` entry connects all loaded user-root threads through one per-user
+bridge owner. It uses Codex's normal global MCP configuration. It does not copy
+one fixed Agent/session config into every workspace. Same-directory roots get
+distinct durable bindings; resuming a thread reuses its original Agent and ACP
+session. Task prompts and exact direct messages keep the same implementations
+as the fixed-session bridge below.
+
+This mode requires native root inventory and host-supplied tool-call metadata
+(qualified on native Codex 0.163.0), a compatible scode with native actor audit,
+and an operator-authorized enrollment adapter. **An enrollment adapter for a
+specific live Nexus installation is not supplied by this package.** Protocol
+fixtures do not establish production enrollment or current-node compatibility.
+The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
+defines that remaining integration boundary and rollout gates.
+
+Prepare a private machine configuration with `--init-codex --config FILE
+--native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES`. The result
+contains the exact native `codex mcp add nexus_scode -- ...` argv for review.
+Use `--native-argv JSON_ARGV` instead of `--native-codex` when the official
+installation uses an interpreter and wrapper. The full argv is preserved for
+both proxy connections and MCP registration; it is never passed through a
+shell. Keep that installation's native package context intact.
+The initializer starts nothing and does not install global configuration. Use
+an owner-protected parent directory; it exclusively creates the file and keeps
+machine values outside the package. Keep the MCP server optional so an offline
+node cannot prevent ordinary Codex startup. Existing project or launch-time
+overrides need an explicit migration; a global entry cannot override them.
+
+Existing fixed-session Agents can be prepared offline with `--bind-codex`.
+The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
+specifies its explicit mapping document, original SID and separate native/ACP
+workspaces. Preparation refuses a running global owner or an existing mapping.
+It does not start a receiver; the previous owner must exit in the coordinated
+window before the normal global entry loads that same actor/session.
+
+To qualify ordinary native startup after its one-time machine preparation, run
+the existing lifecycle test with `--autojoin --managed-package-root
+/absolute/path/to/@openai/codex` as well as `--codex`, `--output` and the selected
+`--case`. This uses only a private Codex home: official daemon start/stop prepares
+that home, then ordinary TUIs start their default daemon themselves. The test
+requires original-thread unload/resume, unchanged actor/SID, zero resume model
+requests and bridge retirement while the native server stays running. Its
+one-second unload setting is fixture-only; it does not select a production
+retirement policy. No Nexus enrollment or production frontend is used.
+
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:

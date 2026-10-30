@@ -57,15 +57,24 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
   const log = (entry: unknown) => appendFileSync(config.log, JSON.stringify({ at: new Date().toISOString(), ...entry as object })+'\n', { mode: 0o600 });
   log({ phase: 'connecting', threadId: config.threadId, sessionId });
   const native = await connectCodex(config);
-  const { request } = native;
-  let closed = false;
   const close = async () => { closed = true; await native.close(); };
+  let closed = false;
   try {
-    const { thread } = await request<{ thread: { id: string; status: { type: string } } }>('thread/read', { threadId: config.threadId, includeTurns: false });
+    const { thread } = await native.request<{ thread: { id: string; status: { type: string } } }>('thread/read', { threadId: config.threadId, includeTurns: false });
     if (thread.id !== config.threadId || !['active', 'idle'].includes(thread.status.type)) {
       throw new Error('Original callback thread must already be loaded; no automatic resume/fork');
     }
-  } catch (error) { await close(); throw error; }
+  } catch (error) { await close().catch(() => {}); throw error; }
+  const delivery = createCodexCallback(native.request, config, sessionId);
+  return { receive(notification) { if (!closed) delivery.receive(notification); },
+    async close() { await delivery.close(); await close(); } };
+}
+
+/** Share an existing native connection without creating another proxy owner. */
+export function createCodexCallback(request: Requester,
+  config: Pick<CodexCallbackConfig, 'threadId' | 'peers' | 'log'>, sessionId: string): CodexCallback {
+  let closed = false;
+  const log = (entry: unknown) => appendFileSync(config.log, JSON.stringify({ at: new Date().toISOString(), ...entry as object })+'\n', { mode: 0o600 });
   let queued = 0;
   let chain = Promise.resolve();
   return {
@@ -79,6 +88,7 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
       if (queued >= 64) { log({ eventId, phase: 'pending', reason: 'Callback queue full; no delivery attempted' }); return; }
       queued++;
       chain = chain.then(async () => {
+        if(closed){log({eventId,phase:'pending',reason:'Callback owner closed before submission'});return;}
         const result = await forwardScodeToCodex(request, config.threadId, notification, eventId);
         log({ eventId, phase: 'accepted', ...result });
       }).catch(error => {
@@ -87,6 +97,6 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
         try { log({ eventId, phase: 'pending', error: String(error) }); } catch { /* Original ACP protocol log is retained by its owner. */ }
       }).finally(() => { queued--; });
     },
-    close,
+    async close() { closed = true; await chain; },
   };
 }

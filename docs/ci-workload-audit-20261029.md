@@ -376,6 +376,27 @@ Full rendering A/A/A-B and painted-browser/viewport measurements move to local
 Docker without changing their existing sampling or budgets. Tagged production
 artifact publishing retains its multi-platform builds.
 
+Each invocation resolves its candidate, PR base and authorized policy to fixed
+Git commits before running profiles. Docker inputs use that policy commit for
+the observer, image context and rendering baseline selection. A maintainer's
+authorized contract update therefore executes its selected candidate tools;
+ordinary acceptance continues to use protected-main tools. Later fetches cannot
+silently change these inputs. Docker runs use the image ID written by the actual
+build, rather than resolving a mutable tag again. `container-provenance.json`
+records the candidate, baseline, policy, context digest and image identity.
+The dispatcher keeps its existing API. Comparing the actual Git-tracked command
+recipes preserves all eight non-container profiles and invalidates only
+`rendering` and `browser`; unrelated native evidence need not be repeated for
+this container implementation change.
+
+The existing Git/SSH guard exercises a real signed check while its policy/base
+refs change. The container infrastructure E2E executes real Docker builds and
+runs, moves Git refs and replaces a tag, and requires a wrong-policy run to fail.
+It uses private fixture storage and a labelled lease; no production benchmark
+state is mounted. Relevant executor changes select this fixture once in the PR
+preflight, with no queue/main repeat or extra job. These fixtures add no product
+coverage and remove no workload, measurement, assertion or deadline.
+
 Static cloud workspace cadence is now two executions per ready Windows/Mac PR
 lifecycle, versus four after cleanup one and eight originally; a third execution
 is native on the author's machine. Co-host PR builds use the author host plus

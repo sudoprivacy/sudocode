@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 // Protocol fixture only. Real engine/policy/mailbox and zero-inference proofs
 // belong to sudocode's stdio acceptance, not this Hydra transport smoke.
 const scenario = process.argv[2] ?? 'normal';
+const actor = process.env.SCODE_DIRECT_FIXTURE_ACTOR ?? 'bound-fixture-actor';
 const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
 const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
 let sessionId;
@@ -32,7 +33,7 @@ const result = (value, tool, input) => {
   const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([0])); frame(hash, content);
   return { content, isError: scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
     version: 1, commandId: `external-a2a-${randomUUID()}`, sessionId: scenario === 'bad-audit' ? 'wrong' : sessionId,
-    actor: 'bound-fixture-actor', namespaceRoot: '', tool,
+    actor, namespaceRoot: '', tool,
     requestedInputSha256: inputDigest(tool, input), effectiveInputSha256: inputDigest(tool, input), resultSha256: hash.digest('hex'),
   } } } } };
 };
@@ -65,7 +66,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     if (ctx.params.sessionId !== sessionId) throw new Error('Unknown native session');
     if (scenario === 'loss') process.exit(17); // Request journal exists, response is lost.
     if (scenario === 'malformed') return { queued: true };
-    return result({ success: true, routing: { sender: 'bound-fixture-actor', to: ctx.params.to }, text: ctx.params.message }, 'send', ctx.params);
+    return result({ success: true, routing: { sender: actor, to: ctx.params.to }, text: ctx.params.message }, 'send', ctx.params);
   })
   .onRequest('_sudocode/a2a/agent_list', value => value, ctx => {
     log({ method: '_sudocode/a2a/agent_list', input: ctx.params });

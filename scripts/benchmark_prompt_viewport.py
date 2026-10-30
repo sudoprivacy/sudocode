@@ -57,6 +57,7 @@ def main():
                   "e2e/terminal-resize/performance-policy.json",
                   "e2e/terminal-resize/gui-policy.json", "e2e/terminal-resize/gui.html",
                   "e2e/terminal-resize/resources.cjs",
+                  "e2e/terminal-resize/paint.cjs",
               ]},
               "measurement": f"{comparison}. Headless CPU/output comparisons cover identical typing phases; extra scrolling and total costs remain in every sample. Browser painting includes two animation frames and PNG readback; RSS uses phase samples and per-process high-water values where available."}
 

@@ -14,6 +14,7 @@ const { launch } = require(path.join(shared, 'host.cjs'));
 const sampling = require(path.join(shared, 'performance-policy.json')).sampling;
 const guiPolicy = require(path.join(shared, 'gui-policy.json'));
 const { createBrowserSampler, processExited } = require(path.join(shared, 'resources.cjs'));
+const { terminalPainter } = require(path.join(shared, 'paint.cjs'));
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const routes = {
   '/': ['text/html', path.join(shared, 'gui.html')],
@@ -131,15 +132,15 @@ websocket.on('connection', socket => {
     await page.keyboard.press('Control+u');
     await page.waitForFunction(() => window.fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
     const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-    let previousPixels = hash(await page.screenshot());
+    const painted = terminalPainter(page);
+    let previousPixels = hash(await painted());
     for (let index = 0; index < guiPolicy.sampling.input_delays_ms.length; index++) {
       await new Promise(resolve => setTimeout(resolve, guiPolicy.sampling.input_delays_ms[index]));
       await page.evaluate(draft => window.fixture.armInput(draft), 'x'.repeat(index + 1));
       const start = performance.now();
       await page.keyboard.press('x');
       await page.evaluate(() => window.fixture.waitForInput());
-      await page.evaluate(() => window.fixture.frame());
-      const pixels = hash(await page.screenshot());
+      const pixels = hash(await painted());
       report.frame_samples.push(performance.now() - start);
       assert.notEqual(pixels, previousPixels, 'each painted key changes actual pixels');
       previousPixels = pixels;

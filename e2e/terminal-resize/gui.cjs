@@ -10,6 +10,7 @@ const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
 const { WebSocketServer } = require('ws');
 const { launch } = require('./host.cjs');
+const { terminalPainter } = require('./paint.cjs');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const p95 = values => [...values].sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
@@ -79,13 +80,7 @@ async function run(config) {
       && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
       && fixture.viewport().split('\n').some(row => /^\s*⏵⏵ danger-full-access(?:\s|$)/u.test(row))
       && performance.now() - fixture.lastData >= 300, config.cols);
-    const screen = page.locator('.xterm-screen');
-    const painted = async () => {
-      await page.evaluate(() => fixture.frame());
-      // Capture the terminal pixels without locator.screenshot's extra
-      // actionability/stability wait, which is unrelated to terminal painting.
-      return page.screenshot({ clip: await screen.boundingBox(), animations: 'disabled' });
-    };
+    const painted = terminalPainter(page);
     const progress = label => fs.writeFileSync(path.join(config.logRoot, 'progress.txt'), label);
     const resources = async label => {
       progress(label);

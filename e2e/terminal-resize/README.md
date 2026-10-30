@@ -127,6 +127,11 @@ xterm selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports
 and screenshots are retained under `SCODE_TERMINAL_LOG_DIR`. Input timing starts
 before browser keyboard dispatch and ends after xterm parses the expected cells,
 two animation frames and a PNG capture. Each typed character must change pixels.
+Both browser observers use `paint.cjs` to capture only `.xterm-screen`, updating
+the clip after resize. Encoding the surrounding empty page adds observer CPU
+work and can amplify fixed-quota scheduling noise. The shared boundary retains
+both animation frames and the completed PNG readback; it does not relax budgets,
+change input delays or remove samples.
 This is a conservative rendering/readback measurement, including automation and
 capture overhead; it does not measure physical keyboard/display scanout latency.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps

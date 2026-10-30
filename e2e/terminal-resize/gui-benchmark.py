@@ -31,7 +31,7 @@ def main():
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
               "driver_sha256": digest(args.driver)}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name)) for name in
-                                ["gui-benchmark.py", "gui.cjs", "gui.html", "host.cjs", "resources.cjs", "benchmark.py"]}
+                                ["gui-benchmark.py", "gui.cjs", "gui.html", "host.cjs", "paint.cjs", "resources.cjs", "benchmark.py"]}
     controls, comparisons = {"browser": []}, {"browser": []}
     browser_metadata = None
 

@@ -137,6 +137,17 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
+        print("Local contract validation: native recovery smoke, full private Docker decision matrix, "
+              "then native nextest enforcement. No product build or benchmark lease.", flush=True)
+        if not shutil.which("docker"):
+            raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
+                               "then retry this push or the printed acceptance command.")
+        try:
+            command("docker", "info", "--format", "{{.ServerVersion}}")
+        except (RuntimeError, OSError) as error:
+            raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
+                               "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
+                               f"guard log above. Native smoke and matrix have not started: {error}") from error
         command(sys.executable, "e2e/local-acceptance/resume_acceptance.py", "--host-smoke")
         contract_container(root, output, command)
         command(sys.executable, "e2e/local-acceptance/nextest.py",

@@ -164,6 +164,11 @@ def verify_contract_update(directory, work, clean_environment):
         state["reject_next_post"] = True
         interrupted = run(sys.executable, trusted_runner, "contract-update", "--remote", "contract-origin", success=False)
         assert "Branch was pushed, but contract authorization is incomplete" in interrupted, interrupted
+        operation = json.loads(next(line.split("=", 1)[1] for line in interrupted.splitlines()
+                                    if line.startswith("LOCAL_ACCEPTANCE_OPERATION_TIMING=")
+                                    and '"operation":"contract-update"' in line))
+        assert operation["outcome"] == "failure" and operation["elapsed_seconds"] > 0
+        assert operation["started_at"] <= operation["finished_at"]
         assert "CANDIDATE_EXECUTOR_USED" in interrupted, interrupted
         head = run("git", "rev-parse", "HEAD")
         assert run("git", "ls-remote", "origin", "refs/heads/authorized-contract").split()[0] == head

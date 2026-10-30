@@ -258,9 +258,54 @@ PRs with complete file lists, this removes both profiles from 64 of the 225 PRs
 previously selecting them: 128 fewer profile invocations, or 28.4% of selected
 PRs. This is a static scope comparison, not measured latency savings. Local
 waiting and validation count toward author time before CI can start.</p>
+<p>The primary latency clock starts with the first recorded local validation or
+acceptance operation and ends with the first local/hosted failure or merge.
+It includes local setup, compilation, benchmark-lock waiting, retries,
+publication and hosted queues. The mandatory interface emits
+<code>LOCAL_ACCEPTANCE_TIMING</code> and
+<code>LOCAL_ACCEPTANCE_OPERATION_TIMING</code>; attempt/operation JSON records
+retain successful and failed runs, while signed receipts/checkpoints carry the
+earliest recorded start through verified resumes. Join the earliest applicable
+start to the hosted outcome; overlapping intervals are not added together.
+Keep whole-PR and final-head observations. Older/manual local history may be
+unknown, and abrupt termination can leave an unfinished record; neither counts
+as zero elapsed time or a complete end-to-end sample. Historical hosted means
+remain reference thresholds because historical local timing was not collected.</p>
+<p>Later local failures preserve SSH-signed checkpoints of already completed
+profiles when the source is still clean and unchanged. The installed push path
+automatically reuses compatible same-head, same-base, same-host evidence and its
+original log hashes. Custom output runs print an executable resume command.
+Only unfinished or changed profiles rerun. Checkpoints have a separate signature
+purpose and cannot substitute for full acceptance, publish a successful GitHub
+status or authorize a push. Abrupt termination may prevent a checkpoint.
+The actual Git/SSH regression exercises a successful native process followed by
+a failed rendering process, partial-note rejection, damaged logs, automatic
+discovery and a complete successful resume. This removes repeated validation
+without reducing product checks.</p>
+<p>Acceptance-contract changes run the complete Git/SSH decision matrix in a
+private local Docker container, with a pinned Rust/Python-capable image. The
+author OS retains the real checkpoint/failure/resume smoke and native nextest
+enforcement fixture. Full Windows/macOS negative-hook decision matrices are no
+longer repeated natively; that OS-specific infrastructure coverage is reduced.
+The full Linux matrix retains its cases, while product native checks and the
+complementary CI platforms remain unchanged. Guard image/entrypoint inputs bind
+the guard fingerprint without invalidating unrelated completed native profiles.
+The container takes no shared benchmark lease. In a same-source probe, the full
+matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
+single trials concern infrastructure validation, not production PR latency.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>
+<p>Native release acceptance reuses the workspace test-profile driver, with its
+mailbox feature graph, instead of compiling release dev-dependencies again.
+<code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release
+<code>scode</code>; the stream/resume assertions and 40-sample, 100 ms startup
+budget remain. The driver and its in-process fixture helpers run in the test
+profile, while the tested product process keeps the normal release graph.
+A real Cargo/native-process regression checks warm driver reuse, exact release
+artifact identity and rejection of a debug executable substituted for it.
+This removes a duplicate compilation graph; it does not claim a measured
+end-to-end percentage improvement.</p>
 
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
@@ -349,21 +394,26 @@ mtimes; unexpected sources and cached entry links are removed. The exclusive Lin
 lease remains and reports blocking waits in the execution log. Real Git/Cargo
 regressions check freshness, stale archives, tampering, permissions and mutual
 exclusion. Product workloads, budgets, sample counts and coverage are unchanged.</p>
-<p>Browser release and integration drivers share the same canonical candidate
-checkout and build directory. The baseline stays independent, and the copied
-production binary remains fixed across dev-feature test builds. Rendering retains
-its trusted driver; the two profiles use five target trees instead of seven.
+<p>Rendering and browser share the same canonical candidate checkout and build
+directory; browser integration drivers reuse it too. Both baselines stay
+independent, and copied production binaries remain fixed across dev-feature
+test builds. Rendering retains its trusted driver. The two profiles now use
+four target trees, down from the original seven and the previous five.
+The existing exclusive lease still covers source mutation, compilation and
+measurement. A real rendering-to-browser Cargo sequence verifies that the
+normal candidate build is reused without recompilation and has identical bytes.
 Real Cargo/npm/native-driver infrastructure acceptance checks freshness, binary
 identity and both observer stages when executor inputs change, once on the PR.
 It adds no product journey coverage. Selected execution fingerprints bind actual
 helper dependencies; unchanged native evidence survives browser-only helper edits.
 Old signed recipes require recoverable attested source, while changed used helpers,
 shared execution or images still invalidate their affected evidence.</p>
-<p>The acceptance target uses arithmetic mean CI-trigger-to-first-failure and
-final-candidate-CI-trigger-to-merge, including queues and reruns. The provisional
-Rust source/build historical means are 32.252 minutes (419 failed heads) and
-185.261 minutes (200 merged PRs), giving targets of 3.225 and 18.526 minutes.
-Mandatory local acceptance is reported separately. Early lightweight PR results
+<p>The acceptance target uses arithmetic mean first-recorded-local-validation
+to first local/hosted failure or merge, including waiting and retries. Keep
+whole-PR and final-head series. The historical hosted-only Rust source/build
+means are 32.252 minutes (419 failed heads) and 185.261 minutes (200 merged PRs),
+giving conservative reference thresholds of 3.225 and 18.526 minutes; historical
+local time is unknown. Early lightweight PR results
 and fewer runner minutes do not prove the comparable production target.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated

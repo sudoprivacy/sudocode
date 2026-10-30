@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 
+from local_acceptance import POLICY, SIGNERS
+
 
 def git(*args):
     return subprocess.check_output(["git", *args]).decode().strip()
@@ -17,7 +19,7 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
-        paths, live, daemon = [], True, True
+        paths, live, daemon, clippy = [], True, True, True
     else:
         if name == "push":
             base, head = event["before"], event["after"]
@@ -30,7 +32,7 @@ def main():
         if not all(re.fullmatch(r"[a-f0-9]{40}", ref) for ref in [base, head]):
             raise RuntimeError("Invalid CI commit identity")
         if base == "0" * 40:
-            paths, live, daemon = [], True, True
+            paths, live, daemon, clippy = [], True, True, True
         else:
             for ref in [base, head]:
                 if subprocess.run(["git", "cat-file", "-e", ref + "^{commit}"], capture_output=True).returncode:
@@ -43,7 +45,14 @@ def main():
             live_inputs = ["rust/**", "spec/**", "e2e/thinking/**", ".github/scripts/probe_live_usage*",
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
             daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**"]
-            live = any(fnmatch.fnmatchcase(path, rule) for path in relevant for rule in live_inputs)
+            # Acceptance metadata changes execution authorization, not provider
+            # requests. Keep these identities with the acceptance authority.
+            live = any(fnmatch.fnmatchcase(path, rule)
+                       for path in relevant if path not in {POLICY, SIGNERS}
+                       for rule in live_inputs)
+            # Test modules remain part of all-target/all-feature linting even
+            # when they do not rebuild or exercise the daemon binary.
+            clippy = any(path.startswith("rust/") for path in relevant)
             # CLI integration modules are not inputs to the daemon/cohost
             # binaries or shell journeys. Native PTYs and live model scope
             # remain unchanged; manifests, src and moved source still qualify.
@@ -59,7 +68,8 @@ def main():
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
-              "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower()}
+              "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
+              "clippy_required": str(clippy).lower()}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")

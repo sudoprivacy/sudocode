@@ -137,9 +137,29 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
-        command(sys.executable, "e2e/local-acceptance/run.py")
-        command(sys.executable, "e2e/local-acceptance/nextest.py",
-                "--output", str(output / "nextest-executor"))
+        print("Local contract validation: policy-owned native recovery, nextest and release guards, "
+              "then the full private Docker decision matrix. No product build or benchmark lease.", flush=True)
+        if not shutil.which("docker"):
+            raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
+                               "then retry this push or the printed acceptance command.")
+        try:
+            command("docker", "info", "--format", "{{.ServerVersion}}")
+        except (RuntimeError, OSError) as error:
+            raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
+                               "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
+                               f"guard log above. Native smoke and matrix have not started: {error}") from error
+        try:
+            policy_ref, _ = run.execution_refs
+        except AttributeError:
+            policy_ref = "origin/main"
+        policy_ref = policy_ref or "origin/main"
+        entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
+        command(sys.executable, str(entry), "--repository", str(root),
+                "--output", str(output / "native-guard"),
+                "--executable", str(nextest_binary(output)),
+                "--source-receipt", str(output / "nextest-source.json"),
+                "--options", json.dumps(nextest_options(output)))
+        contract_container(root, output, command)
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -195,7 +215,11 @@ def run(name, root, output, base, execute):
         binary = output / ("scode" + suffix)
         shutil.copy2(target / "release" / ("scode" + suffix), binary)
         env["SCODE_TEST_BIN"] = str(binary)
-        cargo("test", "--release", "--locked", "-p", "rusty-sudocode-cli", "--test", "pty_model_stream_close",
+        # Reuse the native workspace's test graph. Only the driver is debug;
+        # SCODE_TEST_BIN still launches the copied normal release executable.
+        print("Release acceptance: the native test driver launches the copied release scode; "
+              "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
+        cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
         command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                 "--report", str(output / "startup.json"))
@@ -254,6 +278,93 @@ def run(name, root, output, base, execute):
     if not results:
         raise RuntimeError(f"No command ran for required check: {name}")
     return results
+
+
+def native_guard_files():
+    """Bind external tool bytes through the existing executable fingerprint format."""
+    return {
+        ".github/local-acceptance/native_guard.py": "0339203b8d92282754548373a5f0eab29488a65adcd531a5142b2729830020ad",
+        ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
+        ".github/scripts/local_acceptance.py": "14f93d63e496d7275f832c365e28e40deb01e33e569d5bf0193d73bd021ed596",
+        "e2e/local-acceptance/run.py": "b4303feead6e70226174e592afec0d5d9e5ce6bc6255636a7f74f2893015fb05",
+        "e2e/local-acceptance/resume_acceptance.py": "4bfa5af7e5e690bcdef13c7cae39665c70ed4ab32ce00b5251c792252da3ec9f",
+        "e2e/local-acceptance/release_acceptance.py": "21272f1e5b701410af25238eae2b354badf1f8aa2a193ec6698071e9ef037164",
+        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
+        "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
+    }
+
+
+def stage_profile_executor(root, policy_ref, name, policy_root):
+    """Materialize one hash-bound native tool set without changing the candidate."""
+    if name != "guard-contract":
+        raise RuntimeError(f"No policy-owned native executor for {name}")
+    for relative, expected in native_guard_files().items():
+        destination = (policy_root / relative).resolve()
+        if not destination.is_relative_to(policy_root.resolve()):
+            raise RuntimeError("Executor input escaped its policy snapshot")
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"Native guard input {relative} changed: SHA256 {actual}. "
+                               "Update its protected pin before running acceptance.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+    # The release fixture imports this module. Bind the exact branch it executes
+    # without a cyclic byte hash of a file containing its own execution pins.
+    spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    helper.ROOT = root
+    expected = "675e6ed7c936ea55908b23950c92500413a957818fe06ad5f7ce9be614f2aa7d"
+    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
+        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
+    return policy_root / ".github/local-acceptance/native_guard.py"
+
+
+def contract_container(root, output, command):
+    """Keep the full decision matrix local without serial Windows Git startup costs."""
+    try:
+        policy_ref, candidate_ref = run.execution_refs
+    except AttributeError:
+        policy_ref = candidate_ref = None
+    def revision(ref):
+        return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
+    protected = revision(policy_ref or "origin/main")
+    candidate = revision(candidate_ref or "HEAD")
+    context = output / "guard-image"
+    context.mkdir()
+    inputs_hash = hashlib.sha256()
+    # Keep image bindings inside the existing executable fingerprint format.
+    # A changed image/entrypoint must update its pin before any Docker work.
+    pins = {
+        "Dockerfile.guard": "7ac3c2e7507240482a89938560d1fc7786575b72866b54280e4a11feca85fa9b",
+        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+    }
+    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
+        contents = subprocess.check_output(["git", "show", f"{protected}:.github/local-acceptance/{name}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != pins[name]:
+            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its contract_container pin "
+                               "with the reviewed input, then rerun acceptance; no image build started.")
+        (context / destination).write_bytes(contents)
+        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    image_receipt = output / "guard-image-id.txt"
+    command("docker", "build", "--iidfile", str(image_receipt), "--tag",
+            "sudocode-contract-guard:" + inputs_hash.hexdigest()[:24], str(context),
+            extra={"DOCKER_BUILDKIT": "1"})
+    image = image_receipt.read_text().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise RuntimeError("Contract image build did not return an immutable image ID")
+    inputs = output / "guard-inputs"
+    snapshot(root, candidate, inputs)
+    (output / "guard-provenance.json").write_text(json.dumps({
+        "candidate": candidate, "policy": protected, "image_id": image,
+        "context_sha256": inputs_hash.hexdigest()}, indent=2))
+    # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
+    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
+            "--mount", f"type=bind,source={inputs},target=/inputs,readonly", image)
 
 
 def snapshot(root, ref, destination):
@@ -425,12 +536,18 @@ def benchmark_locked(name, root, output, base, command, target):
     # budget and sample assertions. Changing execution host changes none of them.
     inputs = root.parent
     work, targets = benchmark_storage(name)
+    # Both profiles compile the same candidate. Keep its canonical source path
+    # and Cargo outputs together, under the existing shared exclusion lease.
+    candidate_work, candidate_targets = benchmark_storage("rendering")
+    checkouts = {label: (candidate_work if label == "candidate" else work) / label
+                 for label in ["candidate", "baseline", "trusted"]}
+    build_targets = {"baseline": targets / "baseline", "candidate": candidate_targets / "candidate"}
     work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
-        destination = work / label
+        destination = checkouts[label]
         # Sources are disposable copies from this invocation's exact Git archive.
         replace_checkout(inputs / label, destination)
-    candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
+    candidate, baseline, trusted = (checkouts[label] for label in ["candidate", "baseline", "trusted"])
     driver_source = trusted if name == "rendering" else candidate
     terminal = driver_source / "e2e/terminal-resize"
     # Dependencies must match the checkout's lock; the image supplies the exact
@@ -439,11 +556,11 @@ def benchmark_locked(name, root, output, base, command, target):
     driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+                "--target-dir", str(build_targets[label]), "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(build_targets[label] / "release/scode", output / f"scode-{label}")
     # Share artifacts only with the same canonical source checkout. The copied
     # production binaries above stay fixed when dev features build the drivers.
-    driver_target = targets / ("driver" if name == "rendering" else "candidate")
+    driver_target = targets / "driver" if name == "rendering" else build_targets["candidate"]
     log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
                   "--target-dir", str(driver_target), "-p", "rusty-sudocode-cli", "--test", driver_name,
                   "--no-run", "--message-format=json-render-diagnostics")
@@ -465,7 +582,7 @@ def benchmark_locked(name, root, output, base, command, target):
         # Move the existing viewport gates too; deleting the old release job
         # must not silently drop its headless/browser CPU and painting checks.
         manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = str(targets / "candidate")
+        viewport_target = str(build_targets["candidate"])
         viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
                         "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
         log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,

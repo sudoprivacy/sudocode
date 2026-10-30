@@ -110,8 +110,16 @@ def verify_profile_compatibility(directory, work, command):
             changed = run("git", "rev-parse", "HEAD")
             for note in variants.values():
                 install_note(note)
-                run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", changed,
-                    success=False, error="Acceptance commands changed")
+                diagnostic = run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", changed,
+                                 success=False, error="Acceptance commands changed", stderr=True)
+                records = [json.loads(line.removeprefix("LOCAL_ACCEPTANCE_RECOVERY="))
+                           for line in diagnostic.splitlines() if line.startswith("LOCAL_ACCEPTANCE_RECOVERY=")]
+                assert len(records) == 1, diagnostic
+                recovery = records[0]
+                assert recovery["version"] == 1 and recovery["run_on"] == "original author native host", recovery
+                assert recovery["ci_proof_host_is_not_the_author_test_host"] is True, recovery
+                assert recovery["args"] == ["check", "--head", head, "--base", "origin/main",
+                                            "--policy-ref", changed, "--publish", "--remote", "origin"], recovery
 
         # A newly required profile still needs its own real execution.
         run("git", "checkout", "-b", "compat-required", future)

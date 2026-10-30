@@ -24,7 +24,12 @@
         "sdk/typescript/**",
         ".github/workflows/acp-client.yml"
       ],
-      "targets": ["linux-x64", "linux-arm64", "macos", "windows"]
+      "targets": [
+        "linux-x64",
+        "linux-arm64",
+        "macos",
+        "windows"
+      ]
     },
     "native-workspace": {
       "include": [
@@ -137,6 +142,53 @@
       "exclude": [
         "rust/crates/*/tests/**",
         "**/README.md"
+      ]
+    }
+  },
+  "equivalent_profile_commands": {
+    "preflight": {
+      "a2911e937e577d702e8d789bad79918b10a67c610ceedc75afbd26e7c88a1e05": [
+        "34d7d4d526d116a07326dce720381296c08c965e6b1280b56aa682a75a6a6674"
+      ]
+    },
+    "native-sdk": {
+      "d8588f96aface167bb4b2667c1db11e1a336ec3574c4778db689e8ab2395dc84": [
+        "1a5fbb7a5bf1bf2ad8fe64697b6a2ea4c8b8116715664fd6eefe4ac1edd25dc6"
+      ]
+    },
+    "native-workspace": {
+      "92ba77aea0190aa57fa97a996a3afc001baa8e106001ac5052d2273512dfb01d": [
+        "80ac0dbf2628c12fb66761cbb082552ca2a9d2913e06f1e5e694ac10b84c107d"
+      ]
+    },
+    "native-resize": {
+      "b8fb09c42fdff03c8665a7950adc62b2c6d338c4eca574b8350a19bb95ef2d00": [
+        "27996b0facd8f4047e05eb7c3672f18db8d50df032c26a2c405e5fee8fb8930e"
+      ]
+    },
+    "rendering": {
+      "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86": [
+        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f"
+      ]
+    },
+    "browser": {
+      "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86": [
+        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f"
+      ]
+    },
+    "native-release": {
+      "3f870c1faf02081177c891e41697fc81efe507657d2b12b0f4118f180187c1d0": [
+        "d91fafe2a7e4268199195033e3be52839bebcffa9ff0bacf27cd9a7c09558691"
+      ]
+    },
+    "native-services": {
+      "6805472b7bc8e96764b07984f0c1d746ecd6b4b19b6bfa0720a9397f18d36b8c": [
+        "d32a837988e05a828139dd4f16a0edcb70598e193df2c2e5c0f8fde860156e57"
+      ]
+    },
+    "native-cohost": {
+      "f2b09243d30b81372614c84fa0120a454e49af81cbb590b802912ba2cbdbde88": [
+        "a8f0f6b079a6ac94603973a4b4d6014bf37fae890e9234468dde4a0389cf9552"
       ]
     }
   }

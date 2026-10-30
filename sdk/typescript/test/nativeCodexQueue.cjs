@@ -162,6 +162,7 @@ void(async()=>{
       assert.equal(turnItems().filter(row=>row.item.payload.type==='task_started').length,2);
       receipt.noReplayObservationMs=11000;
     }
+    assert.equal(receipt.endpointError,undefined,'Every model request must have a verified process origin');
     receipt.result='PASS';
   }catch(error){receipt.result='FAIL';receipt.error={message:error.message,stack:error.stack};process.exitCode=1;}
   finally{
@@ -175,6 +176,7 @@ void(async()=>{
     if(!receipt.normalTuiExit){receipt.result='FAIL';process.exitCode=1;}
     if(priorOwner===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=priorOwner;
     await new Promise(resolve=>endpoint.close(resolve));
+    if(receipt.endpointError){receipt.result='FAIL';process.exitCode=1;}
     const file=path.join(options.output,'native-codex-queue-'+options.case+'-'+receipt.at.replace(/[:.]/g,'')+'.receipt.json');
     fs.writeFileSync(file,JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});
     console.log(JSON.stringify({result:receipt.result,error:receipt.error,receipt:file,original:receipt.original&&{pid:receipt.original.pid,threadId:receipt.original.threadId},

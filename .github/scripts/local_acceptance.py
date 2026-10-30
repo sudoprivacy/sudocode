@@ -9,6 +9,7 @@ No candidate code is executed by the GitHub verification job.
 import argparse
 import ast
 import base64
+import copy
 import fnmatch
 import hashlib
 import json
@@ -71,16 +72,79 @@ def contract_hash(ref):
     return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
 
 
+def executor_source(ref):
+    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+    return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
+
+
 def commands_hash(ref):
     # Scheduling, publication and selection edits do not change a completed
     # command's evidence. Bind actual executors/images, then require the current
     # selected check set to be covered. New commands still require a real run.
-    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
-    function = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
-    executor = "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
     paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
-    return sha(canonical({"executor": sha(executor.encode()), **{p: sha(tracked(ref, p)) for p in paths}}))
+    return sha(canonical({"executor": sha(executor_source(ref).encode()),
+                          **{p: sha(tracked(ref, p)) for p in paths}}))
+
+
+def profile_commands_hashes(ref, names):
+    """Bind each literal dispatch branch and all common code without importing it."""
+    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
+    executor = sha(executor_source(ref).encode())
+    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    result = {}
+    for name in names:
+        projected = copy.deepcopy(module)
+        dispatcher = next(node for node in projected.body
+                          if isinstance(node, ast.FunctionDef) and node.name == "run")
+        parameter = dispatcher.args.args[0].arg
+
+        def project(node):
+            test = node.test if isinstance(node, ast.If) else None
+            if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
+                    or test.left.id != parameter or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq)
+                    or len(test.comparators) != 1 or not isinstance(test.comparators[0], ast.Constant)
+                    or not isinstance(test.comparators[0].value, str)):
+                return [node]
+            tail = project(node.orelse[0]) if len(node.orelse) == 1 else node.orelse
+            if test.comparators[0].value != name:
+                return tail
+            node.orelse = tail
+            return [node]
+
+        # If the dispatcher rewrites its profile parameter, its branches may
+        # cease to be disjoint. Keep the whole module in that conservative case.
+        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                         for node in ast.walk(dispatcher))
+        if not reassigned:
+            dispatcher.body = [child for node in dispatcher.body for child in project(node)]
+        result[name] = sha(canonical({"executor": executor, "image": image,
+                                     "profile": ast.dump(projected, include_attributes=False)}))
+    return result
+
+
+def compatible_profile_commands(receipt, policy_ref, required):
+    recorded = receipt.get("profile_commands_sha256")
+    try:
+        if "profile_commands_sha256" not in receipt:
+            # Legacy receipts can recover their attested code only when the
+            # immutable signed source contains that exact executor and image.
+            previous = None
+            for candidate in [receipt["head"], receipt["base"]]:
+                try:
+                    if receipt.get("commands_sha256") == commands_hash(candidate):
+                        previous = candidate
+                        break
+                except (RuntimeError, subprocess.CalledProcessError, StopIteration):
+                    continue
+            if previous is None:
+                return False
+            recorded = profile_commands_hashes(previous, required)
+        current = profile_commands_hashes(policy_ref, required)
+        return isinstance(recorded, dict) and all(recorded.get(name) == current[name] for name in required)
+    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError):
+        return False
 
 
 def changed_paths(base, head):
@@ -383,7 +447,12 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
+    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
+    if not required:
+        raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+    if "profile_commands_sha256" in receipt or (not compatible and "commands_sha256" in receipt):
+        compatible = compatible_profile_commands(receipt, policy_ref, required)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and
@@ -396,9 +465,6 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
     if not compatible:
         raise RuntimeError("Acceptance commands changed; rerun local acceptance")
     check_contract_changes(head, base, policy_ref)
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
-    if not required:
-        raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     checks = receipt.get("checks", {})
     if not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
@@ -490,6 +556,7 @@ def check(args):
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
                "commands_sha256": commands_hash(policy_ref),
+               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
                "finished_at": int(time.time()), "checks": results, "plan": plan}
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))

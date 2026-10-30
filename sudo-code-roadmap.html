@@ -258,6 +258,19 @@ PRs with complete file lists, this removes both profiles from 64 of the 225 PRs
 previously selecting them: 128 fewer profile invocations, or 28.4% of selected
 PRs. This is a static scope comparison, not measured latency savings. Local
 waiting and validation count toward author time before CI can start.</p>
+<p>The primary latency clock starts with the first recorded local validation or
+acceptance operation and ends with the first local/hosted failure or merge.
+It includes local setup, compilation, benchmark-lock waiting, retries,
+publication and hosted queues. The mandatory interface emits
+<code>LOCAL_ACCEPTANCE_TIMING</code> and
+<code>LOCAL_ACCEPTANCE_OPERATION_TIMING</code>; attempt/operation JSON records
+retain successful and failed runs, while signed receipts/checkpoints carry the
+earliest recorded start through verified resumes. Join the earliest applicable
+start to the hosted outcome; overlapping intervals are not added together.
+Keep whole-PR and final-head observations. Older/manual local history may be
+unknown, and abrupt termination can leave an unfinished record; neither counts
+as zero elapsed time or a complete end-to-end sample. Historical hosted means
+remain reference thresholds because historical local timing was not collected.</p>
 <p>Later local failures preserve SSH-signed checkpoints of already completed
 profiles when the source is still clean and unchanged. The installed push path
 automatically reuses compatible same-head, same-base, same-host evidence and its

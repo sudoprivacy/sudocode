@@ -261,6 +261,14 @@ host; custom output directories can use the printed `check --resume-from` comman
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
 An abrupt process termination can prevent checkpoint creation.
+The required interface prints `LOCAL_ACCEPTANCE_TIMING` and retains
+`attempt.json` for each started check, including failures. Signed receipts and
+checkpoints retain the first recorded start across verified resumes. Outer push
+and contract operations also print `LOCAL_ACCEPTANCE_OPERATION_TIMING`; explicit
+output directories retain `operation.json`. Measure local setup, builds, lease
+waiting, retries and publication through CI failure or merge. Use the earliest
+applicable start, without adding overlapping intervals. Older/manual history can
+be missing; these diagnostics neither authorize a push nor prove complete history.
 For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
 in a private local Docker container. A native host smoke retains the actual failing
 process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the

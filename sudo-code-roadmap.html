@@ -301,6 +301,12 @@ but omit standalone integration executables that the dependency cache discards.
 Full native acceptance still compiles and runs those journeys. The three host
 pools, production release warming and 10 GB quota remain; warm cache hits already
 skip this work. This removes redundant compilation, with no coverage reduction.</p>
+<p>Local benchmark snapshots retain identical source bytes and modes at their
+canonical paths, allowing Cargo to reuse valid artifacts. Changed bytes get fresh
+mtimes; unexpected sources and cached entry links are removed. The exclusive Linux
+lease remains and reports blocking waits in the execution log. Real Git/Cargo
+regressions check freshness, stale archives, tampering, permissions and mutual
+exclusion. Product workloads, budgets, sample counts and coverage are unchanged.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.

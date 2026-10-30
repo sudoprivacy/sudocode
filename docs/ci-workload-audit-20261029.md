@@ -97,6 +97,21 @@ three host jobs. Rust pushes still check for a new dependency/toolchain/image
 key, and changes to the publisher still exercise it. Cache-hit correctness and
 source validation are unchanged.
 
+Local benchmark checkouts preserve the mtimes of identical source bytes and
+executable modes, so Cargo can reuse valid artifacts at their existing canonical
+source/target paths. Changed bytes receive fresh mtimes even when their Git archive
+is old. Unexpected cached sources are removed and cached entry links are replaced
+without traversing them. The existing exclusive Linux lease and separate legacy
+namespace continue to protect shared state. Blocked callers now print the lock
+path and report their acquisition wait in the execution log.
+
+The mandatory real Git/Cargo fixture verifies unchanged-input freshness, changed
+old archives, same-size/mtime tampering, and an injected-source compiler failure
+followed by successful cleanup. Linux also checks executable permissions, links
+outside the cached checkout and two processes competing for the actual lease.
+These are infrastructure acceptance checks, not additional product journey credit.
+Actual multi-PR waiting-time savings still require observation.
+
 On a cache miss, the publisher compiles library/bin test targets with the same
 mailbox feature, retaining normal and dev dependencies. It omits standalone
 integration executables: the default cache action removes workspace artifacts

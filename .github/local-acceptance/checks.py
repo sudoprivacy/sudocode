@@ -9,10 +9,12 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -206,28 +208,84 @@ def container(name, root, output, base, command, execute):
 
 
 def copy_checkout_file(source, destination):
-    """Keep executable modes, but give replaced sources fresh Cargo mtimes."""
+    """Keep identical inputs stable and give changed bytes fresh Cargo mtimes."""
+    source, destination = Path(source), Path(destination)
+    if checkout_link(destination):
+        raise RuntimeError(f"Expected a regular benchmark input, found a link: {destination}")
+    if (destination.is_file() and source.stat().st_size == destination.stat().st_size
+            and stat.S_IMODE(source.stat().st_mode) == stat.S_IMODE(destination.stat().st_mode)):
+        # Compare bytes on every invocation. filecmp caches same-size/mtime
+        # comparisons and can miss a changed cached file with restored times.
+        with source.open("rb") as expected, destination.open("rb") as cached:
+            while True:
+                first, second = expected.read(1024 * 1024), cached.read(1024 * 1024)
+                if first != second:
+                    break
+                if not first:
+                    return destination
     shutil.copyfile(source, destination)
     shutil.copymode(source, destination)
     return destination
 
 
-def replace_checkout(source, destination):
-    """Replace a leased checkout as a normal edit, not an old-mtime archive."""
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(source, destination, copy_function=copy_checkout_file)
+def checkout_link(path):
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def remove_checkout_entry(path, root):
+    """Remove an entry inside the leased checkout without traversing cache links."""
+    if not path.parent.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError(f"Benchmark cache entry escaped its checkout: {path}")
+    if path.is_symlink() or not path.is_dir():
+        path.unlink()
+    elif hasattr(path, "is_junction") and path.is_junction():
+        os.rmdir(path)
+    else:
+        shutil.rmtree(path)
+
+
+def replace_checkout(source, destination, *, root=None):
+    """Synchronize the exact snapshot while preserving unchanged compiler inputs."""
+    source, destination = Path(source), Path(destination)
+    if checkout_link(destination):
+        raise RuntimeError(f"Benchmark checkout root must be a real directory: {destination}")
+    root = destination if root is None else root
+    destination.mkdir(parents=True, exist_ok=True)
+    for cached in destination.iterdir():
+        original = source / cached.name
+        if not original.exists() and not original.is_symlink():
+            remove_checkout_entry(cached, root)
+    for original in source.iterdir():
+        cached = destination / original.name
+        if original.is_dir():
+            if checkout_link(cached) or (cached.exists() and not cached.is_dir()):
+                remove_checkout_entry(cached, root)
+            replace_checkout(original, cached, root=root)
+            shutil.copymode(original, cached)
+        else:
+            if checkout_link(cached) or (cached.exists() and not cached.is_file()):
+                remove_checkout_entry(cached, root)
+            copy_checkout_file(original, cached)
 
 
 @contextmanager
-def exclusive_benchmark_state():
+def exclusive_benchmark_state(directory=Path("/locks")):
     """Serialize the Linux container's mutable sources, npm trees and targets."""
     import fcntl
 
     # Docker Desktop bind mounts do not provide reliable flock exclusion.
     # The shared named volume keeps this inode on the Linux filesystem.
-    with (Path("/locks") / "benchmark.lock").open("a") as lease:
-        fcntl.flock(lease, fcntl.LOCK_EX)
+    with (directory / "benchmark.lock").open("a") as lease:
+        started = time.monotonic()
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"Waiting for the local benchmark cache lease: {directory / 'benchmark.lock'}. "
+                  "Another local acceptance owns the shared checkout and compiler outputs.", flush=True)
+            if directory == Path("/locks"):
+                print("Inspect contenders on the host: docker ps --filter volume=sudocode-acceptance-benchmark-lease", flush=True)
+            fcntl.flock(lease, fcntl.LOCK_EX)
+        print(f"Acquired local benchmark cache lease after {time.monotonic() - started:.3f}s", flush=True)
         yield
 
 

@@ -34,8 +34,8 @@ def main():
         commands.append(helper.run_command(["git", "config", "localAcceptance.vsdevcmd", configured],
                                           SOURCE, output / "toolchain-config.log"))
     commands.append(helper.run_command([
-        sys.executable, str(SOURCE / "e2e/local-acceptance/resume_acceptance.py"), "--host-smoke",
-    ], SOURCE, output / "resume-smoke.log"))
+        sys.executable, str(SOURCE / "e2e/local-acceptance/native.py"),
+    ], SOURCE, output / "native-smoke.log"))
     commands.append(helper.run_command([
         sys.executable, str(SOURCE / ".github/local-acceptance/nextest_guard.py"),
         "--repository", str(repository), "--output", str(output / "nextest-executor"),

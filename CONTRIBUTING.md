@@ -312,6 +312,10 @@ Provider tests on main run only for changed provider inputs, and real-daemon
 queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays
 available for gateway diagnosis.
+The acceptance policy and signer registry are CI authorization metadata; changing
+them selects their acceptance checks without selecting unchanged provider calls.
+Other `spec/` inputs retain provider coverage. Source renames/deletions and explicit
+provider dispatch retain their existing selection rules.
 CLI integration-test-only edits retain native PTYs and the existing provider
 checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
 CLI manifests, production source and daemon harness edits still select it.

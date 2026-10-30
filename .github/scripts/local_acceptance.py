@@ -70,18 +70,20 @@ def contract_files(ref):
     paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
              ".github/workflows/local-acceptance-publish.yml"]
     paths += value("ls-tree", "-r", "--name-only", ref, ".github/local-acceptance").splitlines()
-    return paths
+    for name in load_policy(ref)["checks"]:
+        paths += profile_executor_paths(ref, name)
+    return sorted(set(paths))
 
 
 def contract_hash(ref):
     return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(contract_files(ref))}))
 
 
-def profile_executor_inputs(ref, name):
-    """Bind policy-owned entry points and their support files only to their owner."""
+def profile_executor_paths(ref, name):
+    """Declared executor sources are protected, including their external helpers."""
     rule = load_policy(ref)["checks"].get(name, {})
     if "executor" not in rule:
-        return {}
+        return []
     execution = rule["executor"]
     if (not isinstance(execution, dict) or set(execution) != {"entry_point", "support_files"}
             or not isinstance(execution["entry_point"], str)
@@ -89,9 +91,14 @@ def profile_executor_inputs(ref, name):
         raise RuntimeError(f"Invalid policy-owned executor for {name}")
     paths = [execution["entry_point"], *execution["support_files"]]
     if (not all(isinstance(path, str) for path in paths) or len(paths) != len(set(paths))
-            or any(path not in contract_files(ref) for path in paths)):
+            or any(path not in value("ls-tree", "-r", "--name-only", ref).splitlines() for path in paths)):
         raise RuntimeError(f"Executor inputs for {name} must be unique protected policy files")
-    return {path: sha(tracked(ref, path)) for path in sorted(paths)}
+    return sorted(paths)
+
+
+def profile_executor_inputs(ref, name):
+    """Bind policy-owned entry points and their support files only to their owner."""
+    return {path: sha(tracked(ref, path)) for path in profile_executor_paths(ref, name)}
 
 
 def executor_source(ref):
@@ -405,8 +412,7 @@ def host():
 
 
 def changed_contract_files(head, base):
-    protected = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
-                 ".github/workflows/local-acceptance-publish.yml"]
+    protected = set(contract_files(head)) | set(contract_files(base))
     return sorted(path for path in changed_paths(value("merge-base", base, head), head)
                   if path in protected or path.startswith(".github/local-acceptance/"))
 

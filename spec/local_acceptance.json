@@ -10,10 +10,13 @@
     },
     "guard-contract": {
       "executor": {
-        "entry_point": ".github/local-acceptance/nextest_guard.py",
+        "entry_point": ".github/local-acceptance/native_guard.py",
         "support_files": [
           ".github/local-acceptance/checks.py",
-          ".github/scripts/local_acceptance.py"
+          ".github/local-acceptance/nextest_guard.py",
+          ".github/scripts/local_acceptance.py",
+          "e2e/local-acceptance/run.py",
+          "e2e/local-acceptance/resume_acceptance.py"
         ]
       },
       "include": [

@@ -148,26 +148,15 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
                                f"guard log above. Native smoke and matrix have not started: {error}") from error
-        command(sys.executable, "e2e/local-acceptance/resume_acceptance.py", "--host-smoke")
-        contract_container(root, output, command)
         try:
             policy_ref, _ = run.execution_refs
         except AttributeError:
             policy_ref = "origin/main"
         policy_ref = policy_ref or "origin/main"
-        configuration = json.loads(subprocess.check_output(
-            ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
-        executor = configuration["checks"][name]["executor"]
-        policy_root = output / "native-guard-policy"
-        for relative in [executor["entry_point"], *executor["support_files"]]:
-            destination = (policy_root / relative).resolve()
-            if not destination.is_relative_to(policy_root.resolve()):
-                raise RuntimeError("Executor input escaped its policy snapshot")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(subprocess.check_output(
-                ["git", "show", f"{policy_ref}:{relative}"], cwd=root))
-        command(sys.executable, str(policy_root / executor["entry_point"]),
-                "--repository", str(root), "--output", str(output / "nextest-executor"))
+        entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
+        command(sys.executable, str(entry), "--repository", str(root),
+                "--output", str(output / "native-guard"))
+        contract_container(root, output, command)
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -282,6 +271,21 @@ def run(name, root, output, base, execute):
     if not results:
         raise RuntimeError(f"No command ran for required check: {name}")
     return results
+
+
+def stage_profile_executor(root, policy_ref, name, policy_root):
+    """Materialize a declared tool set from one immutable policy, never a candidate."""
+    configuration = json.loads(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
+    executor = configuration["checks"][name]["executor"]
+    for relative in [executor["entry_point"], *executor["support_files"]]:
+        destination = (policy_root / relative).resolve()
+        if not destination.is_relative_to(policy_root.resolve()):
+            raise RuntimeError("Executor input escaped its policy snapshot")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(subprocess.check_output(
+            ["git", "show", f"{policy_ref}:{relative}"], cwd=root))
+    return policy_root / executor["entry_point"]
 
 
 def contract_container(root, output, command):

@@ -40,8 +40,14 @@ def main():
     # Capture the actual policy tool set before pointing Git helpers at fixtures.
     policy = json.loads((SOURCE / "spec/local_acceptance.json").read_text())
     recipe = policy["checks"]["guard-contract"]["executor"]
-    paths = set(authority.contract_files("HEAD")) | {recipe["entry_point"], *recipe["support_files"]}
-    contents = {path: (SOURCE / path).read_bytes() for path in paths}
+    # The Docker decision matrix starts from a tracked-source archive without Git history.
+    # Copy the policy directories, then let the real Git contract select its own inputs.
+    contents = {
+        path.relative_to(SOURCE).as_posix(): path.read_bytes()
+        for directory in [SOURCE / ".github", SOURCE / "spec", SOURCE / "e2e/local-acceptance"]
+        for path in directory.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
     toolchain = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
                               cwd=SOURCE, text=True, capture_output=True).stdout.strip()
     candidate = output / "old-candidate"
@@ -92,23 +98,22 @@ def main():
     except RuntimeError:
         negative = json.loads((output / "old-path-negative.command.json").read_text())
         assert negative["exit_code"] == 2, negative
-    marker = output / "candidate-guard.txt"
-
-    def execute(command, cwd, log, environment=None):
-        return authority.run_command(command, cwd, log, {**(environment or {}), "OLD_GUARD_MARKER": str(marker)})
-
-    profiles.run.execution_refs = (protected, old)
-    result = profiles.run("guard-contract", candidate, output / "positive", old, execute)
-    assert len(result) == 2 and all(row["exit_code"] == 0 for row in result)
-    assert marker.read_text() == "candidate-owned guard ran"
+    entry = profiles.stage_profile_executor(candidate, protected, "guard-contract", output / "native-guard-policy")
+    result = authority.run_command([
+        sys.executable, str(entry), "--repository", str(candidate), "--output", str(output / "positive"),
+    ], candidate, output / "native-guard.log")
+    assert result["exit_code"] == 0
     assert git("rev-parse", "HEAD") == old and not git("status", "--porcelain")
     assert not (candidate / "e2e/local-acceptance/nextest.py").exists()
+    smoke = json.loads((output / "positive/receipt.json").read_text())
+    assert smoke["repository"] == str(candidate)
+    assert all(row["exit_code"] == 0 for row in smoke["commands"])
     native = json.loads((output / "positive/nextest-executor/receipt.json").read_text())
     assert native["repository"] == str(candidate)
     assert [row["command"]["exit_code"] for row in native["checks"]] == [0, 100, 4]
     bound = authority.profile_executor_inputs(protected, "guard-contract")
     for path, digest in bound.items():
-        actual = output / "positive/native-guard-policy" / path
+        actual = output / "native-guard-policy" / path
         assert hashlib.sha256(actual.read_bytes()).hexdigest() == digest, path
     names = list(policy["checks"])
     fingerprint_results = []
@@ -122,6 +127,11 @@ def main():
             affected = {name for name in names if before[name] != after[name]}
             assert affected == {"guard-contract"}, (relative, method.__name__, affected)
             fingerprint_results.append({"file": relative, "encoding": method.__name__, "affected": sorted(affected)})
+        try:
+            authority.check_contract_changes(changed, protected, protected)
+            raise AssertionError(f"Declared executor input escaped contract authorization: {relative}")
+        except RuntimeError as error:
+            assert "Candidate changes the protected acceptance contract" in str(error), error
     git("switch", "--detach", protected)
     invalid = json.loads((candidate / "spec/local_acceptance.json").read_text())
     invalid["checks"]["guard-contract"]["executor"]["support_files"].append("../escape.py")
@@ -140,6 +150,7 @@ def main():
     (output / "receipt.json").write_text(json.dumps({
         "candidate": old, "protected": protected, "commands": result,
         "actual_legacy_missing_path_refused": negative,
+        "actual_signed_resume_smoke": smoke,
         "actual_native_child_and_failure_and_empty_selection": native,
         "only_owner_fingerprint_changes": fingerprint_results,
         "unprotected_input_refused_before_commands": True,

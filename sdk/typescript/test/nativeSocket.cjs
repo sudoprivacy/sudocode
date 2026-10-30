@@ -19,22 +19,10 @@ assert(!socketEntryPresent(path.join(root,'missing','control.sock')));
 assert.throws(()=>canonicalSocketPath(path.join(root,'missing','control.sock')),{code:'ENOENT'});
 console.log('Native AF_UNIX path process PASS: real socket, parent alias, different endpoints and missing-parent refusal');
 `;
-const server=String.raw`
-import os,socket,subprocess,sys
-endpoint=os.path.join(sys.argv[4],'control.sock')
-with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as listener:
-    listener.bind(endpoint)
-    listener.listen(1)
-    try:
-        result=subprocess.run([sys.argv[1],'-e',sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5]],timeout=8)
-    finally:
-        listener.close()
-        os.unlink(endpoint)
-raise SystemExit(result.returncode)
-`;
 try{
   fs.symlinkSync(root,alias,process.platform==='win32'?'junction':'dir');
-  const result=spawnSync(python,['-c',server,process.execPath,inspect,path.join(__dirname,'fixtures','nativeSocket.cjs'),root,alias],
+  const result=spawnSync(python,[path.join(__dirname,'fixtures','nativeSocket.py'),process.execPath,inspect,
+    path.join(__dirname,'fixtures','nativeSocket.cjs'),root,alias],
     {encoding:'utf8',timeout:12000});
   if(result.error)throw result.error;
   assert.equal(result.status,0,result.stdout+result.stderr);

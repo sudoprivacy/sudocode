@@ -516,10 +516,16 @@ def run_command(command, cwd, log, env=None):
                 try:
                     children = psutil.Process(process.pid).children(recursive=True)
                     for child in children:
-                        name = child.name().lower()
-                        if name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "cc", "clang", "clang.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}:
-                            child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
-                            priorities[f"{child.pid}:{name}"] = child.nice()
+                        try:
+                            # name() may read argv on macOS and trigger psutil
+                            # 7.2.2's KERN_PROCARGS2 error path for short-lived children.
+                            name = Path(child.exe()).name.lower()
+                            if (name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
+                                    or re.fullmatch(r"(?:.*-)?(?:clang(?:\+\+)?|gcc|g\+\+)(?:-\d+(?:\.\d+)*)?(?:\.exe)?", name)):
+                                child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
+                                priorities[f"{child.pid}:{name}"] = child.nice()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
                 time.sleep(0.15)

@@ -240,6 +240,12 @@ their protected pins are reviewed and updated. The existing profile fingerprints
 bind those pins without changing the receipt format. The full Docker decision
 matrix still exercises candidate sources.
 Toolchain discovery still uses the candidate repository.
+Compiler monitoring uses executable identity, including versioned and target-prefixed
+compiler names, without reading command-line arguments. This avoids psutil 7.2.2's
+macOS process-name fallback failure. One compiler worker, lowered compiler priority,
+Normal test priority, commands and budgets remain unchanged; protected equivalence
+pins retain successful earlier evidence for those unchanged commands. The new native
+guard always needs its own actual run, including a refused process-name query.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.

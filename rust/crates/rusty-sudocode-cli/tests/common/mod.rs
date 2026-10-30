@@ -813,6 +813,20 @@ impl TestEnv {
         }
     }
 
+    /// Launch a selected executable with exact arguments and the same workspace isolation.
+    #[inline]
+    pub fn spawn_binary_with_env(
+        &self,
+        binary: &std::path::Path,
+        args: &[&str],
+        env_vars: &[(&str, &str)],
+    ) -> PtySession {
+        let workspace = match &self.backend {
+            Backend::Mock { workspace, .. } | Backend::Live { workspace } => workspace,
+        };
+        spawn_binary_with_workspace(workspace, None, binary, &[], args, self.timeout(), env_vars)
+    }
+
     /// The workspace root (temp dir).  Useful for writing fixture
     /// files that tool calls will read.
     #[must_use]
@@ -990,7 +1004,27 @@ fn spawn_with_workspace(
     timeout: Duration,
     env_vars: &[(&str, &str)],
 ) -> PtySession {
-    let bin = scode_bin();
+    spawn_binary_with_workspace(
+        workspace,
+        config_home_override,
+        &scode_bin(),
+        base_args,
+        extra_args,
+        timeout,
+        env_vars,
+    )
+}
+
+/// Apply one isolation and terminal contract to both built and installed executables.
+fn spawn_binary_with_workspace(
+    workspace: &HarnessWorkspace,
+    config_home_override: Option<&std::path::Path>,
+    bin: &std::path::Path,
+    base_args: &[&str],
+    extra_args: &[&str],
+    timeout: Duration,
+    env_vars: &[(&str, &str)],
+) -> PtySession {
     let bin_str = bin.to_string_lossy().to_string();
     #[cfg(not(windows))]
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());

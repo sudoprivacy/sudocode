@@ -101,16 +101,86 @@ and requires native audit to match the intended Agent and ACP session, with the
 Node namespace root (`""`). A copied profile or workspace-disk namespace fails
 before any send. Peer callbacks remain subject to the configured peer allowlist.
 
-The bridge provides this adapter boundary, not a second issuer. Deployment
-requires the Node owner to supply and qualify an actual authorized adapter.
-The committed adapter under `test/fixtures` is strictly a protocol fixture; it
-has no Node, credential or issuer and cannot fulfill that deployment gate.
+Legacy responses retain the equal-cwd requirement. A trusted operator can now
+select an actor-private ACP workspace by additionally returning `workspaceBinding`:
+
+```json
+{"version":1,"actor":"<same actor>","operationId":"<same operation>","threadId":"<same native root>","nativeCanonicalWorkspace":"<original canonical native cwd>","acpCanonicalWorkspace":"<operator-selected canonical ACP cwd>"}
+```
+
+This object belongs **inside** the successful response's `workspaceBinding`
+field. All six fields must match the original claim and actual profile. It is
+a response from the installed trusted local operator, not a peer assertion or
+a cryptographic attestation. The version-2 binding freezes both contexts and
+the operator response. A changed operation, actor, thread, native cwd, ACP cwd
+or ACP SID fails closed. Existing imported bindings retain their original
+contexts. Neither form grants access to an additional directory.
+
+### Shared operator adapter
+
+`src/codexEnrollment.ts` implements the operator boundary. It uses the existing
+Nexus `ZoneApiService/MintAgent` path through the Nexus operator CLI; it does
+not contain a CA loader, signer, registry, Node installer or process owner.
+The new **client** command can target an older daemon that implements MintAgent.
+Do not substitute the legacy `auth mint` CLI: its peer search/offline fallback
+is unsuitable for this exact-endpoint operation.
+
+Prepare explicit Node-side policy using the operator CLI's
+`operator-agent-enroll --initialize --grant FILE --endpoint HTTPS_URI
+--workspace-root DIRECTORY` command and the selected Box's `--data-dir`.
+The [Nexus operator contract](https://github.com/nexi-lab/nexus-vfs/blob/main/docs/operator-agent-enrollment.md)
+owns its Node identity/CA pins, workspace authorization and recovery semantics.
+It issues nothing during preparation. Keep its grant and state in private
+operator-controlled storage. A broader workspace subtree must be selected
+explicitly; there is no implicit all-filesystem grant.
+
+Then prepare the shared ACP adapter's private launch policy:
+
+```text
+scode-acp-bridge --init-codex-operator --config OPERATOR_POLICY
+  --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]
+```
+
+`nexus-operator` names that exact operator executable and grant. `scode-argv`
+is the owner's complete selected scode command ending in `acp`, including its
+normal approval/tool policy. Optional environment values select normal scode
+configuration and the existing Node record; never put Node/CA private keys in
+them. The output contains `enrollmentArgv` for `--init-codex`. These two
+initializers prepare private configuration only; they do not issue credentials,
+register global MCP configuration or restart Codex.
+
+At runtime, the adapter reserves the original actor/op/grant before invoking
+the Node client, creates an actor-private workspace with its own `agentName`,
+creates and persists one real ACP SID, checks `agent_list`'s native actor/SID/
+Node-namespace audit, and closes that creator before returning its profile.
+The original native project's `agentName` is never overwritten. No native
+project directory is added to the ACP session by default. Any delegated
+project access needs a separate explicit owner policy.
+
+Missing/invalid SDK policy is `not_submitted` before reservation. After the
+multi-stage operation is reserved, **every** failure is Unknown, including a
+nested operator refusal, session creation failure, crash or lost public reply.
+Only a completed public receipt may replay the original profile; an incomplete
+operation requires explicit recovery using its original actor/op and saved
+session, never a new name, operation or automatic second session. The bridge
+does not auto-retry `recovery_required` bindings.
+
+`test/operatorEnrollmentIntegration.ts` covers actual subprocesses with protocol
+fixtures. `NEXUS_OPERATOR_BIN` plus its SHA/source in the common native fixture
+selects `test/nativeEnrollment.cjs`, which exercises the operator client against
+a private real mTLS daemon, same-project distinct identities, original SID
+reload and actual A2A. Mock passes do not establish this real-Node acceptance,
+global installation or native Codex new/resume composition. Deployment still
+requires the selected binaries, policy and sole-owner migration to be qualified.
+The fixture adapter under `test/fixtures` contains no Node/issuer/credential and
+cannot fulfill those deployment gates.
 
 ## Durable state and recovery
 
 The version-2 private binding file `<threadId>.json` contains the original actor,
 operation, origin, native workspace, canonical workspace and state. A ready row
-also freezes its original ACP session ID and original/canonical ACP workspace.
+also freezes its original ACP session ID and original/canonical ACP workspace,
+plus the optional explicit operator `workspaceBinding` described above.
 The original enrollment workspace
 bytes stay unchanged; canonical filesystem resolution accepts aliases such as
 macOS `/var` and `/private/var` across unload/resume. The frozen canonical path

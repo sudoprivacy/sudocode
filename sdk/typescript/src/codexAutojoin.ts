@@ -5,8 +5,8 @@ import { createCodexCallback, type CodexCallback } from './codexCallback';
 import { connectScode, type ScodeConnection, type SessionNotification } from './scodeAcp';
 import { listScodeAgents, scodeNativeA2aAudit, ScodeA2aError } from './scodeA2a';
 import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
-  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim } from './codexBindings';
-export type { CodexAgentClaim } from './codexBindings';
+  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
+export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
 
 /** The operator's existing enrollment path owns authorization and credentials.
  * Return a private, durable profile with an EXISTING native ACP session. Never
@@ -15,6 +15,7 @@ export type { CodexAgentClaim } from './codexBindings';
 export interface CodexAgentProfile {
   actor: string;
   configFile: string;
+  workspaceBinding?: CodexWorkspaceBinding;
 }
 
 /** Only the authorized adapter can attest that no issuance was submitted. */
@@ -119,7 +120,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
             operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
           if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
           binding.configFile = profile.configFile;
-          bindProfile(binding, readProfile(profile.configFile));
+          bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
           binding.state = 'ready';
           save(binding);
         } catch (error) {

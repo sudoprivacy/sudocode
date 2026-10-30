@@ -9,10 +9,12 @@ node=Path(os.environ.get('npm_node_execpath') or shutil.which('node'))
 npm=Path(os.environ['npm_execpath'])
 scode=Path(os.environ['SCODE_TEST_BIN']).resolve()
 daemon=Path(os.environ['NEXUSD_BIN']).resolve()
+operator=Path(os.environ['NEXUS_OPERATOR_BIN']).resolve() if os.environ.get('NEXUS_OPERATOR_BIN') else None
 scode_hash=hashlib.sha256(scode.read_bytes()).hexdigest()
 daemon_hash=hashlib.sha256(daemon.read_bytes()).hexdigest()
 assert scode_hash==os.environ['SCODE_TEST_SHA256'].lower()
 assert daemon_hash==os.environ['NEXUSD_SHA256'].lower()
+if operator:assert hashlib.sha256(operator.read_bytes()).hexdigest()==os.environ['NEXUS_OPERATOR_SHA256'].lower()
 scodeReceipt={'binarySha256':scode_hash,'sourceCommit':os.environ['SCODE_TEST_SOURCE']}
 daemonReceipt={'binarySha256':daemon_hash,'tag':os.environ['NEXUSD_TEST_TAG']}
 sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
@@ -66,8 +68,9 @@ try:
  p=subprocess.run([str(node),str(install/'node_modules/@sudocode/acp/dist/server.cjs'),'--verify'],env=env,capture_output=True);assert p.returncode==0,p.stderr
  start();waitlog('VFS data plane ready')
  config={'root':str(run),'install':str(install),'sdkSource':str(sdk),'scode':str(scode),'scodeSha256':scodeReceipt['binarySha256'],'source':scodeReceipt['sourceCommit'],'packageSource':json.loads((sdk/'manifest.json').read_text())['sourceCommit'],'sampleConfig':str(sdk/'../../rust/crates/runtime/src/sudocode.sample.json'),'actors':actors,'marker':uuid.uuid4().hex,'daemonReceipt':daemonReceipt}
+ if operator:config.update(operator=str(operator),operatorSha256=os.environ['NEXUS_OPERATOR_SHA256'].lower(),operatorSource=os.environ['NEXUS_OPERATOR_SOURCE'],dataDirectory=str(data),endpoint=f'https://127.0.0.1:{port}')
  cfg=run/'driver.json';cfg.write_text(json.dumps(config))
- p=subprocess.run([str(node),str(sdk/'test/nativeIntegration.cjs'),str(cfg)],env=env,capture_output=True,timeout=180)
+ p=subprocess.run([str(node),str(sdk/('test/nativeEnrollment.cjs' if operator else 'test/nativeIntegration.cjs')),str(cfg)],env=env,capture_output=True,timeout=180)
  (run/'test.stdout').write_bytes(p.stdout);(run/'test.stderr').write_bytes(p.stderr)
  print(p.stdout.decode('utf-8',errors='replace'));print(p.stderr.decode('utf-8',errors='replace'))
  assert p.returncode==0,'Native paired process test failed'

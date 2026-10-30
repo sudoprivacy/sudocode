@@ -12,11 +12,11 @@ if (Object.keys(library.metafile.inputs).some(name => /(?:node-pty|electron|grpc
 }
 await build({ ...shared, entryPoints: ['src/server.ts'], outfile: 'dist/server.cjs', plugins: [{
   name: 'reuse-library', setup(build) {
-    build.onResolve({ filter: /^\.\/(mcp|codexMcp|lifecycle)$/ }, args => args.importer === path.join(root, 'src/server.ts')
+    build.onResolve({ filter: /^\.\/(mcp|codexMcp|codexEnrollment|lifecycle)$/ }, args => args.importer === path.join(root, 'src/server.ts')
       ? { path: './index.cjs', external: true } : undefined);
   },
 }] });
-for (const test of ['acpIntegration', 'mcpIntegration', 'codexConnectionIntegration', 'codexAutojoinIntegration', 'nativeQueueIntegration']) {
+for (const test of ['acpIntegration', 'mcpIntegration', 'codexConnectionIntegration', 'codexAutojoinIntegration', 'operatorEnrollmentIntegration', 'nativeQueueIntegration']) {
   await build({ ...shared, entryPoints: [`test/${test}.ts`], outfile: `dist/testing/${test}.cjs`,
     external: ['../dist/index.cjs'] });
 }

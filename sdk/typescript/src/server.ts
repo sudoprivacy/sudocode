@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding } from './codexMcp';
 import { shutdownCommand } from './lifecycle';
+import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 
 interface Manifest {
   sourceCommit: string;
@@ -44,6 +45,8 @@ async function main(): Promise<void> {
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
+    'enroll-codex': {type:'boolean'},
+    'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
@@ -53,6 +56,8 @@ async function main(): Promise<void> {
       + '  Use --native-argv JSON_ARGV instead of --native-codex to preserve an official wrapper command.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
+      + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
+      + 'scode-acp-bridge --init-codex-operator --config FILE --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]\n'
       + 'Uses the shared scode ACP/MCP implementation; no Hydra application, tmux or Nexus daemon is started.');
     return;
   }
@@ -62,6 +67,17 @@ async function main(): Promise<void> {
   }
   if (values.verify) { verify(); return; }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
+  if(values['init-codex-operator']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','init-codex-operator','nexus-operator','scode-argv','scode-env'].includes(key)))throw new Error('Select one operator initializer mode');
+    console.log(JSON.stringify(prepareCodexEnrollment(values.config,JSON.parse(values['nexus-operator']??'null'),
+      {scodeArgv:JSON.parse(values['scode-argv']??'null'),...(values['scode-env']?{env:JSON.parse(values['scode-env'])}:{})},__filename)));
+    return;
+  }
+  if(values['nexus-operator']||values['scode-argv']||values['scode-env'])throw new Error('Operator initializer fields require --init-codex-operator');
+  if(values['enroll-codex']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','enroll-codex'].includes(key)))throw new Error('Select one operator enrollment mode');
+    await runCodexEnrollment(values.config);return;
+  }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace
       ||values['session-id']||values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port)throw new Error('Select one preparation mode');

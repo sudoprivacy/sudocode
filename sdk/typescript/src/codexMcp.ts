@@ -5,7 +5,8 @@ import { connect, createServer, type Server, type Socket } from 'node:net';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { connectCodexAutojoin, CodexEnrollmentError, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import { runEnrollmentCommand } from './enrollmentCommand';
 import { validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
@@ -150,35 +151,10 @@ function readHeader(socket: Socket): Promise<unknown> {
   });
 }
 
-function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfile> {
-  return new Promise((resolve,reject) => {
-    const child = spawn(argv[0],argv.slice(1),{stdio:['pipe','pipe','ignore'],shell:false,windowsHide:true});
-    let bytes = Buffer.alloc(0);
-    let failure: Error | undefined;
-    const kill = (error: Error) => {failure ??= error;child.kill('SIGKILL');};
-    const timer = setTimeout(()=>kill(new Error('Enrollment response timed out; recover the original operation')),30000);
-    child.on('error',error=>{failure ??= child.pid===undefined
-      ? new CodexEnrollmentError('not_submitted',`Enrollment adapter did not start: ${error.message}`) : error;});
-    child.stdin.on('error',error=>{failure ??= error;});
-    child.stdout.on('data',(chunk: Buffer)=>{
-      bytes = Buffer.concat([bytes,chunk]);
-      if(bytes.length>8192)kill(new Error('Enrollment response exceeded its bound'));
-    });
-    child.once('close',code=>{
-      clearTimeout(timer);
-      try {
-        if(failure)throw failure;
-        const profile = JSON.parse(bytes.toString('utf8')) as CodexAgentProfile & {outcome?: unknown;detail?: unknown};
-        if(profile && ['not_submitted','unknown'].includes(String(profile.outcome)) && typeof profile.detail==='string'){
-          throw new CodexEnrollmentError(profile.outcome as 'not_submitted'|'unknown',profile.detail);
-        }
-        if(code!==0)throw new Error(`Enrollment exited ${code}; recover the original operation`);
-        if(!profile || Object.keys(profile).some(key=>!['actor','configFile'].includes(key))) throw new Error('Invalid enrollment response');
-        resolve(profile);
-      } catch(error) {reject(error);}
-    });
-    child.stdin.end(JSON.stringify(claim)+'\n');
-  });
+async function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfile> {
+  const profile = await runEnrollmentCommand(argv, claim) as CodexAgentProfile;
+  if(!profile || Object.keys(profile).some(key=>!['actor','configFile','workspaceBinding'].includes(key))) throw new Error('Invalid enrollment response');
+  return profile;
 }
 
 /** One per-user owner, elected by an exclusive loopback bind. It owns the native

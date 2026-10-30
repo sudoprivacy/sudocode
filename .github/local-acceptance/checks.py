@@ -285,9 +285,9 @@ def native_guard_files():
     return {
         ".github/local-acceptance/native_guard.py": "0339203b8d92282754548373a5f0eab29488a65adcd531a5142b2729830020ad",
         ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
-        ".github/scripts/local_acceptance.py": "e01bd7b71557f44d88fba813e6208d3667288c99de06d976a558f0901983cf44",
+        ".github/scripts/local_acceptance.py": "31f2384cb23558661d72047686fe37003beca377ef3ed3f567c606a8623f5c6c",
         "e2e/local-acceptance/run.py": "694523a1d700eb305686f769ec4ec8749df70d8d7caee1f5af99bd70aaacc425",
-        "e2e/local-acceptance/resume_acceptance.py": "53ad5fcbe81f0c01a3b09316b7b03c162a2d54a49a24445c6da75558ee169ce9",
+        "e2e/local-acceptance/resume_acceptance.py": "4bfa5af7e5e690bcdef13c7cae39665c70ed4ab32ce00b5251c792252da3ec9f",
         "e2e/local-acceptance/release_acceptance.py": "21272f1e5b701410af25238eae2b354badf1f8aa2a193ec6698071e9ef037164",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",

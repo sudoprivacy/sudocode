@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { spawn, execFileSync, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
-const socketEntryPresent = require('./fixtures/nativeSocketReady.cjs');
+const {socketEntryPresent,canonicalSocketPath} = require('./fixtures/nativeSocket.cjs');
 
 const { parseArgs } = require('node:util');
 const options = parseArgs({ options: {
@@ -298,7 +298,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       if(managedPackageRoot){
         receipt.nativeManagedVersion=JSON.parse(execFileSync(configured.codexArgv[0],
           ['app-server','daemon','version'],{encoding:'utf8',env:childEnv,timeout:10000}));
-        assert.equal(fs.realpathSync(receipt.nativeManagedVersion.socketPath),fs.realpathSync(selectedSocket));
+        assert.equal(canonicalSocketPath(receipt.nativeManagedVersion.socketPath),canonicalSocketPath(selectedSocket));
         const read=await request(observer,'test unload configuration','config/read',{includeLayers:false});
         receipt.experimentalUnloadConfiguration={requestedSeconds:1,readSeconds:read.config.thread_unload_delay_secs??null,
           scope:'fixture only; does not select production retirement policy'};

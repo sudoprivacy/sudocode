@@ -14,6 +14,7 @@ const options = parseArgs({ options: {
   driver: {type:'string'}, 'temp-root': {type:'string'}, 'mcp-context': {type:'boolean'}, autojoin: {type:'boolean'},
   'managed-package-root': {type:'string'}, help: {type:'boolean'},
   'operator-context': {type:'string'},
+  'legacy-import': {type:'boolean'},
 } }).values;
 if (options.help) {
   console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>]');
@@ -48,6 +49,8 @@ if(operatorContext){
     && fs.realpathSync(root).startsWith(fs.realpathSync(operatorContext.fixtureRoot)+path.sep),
     'Real enrollment requires the enclosing private native Node fixture; never adopt a live user installation');
 }
+if(options['legacy-import'])assert(operatorContext && managedPackageRoot && options.case==='idle',
+  'Legacy import is an isolated real-Node managed-entry fixture, separate from the new-thread cases');
 const readAutojoinClaims=()=>operatorContext
   ? fs.readdirSync(path.join(root,'bindings')).filter(file=>file.endsWith('.json'))
     .map(file=>JSON.parse(fs.readFileSync(path.join(root,'bindings',file),'utf8'))).filter(binding=>binding.state==='ready')
@@ -131,9 +134,9 @@ const request = async (client,label,method,params) => {
   receipt.requests.push({client:label,method,threadId:params.threadId});
   return client.request(method,params);
 };
-const connect = async (label, events) => {
+const connect = async (label, events, socket=selectedSocket, env=childEnv) => {
   // --sock selects only this fixture endpoint; no env wrapper or second transport.
-  const client=await connectCodex({codexArgv:configured.codexArgv,socket:selectedSocket,env:childEnv}, n=>{
+  const client=await connectCodex({codexArgv:configured.codexArgv,socket,env}, n=>{
     events.push({method:n.method,threadId:n.params?.thread?.id ?? n.params?.threadId});
   });
   connections.push(client);
@@ -155,6 +158,16 @@ const closeTui = async own => {
   const final=own.lines.find(line=>line.event==='exit');
   assert(final && final.returncode===0 && !own.lines.some(line=>['terminate','kill','normal_exit_timeout'].includes(line.event)),
     'Actual TUI must exit normally; forced cleanup is not lifecycle acceptance');
+};
+const spawnTui = async (label,args=[],env=childEnv) => {
+  const driver=spawn(driverArgv[0],[...driverArgv.slice(1),configured.codexArgv[0],
+    ...configured.codexArgv.slice(1),...args,'--no-alt-screen','--cd',workspace],{cwd:workspace,
+      env:{...env,NATIVE_LIFECYCLE_PTY_TRACE:path.join(root,'tui-'+label+'.trace.json')},stdio:['pipe','pipe','pipe']});
+  const own={label,driver,exit:once(driver,'close'),lines:[],stderr:''};tuis.push(own);
+  let buffer='';driver.stdout.on('data',bytes=>{buffer+=bytes;let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);own.lines.push(JSON.parse(line));}});
+  driver.stderr.on('data',bytes=>{own.stderr=(own.stderr+bytes).slice(-4000);});
+  await waitUntil(()=>own.lines.some(line=>line.event==='spawn'),5000,'TUI spawn');
+  return own;
 };
 (async()=>{
   try {
@@ -186,6 +199,55 @@ const closeTui = async own => {
         '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
       (options.autojoin ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
+    if(options['legacy-import']){
+      const file=path.join(isolatedHome,'config.toml'),standard=fs.readFileSync(file,'utf8');
+      const profile=JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8'));
+      const legacyProfile=path.join(root,'legacy-profile.json');
+      fs.writeFileSync(legacyProfile,JSON.stringify({...profile,version:1,auditLog:path.join(root,'legacy-audit.jsonl')}),{mode:0o600});
+      const withoutGlobal=standard.slice(0,standard.indexOf('[mcp_servers.nexus_auto]'));
+      fs.writeFileSync(file,withoutGlobal+'[mcp_servers.nexus_legacy]\ncommand = '+JSON.stringify(process.execPath)+
+        '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--config',legacyProfile].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n');
+      const legacyEnv={...childEnv};delete legacyEnv.CODEX_MANAGED_PACKAGE_ROOT;delete legacyEnv.CODEX_MANAGED_BY_NPM;
+      const legacySocket=path.join(os.tmpdir(),'cx-legacy-'+crypto.randomUUID()+'.sock');
+      native=spawn(configured.codexArgv[0],['app-server','--listen','unix://'+legacySocket],
+        {cwd:workspace,env:legacyEnv,stdio:['ignore','ignore','pipe']});nativeExited=once(native,'close');
+      native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
+      await waitUntil(()=>socketEntryPresent(legacySocket),10000,'private legacy listener');
+      const old=await connect('legacy observer',receipt.observerNotifications,legacySocket,legacyEnv);
+      const tui=await spawnTui('legacy',['--remote','unix://'+legacySocket],legacyEnv);
+      let original;
+      await bounded((async()=>{while(true){
+        const ids=(await request(old,'legacy inventory','thread/loaded/list',{})).data;
+        if(ids.length===1){const {thread}=await request(old,'legacy original','thread/read',{threadId:ids[0],includeTurns:false});
+          if(thread.status.type==='idle'){original=thread;return;}}
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }})(),20000,'legacy idle root');
+      const sent=await request(old,'legacy actual MCP send','mcpServer/tool/call',{threadId:original.id,
+        server:'nexus_legacy',tool:'scode_send',arguments:{to:operatorContext.recipient,message:'Private legacy migration fixture',summary:'legacy identity'}});
+      assert.equal(sent.isError,false,JSON.stringify(sent));
+      const actor=JSON.parse(sent.content[0].text).routing.sender;
+      await request(old,'legacy history name','thread/name/set',{threadId:original.id,name:'Private legacy migration fixture'});
+      phase='completed-seed';
+      await request(old,'legacy history seed','turn/start',{threadId:original.id,input:[{type:'text',text:'Seed isolated native lifecycle history.'}]});
+      await bounded((async()=>{while(true){
+        const {thread}=await request(old,'legacy history','thread/read',{threadId:original.id,includeTurns:false});
+        const trace=path.join(root,'tui-legacy.trace.json');
+        if(thread.status.type==='idle'&&fs.existsSync(trace)&&JSON.parse(fs.readFileSync(trace,'utf8')).outputTail.includes('Isolated lifecycle seed response.'))return;
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }})(),15000,'legacy visible history');
+      assert.equal(receipt.modelRequests.length,1,'one explicit legacy seed; direct send does not infer');
+      phase='legacy-closed';await closeTui(tui);await old.close();
+      native.kill('SIGTERM');await bounded(nativeExited,5000,'owned legacy backend exit');native=undefined;
+      if(fs.existsSync(legacySocket))fs.unlinkSync(legacySocket);
+      const imported=await require(library).prepareExistingCodexBinding(autojoinConfig,{threadId:original.id,
+        workspace,actor,configFile:operatorContext.inboundSenderProfile,acpSessionId:profile.acpSessionId});
+      assert.equal(imported.startedAgent,false);
+      receipt.legacyImport={originalThreadId:original.id,actor,originalAcpSessionId:profile.acpSessionId,
+        nativeCanonicalWorkspace:fs.realpathSync(workspace),acpCanonicalWorkspace:fs.realpathSync(profile.workspace),
+        oldBackendExitedBeforeManagedStartup:true,oldTuiExitedNormally:true,legacySeedModelRequests:1,imported};
+      fs.writeFileSync(file,standard);
+    }
+    const startupModelRequests=receipt.modelRequests.length;
     if(managedPackageRoot){
       const settings=path.join(isolatedHome,'app-server-daemon','settings.json');
       fs.mkdirSync(path.dirname(settings),{recursive:true,mode:0o700});
@@ -217,17 +279,8 @@ const closeTui = async own => {
       native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
     }
     {
-      const spawnTui = async (label,args=[]) => {
-        const driver=spawn(driverArgv[0],[...driverArgv.slice(1),configured.codexArgv[0],
-          ...configured.codexArgv.slice(1),...args,'--no-alt-screen','--cd',workspace],{cwd:workspace,
-            env:{...childEnv,NATIVE_LIFECYCLE_PTY_TRACE:path.join(root,'tui-'+label+'.trace.json')},stdio:['pipe','pipe','pipe']});
-        const own={label,driver,exit:once(driver,'close'),lines:[],stderr:''};tuis.push(own);
-        let buffer='';driver.stdout.on('data',bytes=>{buffer+=bytes;let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);own.lines.push(JSON.parse(line));}});
-        driver.stderr.on('data',bytes=>{own.stderr=(own.stderr+bytes).slice(-4000);});
-        await waitUntil(()=>own.lines.some(line=>line.event==='spawn'),5000,'TUI spawn');
-        return own;
-      };
-      for(const label of ['first','second'])await spawnTui(label);
+      for(const label of ['first','second'])await spawnTui(label,
+        label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
       await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'isolated native listener');
       const observer=await connect('observer',receipt.observerNotifications);
       if(managedPackageRoot){
@@ -272,8 +325,18 @@ const closeTui = async own => {
       receipt.inventory=inventory.data;
       receipt.startedSeenByObserver=receipt.observerNotifications.filter(n=>n.method==='thread/started').map(n=>n.threadId);
       assert(receipt.created.every(thread=>receipt.startedSeenByObserver.includes(thread.id)));
-      assert.equal(receipt.modelRequests.length,0);
-      receipt.modelRequestsBeforeSeed=0;
+      assert.equal(receipt.modelRequests.length,startupModelRequests);
+      receipt.modelRequestsBeforeSeed=startupModelRequests;
+      if(receipt.legacyImport){
+        const original=receipt.legacyImport;
+        assert(receipt.inventory.includes(original.originalThreadId));
+        await waitUntil(()=>{
+          const trace=path.join(root,'tui-first.trace.json');
+          return fs.existsSync(trace)&&JSON.parse(fs.readFileSync(trace,'utf8')).outputTail.includes('Isolated lifecycle seed response.');
+        },15000,'ordinary resume restores the legacy history');
+        original.actualManagedResumeRestoredHistory=true;
+        original.migrationAdditionalModelRequests=receipt.modelRequests.length-startupModelRequests;
+      }
       if(options['mcp-context']){
         await waitUntil(()=>fs.readdirSync(root).some(name=>name.startsWith('mcp-context-')),10000,'MCP startup context');
         receipt.mcpStartupContext=fs.readdirSync(root).filter(name=>name.startsWith('mcp-context-'))
@@ -301,9 +364,12 @@ const closeTui = async own => {
             const calls=fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
               .filter(row=>row.direction==='outgoing').map(row=>row.message.method);
             assert.equal(calls.filter(method=>method==='session/new').length,1);
-            assert.equal(calls.filter(method=>method==='session/load').length,1);
+            assert.equal(calls.filter(method=>method==='session/load').length,binding.origin==='existing'?3:1);
             assert(!calls.includes('session/prompt'));
-            assert.equal(binding.workspaceBinding.operationId,claim.operationId);
+            if(binding.origin==='existing'){
+              assert.equal(claim.actor,receipt.legacyImport.actor);
+              assert.equal(profile.acpSessionId,receipt.legacyImport.originalAcpSessionId);
+            }else assert.equal(binding.workspaceBinding.operationId,claim.operationId);
             assert.notEqual(binding.acp.canonicalWorkspace,binding.canonicalWorkspace);
             return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,sessionId:profile.acpSessionId,calls};
           });
@@ -335,7 +401,7 @@ const closeTui = async own => {
         assert.equal(new Set(receipt.autojoinCommandAudit.map(row=>row.pid)).size,2,'distinct actual receiver processes execute the two roots');
         assert(receipt.autojoinCommandAudit.every(row=>receipt.autojoinClaims.some(claim=>
           row.nativeThreadId===claim.threadId&&row.nativeAudit.actor===claim.actor)));
-        assert.equal(receipt.modelRequests.length,0,'autojoin must not start the native model');
+        assert.equal(receipt.modelRequests.length,startupModelRequests,'autojoin must not start the native model');
       }
       if(seededResume){
         const original=receipt.created[0];
@@ -416,7 +482,7 @@ const closeTui = async own => {
         }
         await closeTui(resumer);
       }
-      if(operatorContext && !seededResume){
+      if(operatorContext && !seededResume && !receipt.legacyImport){
         const {connectScode,sendScodeMessage}=require(library);
         const peer=await connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
         try{
@@ -440,7 +506,7 @@ const closeTui = async own => {
             if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
             await new Promise(resolve=>setTimeout(resolve,50));
           }
-          assert.equal(receipt.modelRequests.length,1,'one actual received peer input, no duplicate native inference');
+          assert.equal(receipt.modelRequests.length,startupModelRequests+1,'one actual received peer input, no duplicate native inference');
         }finally{await peer.close();}
       }
       if(managedPackageRoot && options.autojoin){

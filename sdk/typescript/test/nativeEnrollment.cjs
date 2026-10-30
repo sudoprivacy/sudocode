@@ -87,6 +87,15 @@ async function main(){
       fs.writeFileSync(path.join(config.root,`native-operator-${scenario}.json`),JSON.stringify(result,null,2)+'\n');
       assert.equal(result.result,'PASS',JSON.stringify(result));
     }
+    if(config.nativePackageRoot){
+      const migrationArgs=[path.join(__dirname,'nativeCodexLifecycle.cjs'),'--codex',config.nativeCodex,'--output',config.root,
+        '--case','idle','--autojoin','--legacy-import','--operator-context',context,'--temp-root',config.root,
+        '--managed-package-root',config.nativePackageRoot];
+      if(config.nativeDriver)migrationArgs.push('--driver',JSON.stringify(config.nativeDriver));
+      const migrated=await runAsync(process.execPath,migrationArgs);
+      fs.writeFileSync(path.join(config.root,'native-operator-legacy-import.json'),JSON.stringify(migrated,null,2)+'\n');
+      assert.equal(migrated.result,'PASS',JSON.stringify(migrated));
+    }
   }
   console.log(JSON.stringify({success:true,realLegacyTlsNode:true,privateSameProjectActors:true,originalAcpSidsReloaded:true,enrollmentInferenceRequests:0}));
 }

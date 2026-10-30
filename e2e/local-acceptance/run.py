@@ -148,6 +148,66 @@ def scope_acceptance(directory):
     print("PASS: real Git scopes for PR/push/queue, native test targets, shared fixtures, source rename and explicit dispatch")
 
 
+def performance_scope_acceptance(directory):
+    """Check committed changes through the public planner, including both rename paths."""
+    repository = directory / "performance-scope"
+    command("git", "init", "--initial-branch=main", repository, cwd=directory)
+    command("git", "config", "user.name", "Performance scope E2E", cwd=repository)
+    command("git", "config", "user.email", "scope@example.invalid", cwd=repository)
+    for path in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
+        destination = repository / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(SOURCE / path, destination)
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Protected performance selection", cwd=repository)
+    policy = command("git", "rev-parse", "HEAD", cwd=repository)
+    helper = repository / ".github/scripts/local_acceptance.py"
+
+    def expect(base, expected):
+        text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
+                       "--host", "windows", "--architecture", "AMD64", cwd=repository)
+        plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                               if line.startswith("ACCEPTANCE_PLAN=")))
+        names = set(plan["local_checks"])
+        assert names & {"rendering", "browser"} == set(expected), text
+        assert "Statistical performance profiles:" in text, text
+        if not expected:
+            assert "indirect performance effects" in text, text
+        assert "native-workspace" in names, text
+        assert {job["os"] for job in plan["ci"]} == {"ubuntu-latest", "macos-latest"}, text
+        for job in plan["ci"]:
+            assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
+
+    both = ["rendering", "browser"]
+    cases = [(f"rust/crates/{crate}/src/fixture.rs", [])
+             for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host"]]
+    cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
+        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs", "rust/crates/engine-core/src/lib.rs",
+        "rust/crates/pty-harness/src/lib.rs", "rust/crates/rusty-sudocode-cli/tests/common/mod.rs",
+        "rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/host.cjs"]]
+    cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
+              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"])]
+    for index, (path, expected) in enumerate(cases):
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        file = repository / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("actual changed input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", f"Performance input {index}", cwd=repository)
+        expect(base, expected)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "mv", "rust/crates/rusty-sudocode-cli/src/render.rs",
+            "rust/crates/runtime/src/moved.rs", cwd=repository)
+    command("git", "commit", "-m", "Move UI source into another crate", cwd=repository)
+    expect(base, both)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", "e2e/terminal-resize/host.cjs", cwd=repository)
+    command("git", "commit", "-m", "Delete measurement input", cwd=repository)
+    expect(base, both)
+    print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
+
+
 def plan_acceptance(directory):
     """Preview actual committed inputs through the public CLI; never attest a fake host."""
     repository = directory / "plans"
@@ -215,6 +275,7 @@ def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
+        performance_scope_acceptance(directory)
         plan_acceptance(directory)
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"

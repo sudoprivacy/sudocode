@@ -239,12 +239,25 @@ results and complementary native hosts remain required. This authorization is
 not a test pass and does not require the end user personally to inspect code.</p>
 
 <p>Full rendering A/A and A/B, painted browser and viewport performance checks
-run automatically in local Docker for changed production or measurement inputs.
+run automatically in local Docker for changed CLI or engine-core sources,
+shared PTY helpers, measurement sources, or Rust build/dependency inputs.
 The existing fixed baseline, workload rounds, sample counts, normal release
 binary graph and budgets remain. A failed A/A calibration is inconclusive.
 There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
 unchanged performance pairs; docs-only changes run preflight. Local compiler
 workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
+Source-only changes in API, runtime, tools, ACP and services no longer select
+these two Docker profiles. Their selected native functional checks, including
+cache-prefix and compaction cases, remain. Indirect performance regressions in
+those crates can therefore escape this per-PR performance comparison. Known
+performance changes must include the corresponding measurement scenario.
+Direct CLI, engine-core, build/dependency and shared measurement inputs still
+select the unchanged workloads, samples, baselines and budgets. In 290 historical
+PRs with complete file lists, this removes both profiles from 64 of the 225 PRs
+previously selecting them: 128 fewer profile invocations, or 28.4% of selected
+PRs. This is a static scope comparison, not measured latency savings. Local
+waiting and validation count toward author time before CI can start.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>

@@ -193,8 +193,14 @@ Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
-run automatically in local Docker when production or measurement inputs change.
-They keep their existing baselines, rounds, assertions and budgets. They have no
+run automatically in local Docker when CLI, engine-core, shared PTY helpers,
+measurement sources or Rust build/dependency inputs change. Other crates' source
+changes keep their selected native functional checks but skip these statistical
+performance comparisons. This deliberately reduces performance coverage for
+indirect effects from API, runtime, tools, ACP and service implementations; it
+does not establish that those effects are impossible. A change known to affect
+the performance workloads must include the corresponding measurement scenario.
+Selected measurements keep their existing baselines, rounds, assertions and budgets. They have no
 scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay

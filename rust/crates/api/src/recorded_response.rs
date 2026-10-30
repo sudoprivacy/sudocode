@@ -1,7 +1,6 @@
 //! Preserve reqwest semantics while recording body bytes before adapter parsing.
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -86,12 +85,21 @@ struct CaptureState {
     end: Option<&'static str>,
     error: Option<&'static str>,
     disabled: bool,
-    ready_at: Option<Instant>,
+    running: bool,
 }
 
-#[derive(Default)]
 struct CaptureQueue {
     state: Mutex<CaptureState>,
+    ready: Condvar,
+    worker: Mutex<CaptureWorker>,
+    runtime: tokio::runtime::Handle,
+}
+
+struct CaptureWorker {
+    tracer: SessionTracer,
+    metadata: Option<ResponseCaptureMetadata>,
+    recorder: Option<Box<dyn ResponseRecorder>>,
+    lease: Option<CaptureLease>,
 }
 
 impl CaptureQueue {
@@ -99,102 +107,71 @@ impl CaptureQueue {
     fn lock(&self) -> MutexGuard<'_, CaptureState> {
         lock(&self.state)
     }
-}
 
-type CaptureWork = Option<Box<PendingCapture>>;
-
-struct PendingCapture {
-    queue: Arc<CaptureQueue>,
-    tracer: SessionTracer,
-    metadata: Option<ResponseCaptureMetadata>,
-    recorder: Option<Box<dyn ResponseRecorder>>,
-    _lease: CaptureLease,
-}
-
-impl PendingCapture {
-    fn flush(&mut self, deadline: &mut Option<Instant>) -> bool {
-        if let Some(metadata) = self.metadata.take() {
-            self.recorder = self.tracer.begin_response_capture(metadata);
+    fn run(&self) {
+        // Keep the recorder between batches, not a parked blocking worker.
+        // A different archive can still finalize while this one acquires its fence.
+        let mut worker = lock(&self.worker);
+        if worker.lease.is_none() {
+            return;
         }
-        let Some(recorder) = self.recorder.as_mut() else {
-            let mut state = self.queue.lock();
+        if let Some(metadata) = worker.metadata.take() {
+            worker.recorder = worker.tracer.begin_response_capture(metadata);
+        }
+        let Some(recorder) = worker.recorder.as_mut() else {
+            let mut state = self.lock();
             state.disabled = true;
             state.pending = Vec::new();
-            return false;
+            worker.lease.take();
+            return;
         };
-        let (batch, end) = {
-            let mut state = self.queue.lock();
-            if state.end.is_none() {
-                if state.pending.is_empty() {
-                    return true;
+        loop {
+            let (batch, end) = {
+                let mut state = self.lock();
+                if state.pending.is_empty() && state.end.is_none() {
+                    state.running = false;
+                    return;
                 }
-                if state.pending.len() < 64 * 1024 {
-                    if let Some(ready_at) = state.ready_at.filter(|at| *at > Instant::now()) {
-                        *deadline = Some(deadline.map_or(ready_at, |at| at.min(ready_at)));
-                        return true;
-                    }
+                // Batch small network chunks; an end notification flushes immediately.
+                if state.end.is_none()
+                    && !state.pending.is_empty()
+                    && state.pending.len() < 64 * 1024
+                {
+                    (state, _) = self
+                        .ready
+                        .wait_timeout(state, FLUSH_INTERVAL)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                 }
+                let end = state
+                    .end
+                    .map(|reason| (reason, state.observed, state.error));
+                (std::mem::take(&mut state.pending), end)
+            };
+            // No queue mutex is held during compression, fencing or filesystem I/O.
+            if !batch.is_empty() {
+                recorder.record(&batch);
             }
-            let end = state
-                .end
-                .map(|reason| (reason, state.observed, state.error));
-            state.ready_at = None;
-            (std::mem::take(&mut state.pending), end)
-        };
-        // The HTTP reader never waits for compression, fencing or filesystem I/O.
-        if !batch.is_empty() {
-            recorder.record(&batch);
+            if let Some((reason, observed_bytes, capture_error)) = end {
+                recorder.finish(ResponseCaptureEnd {
+                    reason,
+                    observed_bytes,
+                    capture_error,
+                });
+                worker.recorder.take();
+                worker.lease.take();
+                return;
+            }
         }
-        if let Some((reason, observed_bytes, capture_error)) = end {
-            recorder.finish(ResponseCaptureEnd {
-                reason,
-                observed_bytes,
-                capture_error,
-            });
-            return false;
-        }
-        true
     }
-}
 
-fn run_capture_worker(incoming: &Receiver<CaptureWork>) {
-    let mut active = Vec::<PendingCapture>::new();
-    let mut deadline: Option<Instant> = None;
-    loop {
-        let next = match deadline {
-            Some(at) => incoming.recv_timeout(at.saturating_duration_since(Instant::now())),
-            None => incoming.recv().map_err(|_| RecvTimeoutError::Disconnected),
-        };
-        match next {
-            Ok(Some(capture)) => active.push(*capture),
-            Ok(None) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
-        }
-        active.extend(incoming.try_iter().flatten().map(|capture| *capture));
-        deadline = None;
-        active.retain_mut(|capture| capture.flush(&mut deadline));
+    fn schedule(self: &Arc<Self>) {
+        let queue = Arc::clone(self);
+        self.runtime.spawn_blocking(move || queue.run());
     }
-}
-
-/// One lazily started writer multiplexes response queues without occupying the
-/// engine's blocking pool while an HTTP response is still open.
-fn capture_worker() -> Option<&'static Sender<CaptureWork>> {
-    static WORKER: OnceLock<Option<Sender<CaptureWork>>> = OnceLock::new();
-    WORKER
-        .get_or_init(|| {
-            let (sender, incoming) = mpsc::channel();
-            std::thread::Builder::new()
-                .name("response-writer".into())
-                .spawn(move || run_capture_worker(&incoming))
-                .ok()
-                .map(|_| sender)
-        })
-        .as_ref()
 }
 
 struct BackgroundCapture {
     queue: Arc<CaptureQueue>,
-    sender: Option<&'static Sender<CaptureWork>>,
 }
 
 impl std::fmt::Debug for BackgroundCapture {
@@ -206,30 +183,23 @@ impl std::fmt::Debug for BackgroundCapture {
 impl BackgroundCapture {
     #[inline]
     fn new(tracer: SessionTracer, metadata: ResponseCaptureMetadata) -> Self {
-        let queue = Arc::new(CaptureQueue::default());
-        let capture = Box::new(PendingCapture {
-            queue: Arc::clone(&queue),
-            _lease: CaptureLease::new(tracer.session_id()),
-            tracer,
-            metadata: Some(metadata),
-            recorder: None,
+        let lease = CaptureLease::new(tracer.session_id());
+        let queue = Arc::new(CaptureQueue {
+            state: Mutex::new(CaptureState {
+                running: true,
+                ..CaptureState::default()
+            }),
+            ready: Condvar::new(),
+            worker: Mutex::new(CaptureWorker {
+                tracer,
+                metadata: Some(metadata),
+                recorder: None,
+                lease: Some(lease),
+            }),
+            runtime: tokio::runtime::Handle::current(),
         });
-        let sender = capture_worker();
-        let unavailable = match sender {
-            Some(sender) => sender.send(Some(capture)).err().and_then(|error| error.0),
-            None => Some(capture),
-        };
-        if let Some(capture) = unavailable {
-            capture.tracer.record(
-                "response_capture_unavailable",
-                serde_json::Map::from_iter([(
-                    "reason".into(),
-                    serde_json::Value::String("response_writer_unavailable".into()),
-                )]),
-            );
-            queue.lock().disabled = true;
-        }
-        Self { queue, sender }
+        queue.schedule();
+        Self { queue }
     }
 
     #[inline]
@@ -243,9 +213,6 @@ impl BackgroundCapture {
             return;
         }
         let was_empty = state.pending.is_empty();
-        if was_empty {
-            state.ready_at = Some(Instant::now() + FLUSH_INTERVAL);
-        }
         let length = bytes.len().min(MAX_PENDING_BYTES - state.pending.len());
         let required = state.pending.len() + length;
         if required > state.pending.capacity() {
@@ -258,28 +225,28 @@ impl BackgroundCapture {
             // Preserve a contiguous prefix and explicitly report missing bytes.
             state.error = Some("response_capture_queue_saturated");
         }
+        let schedule = !std::mem::replace(&mut state.running, true);
         drop(state);
         if was_empty {
-            self.notify();
+            self.queue.ready.notify_one();
+        }
+        if schedule {
+            self.queue.schedule();
         }
     }
 
     #[inline]
     fn finish(&mut self, reason: &'static str) {
-        let first = {
-            let mut state = self.queue.lock();
-            let first = state.end.is_none();
-            state.end.get_or_insert(reason);
-            first
-        };
-        if first {
-            self.notify();
+        let mut state = self.queue.lock();
+        if state.disabled || state.end.is_some() {
+            return;
         }
-    }
-
-    fn notify(&self) {
-        if let Some(sender) = self.sender {
-            let _ = sender.send(None);
+        state.end = Some(reason);
+        let schedule = !std::mem::replace(&mut state.running, true);
+        drop(state);
+        self.queue.ready.notify_one();
+        if schedule {
+            self.queue.schedule();
         }
     }
 }

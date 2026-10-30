@@ -215,6 +215,17 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+Release acceptance builds the normal release `scode` once, copies it outside
+Cargo outputs, and points the native workspace's test-profile driver at that
+exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
+feature graph; release-only dev-dependency compilation is no longer repeated.
+The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
+An actual Cargo/native-process fixture checks driver reuse, the release binary's
+identity and rejection of a substituted debug binary. The test driver and its
+in-process fixture helpers now execute in the test profile; the product process
+still uses the normal release graph.
+Ordinary Windows shells also receive the configured/discovered MSVC environment
+when the startup measurement script compiles its native reference process.
 The protected policy records exact pairs of equivalent execution hashes for the
 runner migration. Existing full-Cargo evidence for the same candidate can remain
 valid; the new runner-enforcement guard still runs. The verifier checks the old

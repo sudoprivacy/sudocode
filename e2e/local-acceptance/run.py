@@ -480,8 +480,8 @@ def enforcement_acceptance():
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
     if sys.argv[1:] == ["--fixture-child"]:
         enforcement_acceptance()
         return

@@ -160,8 +160,6 @@ def run(name, root, output, base, execute):
                 "--source-receipt", str(output / "nextest-source.json"),
                 "--options", json.dumps(nextest_options(output)))
         contract_container(root, output, command)
-        command(sys.executable, "e2e/local-acceptance/release_acceptance.py",
-                "--output", str(output / "release-executor"))
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -285,11 +283,14 @@ def run(name, root, output, base, execute):
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
-        ".github/local-acceptance/native_guard.py": "ac3c83b231e731196394387920b18c1d950fd525093a038eee4afca613db92b8",
+        ".github/local-acceptance/native_guard.py": "0339203b8d92282754548373a5f0eab29488a65adcd531a5142b2729830020ad",
         ".github/local-acceptance/nextest_guard.py": "fb8dde64608e19c0f451eb1ee40d83789844bf07ed884fb14a4aed52a0d45f36",
-        ".github/scripts/local_acceptance.py": "abcdad4a31825138ae23cd40236737d2fdf7ef084603b7c97786efaffc208b3c",
+        ".github/scripts/local_acceptance.py": "ac0f2dcb26dac451f9ca06018ac7168ac6c3677fa2c14148f38ce420cb706da9",
         "e2e/local-acceptance/run.py": "694523a1d700eb305686f769ec4ec8749df70d8d7caee1f5af99bd70aaacc425",
         "e2e/local-acceptance/resume_acceptance.py": "53ad5fcbe81f0c01a3b09316b7b03c162a2d54a49a24445c6da75558ee169ce9",
+        "e2e/local-acceptance/release_acceptance.py": "21272f1e5b701410af25238eae2b354badf1f8aa2a193ec6698071e9ef037164",
+        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
+        "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
     }
 
 
@@ -308,6 +309,17 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
                                "Update its protected pin before running acceptance.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents)
+    # The release fixture imports this module. Bind the exact branch it executes
+    # without a cyclic byte hash of a file containing its own execution pins.
+    spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    helper.ROOT = root
+    expected = "850ce58521ea0b9f2079da64db3e775154796bac5ca5ac030462a2d22af46bd1"
+    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
+        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
     return policy_root / ".github/local-acceptance/native_guard.py"
 
 

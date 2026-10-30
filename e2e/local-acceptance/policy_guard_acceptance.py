@@ -44,7 +44,7 @@ def main():
     # Copy the policy directories, then let the real Git contract select its own inputs.
     contents = {
         path.relative_to(SOURCE).as_posix(): path.read_bytes()
-        for directory in [SOURCE / ".github", SOURCE / "spec", SOURCE / "e2e/local-acceptance"]
+        for directory in [SOURCE / ".github", SOURCE / "spec", SOURCE / "e2e/local-acceptance", SOURCE / "e2e/startup"]
         for path in directory.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     }
@@ -114,6 +114,9 @@ def main():
     native = json.loads((output / "positive/nextest-executor/receipt.json").read_text())
     assert native["repository"] == str(candidate)
     assert [row["command"]["exit_code"] for row in native["checks"]] == [0, 100, 4]
+    release = json.loads((output / "positive/release-executor/result.json").read_text())
+    assert release["status"] == "PASS"
+    assert release["commands"][-1]["exit_code"] == 101
     for path, digest in pins.items():
         actual = output / "native-guard-policy" / path
         assert hashlib.sha256(actual.read_bytes()).hexdigest() == digest, path
@@ -161,6 +164,7 @@ def main():
         "actual_legacy_missing_path_refused": negative,
         "actual_signed_resume_smoke": smoke,
         "actual_native_child_and_failure_and_empty_selection": native,
+        "actual_release_driver_and_wrong_artifact_refusal": release,
         "only_owner_fingerprint_changes": fingerprint_results,
         "unprotected_input_refused_before_commands": True,
         "old_candidate_head_and_checkout_unchanged": True,

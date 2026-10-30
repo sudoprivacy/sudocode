@@ -29,6 +29,10 @@ def main():
     # The isolated tool snapshot needs Git discovery for fixture-environment cleanup.
     commands = [helper.run_command(["git", "init", "--initial-branch=main", str(SOURCE)],
                                   output, output / "snapshot-git.log")]
+    configured = helper.git("config", "--get", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()
+    if configured:
+        commands.append(helper.run_command(["git", "config", "localAcceptance.vsdevcmd", configured],
+                                          SOURCE, output / "toolchain-config.log"))
     commands.append(helper.run_command([
         sys.executable, str(SOURCE / "e2e/local-acceptance/resume_acceptance.py"), "--host-smoke",
     ], SOURCE, output / "resume-smoke.log"))
@@ -38,10 +42,14 @@ def main():
         "--executable", str(args.executable), "--source-receipt", str(args.source_receipt),
         "--options", args.options,
     ], SOURCE, output / "nextest.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/release_acceptance.py"),
+        "--output", str(output / "release-executor"),
+    ], SOURCE, output / "release.log"))
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,
     }, indent=2))
-    print(f"Native policy guard passed: signed recovery smoke and real nextest enforcement; {output}")
+    print(f"Native policy guard passed: signed recovery, nextest and release enforcement; {output}")
 
 
 if __name__ == "__main__":

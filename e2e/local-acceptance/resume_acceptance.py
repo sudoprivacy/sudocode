@@ -192,6 +192,11 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert events() == before_events + ["native-v1"]
     assert not (failed / "envelope.json").exists()
     checkpoint = json.loads((failed / "checkpoint/receipt.json").read_text())
+    failed_attempt = json.loads((failed / "attempt.json").read_text())
+    assert failed_attempt["outcome"] == "failure" and failed_attempt["elapsed_seconds"] > 0
+    assert failed_attempt["started_at"] <= failed_attempt["finished_at"]
+    assert checkpoint["timing"]["started_at"] == failed_attempt["started_at"]
+    assert checkpoint["timing"]["started_at"] <= checkpoint["timing"]["checks_finished_at"] <= failed_attempt["finished_at"]
     assert checkpoint["kind"] == "completed-profiles"
     assert set(checkpoint["checks"]) == {"native-workspace"}
     assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
@@ -220,6 +225,12 @@ def verify_resume(directory, source, command, host_smoke=False):
     completed = fixture / "completed-after-failure"
     check(completed, failed)
     receipt = json.loads((completed / "receipt.json").read_text())
+    completed_attempt = json.loads((completed / "attempt.json").read_text())
+    assert completed_attempt["outcome"] == "success" and completed_attempt["elapsed_seconds"] > 0
+    assert receipt["timing"]["started_at"] > failed_attempt["finished_at"]
+    assert receipt["timing"]["first_recorded_started_at"] == failed_attempt["started_at"]
+    assert receipt["timing"]["prior_timing_available"] is True
+    assert completed_attempt["first_recorded_started_at"] == failed_attempt["started_at"]
     assert events() == before_events + ["native-v1", "render-v2"]
     assert receipt["resumed_from"]["profiles"] == ["native-workspace"]
     assert receipt["checks"]["native-workspace"] == checkpoint["checks"]["native-workspace"]
@@ -239,7 +250,10 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Reusing signed native-workspace" in result.stdout, result.stdout
     assert events() == before_events + ["native-v1", "render-v2", "render-v2"]
-    assert json.loads((automatic / "receipt.json").read_text())["resumed_from"]["profiles"] == ["native-workspace"]
+    automatic_receipt = json.loads((automatic / "receipt.json").read_text())
+    assert automatic_receipt["resumed_from"]["profiles"] == ["native-workspace"]
+    assert automatic_receipt["timing"]["first_recorded_started_at"] == failed_attempt["started_at"]
+    assert "LOCAL_ACCEPTANCE_TIMING=" in result.stdout and "LOCAL_ACCEPTANCE_OPERATION_TIMING=" in result.stdout
     print("PASS: actual later failure preserves completed signed profiles; partial notes and wrong SSH purpose cannot pass; explicit/automatic resume reruns only unfinished work")
 
 

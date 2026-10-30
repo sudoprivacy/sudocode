@@ -643,10 +643,12 @@ def check(args):
 
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
-    policy_ref = args.policy_ref
+    policy_ref = value("rev-parse", args.policy_ref)
+    base_ref = value("rev-parse", args.base)
     # A candidate cannot replace its required command definitions unnoticed.
-    check_contract_changes(head, args.base, policy_ref)
-    base = value("merge-base", args.base, head)
+    check_contract_changes(head, base_ref, policy_ref)
+    base = value("merge-base", base_ref, head)
+    print(f"Local acceptance inputs: head={head[:12]} base={base[:12]} policy={policy_ref[:12]}", flush=True)
     needed = selected(load_policy(policy_ref), changed_paths(base, head))
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
@@ -667,6 +669,9 @@ def check(args):
     spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Each invocation loads a fresh module. Keep the dispatcher's existing API
+    # so container-only context does not invalidate unrelated native receipts.
+    module.run.execution_refs = (policy_ref, head)
     results = {}
     for name in needed:
         print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
@@ -688,7 +693,7 @@ def check(args):
     subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", NAMESPACE, str(payload)], check=True)
     envelope = {"signer": identity, "payload": base64.b64encode(payload.read_bytes()).decode(),
                 "signature": base64.b64encode(signature.read_bytes()).decode()}
-    verify_envelope(envelope, head, args.base, policy_ref)
+    verify_envelope(envelope, head, base_ref, policy_ref)
     (output / "envelope.json").write_bytes(canonical(envelope))
     if args.publish:
         publish(head, envelope, args.remote)

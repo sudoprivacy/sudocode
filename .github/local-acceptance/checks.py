@@ -149,7 +149,12 @@ def run(name, root, output, base, execute):
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
             benchmark(name, root, output, base, command, target)
         else:
-            container(name, root, output, base, command, execute)
+            try:
+                policy_ref, candidate_ref = run.execution_refs
+            except AttributeError:
+                policy_ref = candidate_ref = None
+            container(name, root, output, base, command, execute,
+                      policy_ref=policy_ref, candidate_ref=candidate_ref)
     else:
         raise RuntimeError(f"Unknown mandatory acceptance check: {name}")
     if not results:
@@ -168,14 +173,30 @@ def snapshot(root, ref, destination):
             stream.extractall(destination, filter="data")
 
 
-def container(name, root, output, base, command, execute):
-    state = Path.home() / ".cache/sudocode-local-acceptance/linux"
+def container_storage():
+    return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
+
+
+def container(name, root, output, base, command, execute, policy_ref, candidate_ref):
+    import hashlib
+
+    state, lease_volume = container_storage()
     state.mkdir(parents=True, exist_ok=True)
-    image = "sudocode-local-acceptance:1"
     # The container leases its reusable checkouts and targets exclusively;
     # dependency downloads remain shared across profiles.
-    protected = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=root).decode().strip()
+    def revision(ref):
+        return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
+
+    protected = revision(policy_ref or "origin/main")
+    candidate = revision(candidate_ref or "HEAD")
+    policy = json.loads(subprocess.check_output(["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
+    reference = revision(policy["baseline_commit"] if name == "rendering" else base)
+    sources = output / "inputs"
+    sources.mkdir()
+    for label, ref in [("candidate", candidate), ("baseline", reference), ("trusted", protected)]:
+        snapshot(root, ref, sources / label)
     context = output / "image-context"
+    context_hash = hashlib.sha256()
     for source, destination in [
         (".github/local-acceptance/Dockerfile", "Dockerfile"),
         ("e2e/terminal-resize/package.json", "e2e/terminal-resize/package.json"),
@@ -183,15 +204,20 @@ def container(name, root, output, base, command, execute):
     ]:
         path = context / destination
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root))
-    command("docker", "build", "--tag", image, str(context), extra={"DOCKER_BUILDKIT": "1"})
-    policy = json.loads(subprocess.check_output(["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
-    reference = policy["baseline_commit"] if name == "rendering" else base
-    sources = output / "inputs"
-    sources.mkdir()
-    snapshot(root, "HEAD", sources / "candidate")
-    snapshot(root, reference, sources / "baseline")
-    snapshot(root, protected, sources / "trusted")
+        contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
+        path.write_bytes(contents)
+        context_hash.update(destination.encode() + b"\0" + contents + b"\0")
+    image = f"sudocode-local-acceptance:{context_hash.hexdigest()[:24]}"
+    image_receipt = output / "image-id.txt"
+    command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+            extra={"DOCKER_BUILDKIT": "1"})
+    image_id = image_receipt.read_text().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
+    (output / "container-provenance.json").write_text(json.dumps({
+        "candidate": candidate, "baseline": reference, "policy": protected,
+        "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
+    }, indent=2))
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
@@ -201,8 +227,8 @@ def container(name, root, output, base, command, execute):
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
             "--mount", f"type=bind,source={state},target=/state",
-            "--mount", "type=volume,source=sudocode-acceptance-benchmark-lease,target=/locks",
-            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image,
+            "--mount", f"type=volume,source={lease_volume},target=/locks",
+            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
 

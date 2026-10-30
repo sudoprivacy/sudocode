@@ -51,12 +51,15 @@ def main():
                          for path in relevant
                          if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
                          for rule in daemon_inputs)
-    benchmark = any(path in {".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile",
-                            ".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
-                            ".github/workflows/rust-ci.yml",
-                            "e2e/local-acceptance/benchmark_targets_acceptance.py"} for path in paths)
+    executor_inputs = {".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile",
+                       ".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
+                       ".github/workflows/rust-ci.yml"}
+    benchmark = any(path in executor_inputs | {"e2e/local-acceptance/benchmark_targets_acceptance.py"}
+                    for path in paths)
+    container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
+                    for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
-              "benchmark_required": str(benchmark).lower()}
+              "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower()}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")

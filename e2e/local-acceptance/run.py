@@ -54,7 +54,7 @@ def scope_acceptance(directory):
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
 
-    def expect_scope(event_name, event, live, daemon):
+    def expect_scope(event_name, event, live, daemon, benchmark=False):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -65,6 +65,7 @@ def scope_acceptance(directory):
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert f"live_required={str(live).lower()}" in output.read_text()
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+        assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -94,7 +95,10 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False),
              ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True),
              ("rust/crates/pty-harness/src/lib.rs", True, True),
-             ("e2e/shared-services/check.py", False, True)]
+             ("e2e/shared-services/check.py", False, True),
+             (".github/local-acceptance/checks.py", False, False),
+             (".github/scripts/local_acceptance.py", False, False),
+             ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False)]
     for index, (path, live, daemon) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -112,7 +116,9 @@ def scope_acceptance(directory):
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
-            expect_scope(event_name, event, live, daemon)
+            expect_scope(event_name, event, live, daemon, path in {
+                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"})
     # Each real Git diff contains only one formerly unguarded ignored-test input.
     for path, required in [
         (".github/local-acceptance/checks.py", {"native-guard", "native-resize", "rendering", "browser"}),
@@ -271,15 +277,23 @@ def enforcement_acceptance():
         (work / ".github/workflows/local-acceptance-publish.yml").write_text("# Fixture trusted publisher\n")
         (work / ".github/local-acceptance/checks.py").write_text(
             'import sys\n'
+            'def nested_python():\n'
+            '    return sys.executable\n'
+            'def shared_python():\n'
+            '    return nested_python()\n'
+            'def browser_only_helper():\n'
+            '    return "unused browser helper v1"\n'
             'def run(name, root, output, base, execute):\n'
             '    if name == "native-sdk":\n'
-            '        return [execute([sys.executable, "-c", '
+            '        return [execute([shared_python(), "-c", '
             '"from pathlib import Path; text=Path(\'sdk/typescript/input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
             'root, output / "sdk-process.log")]\n'
-            '    return [execute([sys.executable, "-c", '
+            '    if name in {"rendering", "browser"}:\n'
+            '        raise RuntimeError(browser_only_helper())\n'
+            '    return [execute([shared_python(), "-c", '
             '"import os; from pathlib import Path; assert os.environ.get(\'NO_COLOR\') is None, \'NO_COLOR inherited into acceptance child\'; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
             'root, output / "actual-process.log"), '
-            'execute([sys.executable, "-c", "import os; assert os.environ.get(\'NO_COLOR\') == \'1\', \'explicit color opt-out was lost\'"], '
+            'execute([shared_python(), "-c", "import os; assert os.environ.get(\'NO_COLOR\') == \'1\', \'explicit color opt-out was lost\'"], '
             'root, output / "explicit-optout.log", {"NO_COLOR": "1"})]\n'
         )
         (work / "spec").mkdir()
@@ -327,6 +341,9 @@ def enforcement_acceptance():
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
         assert len(receipt["checks"]["real-process"]) == 2
         assert receipt["checks"]["real-process"][1]["exit_code"] == 0
+
+        from profile_compat_acceptance import verify_profile_compatibility
+        verify_profile_compatibility(directory, work, command)
 
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production

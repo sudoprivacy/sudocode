@@ -15,8 +15,16 @@
         "e2e/local-acceptance/**",
         "spec/local_acceptance*.json",
         ".github/workflows/local-acceptance*.yml",
+        ".github/workflows/acp-client.yml",
         ".github/scripts/ci_input_scope.py"
       ]
+    },
+    "native-sdk": {
+      "include": [
+        "sdk/typescript/**",
+        ".github/workflows/acp-client.yml"
+      ],
+      "targets": ["linux-x64", "linux-arm64", "macos", "windows"]
     },
     "native-workspace": {
       "include": [

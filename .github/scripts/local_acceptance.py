@@ -9,12 +9,14 @@ No candidate code is executed by the GitHub verification job.
 import argparse
 import ast
 import base64
+import copy
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -71,16 +73,197 @@ def contract_hash(ref):
     return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
 
 
+def executor_source(ref):
+    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+    return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
+
+
 def commands_hash(ref):
     # Scheduling, publication and selection edits do not change a completed
     # command's evidence. Bind actual executors/images, then require the current
     # selected check set to be covered. New commands still require a real run.
-    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
-    function = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
-    executor = "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
     paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
-    return sha(canonical({"executor": sha(executor.encode()), **{p: sha(tracked(ref, p)) for p in paths}}))
+    return sha(canonical({"executor": sha(executor_source(ref).encode()),
+                          **{p: sha(tracked(ref, p)) for p in paths}}))
+
+
+def profile_ast_value(value):
+    """Serialize semantic AST fields independently of Python's dump formatting."""
+    if isinstance(value, ast.AST):
+        return {"node": type(value).__name__, "fields": {
+            name: profile_ast_value(field) for name, field in ast.iter_fields(value)
+            if field is not None and not (isinstance(field, list) and not field)
+        }}
+    if isinstance(value, list):
+        return [profile_ast_value(item) for item in value]
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, complex):
+        return {"complex": [value.real, value.imag]}
+    if value is Ellipsis:
+        return {"ellipsis": True}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise RuntimeError(f"Unsupported acceptance AST value: {type(value).__name__}")
+
+
+def profile_commands_hashes(ref, names):
+    """Bind each literal dispatch branch and all common code without importing it."""
+    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
+    executor = sha(executor_source(ref).encode())
+    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    result = {}
+    for name in names:
+        projected = copy.deepcopy(module)
+        dispatcher = next(node for node in projected.body
+                          if isinstance(node, ast.FunctionDef) and node.name == "run")
+        parameter = dispatcher.args.args[0].arg
+
+        def project(node):
+            test = node.test if isinstance(node, ast.If) else None
+            if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
+                    or test.left.id != parameter or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq)
+                    or len(test.comparators) != 1 or not isinstance(test.comparators[0], ast.Constant)
+                    or not isinstance(test.comparators[0].value, str)):
+                return [node]
+            tail = project(node.orelse[0]) if len(node.orelse) == 1 else node.orelse
+            if test.comparators[0].value != name:
+                return tail
+            node.orelse = tail
+            return [node]
+
+        # If the dispatcher rewrites its profile parameter, its branches may
+        # cease to be disjoint. Keep the whole module in that conservative case.
+        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                         for node in ast.walk(dispatcher))
+        if not reassigned:
+            dispatcher.body = [child for node in dispatcher.body for child in project(node)]
+        result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
+    return result
+
+
+def reachable_profile_commands_hashes(ref, names):
+    """Keep import effects and bind helpers reachable from each selected dispatch."""
+    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
+    executor = sha(executor_source(ref).encode())
+    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    result = {}
+    # Reflection can find a function without a static Name reference. Retain
+    # the complete module rather than guessing which code it might execute.
+    reflection_names = {"globals", "locals", "vars", "dir", "eval", "exec", "getattr", "__import__", "__builtins__"}
+    reflected = any((isinstance(node, ast.Name) and node.id in reflection_names)
+                    or (isinstance(node, ast.Attribute) and node.attr in reflection_names
+                        | {"__dict__", "__globals__", "modules", "f_globals", "f_locals", "_getframe", "get_objects"})
+                    for node in ast.walk(module))
+    for name in names:
+        projected = copy.deepcopy(module)
+        dispatcher = next(node for node in projected.body
+                          if isinstance(node, ast.FunctionDef) and node.name == "run")
+        parameter = dispatcher.args.args[0].arg
+
+        def project(node):
+            test = node.test if isinstance(node, ast.If) else None
+            if (not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name)
+                    or test.left.id != parameter or len(test.ops) != 1 or len(test.comparators) != 1):
+                return [node]
+            expected = test.comparators[0]
+            if isinstance(expected, ast.Constant) and isinstance(expected.value, str):
+                values = [expected.value]
+            elif isinstance(expected, (ast.Set, ast.List, ast.Tuple)) and all(
+                    isinstance(item, ast.Constant) and isinstance(item.value, str) for item in expected.elts):
+                values = [item.value for item in expected.elts]
+            else:
+                return [node]
+            operation = test.ops[0]
+            if isinstance(operation, (ast.Eq, ast.NotEq)) and isinstance(expected, ast.Constant):
+                matched = name == expected.value
+            elif isinstance(operation, (ast.In, ast.NotIn)) and not isinstance(expected, ast.Constant):
+                matched = name in values
+            else:
+                return [node]
+            if isinstance(operation, (ast.NotEq, ast.NotIn)):
+                matched = not matched
+            return [child for item in (node.body if matched else node.orelse) for child in project(item)]
+
+        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                         for node in ast.walk(dispatcher))
+        if not reflected and not reassigned:
+            dispatcher.body = [child for node in dispatcher.body for child in project(node)]
+            functions = {node.name: node for node in projected.body if isinstance(node, ast.FunctionDef)}
+            # Decorators/default expressions can execute at import time. Keep
+            # those definitions even if the selected branch does not call them.
+            roots = [node for node in projected.body if not isinstance(node, ast.FunctionDef)
+                     or node.name == "run" or node.decorator_list or node.args.defaults or node.args.kw_defaults
+                     or node.returns is not None or any(argument.annotation is not None for argument in (
+                         node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                         + [argument for argument in [node.args.vararg, node.args.kwarg] if argument]))
+                     or getattr(node, "type_params", [])]
+            pending = roots[:]
+            retained = {node.name for node in roots if isinstance(node, ast.FunctionDef)}
+            while pending:
+                references = {node.id for node in ast.walk(pending.pop())
+                              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+                for reference in references & functions.keys() - retained:
+                    retained.add(reference)
+                    pending.append(functions[reference])
+            projected.body = [node for node in projected.body
+                              if not isinstance(node, ast.FunctionDef) or node.name in retained]
+        result[name] = sha(canonical({"version": 2, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
+    return result
+
+
+def attested_commands_ref(receipt):
+    """Find immutable source that matches the signed complete execution hash."""
+    candidates = ([receipt["commands_ref"]] if "commands_ref" in receipt
+                  else [receipt["head"], receipt["base"]])
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not re.fullmatch(r"[a-f0-9]{40}", candidate):
+            continue
+        try:
+            if receipt.get("commands_sha256") == commands_hash(candidate):
+                return candidate
+        except (RuntimeError, subprocess.CalledProcessError, StopIteration):
+            continue
+    return None
+
+
+def compatible_profile_commands(receipt, policy_ref, required):
+    recorded = receipt.get("profile_commands_sha256")
+    try:
+        previous = attested_commands_ref(receipt)
+        if "commands_ref" in receipt and previous is None:
+            return False
+        if "profile_commands_sha256" not in receipt:
+            if previous is None:
+                return False
+            recorded = profile_commands_hashes(previous, required)
+        if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
+            return False
+        current = profile_commands_hashes(policy_ref, required)
+        if "reachable_profile_commands_sha256" not in receipt and all(
+                recorded.get(name) == current[name] for name in required):
+            return True
+        # A changed recipe is recovered from attested source, never from a
+        # supplied hash alone. This also validates both maps on new receipts.
+        if previous is None:
+            return False
+        original = profile_commands_hashes(previous, required)
+        if not all(recorded.get(name) == original[name] for name in required):
+            return False
+        original_reachable = reachable_profile_commands_hashes(previous, required)
+        if "reachable_profile_commands_sha256" in receipt:
+            reachable = receipt["reachable_profile_commands_sha256"]
+            if not isinstance(reachable, dict) or any(
+                    reachable.get(name) != original_reachable[name] for name in required):
+                return False
+        expected = reachable_profile_commands_hashes(policy_ref, required)
+        return all(original_reachable[name] == expected[name] for name in required)
+    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError):
+        return False
 
 
 def changed_paths(base, head):
@@ -381,7 +564,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
+    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
+    if not required:
+        raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+    if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
+            or (not compatible and "commands_sha256" in receipt)):
+        compatible = compatible_profile_commands(receipt, policy_ref, required)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and
@@ -394,9 +583,6 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
     if not compatible:
         raise RuntimeError("Acceptance commands changed; rerun local acceptance")
     check_contract_changes(head, base, policy_ref)
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
-    if not required:
-        raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     checks = receipt.get("checks", {})
     if not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
@@ -488,6 +674,9 @@ def check(args):
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
                "commands_sha256": commands_hash(policy_ref),
+               "commands_ref": value("rev-parse", policy_ref),
+               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
+               "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
                "finished_at": int(time.time()), "checks": results, "plan": plan}
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))

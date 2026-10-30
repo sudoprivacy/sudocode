@@ -208,6 +208,8 @@ scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Process-inspection permission denials are counted in command evidence and leave
+the native command running; unrelated observer errors still fail acceptance.
 Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.

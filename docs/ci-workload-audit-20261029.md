@@ -504,10 +504,23 @@ capacity unused. See [GitHub-hosted runner specifications](https://docs.github.c
 
 ## ACP package runs
 
-Keep integration and portable installed-package journeys on all four PR hosts.
+The initial consolidation kept integration and portable installed-package
+journeys on all four PR hosts. This duplicated the author's local platform and
+left SDK execution outside the signed local profile. The subsequent SDK
+integration fixes that gap: `native-sdk` is mandatory for SDK inputs, its actual
+commands run before push, and the shared acceptance plan schedules only missing
+targets in CI. Linux x64 and ARM64 remain distinct required targets; macOS and
+Windows use OS-level source coverage. SDK-only jobs need Node, not a Rust setup.
 Main still builds and packs its exact merged revision on each host, retaining
 the commit-bound manifest, archive integrity receipt and uploaded artifacts.
 It does not repeat the same integration journeys. As with native queue reuse,
 an interaction unique to merged changes is outside that repeated runtime
-coverage. Explicit runs retain integration; a new PR/ref head cancels an
-obsolete package run. No scenario or distribution platform is deleted.
+coverage. Explicit runs retain integration; a new PR/ref head cancels obsolete
+acceptance runs. No scenario or distribution platform is deleted.
+
+The plan is printed by the hook (including when reusing a valid receipt), signed
+with the command results, and reused by both the read-only CI gate and status
+publisher. CI summaries show each check/target assignment; `Local acceptance`'s
+status description exposes the host split to `gh` and API clients directly.
+Missing SDK commands and mismatched signed plans are refusals. A passing source
+receipt explicitly leaves installation and deployed-system acceptance unproven.

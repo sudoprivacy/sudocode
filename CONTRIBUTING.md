@@ -186,8 +186,10 @@ The hook runs applicable real checks before a branch push. A Windows author runs
 the Windows workspace, resize, release and service checks locally; CI runs Linux
 and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
 author runs Linux locally; CI runs Windows and macOS. Co-host release verification
-follows the same host split when its inputs change. Each supported OS remains
-covered; this does not claim every CPU architecture is exercised on every PR.
+follows the same host split when its inputs change. SDK changes additionally
+require both Linux x64 and ARM64: a Linux author supplies only their own CPU
+target, and CI supplies the other. Each supported OS remains covered; macOS and
+Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
@@ -208,7 +210,9 @@ otherwise the runner discovers Visual Studio or uses the existing Developer shel
 A signed Git note binds the successful command list and log hashes to the exact
 commit, tree, diff base, policy and native host. The hook publishes that note
 before the branch. GitHub's read-only metadata job verifies the signature against
-public keys enrolled on main and selects the missing hosts. Missing, failed,
+public keys enrolled on main and selects the missing hosts. The SDK profile runs
+the actual `npm ci`, `npm test` and runtime packaging commands locally and in CI;
+an older preflight-only receipt cannot satisfy it. Missing, failed,
 stale or tampered receipts block the Local acceptance required check. A signature
 authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
@@ -255,24 +259,29 @@ Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
 
-The protected runner's `acceptance_plan` is the shared source for local/CI
-responsibilities. Local check output includes `ACCEPTANCE_PLAN` JSON, signed
-receipts bind that plan, and the required `Local acceptance` status names the
-local and CI targets. Preview the current selection without running or signing
-tests with `python .github/scripts/local_acceptance.py plan`. These receipts
-establish source coverage; deployment and enrollment require separate acceptance.
+`spec/local_acceptance.json` selects required targets, and the protected runner's
+`acceptance_plan` drives both the hook and CI. Push output and CI summaries print
+the local/CI responsibilities and an `ACCEPTANCE_PLAN` JSON record. The signed
+receipt retains that plan; GitHub's required `Local acceptance` status description
+also names the local host and complementary CI targets, so `gh`/API clients see
+the split directly. To preview it without executing or attesting tests, run:
 
-The metadata gate currently emits both the legacy native `checks`/`platforms`
-fields and a complete `matrix`; existing native job names remain stable. This
-allows protected metadata code to land before a later workflow/profile switch.
-SDK tests still use the package workflow's four hosts until that switch lands;
-the planner's support for SDK targets alone does not enable the mandatory profile.
+```bash
+python .github/scripts/local_acceptance.py plan
+```
 
-The ACP package workflow runs integration journeys on all four PR hosts. Main
-still builds and packages its exact merged revision on those hosts, while
-reusing the PR's integration result. A newer head cancels an obsolete package
-run for the same PR/ref. Unrelated workflow edits do not start three Rust cache
+The ACP package workflow no longer repeats PR integration tests on the author's
+platform. Ready PRs use the mandatory shared acceptance gate; drafts do not claim
+those skipped jobs passed. Main still builds and packages its exact merged
+revision on all four hosts. Explicit package dispatch remains diagnostic and
+does not replace a signed receipt. A newer head cancels obsolete acceptance runs.
+Unrelated workflow edits do not start three Rust cache
 publishers; Rust changes and changes to the publisher itself still do.
+
+These receipts establish source-test coverage. They do not prove installation,
+authenticated enrollment, frontend lifecycle or deployed cross-machine delivery.
+Do not request another author's manual platform rerun to duplicate CI; separately
+scoped deployment acceptance still exercises the actual installed system.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
@@ -782,9 +791,11 @@ sections and cached rendering; session snapshots survive compact/resume/fork.
 Do not refresh file-derived context as a side effect of compaction.
 
 Run `SCODE_TEST_BACKEND=mock cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety`
-from `rust/` after changing these paths. CI includes both suites in the full
-workspace run: Linux PR feedback, then Linux, macOS and Windows on the integrated
-merge-queue commit. These PTYs capture HTTP bodies after
+from `rust/` after changing these paths. The native workspace profile includes
+both suites: the author runs their own platform and complementary CI supplies
+the remaining hosts according to the protected acceptance plan. The merge queue
+carries those exact-head results instead of repeating the workspace suites.
+These PTYs capture HTTP bodies after
 provider conversion and compare the stable prefix through retries, discovery,
 compaction, forks, and restart. They also exercise explicit prompt replacement.
 The scoped-context cases verify config roots, CLI package discovery, layered
@@ -854,9 +865,10 @@ relevant) `README.md`. When adding a new crate:
 Before opening a PR:
 
 - [ ] Branch off the latest `main`.
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- [ ] `cargo test --workspace` passes locally.
+- [ ] The managed hook ran every check selected by the protected acceptance
+      plan on the author's platform and produced a valid exact-head receipt.
+      Use its printed commands and local/CI responsibilities; do not infer a
+      full Rust build from this checklist for documentation or SDK-only edits.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen

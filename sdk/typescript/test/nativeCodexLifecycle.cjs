@@ -13,6 +13,7 @@ const options = parseArgs({ options: {
   codex: {type:'string'}, output: {type:'string'}, case: {type:'string',default:'idle'},
   driver: {type:'string'}, 'temp-root': {type:'string'}, 'mcp-context': {type:'boolean'}, autojoin: {type:'boolean'},
   'managed-package-root': {type:'string'}, help: {type:'boolean'},
+  'operator-context': {type:'string'},
 } }).values;
 if (options.help) {
   console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>]');
@@ -41,6 +42,18 @@ assert(Array.isArray(driverArgv) && driverArgv.length && driverArgv.every(arg=>t
   'A real TUI driver is required; Windows must provide --driver JSON argv. No protocol-front-end fallback.');
 const root = fs.mkdtempSync(path.join(options['temp-root'] ?? os.tmpdir(), 'cx-life-'));
 fs.chmodSync(root, 0o700);
+const operatorContext=options['operator-context']?JSON.parse(fs.readFileSync(options['operator-context'],'utf8')):undefined;
+if(operatorContext){
+  assert(options.autojoin && operatorContext.fixtureOnly===true && path.isAbsolute(operatorContext.sdkGrant)
+    && fs.realpathSync(root).startsWith(fs.realpathSync(operatorContext.fixtureRoot)+path.sep),
+    'Real enrollment requires the enclosing private native Node fixture; never adopt a live user installation');
+}
+const readAutojoinClaims=()=>operatorContext
+  ? fs.readdirSync(path.join(root,'bindings')).filter(file=>file.endsWith('.json'))
+    .map(file=>JSON.parse(fs.readFileSync(path.join(root,'bindings',file),'utf8'))).filter(binding=>binding.state==='ready')
+    .map(({actor,operationId,threadId,workspace})=>({version:1,actor,operationId,threadId,workspace}))
+    .sort((a,b)=>a.threadId.localeCompare(b.threadId))
+  : fs.readFileSync(path.join(root,'claims.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
 const isolatedHome = path.join(root,'home');
 const workspace = path.join(root,'work');
 fs.mkdirSync(isolatedHome);fs.mkdirSync(workspace);
@@ -74,7 +87,7 @@ const receipt = {
   })),
   nativeSha256: crypto.createHash('sha256').update(fs.readFileSync(configured.codexArgv[0])).digest('hex'),
   nativeVersion: execFileSync(configured.codexArgv[0], ['--version'], {encoding:'utf8',env:childEnv}).trim(),
-  isolation: {root, isolatedCodexHome:true, liveEndpointUsed:false, nexusUsed:false, liveConfigChanged:false},
+  isolation: {root, isolatedCodexHome:true, liveEndpointUsed:false, nexusUsed:!!operatorContext, liveConfigChanged:false},
   requests: [], observerNotifications: [], modelRequests: [], stages: [], tuiProcesses: [],
 };
 const bounded = (promise, ms, label) => Promise.race([promise, new Promise((_, reject) => {
@@ -152,7 +165,9 @@ const closeTui = async own => {
       fs.writeFileSync(autojoinConfig,JSON.stringify({version:1,mode:'codex-autojoin',
         native:{codexArgv:configured.codexArgv,socket:selectedSocket,env:childEnv},
         stateDirectory:path.join(root,'bindings'),auditLog:path.join(root,'autojoin-audit.jsonl'),peers:[],
-        enrollmentArgv:[process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
+        enrollmentArgv:operatorContext
+          ? [process.execPath,path.resolve(__dirname,'../dist/server.cjs'),'--enroll-codex','--config',operatorContext.sdkGrant]
+          : [process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
         endpoint:{port,token:crypto.randomBytes(32).toString('hex')},
       }),{mode:0o600});
     }
@@ -262,22 +277,46 @@ const closeTui = async own => {
       }
       if(options.autojoin){
         const claims=path.join(root,'claims.jsonl');
-        await waitUntil(()=>fs.existsSync(claims)&&fs.readFileSync(claims,'utf8').trim().split('\n').length===2,15000,'two independent autojoin claims');
-        receipt.autojoinClaims=fs.readFileSync(claims,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+        await waitUntil(()=>operatorContext
+          ? fs.existsSync(path.join(root,'bindings'))&&readAutojoinClaims().length===2
+          : fs.existsSync(claims)&&fs.readFileSync(claims,'utf8').trim().split('\n').length===2,15000,'two independent autojoin claims');
+        receipt.autojoinClaims=readAutojoinClaims();
         assert.equal(new Set(receipt.autojoinClaims.map(claim=>claim.actor)).size,2,'same-cwd roots need distinct Agents');
         assert.deepEqual(receipt.autojoinClaims.map(claim=>claim.threadId).sort(),receipt.inventory.slice().sort());
         assert(receipt.autojoinClaims.every(claim=>!claim.actor.includes(claim.threadId)),'Agent name is not a transcript id');
-        const log=path.join(root,'acp.jsonl');
-        await waitUntil(()=>fs.existsSync(log)&&fs.readFileSync(log,'utf8').trim().split('\n').filter(line=>JSON.parse(line).method==='_sudocode/a2a/agent_list').length===2,10000,'authenticated ACP identity checks');
-        receipt.autojoinAcp=fs.readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
-        assert.equal(new Set(receipt.autojoinAcp.map(call=>call.pid)).size,2,'one receiver owner per distinct Agent');
-        assert(!receipt.autojoinAcp.some(call=>call.method==='session/prompt'),'autojoin must not start the inner model');
+        if(operatorContext){
+          await waitUntil(()=>receipt.autojoinClaims.every(claim=>{
+            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
+            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
+            return fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
+              .filter(row=>row.direction==='outgoing'&&row.message?.method==='_sudocode/a2a/agent_list').length>=2;
+          }),10000,'actual creator and owner ACP identity checks');
+          receipt.realNodeEnrollment=receipt.autojoinClaims.map(claim=>{
+            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
+            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
+            const calls=fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
+              .filter(row=>row.direction==='outgoing').map(row=>row.message.method);
+            assert.equal(calls.filter(method=>method==='session/new').length,1);
+            assert.equal(calls.filter(method=>method==='session/load').length,1);
+            assert(!calls.includes('session/prompt'));
+            assert.equal(binding.workspaceBinding.operationId,claim.operationId);
+            assert.notEqual(binding.acp.canonicalWorkspace,binding.canonicalWorkspace);
+            return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,sessionId:profile.acpSessionId,calls};
+          });
+          assert(!fs.existsSync(path.join(workspace,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
+        }else{
+          const log=path.join(root,'acp.jsonl');
+          await waitUntil(()=>fs.existsSync(log)&&fs.readFileSync(log,'utf8').trim().split('\n').filter(line=>JSON.parse(line).method==='_sudocode/a2a/agent_list').length===2,10000,'authenticated ACP identity checks');
+          receipt.autojoinAcp=fs.readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+          assert.equal(new Set(receipt.autojoinAcp.map(call=>call.pid)).size,2,'one receiver owner per distinct Agent');
+          assert(!receipt.autojoinAcp.some(call=>call.method==='session/prompt'),'autojoin must not start the inner model');
+        }
         receipt.autojoinTools=[];
         for(const claim of receipt.autojoinClaims){
           // Actual native MCP routing overwrites a conflicting caller _meta.
           const result=await request(observer,'native MCP routing','mcpServer/tool/call',{
             threadId:claim.threadId,server:'nexus_auto',tool:'scode_send',
-            arguments:{to:'fixture-peer',message:'Exact automatic root 🧪\n\u0000',summary:'root binding'},
+            arguments:{to:operatorContext?.recipient??'fixture-peer',message:'Exact automatic root 🧪\n\u0000',summary:'root binding'},
             _meta:{threadId:receipt.autojoinClaims.find(other=>other!==claim).threadId},
           });
           assert.equal(result.isError,false,JSON.stringify(result));
@@ -289,6 +328,7 @@ const closeTui = async own => {
         assert.equal(receipt.autojoinOwner.length,1,'racing MCP entries elect one observer/receiver owner');
         receipt.autojoinCommandAudit=audit.filter(row=>row.phase==='returned');
         assert.equal(receipt.autojoinCommandAudit.length,2);
+        assert.equal(new Set(receipt.autojoinCommandAudit.map(row=>row.pid)).size,2,'distinct actual receiver processes execute the two roots');
         assert(receipt.autojoinCommandAudit.every(row=>receipt.autojoinClaims.some(claim=>
           row.nativeThreadId===claim.threadId&&row.nativeAudit.actor===claim.actor)));
         assert.equal(receipt.modelRequests.length,0,'autojoin must not start the native model');
@@ -352,15 +392,21 @@ const closeTui = async own => {
         assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'Resume must add zero model requests');
         receipt.resumeAdditionalModelRequests=0;
         if(options.autojoin){
-          const after=fs.readFileSync(path.join(root,'claims.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+          const after=readAutojoinClaims();
           assert.deepEqual(after,receipt.autojoinClaims,'resume must not issue another Agent or operation');
           const claim=after.find(claim=>claim.threadId===restored.id);
           const result=await request(observer,'resumed native MCP routing','mcpServer/tool/call',{
             threadId:restored.id,server:'nexus_auto',tool:'scode_send',
-            arguments:{to:'fixture-peer',message:'Resumed exact Agent 🧪',summary:'resume binding'},
+            arguments:{to:operatorContext?.recipient??'fixture-peer',message:'Resumed exact Agent 🧪',summary:'resume binding'},
           });
           assert.equal(result.isError,false,JSON.stringify(result));
           assert.equal(JSON.parse(result.content[0].text).routing.sender,claim.actor);
+          if(operatorContext){
+            const expected=receipt.realNodeEnrollment.find(row=>row.threadId===restored.id);
+            const returned=fs.readFileSync(path.join(root,'autojoin-audit.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line))
+              .filter(row=>row.phase==='returned'&&row.nativeThreadId===restored.id).at(-1);
+            assert.equal(returned.nativeAudit.sessionId,expected.sessionId,'resume keeps the original real ACP SID');
+          }
           receipt.autojoinResume={actor:claim.actor,threadId:restored.id,result};
           assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'resumed direct send adds no inference');
         }
@@ -381,7 +427,7 @@ const closeTui = async own => {
       }
       receipt.result='PASS';
       receipt.notProven=[...(seededResume?[]:['existing-history resume']),...(cancelledResume?['completed assistant-history resume']:[]),
-        'automatic authenticated Nexus enrollment',...(process.platform==='win32'?[]:['Windows actual TUI/default endpoint']),
+        ...(operatorContext?[]:['automatic authenticated Nexus enrollment']),...(process.platform==='win32'?[]:['Windows actual TUI/default endpoint']),
         'current production private frontend migration','all Codex application launch modes'];
       return;
     }

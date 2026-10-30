@@ -37,6 +37,56 @@ debug assertions. Their shared environment keeps Cargo cache inputs aligned.
 Release resource acceptance retains its normal release profile. Browser
 measurements run through the changed-input local Docker profile.
 
+## End-to-end acceptance metric
+
+The primary target is at most 10% of the comparable historical arithmetic means
+for candidate CI trigger to first failed job and final-candidate CI trigger to
+merge. Include queueing, same-head retries and merge queue. Record mandatory
+local acceptance separately so moving work cannot hide a local bottleneck.
+Runner-minutes and execution counts are supporting measurements.
+
+The provisional September 29–October 29 Rust source/build cohort contains 419
+failed candidate heads averaging 32.252 minutes to first failure and 200 merged
+PRs averaging 185.261 minutes from their final candidate's CI trigger to merge.
+The corresponding targets are 3.225 and 18.526 minutes. Scope comes from final
+PR diffs; open outcomes are censored and same-head human idle time remains in
+merge elapsed time. These are elapsed means, not the older completion medians.
+
+Early post-rollout observations through October 30 00:29 UTC contain 17 merged
+CI/test/documentation heads averaging 4.215 minutes and seven failed heads
+averaging 1.488 minutes. There is no comparable completed production Rust sample
+in that cohort. This does not establish the overall target. One subsequent
+local acceptance waited 6,913.983 seconds for the benchmark lease and eventually
+failed a real terminal exit check; that incomplete run is not a fast pass.
+
+## Browser build reuse and selected execution evidence
+
+The browser profile builds its release CLI and both integration drivers against
+the same canonical candidate checkout and target directory. The independent
+baseline stays separate. Copy production binaries before test builds, because
+dev dependency features can change the CLI binary in Cargo's output directory.
+Rendering keeps its independent trusted driver. This reduces the seven target
+trees across both profiles to five; actual full-profile savings still need
+measurement. No workloads, sample counts, budgets or product cases are removed.
+
+`benchmark_targets_acceptance.py` executes the production browser builder with
+real Cargo, npm and native fixture drivers in private state. It checks distinct
+baseline/candidate results, dev feature unification, immutable measured binaries,
+both observer stages and Cargo-fresh viewport dependencies. Restoring separate
+driver targets makes that check fail. CI runs it only for changed executor,
+image, fixture or workflow inputs on the PR; queue/main reuse that execution.
+These are infrastructure checks and earn no product journey coverage credit.
+
+Selected execution fingerprints retain module import effects, process execution,
+images and the helpers reached by the selected dispatcher. Reflection or a
+rewritten profile parameter retains the complete module conservatively. A
+browser-only helper edit can therefore preserve unchanged native evidence.
+New receipts bind both fingerprint recipes to an immutable `commands_ref` and
+the complete signed command hash. Existing recipes are recovered only from their
+actual attested source. Real Git pushes and SSH notes exercise old/new receipt
+formats, unused and transitive helpers, changed shared/executor/image inputs,
+required profiles, reflection, malformed hashes and invalid source references.
+
 ## Measured timing and duplicate-test review
 
 The month contains 540 successful PR heads with all three original native

@@ -24,8 +24,8 @@ jobs:
     runs-on: windows-latest
     outputs:
       needed: ${{ steps.proof.outputs.needed }}
-      checks: ${{ steps.proof.outputs.checks }}
-      platforms: ${{ steps.proof.outputs.platforms }}
+      matrix: ${{ steps.proof.outputs.matrix }}
+      policy_ref: ${{ steps.proof.outputs.policy_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,15 +42,17 @@ jobs:
         run: python .github/local-acceptance/gate.py
 
   native:
-    name: Complement local host (${{ matrix.os }})
+    name: ${{ matrix.name }}
     needs: proof
     if: needs.proof.outputs.needed == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout }}
+    defaults:
+      run:
+        working-directory: candidate
     strategy:
       fail-fast: true
-      matrix:
-        os: ${{ fromJSON(needs.proof.outputs.platforms) }}
+      matrix: ${{ fromJSON(needs.proof.outputs.matrix) }}
     env:
       # Match the shared publisher's cache key. The trusted executor sets its
       # one-job/incremental limits only on compiler subprocesses, after restore.
@@ -62,25 +64,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # Ordinary PRs use protected main. Exact-head maintainer contract
+          # authorization permits the newly verified executor and new checks.
+          ref: ${{ needs.proof.outputs.policy_ref }}
           path: .trusted-acceptance
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.family == 'native'
         with:
           components: clippy, rustfmt
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - uses: Swatinem/rust-cache@v2
+        if: matrix.family == 'native'
         with:
-          workspaces: rust -> target
+          workspaces: candidate/rust -> target
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false
@@ -88,14 +95,20 @@ jobs:
         run: python -m pip install psutil jsonschema
       - name: Run the same native commands on the missing platform
         env:
-          ACCEPTANCE_NATIVE_CHECKS: ${{ needs.proof.outputs.checks }}
+          ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
           ACCEPTANCE_BASE: ${{ github.event.pull_request.base.sha }}
           ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
-        run: python .trusted-acceptance/.github/local-acceptance/cross_platform.py
+        run: python ../.trusted-acceptance/.github/local-acceptance/cross_platform.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: cross-platform-${{ matrix.os }}
+          name: cross-platform-${{ matrix.family }}-${{ matrix.os }}
           path: ${{ runner.temp }}/local-acceptance
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: matrix.family == 'sdk' && success()
+        with:
+          name: scode-acp-${{ matrix.os }}-${{ github.event.pull_request.head.sha }}
+          path: candidate/sdk/typescript/artifacts/*
+          if-no-files-found: error

@@ -26,8 +26,21 @@ def execute(command, cwd, log, env=None):
     })
 
 
-for name in os.environ["ACCEPTANCE_NATIVE_CHECKS"].split():
+native_checks = os.environ["ACCEPTANCE_NATIVE_CHECKS"].split()
+root, output = Path.cwd(), Path(os.environ["ACCEPTANCE_OUTPUT"])
+for name in native_checks:
     if not name.startswith("native-"):
         raise RuntimeError("Only native profiles may execute in the complementary CI job")
-    checks.run(name, Path.cwd(), Path(os.environ["ACCEPTANCE_OUTPUT"]) / name,
+
+if os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true":
+    # Preserve the former Windows job's protection against mock-server sockets
+    # exhausting the default ephemeral range while old sockets are in TIME_WAIT.
+    execute(["netsh", "int", "ipv4", "set", "dynamicport", "tcp", "start=10000", "num=55535"],
+            root, output / "host-setup/000.log")
+    execute(["netsh", "int", "ipv4", "show", "dynamicport", "tcp"],
+            root, output / "host-setup/001.log")
+    os.environ["RUST_TEST_NOCAPTURE"] = "1"
+
+for name in native_checks:
+    checks.run(name, root, output / name,
                os.environ["ACCEPTANCE_BASE"], execute)

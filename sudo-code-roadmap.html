@@ -230,8 +230,13 @@ local. GitHub verifies enrolled public keys and freshness before scheduling the
 missing platforms. Signatures authenticate an enrolled author's attestation;
 they do not remotely attest machine execution. Missing or stale evidence blocks
 the required <code>Local acceptance</code> check. Existing PRs use the protected
-runner without needing a cosmetic merge. Acceptance-policy edits require a
-maintainer-reviewed bootstrap.</p>
+runner without needing a cosmetic merge. A protected contract edit prints an
+executable <code>contract-update</code> command through the installed runner.
+An enrolled repository maintainer or authorized agent runs the exact candidate
+checks and publishes separate, exact-head authorization for the rule change.
+The read-only gate verifies current authority and both contract hashes; signed
+results and complementary native hosts remain required. This authorization is
+not a test pass and does not require the end user personally to inspect code.</p>
 
 <p>Full rendering A/A and A/B, painted browser and viewport performance checks
 run automatically in local Docker for changed production or measurement inputs.
@@ -291,6 +296,33 @@ commit-bound package artifacts for its merged revision, reusing the PR's
 integration result. Obsolete package heads cancel within the same PR/ref.
 Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
 publisher changes still check for new dependency/toolchain/image keys.</p>
+<p>Cold cache publishers compile library/bin test targets to retain dev dependencies
+but omit standalone integration executables that the dependency cache discards.
+Full native acceptance still compiles and runs those journeys. The three host
+pools, production release warming and 10 GB quota remain; warm cache hits already
+skip this work. This removes redundant compilation, with no coverage reduction.</p>
+<p>Local benchmark snapshots retain identical source bytes and modes at their
+canonical paths, allowing Cargo to reuse valid artifacts. Changed bytes get fresh
+mtimes; unexpected sources and cached entry links are removed. The exclusive Linux
+lease remains and reports blocking waits in the execution log. Real Git/Cargo
+regressions check freshness, stale archives, tampering, permissions and mutual
+exclusion. Product workloads, budgets, sample counts and coverage are unchanged.</p>
+<p>Browser release and integration drivers share the same canonical candidate
+checkout and build directory. The baseline stays independent, and the copied
+production binary remains fixed across dev-feature test builds. Rendering retains
+its trusted driver; the two profiles use five target trees instead of seven.
+Real Cargo/npm/native-driver infrastructure acceptance checks freshness, binary
+identity and both observer stages when executor inputs change, once on the PR.
+It adds no product journey coverage. Selected execution fingerprints bind actual
+helper dependencies; unchanged native evidence survives browser-only helper edits.
+Old signed recipes require recoverable attested source, while changed used helpers,
+shared execution or images still invalidate their affected evidence.</p>
+<p>The acceptance target uses arithmetic mean CI-trigger-to-first-failure and
+final-candidate-CI-trigger-to-merge, including queues and reruns. The provisional
+Rust source/build historical means are 32.252 minutes (419 failed heads) and
+185.261 minutes (200 merged PRs), giving targets of 3.225 and 18.526 minutes.
+Mandatory local acceptance is reported separately. Early lightweight PR results
+and fewer runner minutes do not prove the comparable production target.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
 suite executions does not halve the feature surface or earn additional coverage.

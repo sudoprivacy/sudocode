@@ -37,6 +37,56 @@ debug assertions. Their shared environment keeps Cargo cache inputs aligned.
 Release resource acceptance retains its normal release profile. Browser
 measurements run through the changed-input local Docker profile.
 
+## End-to-end acceptance metric
+
+The primary target is at most 10% of the comparable historical arithmetic means
+for candidate CI trigger to first failed job and final-candidate CI trigger to
+merge. Include queueing, same-head retries and merge queue. Record mandatory
+local acceptance separately so moving work cannot hide a local bottleneck.
+Runner-minutes and execution counts are supporting measurements.
+
+The provisional September 29–October 29 Rust source/build cohort contains 419
+failed candidate heads averaging 32.252 minutes to first failure and 200 merged
+PRs averaging 185.261 minutes from their final candidate's CI trigger to merge.
+The corresponding targets are 3.225 and 18.526 minutes. Scope comes from final
+PR diffs; open outcomes are censored and same-head human idle time remains in
+merge elapsed time. These are elapsed means, not the older completion medians.
+
+Early post-rollout observations through October 30 00:29 UTC contain 17 merged
+CI/test/documentation heads averaging 4.215 minutes and seven failed heads
+averaging 1.488 minutes. There is no comparable completed production Rust sample
+in that cohort. This does not establish the overall target. One subsequent
+local acceptance waited 6,913.983 seconds for the benchmark lease and eventually
+failed a real terminal exit check; that incomplete run is not a fast pass.
+
+## Browser build reuse and selected execution evidence
+
+The browser profile builds its release CLI and both integration drivers against
+the same canonical candidate checkout and target directory. The independent
+baseline stays separate. Copy production binaries before test builds, because
+dev dependency features can change the CLI binary in Cargo's output directory.
+Rendering keeps its independent trusted driver. This reduces the seven target
+trees across both profiles to five; actual full-profile savings still need
+measurement. No workloads, sample counts, budgets or product cases are removed.
+
+`benchmark_targets_acceptance.py` executes the production browser builder with
+real Cargo, npm and native fixture drivers in private state. It checks distinct
+baseline/candidate results, dev feature unification, immutable measured binaries,
+both observer stages and Cargo-fresh viewport dependencies. Restoring separate
+driver targets makes that check fail. CI runs it only for changed executor,
+image, fixture or workflow inputs on the PR; queue/main reuse that execution.
+These are infrastructure checks and earn no product journey coverage credit.
+
+Selected execution fingerprints retain module import effects, process execution,
+images and the helpers reached by the selected dispatcher. Reflection or a
+rewritten profile parameter retains the complete module conservatively. A
+browser-only helper edit can therefore preserve unchanged native evidence.
+New receipts bind both fingerprint recipes to an immutable `commands_ref` and
+the complete signed command hash. Existing recipes are recovered only from their
+actual attested source. Real Git pushes and SSH notes exercise old/new receipt
+formats, unused and transitive helpers, changed shared/executor/image inputs,
+required profiles, reflection, malformed hashes and invalid source references.
+
 ## Measured timing and duplicate-test review
 
 The month contains 540 successful PR heads with all three original native
@@ -96,6 +146,37 @@ Workflow-only changes unrelated to `ci-dependency-cache.yml` do not start its
 three host jobs. Rust pushes still check for a new dependency/toolchain/image
 key, and changes to the publisher still exercise it. Cache-hit correctness and
 source validation are unchanged.
+
+Local benchmark checkouts preserve the mtimes of identical source bytes and
+executable modes, so Cargo can reuse valid artifacts at their existing canonical
+source/target paths. Changed bytes receive fresh mtimes even when their Git archive
+is old. Unexpected cached sources are removed and cached entry links are replaced
+without traversing them. The existing exclusive Linux lease and separate legacy
+namespace continue to protect shared state. Blocked callers now print the lock
+path and report their acquisition wait in the execution log.
+
+The mandatory real Git/Cargo fixture verifies unchanged-input freshness, changed
+old archives, same-size/mtime tampering, and an injected-source compiler failure
+followed by successful cleanup. Linux also checks executable permissions, links
+outside the cached checkout and two processes competing for the actual lease.
+These are infrastructure acceptance checks, not additional product journey credit.
+Actual multi-PR waiting-time savings still require observation.
+
+On a cache miss, the publisher compiles library/bin test targets with the same
+mailbox feature, retaining normal and dev dependencies. It omits standalone
+integration executables: the default cache action removes workspace artifacts
+before saving them, so those links do not warm an additional dependency. Native
+acceptance still builds and runs the complete selected journeys. Production
+release dependency warming, all three host pools and the 10 GB quota remain.
+See the action's [cache contract](https://github.com/Swatinem/rust-cache#cache-details).
+
+A real Windows Cargo fixture built both selections from separate empty targets.
+The reduced selection retained an integration-only dev dependency outside the
+workspace and the enabled library feature, while eliminating five integration
+executables. The fixture validates selection, not a percentage of cloud savings.
+Previously measured 139 CLI integration compilations consumed 302.26 compiler
+seconds in one single-worker desktop build; this is an opportunity estimate,
+not a hosted latency reduction. Existing cache hits skip compilation already.
 
 Complementary native jobs use the same cache environment as the main publisher.
 `rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
@@ -423,10 +504,23 @@ capacity unused. See [GitHub-hosted runner specifications](https://docs.github.c
 
 ## ACP package runs
 
-Keep integration and portable installed-package journeys on all four PR hosts.
+The initial consolidation kept integration and portable installed-package
+journeys on all four PR hosts. This duplicated the author's local platform and
+left SDK execution outside the signed local profile. The subsequent SDK
+integration fixes that gap: `native-sdk` is mandatory for SDK inputs, its actual
+commands run before push, and the shared acceptance plan schedules only missing
+targets in CI. Linux x64 and ARM64 remain distinct required targets; macOS and
+Windows use OS-level source coverage. SDK-only jobs need Node, not a Rust setup.
 Main still builds and packs its exact merged revision on each host, retaining
 the commit-bound manifest, archive integrity receipt and uploaded artifacts.
 It does not repeat the same integration journeys. As with native queue reuse,
 an interaction unique to merged changes is outside that repeated runtime
-coverage. Explicit runs retain integration; a new PR/ref head cancels an
-obsolete package run. No scenario or distribution platform is deleted.
+coverage. Explicit runs retain integration; a new PR/ref head cancels obsolete
+acceptance runs. No scenario or distribution platform is deleted.
+
+The plan is printed by the hook (including when reusing a valid receipt), signed
+with the command results, and reused by both the read-only CI gate and status
+publisher. CI summaries show each check/target assignment; `Local acceptance`'s
+status description exposes the host split to `gh` and API clients directly.
+Missing SDK commands and mismatched signed plans are refusals. A passing source
+receipt explicitly leaves installation and deployed-system acceptance unproven.

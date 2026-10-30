@@ -448,6 +448,21 @@ jobs:
         id: scope
         run: python3 .github/scripts/ci_input_scope.py
 
+      - name: Exercise browser build reuse with real Cargo and native drivers
+        # Only changed executor/fixture inputs, once on the PR. Queue/main
+        # reuse this result instead of rebuilding the same tiny fixture.
+        if: github.event_name == 'pull_request' && steps.scope.outputs.benchmark_required == 'true'
+        run: |
+          python3 -m pip install psutil
+          python3 e2e/local-acceptance/benchmark_targets_acceptance.py --output "$RUNNER_TEMP/benchmark-build-reuse"
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'pull_request' && steps.scope.outputs.benchmark_required == 'true'
+        with:
+          name: benchmark-build-reuse
+          path: ${{ runner.temp }}/benchmark-build-reuse
+          if-no-files-found: error
+          retention-days: 7
+
   live-api-smoke:
     needs: one-nexus-vfs-pin
     name: Live API smoke test

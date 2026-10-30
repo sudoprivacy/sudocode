@@ -29,11 +29,13 @@ def fixture_environment():
 FIXTURE_ENV = fixture_environment()
 
 
-def command(*args, cwd, success=True):
+def command(*args, cwd, success=True, error=None):
     result = subprocess.run(list(map(str, args)), cwd=cwd, capture_output=True,
                             text=True, encoding="utf-8", errors="replace", env=FIXTURE_ENV)
     if (result.returncode == 0) != success:
         raise RuntimeError(f"Unexpected exit {result.returncode}: {args}\n{result.stdout}\n{result.stderr}")
+    if error is not None:
+        assert error in result.stderr, result.stderr
     return result.stdout.strip()
 
 
@@ -50,7 +52,7 @@ def scope_acceptance(directory):
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
 
-    def expect_scope(event_name, event, live, daemon, clippy):
+    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -62,6 +64,7 @@ def scope_acceptance(directory):
         assert f"live_required={str(live).lower()}" in output.read_text()
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
+        assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -80,7 +83,10 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True, True),
              ("rust/crates/pty-harness/src/lib.rs", True, True, True),
-             ("e2e/shared-services/check.py", False, True, False)]
+             ("e2e/shared-services/check.py", False, True, False),
+             (".github/local-acceptance/checks.py", False, False, False),
+             (".github/scripts/local_acceptance.py", False, False, False),
+             ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -105,7 +111,9 @@ def scope_acceptance(directory):
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
-            expect_scope(event_name, event, live, daemon, clippy)
+            expect_scope(event_name, event, live, daemon, clippy, path in {
+                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"})
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -135,10 +143,74 @@ def scope_acceptance(directory):
     print("PASS: real Git scopes for PR/push/queue, native test targets, shared fixtures, source rename and explicit dispatch")
 
 
+def plan_acceptance(directory):
+    """Preview actual committed inputs through the public CLI; never attest a fake host."""
+    repository = directory / "plans"
+    command("git", "init", "--initial-branch=main", repository, cwd=directory)
+    command("git", "config", "user.name", "Plan E2E", cwd=repository)
+    command("git", "config", "user.email", "plan@example.invalid", cwd=repository)
+    helper = repository / ".github/scripts/local_acceptance.py"
+    helper.parent.mkdir(parents=True)
+    shutil.copyfile(SOURCE / ".github/scripts/local_acceptance.py", helper)
+    policy = repository / "spec/local_acceptance.json"
+    policy.parent.mkdir()
+    rules = json.loads((SOURCE / "spec/local_acceptance.json").read_text())
+    # The planner must understand a future architecture-specific profile before
+    # the protected workflow/publisher can safely switch to that new matrix.
+    rules["checks"]["native-sdk"] = {"include": ["sdk/typescript/**"],
+        "targets": ["linux-x64", "linux-arm64", "macos", "windows"]}
+    policy.write_text(json.dumps(rules))
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Protected fixture policy", cwd=repository)
+    command("git", "checkout", "-b", "sdk", cwd=repository)
+    source = repository / "sdk/typescript/src/example.ts"
+    source.parent.mkdir(parents=True)
+    source.write_text("export const fixture = true;\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "SDK inputs", cwd=repository)
+
+    def preview(system, architecture, success=True, error=None):
+        output = command(sys.executable, helper, "plan", "--base", "main", "--policy-ref", "main",
+                         "--host", system, "--architecture", architecture, cwd=repository,
+                         success=success, error=error)
+        if success:
+            assert "Preview only" in output
+            return json.loads(next(line.split("=", 1)[1] for line in output.splitlines()
+                                   if line.startswith("ACCEPTANCE_PLAN=")))
+
+    for system, architecture, local in [("macos", "x86_64", "macos"), ("windows", "AMD64", "windows"),
+                                        ("linux", "x86_64", "linux-x64"), ("linux", "aarch64", "linux-arm64")]:
+        plan = preview(system, architecture)
+        assert plan["local_checks"] == ["preflight", "native-sdk"], plan
+        assert plan["local_targets"] == [{"check": "native-sdk", "targets": [local]}], plan
+        assert len(plan["ci"]) == 3, plan
+        assert {target for job in plan["ci"] for target in job["targets"]} == {
+            "macos", "windows", "linux-x64", "linux-arm64"} - {local}, plan
+        assert all(job["family"] == "sdk" and job["checks"] == ["native-sdk"] for job in plan["ci"])
+        assert plan["deployment_verified"] is False
+    preview("linux", "riscv64", success=False, error="Author host does not cover a required target")
+    # Mixed SDK/Rust inputs keep ARM64 SDK coverage without inventing an ARM64
+    # Rust workspace job, and retain every selected native check on the other OS.
+    source = repository / "rust/crates/runtime/src/example.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text("pub const FIXTURE: bool = true;\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Mixed SDK and native inputs", cwd=repository)
+    plan = preview("macos", "x86_64")
+    assert len(plan["ci"]) == 5, plan
+    native = [job for job in plan["ci"] if job["family"] == "native"]
+    assert {job["os"] for job in native} == {"ubuntu-latest", "windows-latest"}
+    assert all(job["name"] == f"Complement local host ({job['os']})" for job in native)
+    expected = {name for name in plan["local_checks"] if name.startswith("native-")} - {"native-sdk"}
+    assert all(set(job["checks"]) == expected for job in native)
+    print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
+
+
 def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
+        plan_acceptance(directory)
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
@@ -157,14 +229,28 @@ def enforcement_acceptance():
         (work / ".github/workflows/local-acceptance-publish.yml").write_text("# Fixture trusted publisher\n")
         (work / ".github/local-acceptance/checks.py").write_text(
             'import sys\n'
+            'def nested_python():\n'
+            '    return sys.executable\n'
+            'def shared_python():\n'
+            '    return nested_python()\n'
+            'def browser_only_helper():\n'
+            '    return "unused browser helper v1"\n'
             'def run(name, root, output, base, execute):\n'
-            '    return [execute([sys.executable, "-c", '
+            '    if name == "native-sdk":\n'
+            '        return [execute([shared_python(), "-c", '
+            '"from pathlib import Path; text=Path(\'sdk/typescript/input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
+            'root, output / "sdk-process.log")]\n'
+            '    if name in {"rendering", "browser"}:\n'
+            '        raise RuntimeError(browser_only_helper())\n'
+            '    return [execute([shared_python(), "-c", '
             '"from pathlib import Path; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
             'root, output / "actual-process.log")]\n'
         )
         (work / "spec").mkdir()
         (work / "spec/local_acceptance.json").write_text(json.dumps({
-            "version": 1, "repository": "acceptance/fixture", "checks": {"real-process": {"include": ["**"]}}
+            "version": 1, "repository": "acceptance/fixture", "checks": {
+                "real-process": {"include": ["**"]}, "native-sdk": {"include": ["sdk/typescript/**"],
+                "targets": ["linux-x64", "linux-arm64", "macos", "windows"]}}
         }))
         key = directory / "device-key"
         command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key), cwd=work)
@@ -204,6 +290,9 @@ def enforcement_acceptance():
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
 
+        from profile_compat_acceptance import verify_profile_compatibility
+        verify_profile_compatibility(directory, work, command)
+
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production
         # branch-protection bypass.
@@ -223,6 +312,36 @@ def enforcement_acceptance():
         assert linked.resolve().parent == directory.resolve()
         command("git", "worktree", "remove", linked, cwd=work)
 
+        # Both stronger and weaker candidate policies must fail the actual
+        # push with actionable diagnostics, without publishing a branch/note.
+        command("git", "checkout", "-b", "contract-change", cwd=work)
+        policy_file = work / "spec/local_acceptance.json"
+        original_policy = json.loads(policy_file.read_text())
+        before_notes = command("git", "ls-remote", "origin", "refs/notes/local-acceptance", cwd=work)
+        for label, checks in [
+            ("add-check", {**original_policy["checks"], "additional-check": {"include": ["**"]}}),
+            ("remove-checks", {}),
+        ]:
+            policy_file.write_text(json.dumps({**original_policy, "checks": checks}))
+            command("git", "add", ".", cwd=work)
+            command("git", "commit", "-m", label, cwd=work)
+            rejected = subprocess.run(["git", "push", "origin", "contract-change"], cwd=work,
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", env=FIXTURE_ENV)
+            assert rejected.returncode != 0, rejected.stdout + rejected.stderr
+            assert 'Changed protected files: ["spec/local_acceptance.json"]' in rejected.stderr, rejected.stderr
+            assert "Trusted policy: origin/main (" in rejected.stderr, rejected.stderr
+            assert "including added checks" in rejected.stderr, rejected.stderr
+            assert 'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin' in rejected.stderr, rejected.stderr
+            assert "maintain/admin actor" in rejected.stderr, rejected.stderr
+            assert "not a request for the end user to review code" in rejected.stderr, rejected.stderr
+            assert "CONTRIBUTING.md#acceptance-contract-changes" in rejected.stderr, rejected.stderr
+            assert not command("git", "ls-remote", "origin", "refs/heads/contract-change", cwd=work)
+            assert command("git", "ls-remote", "origin", "refs/notes/local-acceptance", cwd=work) == before_notes
+        command("git", "checkout", "feature", cwd=work)
+        from contract_update_acceptance import verify_contract_update
+        verify_contract_update(directory, work, FIXTURE_ENV)
+        print("PASS: added/removed checks both block real pushes with diagnostics and unchanged remote refs")
+
         # Both a new commit and unsigned changes to a previously valid receipt
         # must fail real SSH verification rather than borrowing an older pass.
         command("git", "commit", "--allow-empty", "-m", "New head needs a new receipt", cwd=work)
@@ -241,6 +360,45 @@ def enforcement_acceptance():
         data.write_text(json.dumps(forged))
         command("git", "notes", "--ref=local-acceptance", "add", "-f", "-F", data, new_head, cwd=work)
         command(sys.executable, helper, "verify", cwd=work, success=False)
+
+        # Adding an SDK input must execute its selected command before the
+        # actual push can succeed. These are process fixtures, not product SDK
+        # acceptance; the production profile runs the real npm suite separately.
+        sdk = work / "sdk/typescript/input.txt"
+        sdk.parent.mkdir(parents=True)
+        sdk.write_text("fail")
+        command("git", "add", ".", cwd=work)
+        command("git", "commit", "-m", "SDK fixture must pass its own process", cwd=work)
+        command("git", "push", "origin", "feature", cwd=work, success=False)
+        assert command("git", "ls-remote", "origin", "refs/heads/feature", cwd=work).startswith(new_head)
+        sdk.write_text("pass")
+        command("git", "add", ".", cwd=work)
+        command("git", "commit", "-m", "SDK fixture process passes", cwd=work)
+        pushed = command("git", "push", "origin", "feature", cwd=work)
+        assert "ACCEPTANCE_PLAN=" in pushed and "native-sdk" in pushed, pushed
+        sdk_head = command("git", "rev-parse", "HEAD", cwd=work)
+        command("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance", cwd=work)
+        sdk_note = json.loads(command("git", "notes", "--ref=local-acceptance", "show", sdk_head, cwd=work))
+        original = sdk_note["attestations"]["fixture"]
+        for omit_sdk in [True, False]:
+            payload = json.loads(base64.b64decode(original["payload"]))
+            if omit_sdk:
+                del payload["checks"]["native-sdk"]
+            else:
+                payload["plan"]["ci"] = []
+            data.write_text(json.dumps(payload))
+            signature = data.with_suffix(".json.sig")
+            if signature.exists():
+                signature.unlink()
+            command("ssh-keygen", "-Y", "sign", "-f", key, "-n", "sudocode-local-acceptance", data, cwd=work)
+            sdk_note["attestations"]["fixture"] = {"signer": "fixture",
+                "payload": base64.b64encode(data.read_bytes()).decode(),
+                "signature": base64.b64encode(signature.read_bytes()).decode()}
+            data.write_text(json.dumps(sdk_note))
+            command("git", "notes", "--ref=local-acceptance", "add", "-f", "-F", data, sdk_head, cwd=work)
+            command(sys.executable, helper, "verify", cwd=work, success=False,
+                    error="Acceptance check set differs" if omit_sdk else "Signed acceptance plan does not match")
+        print("PASS: actual SDK process blocks push; valid signatures cannot omit SDK coverage or alter the plan")
 
         # A dirty source file cannot be silently included in tested inputs.
         (work / "input.txt").write_text("uncommitted")

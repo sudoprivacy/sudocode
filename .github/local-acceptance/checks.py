@@ -137,8 +137,8 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
-        print("Local contract validation: native recovery smoke, full private Docker decision matrix, "
-              "then native nextest enforcement. No product build or benchmark lease.", flush=True)
+        print("Local contract validation: policy-owned native recovery, nextest and release guards, "
+              "then the full private Docker decision matrix. No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
                                "then retry this push or the printed acceptance command.")
@@ -148,12 +148,18 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
                                f"guard log above. Native smoke and matrix have not started: {error}") from error
-        command(sys.executable, "e2e/local-acceptance/resume_acceptance.py", "--host-smoke")
+        try:
+            policy_ref, _ = run.execution_refs
+        except AttributeError:
+            policy_ref = "origin/main"
+        policy_ref = policy_ref or "origin/main"
+        entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
+        command(sys.executable, str(entry), "--repository", str(root),
+                "--output", str(output / "native-guard"),
+                "--executable", str(nextest_binary(output)),
+                "--source-receipt", str(output / "nextest-source.json"),
+                "--options", json.dumps(nextest_options(output)))
         contract_container(root, output, command)
-        command(sys.executable, "e2e/local-acceptance/nextest.py",
-                "--output", str(output / "nextest-executor"))
-        command(sys.executable, "e2e/local-acceptance/release_acceptance.py",
-                "--output", str(output / "release-executor"))
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -272,6 +278,49 @@ def run(name, root, output, base, execute):
     if not results:
         raise RuntimeError(f"No command ran for required check: {name}")
     return results
+
+
+def native_guard_files():
+    """Bind external tool bytes through the existing executable fingerprint format."""
+    return {
+        ".github/local-acceptance/native_guard.py": "0339203b8d92282754548373a5f0eab29488a65adcd531a5142b2729830020ad",
+        ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
+        ".github/scripts/local_acceptance.py": "31f2384cb23558661d72047686fe37003beca377ef3ed3f567c606a8623f5c6c",
+        "e2e/local-acceptance/run.py": "694523a1d700eb305686f769ec4ec8749df70d8d7caee1f5af99bd70aaacc425",
+        "e2e/local-acceptance/resume_acceptance.py": "4bfa5af7e5e690bcdef13c7cae39665c70ed4ab32ce00b5251c792252da3ec9f",
+        "e2e/local-acceptance/release_acceptance.py": "21272f1e5b701410af25238eae2b354badf1f8aa2a193ec6698071e9ef037164",
+        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
+        "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
+    }
+
+
+def stage_profile_executor(root, policy_ref, name, policy_root):
+    """Materialize one hash-bound native tool set without changing the candidate."""
+    if name != "guard-contract":
+        raise RuntimeError(f"No policy-owned native executor for {name}")
+    for relative, expected in native_guard_files().items():
+        destination = (policy_root / relative).resolve()
+        if not destination.is_relative_to(policy_root.resolve()):
+            raise RuntimeError("Executor input escaped its policy snapshot")
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"Native guard input {relative} changed: SHA256 {actual}. "
+                               "Update its protected pin before running acceptance.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+    # The release fixture imports this module. Bind the exact branch it executes
+    # without a cyclic byte hash of a file containing its own execution pins.
+    spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    helper.ROOT = root
+    expected = "675e6ed7c936ea55908b23950c92500413a957818fe06ad5f7ce9be614f2aa7d"
+    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
+        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
+    return policy_root / ".github/local-acceptance/native_guard.py"
 
 
 def contract_container(root, output, command):

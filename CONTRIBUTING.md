@@ -194,6 +194,9 @@ Actual tagged co-host releases retain their five-platform artifact builds.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when production or measurement inputs change.
+Each invocation builds each image context once and reuses that actual immutable
+image ID across profiles, recording and checking it before reuse. A missing
+captured image fails acceptance; a tag or an unrelated prior build cannot replace it.
 They keep their existing baselines, rounds, assertions and budgets. They have no
 scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local

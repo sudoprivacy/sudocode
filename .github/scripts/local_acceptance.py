@@ -680,6 +680,7 @@ def check(args):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
+    module.run.execution_images = {}
     results = {}
     for name in needed:
         print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)

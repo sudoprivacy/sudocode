@@ -102,7 +102,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     (output / "configuration.json").write_text(json.dumps(configuration, indent=2))
     execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", lease])
 
-    def launch(name, policy_ref, expected, *, swap_image=None):
+    def launch(name, policy_ref, expected, *, swap_image=None, profile="rendering", images_cache=None):
         evidence = output / name
         evidence.mkdir()
         (evidence / "expected.json").write_text(json.dumps(expected))
@@ -123,7 +123,8 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             return json.loads(log.with_suffix(".command.json").read_text())
 
         checks.run.execution_refs = (policy_ref, candidate)
-        checks.run("rendering", root, evidence, protected, execute_profile)
+        checks.run.execution_images = images_cache
+        checks.run(profile, root, evidence, protected, execute_profile)
         provenance = json.loads((evidence / "container-provenance.json").read_text())
         observed = json.loads((evidence / "observed.json").read_text())
         assert observed["sources"] == expected["sources"]
@@ -135,20 +136,33 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         return provenance
 
     try:
+        invocation_images = {}
         first = launch("protected-policy", protected, {"policy": "main-policy", "sources": {
-            "candidate": "candidate-policy", "baseline": "baseline", "trusted": "main-policy"}})
-        second = launch("candidate-policy-ref-and-tag-change", candidate, {"policy": "candidate-policy", "sources": {
-            "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}},
-            swap_image=first["image_id"])
+            "candidate": "candidate-policy", "baseline": "baseline", "trusted": "main-policy"}},
+            images_cache=invocation_images)
+        candidate_expected = {"policy": "candidate-policy", "sources": {
+            "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}}
+        second = launch("candidate-policy-ref-and-tag-change", candidate, candidate_expected,
+            swap_image=first["image_id"], images_cache=invocation_images)
+        builds = sum(docker_operation(row, "build") for row in commands)
+        reused = launch("same-invocation-browser", candidate, candidate_expected,
+                        profile="browser", images_cache=invocation_images)
+        assert sum(docker_operation(row, "build") for row in commands) == builds
+        assert reused["image_reused"] and reused["image_id"] == second["image_id"]
+        assert reused["image_build_receipt"] == second["image_build_receipt"]
+        print("PASS: second profile runs the actual same image after retagging without another registry build", flush=True)
         assert git("rev-parse", "HEAD") == baseline, "Fixture did not actually move HEAD"
         assert git("rev-parse", "origin/main") == baseline, "Fixture did not actually move origin/main"
         tag_id = execute(["docker", "image", "inspect", "--format", "{{.Id}}", second["image_tag"]]).read_text().strip()
-        assert tag_id == first["image_id"] != second["image_id"], "Fixture did not actually replace the tag"
+        first_id = execute(["docker", "image", "inspect", "--format", "{{.Id}}", first["image_id"]]).read_text().strip()
+        second_id = execute(["docker", "image", "inspect", "--format", "{{.Id}}", second["image_id"]]).read_text().strip()
+        assert tag_id == first_id != second_id, "Fixture did not actually replace the tag"
         print("PASS: actual Git ref moves and Docker retag preserve frozen input/image selection", flush=True)
         print("Expected negative case: the following wrong-policy container must be rejected", flush=True)
         try:
             launch("negative-wrong-policy", protected, {"policy": "candidate-policy", "sources": {
-                "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}})
+            "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}},
+            )
         except RuntimeError:
             errors = [Path(row["log"]).read_text(errors="replace") for row in commands
                       if docker_operation(row, "run")]
@@ -156,8 +170,22 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: wrong-policy container rejected by the real input probe", flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
-        result = {"status": "PASS", "cases": 3,
-            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected and candidate policies select their own image/driver/baseline. Actual HEAD/origin/main movement and a real tag replacement cannot change captured inputs. Wrong-policy container is rejected. Infrastructure only; no product benchmark coverage."}
+        # Removing this fixture's now-untagged image must not fall back to the
+        # retagged image or contact the registry to replace a captured build.
+        execute(["docker", "image", "rm", second["image_id"]])
+        builds = sum(docker_operation(row, "build") for row in commands)
+        runs = sum(docker_operation(row, "run") for row in commands)
+        try:
+            launch("negative-missing-built-image", candidate, candidate_expected,
+                   profile="browser", images_cache=invocation_images)
+        except RuntimeError:
+            assert sum(docker_operation(row, "build") for row in commands) == builds
+            assert sum(docker_operation(row, "run") for row in commands) == runs
+            print("PASS: an actually removed cached image fails before running or rebuilding a replacement", flush=True)
+        else:
+            raise AssertionError("A removed immutable image was silently replaced")
+        result = {"status": "PASS", "cases": 5,
+            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected and candidate policies select their own image/driver/baseline. Actual HEAD/origin/main movement and a real tag replacement cannot change captured inputs. A second profile reuses its invocation's actual built image without another build. Wrong-policy and actually removed images are rejected. Infrastructure only; no product benchmark coverage."}
     finally:
         (output / "commands.json").write_text(json.dumps(commands, indent=2))
         # All tags and IDs below were produced by this UUID-labelled fixture.

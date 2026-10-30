@@ -247,8 +247,12 @@ def run(name, root, output, base, execute):
                 policy_ref, candidate_ref = run.execution_refs
             except AttributeError:
                 policy_ref = candidate_ref = None
+            try:
+                images = run.execution_images
+            except AttributeError:
+                images = None
             container(name, root, output, base, command, execute,
-                      policy_ref=policy_ref, candidate_ref=candidate_ref)
+                      policy_ref=policy_ref, candidate_ref=candidate_ref, images=images)
     else:
         raise RuntimeError(f"Unknown mandatory acceptance check: {name}")
     if not results:
@@ -271,9 +275,7 @@ def container_storage():
     return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
 
 
-def container(name, root, output, base, command, execute, policy_ref, candidate_ref):
-    import hashlib
-
+def container(name, root, output, base, command, execute, policy_ref, candidate_ref, images=None):
     state, lease_volume = container_storage()
     state.mkdir(parents=True, exist_ok=True)
     # The container leases its reusable checkouts and targets exclusively;
@@ -301,16 +303,32 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
-    image = f"sudocode-local-acceptance:{context_hash.hexdigest()[:24]}"
+    digest = context_hash.hexdigest()
+    image = f"sudocode-local-acceptance:{digest[:24]}"
     image_receipt = output / "image-id.txt"
-    command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
-            extra={"DOCKER_BUILDKIT": "1"})
-    image_id = image_receipt.read_text().strip()
+    # A check invocation owns this map. Reuse only its actual build result,
+    # never a mutable tag or an image left by another acceptance invocation.
+    cached = images.get(digest) if images is not None else None
+    if cached is None:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+                extra={"DOCKER_BUILDKIT": "1"})
+        image_id = image_receipt.read_text().strip()
+        build_receipt = str(image_receipt)
+    else:
+        image_id, build_receipt = cached["image_id"], cached["build_receipt"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
+    if cached is not None:
+        # Inspect by immutable ID before recording reuse. A missing image must
+        # fail, rather than pulling a tag or silently rebuilding another image.
+        command("docker", "image", "inspect", "--format", "{{.Id}}", image_id)
+        image_receipt.write_text(image_id + "\n")
+    elif images is not None:
+        images[digest] = {"image_id": image_id, "build_receipt": build_receipt}
     (output / "container-provenance.json").write_text(json.dumps({
         "candidate": candidate, "baseline": reference, "policy": protected,
-        "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
+        "image_id": image_id, "image_tag": image, "context_sha256": digest,
+        "image_reused": cached is not None, "image_build_receipt": build_receipt,
     }, indent=2))
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)

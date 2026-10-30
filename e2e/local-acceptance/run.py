@@ -292,6 +292,7 @@ def enforcement_acceptance():
             '    policy_ref, candidate_ref = run.execution_refs\n'
             '    assert policy_ref and len(policy_ref) == 40\n'
             '    assert candidate_ref and len(candidate_ref) == 40\n'
+            '    assert isinstance(run.execution_images, dict)\n'
             '    if name == "native-sdk":\n'
             '        return [execute([shared_python(), "-c", '
             '"from pathlib import Path; text=Path(\'sdk/typescript/input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '

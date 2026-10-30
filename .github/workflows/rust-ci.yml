@@ -81,12 +81,82 @@ jobs:
     with:
       linux_only: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_linux_only }}
 
+  clippy-workspace:
+    # Local/complementary acceptance owns the native suites. Preserve the
+    # stronger all-feature lint contract, including the integrated queue tree.
+    if: >-
+      !inputs.live_only && !inputs.cache_only &&
+      needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' &&
+      (github.event_name == 'merge_group' ||
+       (github.event_name == 'pull_request' && !github.event.pull_request.draft))
+    needs: one-nexus-vfs-pin
+    name: cargo clippy --workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ./.github/actions/setup-protoc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Run workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+
+  integrated-acceptance:
+    # A required job must fail when a dependency fails or is unexpectedly
+    # skipped; GitHub treats a skipped required job as successful.
+    if: always() && github.event_name == 'merge_group'
+    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]
+    name: nexus-A2A live (real daemon)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Require native daemon acceptance and zero workspace warnings
+        env:
+          PIN_RESULT: ${{ needs.one-nexus-vfs-pin.result }}
+          DAEMON_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
+          A2A_RESULT: ${{ needs.a2a-live.result }}
+          CLIPPY_RESULT: ${{ needs.clippy-workspace.result }}
+        run: |
+          set -eu
+          test "$PIN_RESULT" = success
+          require_result() {
+            label=$1 required=$2 actual=$3
+            case "$required" in
+              true) expected=success ;;
+              false) expected=skipped ;;
+              *) echo "::error::Missing $label input decision"; exit 1 ;;
+            esac
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Integrated $label acceptance requires $expected, got $actual"
+              exit 1
+            fi
+          }
+          require_result daemon "$DAEMON_REQUIRED" "$A2A_RESULT"
+          require_result clippy "$CLIPPY_REQUIRED" "$CLIPPY_RESULT"
+
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
     # once, rather than repeating on the PR and on push/main too.
     if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.daemon_required == 'true'
     needs: one-nexus-vfs-pin
-    name: nexus-A2A live (real daemon)
+    name: nexus-A2A journeys (real daemon)
     runs-on: ubuntu-latest
     env:
       SCODE_TEST_BACKEND: mock
@@ -224,6 +294,7 @@ jobs:
       commit: ${{ steps.pin.outputs.commit }}
       live_required: ${{ steps.scope.outputs.live_required }}
       daemon_required: ${{ steps.scope.outputs.daemon_required }}
+      clippy_required: ${{ steps.scope.outputs.clippy_required }}
     defaults:
       run:
         working-directory: .
@@ -269,6 +340,9 @@ jobs:
       - name: Exercise real Git histories
         if: *full_preflight
         run: python3 e2e/pr-history/run.py
+      - name: Exercise queue cancellation completion races
+        if: *full_preflight
+        run: python3 e2e/local-acceptance/queue_maintenance_acceptance.py
       - name: Every committed shell script must be executable
         if: *full_preflight
         shell: bash

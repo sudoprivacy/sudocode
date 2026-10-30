@@ -168,10 +168,10 @@ async function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgen
 export async function runCodexMcpOwner(file: string): Promise<void> {
   const {config,sha256} = readConfig(file);
   const audit = (entry: unknown) => appendFileSync(config.auditLog,JSON.stringify({
-    at:new Date().toISOString(),provenance:'codex-autojoin-owner',...entry as object,
+    ...entry as object,at:new Date().toISOString(),provenance:'codex-autojoin-owner',pid:process.pid,
   })+'\n',{mode:0o600});
   // Audit failure must prevent opening the shared command endpoint.
-  audit({phase:'starting',pid:process.pid,parentPid:process.ppid});
+  audit({phase:'starting',parentPid:process.ppid});
   let network: CodexAutojoin | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
@@ -180,12 +180,12 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   let finish = () => {};
   const finished = new Promise<void>(resolve=>{finish=resolve;});
   const stop = (reason: string) => stopping ??= (async()=>{
-    audit({phase:'stopping',reason,pid:process.pid,agents:network?.status()??[]});
+    audit({phase:'stopping',reason,agents:network?.status()??[]});
     clearTimeout(idleTimer);
     listener.close();
     for(const socket of sockets)socket.destroy();
     await network?.close();
-    audit({phase:'stopped',reason,pid:process.pid});
+    audit({phase:'stopped',reason});
   })().finally(finish);
   const scheduleExit = () => {
     clearTimeout(idleTimer);
@@ -223,11 +223,11 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     })().catch(()=>socket.destroy());
   });
   await claimOwner(listener, config.endpoint.port);
-  audit({phase:'listening',pid:process.pid});
+  audit({phase:'listening'});
   const onTerm = () => {void stop('SIGTERM');};
   const onInt = () => {void stop('SIGINT');};
   const onCrash = (error: Error, origin: string) => {
-    try {audit({phase:'owner_crash',pid:process.pid,origin,error:String(error)});} catch { /* Monitor only. */ }
+    try {audit({phase:'owner_crash',origin,error:String(error)});} catch { /* Monitor only. */ }
   };
   process.once('SIGTERM',onTerm);process.once('SIGINT',onInt);
   process.on('uncaughtExceptionMonitor',onCrash);

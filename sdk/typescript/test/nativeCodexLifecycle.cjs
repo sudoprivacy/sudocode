@@ -524,13 +524,16 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       if(managedPackageRoot && options.autojoin){
         for(const own of tuis)await closeTui(own);
         const pid=receipt.autojoinOwner[0].pid;
+        let ownerExitObservedAt;
         await waitUntil(()=>{
-          try{process.kill(pid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}
+          try{process.kill(pid,0);return false;}catch(error){
+            if(error.code==='ESRCH'){ownerExitObservedAt=new Date().toISOString();return true;}throw error;
+          }
         },15000,'shared owner retirement after native unload');
         const version=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','version'],
           {encoding:'utf8',env:childEnv,timeout:10000}));
         const loaded=(await request(observer,'retirement observation','thread/loaded/list',{})).data;
-        receipt.frontendRetirementObservation={ownerPid:pid,allTuisExitedNormally:true,
+        receipt.frontendRetirementObservation={ownerPid:pid,ownerExitObservedAt,observedAt:new Date().toISOString(),allTuisExitedNormally:true,
           nativeServerStillRunning:version.status==='running',ownerExitedBeforeNativeServer:true,loaded};
         receipt.retirementRemainingThreads=[];
         for(const threadId of loaded){

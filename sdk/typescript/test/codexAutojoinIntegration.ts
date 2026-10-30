@@ -226,6 +226,7 @@ async function main() {
     assert.ok(Date.now()<retirement,'owner did not retire after authoritative root unload');
     await new Promise(resolve=>setTimeout(resolve,50));
   }
+  const retiredOwnerPid=mcpOwnerPid;
   mcpOwnerPid=undefined;
   const lifecycle=fs.readFileSync(path.join(directory,'mcp-audit.jsonl'),'utf8').trim().split('\n')
     .map(line=>JSON.parse(line));
@@ -236,6 +237,8 @@ async function main() {
   assert.equal(lifecycle.find(row=>row.phase==='stopping')?.reason,'no_qualified_native_roots');
   assert.equal(lifecycle.find(row=>row.phase==='stopped')?.reason,'no_qualified_native_roots');
   assert.ok(!lifecycle.some(row=>row.phase==='owner_crash'));
+  assert.ok(lifecycle.filter(row=>row.provenance==='codex-autojoin-owner').every(row=>row.pid===retiredOwnerPid),
+    'every owner event is bound to its actual process');
   const afterRetirement=rows().length;
   const configBytes=fs.readFileSync(mcpConfig);
   const imported=JSON.parse(prepare());

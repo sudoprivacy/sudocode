@@ -139,6 +139,15 @@ owned by `gui-policy.json` and shared by the observer and completeness checks.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same
 deterministic inter-key delays outside timed regions, retained in the report.
+The finite streamed document uses consumer-driven windows: one while history is
+selected, one per measured input, and a final window after input sampling. Each
+window must send new real SSE deltas before the next input. Window count comes
+from the same sampling policy, and chunk size, inter-chunk delay and document
+stay unchanged. Waiting for each window is outside the input timer; it prevents
+slow PNG readback from exhausting the stream before the input journey finishes.
+The selection check additionally waits for new document content in xterm while
+the selection remains active. Reports retain window acknowledgments and wire
+positions; holding only the final stream terminator cannot satisfy this journey.
 Event completion uses a promise instead of frame polling. Raw key, PTY output,
 WebSocket receive and write-callback timestamps remain available for diagnosis;
 cross-process time origins are diagnostic only. Input checks read only the live

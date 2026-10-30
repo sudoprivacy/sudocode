@@ -210,6 +210,31 @@ async function run(config) {
     const selection = await drag(sampling.drag_steps);
     report.samples.drag_frame_ms = selection.samples;
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
+    const streamWindows = inputDelaysMs.length * (sampling.parsed_bursts + sampling.painted_bursts) + 2;
+    const streamDirectory = path.dirname(config.streamWindowPlan);
+    fs.mkdirSync(streamDirectory, { recursive: true });
+    fs.writeFileSync(config.streamWindowPlan, JSON.stringify({ windows: streamWindows }));
+    report.stream_windows = [];
+    let streamWindow = 0, sentChunks = 0;
+    function releaseStreamWindow() {
+      assert(streamWindow < streamWindows, 'more input windows than planned');
+      const index = streamWindow++;
+      fs.writeFileSync(path.join(streamDirectory, `permit-${index}`), 'release');
+      return { index, released_at: performance.now(), wire_before: wireBytes };
+    }
+    async function finishStreamWindow(window) {
+      const sent = path.join(streamDirectory, `sent-${window.index}`);
+      const deadline = performance.now() + 30000;
+      while (!fs.existsSync(sent)) {
+        assert.equal(exitCode, undefined);
+        assert(performance.now() < deadline, 'stream window did not send its deltas');
+        await sleep(10);
+      }
+      const chunks = Number(fs.readFileSync(sent, 'utf8'));
+      assert(Number.isSafeInteger(chunks) && chunks > sentChunks, 'stream window contained no deltas');
+      sentChunks = chunks;
+      report.stream_windows.push({ ...window, finished_at: performance.now(), chunks, wire_after: wireBytes });
+    }
     async function keys(phase) {
       progress(`typing:${phase}`);
       await page.bringToFront();
@@ -231,6 +256,7 @@ async function run(config) {
             const delay = inputDelaysMs[(key + burst) % inputDelaysMs.length];
             draft += 'x';
             await page.evaluate(draft => fixture.armInput(draft), draft);
+            const stream = phase === 'stream' ? releaseStreamWindow() : null;
             if (delay) await sleep(delay);
             const began = performance.now();
             await page.keyboard.type('x');
@@ -245,6 +271,9 @@ async function run(config) {
             } else {
               parseSamples.push(events.parsed - events.keydown);
             }
+            // Outside the input timer: require real network progress before
+            // another key, without racing screenshots against a finite EOF.
+            if (stream) await finishStreamWindow(stream);
           }
           await page.keyboard.press('Control+u');
           await wait(() => fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
@@ -265,12 +294,17 @@ async function run(config) {
     await keys('wait');
     fs.writeFileSync(path.join(config.root, 'stream-release'), 'release');
     const duringStream = await drag(1);
-    await sleep(150);
+    const headingsBefore = await page.evaluate(() => fixture.lines().join('\n').split('LinkHeading').length);
+    const selectionWindow = releaseStreamWindow();
+    await finishStreamWindow(selectionWindow);
+    await page.waitForFunction(count => fixture.lines().join('\n').split('LinkHeading').length > count, headingsBefore);
     assert.equal(await page.evaluate(() => fixture.terminal.getSelection()), duringStream.selected, 'streaming changed the selected history');
     report.streaming_selection_preserved = true;
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
     await keys('stream');
     assert(!fs.existsSync(path.join(config.root, 'prose-ready')), 'stream completed before typing samples');
+    await finishStreamWindow(releaseStreamWindow());
+    assert.equal(streamWindow, streamWindows, 'stream/input window plan was not exhausted');
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await wait(() => fixture.viewport().includes('ctx ') && fixture.lines().join('\n').split('LinkBodyEND.').length >= 3);
     await resources('stream');

@@ -152,6 +152,8 @@ def run(name, root, output, base, execute):
         contract_container(root, output, command)
         command(sys.executable, "e2e/local-acceptance/nextest.py",
                 "--output", str(output / "nextest-executor"))
+        command(sys.executable, "e2e/local-acceptance/release_acceptance.py",
+                "--output", str(output / "release-executor"))
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -207,7 +209,11 @@ def run(name, root, output, base, execute):
         binary = output / ("scode" + suffix)
         shutil.copy2(target / "release" / ("scode" + suffix), binary)
         env["SCODE_TEST_BIN"] = str(binary)
-        cargo("test", "--release", "--locked", "-p", "rusty-sudocode-cli", "--test", "pty_model_stream_close",
+        # Reuse the native workspace's test graph. Only the driver is debug;
+        # SCODE_TEST_BIN still launches the copied normal release executable.
+        print("Release acceptance: the native test driver launches the copied release scode; "
+              "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
+        cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
         command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                 "--report", str(output / "startup.json"))

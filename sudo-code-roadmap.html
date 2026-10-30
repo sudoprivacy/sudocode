@@ -283,6 +283,16 @@ single trials concern infrastructure validation, not production PR latency.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>
+<p>Native release acceptance reuses the workspace test-profile driver, with its
+mailbox feature graph, instead of compiling release dev-dependencies again.
+<code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release
+<code>scode</code>; the stream/resume assertions and 40-sample, 100 ms startup
+budget remain. The driver and its in-process fixture helpers run in the test
+profile, while the tested product process keeps the normal release graph.
+A real Cargo/native-process regression checks warm driver reuse, exact release
+artifact identity and rejection of a debug executable substituted for it.
+This removes a duplicate compilation graph; it does not claim a measured
+end-to-end percentage improvement.</p>
 
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the

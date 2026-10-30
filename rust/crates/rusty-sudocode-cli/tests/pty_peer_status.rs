@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use runtime::agent_mailbox::MailboxEnvelope;
-use runtime::mailbox::{local_pair_root_in, Mailbox};
+use runtime::mailbox::{local_pair_root_in, InboxConvention, Mailbox};
 
 const AGENT: &str = "status-probe";
 const PEER: &str = "status-peer";
@@ -36,6 +36,22 @@ fn screen_shows_all(sess: &mut pty_expect::PtySession, needles: &[&str], budget:
 fn status_reports_the_disk_namespace_and_that_this_session_receives() {
     let env = TestEnv::new("peer-status");
     node_home::pin_agent_name(env.workspace_root(), AGENT);
+    let pair_root = local_pair_root_in(env.config_home());
+    let reader_path = InboxConvention::new(pair_root.to_string_lossy().into_owned())
+        .reader_path(AGENT, PEER, AGENT);
+    std::fs::create_dir_all(std::path::Path::new(&reader_path).parent().unwrap()).unwrap();
+    // An older record's diagnostic deadline grants no ownership. The actual
+    // process lock admits this receiver and its next write keeps durable facts.
+    std::fs::write(
+        &reader_path,
+        serde_json::to_vec(&serde_json::json!({
+            "holder": "previous-process",
+            "lease_expires_at": u64::MAX,
+            "read_offset": 0,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut session = env.spawn_with_env(
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"), ("PAGER", "")],
@@ -81,4 +97,10 @@ fn status_reports_the_disk_namespace_and_that_this_session_receives() {
         "/status never reported {expected:?}\nscreen:\n{}",
         session.render(|s| s.contents())
     );
+    let register: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&reader_path).unwrap()).unwrap();
+    assert!(register.get("lease_expires_at").is_none(), "{register}");
+    let holder = register["holder"].as_str().unwrap();
+    assert!(!holder.is_empty());
+    assert_ne!(holder, "previous-process");
 }

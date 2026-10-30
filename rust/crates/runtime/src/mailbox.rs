@@ -927,16 +927,10 @@ impl Mailbox {
 /// overwrite a newer holder's position.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderRegister {
-    /// The instance tailing this conversation for this agent, empty if the seat
-    /// is free. Deliberately NOT the agent name: two instances of the SAME
-    /// agent are exactly what this has to tell apart.
+    /// Identity of the claim that committed this record. The backend lock
+    /// controls current runtime ownership; this value identifies durable writes.
     #[serde(default)]
-    /// The claim that failed to advance, empty when no reader was held (see
-    /// [`DeliveryStall::ClaimFailed`]).
     pub holder: String,
-    /// Legacy diagnostic deadline; the backend lock controls ownership.
-    #[serde(default)]
-    pub lease_expires_at: u64,
     /// Offset past the last envelope this agent has taken responsibility for.
     #[serde(default)]
     pub read_offset: u64,
@@ -1017,21 +1011,9 @@ fn sleep_unless_aborted(abort: &crate::HookAbortSignal, ms: u64) {
     }
 }
 
-/// A process-and-machine-unique id for one receiver instance.
-///
-/// Uniqueness is the whole requirement: two instances of the same agent must
-/// never mint the same holder, or each reads the other's claim as its own and
-/// both tail the conversation. A pid repeats across machines and a counter
-/// repeats across processes, so both are mixed with a nanosecond clock read.
-/// The clock is entropy here and nothing else — the lease compares deadlines,
-/// never these.
-fn instance_id() -> String {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
+/// A fresh claim identity, independent of clocks, devices and OS PID reuse.
+fn claim_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// A durable cursor guarded by the backend's atomic exclusive lock.
@@ -1058,12 +1040,8 @@ impl ConversationReader {
         else {
             return Ok(None);
         };
-        let Some((cursor, offset)) = crate::cursor_fence::RegisterCursor::claim(
-            backend,
-            self.path,
-            self.holder,
-            now_ms() + READER_LEASE_MS,
-        )?
+        let Some((cursor, offset)) =
+            crate::cursor_fence::RegisterCursor::claim(backend, self.path, self.holder)?
         else {
             return Ok(None);
         };
@@ -1407,7 +1385,7 @@ impl OwnedReader {
         // The lease held. A write that fails now is the register's failure,
         // even if the lease is lost while it is in flight.
         self.cursor
-            .commit(offset, now_ms() + READER_LEASE_MS)
+            .commit(offset)
             .map_err(|message| CommitRefusal {
                 loss: None,
                 message,
@@ -1477,7 +1455,7 @@ impl Mailbox {
                 .convention
                 .reader_path(&self.self_id, peer, &self.self_id),
             backend: self.backend.clone(),
-            holder: instance_id(),
+            holder: claim_id(),
             agent: self.self_id.clone(),
         }
     }

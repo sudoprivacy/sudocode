@@ -222,8 +222,8 @@ impl ResponseArchive for SessionResponseArchive {
             used: Arc::clone(&self.used),
             limit: self.config.max_session_bytes,
         };
-        let recording = SessionResponseRecorder {
-            encoder: Some(GzEncoder::new(output, Compression::fast())),
+        let mut recording = SessionResponseRecorder {
+            encoder: None,
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
             metadata_path,
@@ -239,6 +239,9 @@ impl ResponseArchive for SessionResponseArchive {
             writer.check().map_err(io::Error::other)?;
             recording.write_metadata("recording", false)?;
         }
+        // Keep the compressor's large buffer out of the initial metadata I/O.
+        // Slow storage must not retain one for every pending capture.
+        recording.encoder = Some(GzEncoder::new(output, Compression::fast()));
         Ok(Box::new(recording))
     }
 }

@@ -67,10 +67,11 @@ def verify_snapshot_replacements(directory, inputs):
         log = logs / f"{len(list(logs.glob('*.log'))):03d}.log"
         executor.run_command(["cargo", "build", "--locked", "--manifest-path", str(candidate / "Cargo.toml"),
                               "--target-dir", str(target), "--message-format=json"], directory, log)
-        messages = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+        messages = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("{")]
         binaries = [row for row in messages if row.get("reason") == "compiler-artifact" and row.get("executable")]
         assert len(binaries) == 1, binaries
         binary = target / "debug" / ("acceptance-cache-probe.exe" if os.name == "nt" else "acceptance-cache-probe")
+        assert Path(binaries[0]["executable"]).resolve() == binary.resolve(), "Cargo artifact paths must round-trip as UTF-8"
         return subprocess.check_output([str(binary)], cwd=candidate).decode().strip(), binaries[0]["fresh"]
 
     for marker in ["one", "two"]:
@@ -167,7 +168,7 @@ def verify_cache_lease(directory):
             waiter = subprocess.Popen([sys.executable, "-c", waiter_code], stdout=waiter_log, stderr=subprocess.STDOUT)
             processes.append(waiter)
             deadline = time.monotonic() + 10
-            while "Waiting for the local benchmark cache lease" not in (directory / "waiter.log").read_text():
+            while "Waiting for the local benchmark cache lease" not in (directory / "waiter.log").read_text(encoding="utf-8", errors="replace"):
                 assert waiter.poll() is None and time.monotonic() < deadline, "Blocked caller did not explain its wait"
                 time.sleep(0.02)
             assert not acquired.exists(), "Second process entered the leased checkout concurrently"
@@ -191,5 +192,5 @@ def verify_snapshot_cache(directory):
 
 
 if __name__ == "__main__":
-    with tempfile.TemporaryDirectory(prefix="scode-cache-acceptance-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="scode-cache-acceptance-中文-") as temporary:
         verify_snapshot_cache(Path(temporary))

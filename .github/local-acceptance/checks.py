@@ -2,7 +2,9 @@
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,85 @@ import tempfile
 import time
 import urllib.request
 import zipfile
+
+
+def nextest_binary(output):
+    """Use a pinned, checksum-verified tool without replacing a user's installation."""
+    version = '0.9.150'
+    architecture = platform.machine().lower()
+    system = platform.system()
+    if system == 'Darwin' and architecture in {'arm64', 'aarch64', 'x86_64', 'amd64'}:
+        triplet = 'universal-apple-darwin'
+    else:
+        architecture = {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(architecture, architecture)
+        suffix = {'Windows': 'pc-windows-msvc', 'Linux': 'unknown-linux-gnu'}.get(system)
+        if suffix is None:
+            raise RuntimeError(f'No verified nextest binary for {system}/{architecture}')
+        triplet = f'{architecture}-{suffix}'
+    hashes = {
+        'x86_64-pc-windows-msvc': '6fd8f9ba48c946a79a5bcdd35bf4f922447b149f7ca6c3ff7f39e12f32ef78db',
+        'aarch64-pc-windows-msvc': '812da1f75a1a18911d8aeb74e2b75caa95e652bfd210a46527de7d5f0776f22e',
+        'x86_64-unknown-linux-gnu': 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f',
+        'aarch64-unknown-linux-gnu': '9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8',
+        'universal-apple-darwin': '82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a',
+    }
+    if triplet not in hashes:
+        raise RuntimeError(f'No pinned nextest checksum for {triplet}')
+    extension = 'zip' if system == 'Windows' else 'tar.gz'
+    filename = f'cargo-nextest-{version}-{triplet}.{extension}'
+    source = f'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-{version}/{filename}'
+    cache = Path.home() / '.cache/sudocode-local-acceptance/tools/nextest' / version / triplet
+    cache.mkdir(parents=True, exist_ok=True)
+    archive = cache / filename
+    if not archive.exists():
+        with tempfile.NamedTemporaryFile(dir=cache, suffix='.download', delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            urllib.request.urlretrieve(source, temporary_path)
+            if hashlib.sha256(temporary_path.read_bytes()).hexdigest() != hashes[triplet]:
+                raise RuntimeError(f'nextest archive checksum mismatch: {source}')
+            os.replace(temporary_path, archive)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    contents = archive.read_bytes()
+    if hashlib.sha256(contents).hexdigest() != hashes[triplet]:
+        raise RuntimeError(f'Cached nextest archive checksum mismatch: {archive}')
+    name = 'cargo-nextest.exe' if system == 'Windows' else 'cargo-nextest'
+    if system == 'Windows':
+        with zipfile.ZipFile(io.BytesIO(contents)) as bundle:
+            members = [item for item in bundle.infolist() if not item.is_dir() and Path(item.filename).name == name]
+            if len(members) != 1:
+                raise RuntimeError('Expected exactly one nextest executable in the verified archive')
+            executable_bytes = bundle.read(members[0])
+    else:
+        with tarfile.open(fileobj=io.BytesIO(contents), mode='r:gz') as bundle:
+            members = [item for item in bundle.getmembers() if item.isfile() and Path(item.name).name == name]
+            if len(members) != 1:
+                raise RuntimeError('Expected exactly one nextest executable in the verified archive')
+            executable_bytes = bundle.extractfile(members[0]).read()
+    executable = cache / name
+    if executable.exists():
+        if executable.read_bytes() != executable_bytes:
+            raise RuntimeError(f'Cached nextest executable differs from the verified archive: {executable}')
+    else:
+        executable.write_bytes(executable_bytes)
+        executable.chmod(0o755)
+    (output / 'nextest-source.json').write_text(json.dumps({
+        'version': version, 'url': source, 'archive_sha256': hashes[triplet],
+        'executable_sha256': hashlib.sha256(executable_bytes).hexdigest(),
+    }, indent=2))
+    return executable
+
+
+def nextest_options(output):
+    """Keep retry/filter/fail-fast behavior independent of ambient user settings."""
+    configuration = output / 'nextest.toml'
+    configuration.write_text('[profile.default]\nretries = 0\nfail-fast = { max-fail = 1, terminate = "wait" }\n')
+    workers = int(os.environ.get('SCODE_ACCEPTANCE_TEST_THREADS', '4'))
+    if not 1 <= workers <= 4:
+        raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
+    return ['--config-file', str(configuration), '--profile', 'default', '--ignore-default-filter',
+            '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
 def changed_cli_test_targets(root, base):
@@ -48,11 +129,17 @@ def run(name, root, output, base, execute):
     def cargo(*args, **kwargs):
         return command("cargo", *args, cwd=rust, **kwargs)
 
+    def native_tests(*args):
+        return command(str(nextest_binary(output)), "nextest", "run",
+                       *nextest_options(output), *args, cwd=rust)
+
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
         command(sys.executable, "e2e/local-acceptance/run.py")
+        command(sys.executable, "e2e/local-acceptance/nextest.py",
+                "--output", str(output / "nextest-executor"))
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -60,6 +147,11 @@ def run(name, root, output, base, execute):
         command("npm", "test", cwd=sdk)
         command("npm", "run", "pack:runtime", cwd=sdk)
     elif name == "native-workspace":
+        if os.name == "nt" and not shutil.which("pwsh.exe"):
+            raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
+                               "Add your existing PowerShell 7 directory to PATH, or install it with "
+                               "`winget install --id Microsoft.PowerShell --exact --source winget`, "
+                               "then rerun the same acceptance command. No workspace compilation started.")
         cargo("fmt", "--all", "--check")
         tests = changed_cli_test_targets(root, base)
         (output / "test-scope.json").write_text(json.dumps({
@@ -67,10 +159,10 @@ def run(name, root, output, base, execute):
             "targets": tests,
         }, indent=2))
         if tests is not None:
-            arguments = ["test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
+            arguments = ["--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
-            cargo(*arguments)
+            native_tests(*arguments)
         else:
             command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
@@ -78,7 +170,9 @@ def run(name, root, output, base, execute):
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox")
+            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox")
+            # Stable nextest excludes doctests; retain Cargo's separate path.
+            cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
             cargo("clippy", "--workspace", "--locked")
     elif name == "native-resize":
         if os.name == "nt":

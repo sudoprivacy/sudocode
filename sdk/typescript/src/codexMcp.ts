@@ -171,18 +171,21 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     at:new Date().toISOString(),provenance:'codex-autojoin-owner',...entry as object,
   })+'\n',{mode:0o600});
   // Audit failure must prevent opening the shared command endpoint.
-  audit({phase:'starting',pid:process.pid});
+  audit({phase:'starting',pid:process.pid,parentPid:process.ppid});
   let network: CodexAutojoin | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
+  let lastInventory: string | undefined;
   const sockets = new Set<Socket>();
   let finish = () => {};
   const finished = new Promise<void>(resolve=>{finish=resolve;});
-  const stop = () => stopping ??= (async()=>{
+  const stop = (reason: string) => stopping ??= (async()=>{
+    audit({phase:'stopping',reason,pid:process.pid,agents:network?.status()??[]});
     clearTimeout(idleTimer);
     listener.close();
     for(const socket of sockets)socket.destroy();
     await network?.close();
+    audit({phase:'stopped',reason,pid:process.pid});
   })().finally(finish);
   const scheduleExit = () => {
     clearTimeout(idleTimer);
@@ -190,7 +193,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
       void (async()=>{
         await network?.refresh();
         if(sockets.size)return;
-        if(network?.canRetire)await stop();
+        if(network?.canRetire)await stop('no_qualified_native_roots');
         else scheduleExit();
       })().catch(()=>scheduleExit());
     },5000);
@@ -221,21 +224,31 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   });
   await claimOwner(listener, config.endpoint.port);
   audit({phase:'listening',pid:process.pid});
-  const onSignal = () => {void stop();};
-  process.once('SIGTERM',onSignal);process.once('SIGINT',onSignal);
+  const onTerm = () => {void stop('SIGTERM');};
+  const onInt = () => {void stop('SIGINT');};
+  const onCrash = (error: Error, origin: string) => {
+    try {audit({phase:'owner_crash',pid:process.pid,origin,error:String(error)});} catch { /* Monitor only. */ }
+  };
+  process.once('SIGTERM',onTerm);process.once('SIGINT',onInt);
+  process.on('uncaughtExceptionMonitor',onCrash);
   scheduleExit();
   try {
     network = await connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
       peerPolicy:config.peerPolicy,
-      onClosed:()=>{void stop();},
+      onClosed:()=>{void stop('native_connection_closed');},
+      onInventory:observation=>{
+        const value=JSON.stringify(observation);
+        if(value!==lastInventory){audit({phase:'native_inventory',...observation});lastInventory=value;}
+      },
       resolveAgent:claim=>enroll(config.enrollmentArgv,claim),onError:error=>{
         try {audit({phase:'attachment_error',error:String(error)});} catch { /* No command submission. */ }
       }});
     if(stopping)await network.close();
     await finished;
   } finally {
-    await stop();
-    process.removeListener('SIGTERM',onSignal);process.removeListener('SIGINT',onSignal);
+    await stop('owner_finally');
+    process.removeListener('SIGTERM',onTerm);process.removeListener('SIGINT',onInt);
+    process.removeListener('uncaughtExceptionMonitor',onCrash);
   }
 }
 

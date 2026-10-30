@@ -227,6 +227,15 @@ async function main() {
     await new Promise(resolve=>setTimeout(resolve,50));
   }
   mcpOwnerPid=undefined;
+  const lifecycle=fs.readFileSync(path.join(directory,'mcp-audit.jsonl'),'utf8').trim().split('\n')
+    .map(line=>JSON.parse(line));
+  const observed=lifecycle.filter(row=>row.phase==='native_inventory');
+  assert.ok(observed.some(row=>row.roots.some((thread:{threadId:string;qualified:boolean})=>thread.threadId===ids[0]&&thread.qualified)),
+    'the actual owner must record its qualifying native root');
+  assert.deepEqual(observed.at(-1).loaded,[]);
+  assert.equal(lifecycle.find(row=>row.phase==='stopping')?.reason,'no_qualified_native_roots');
+  assert.equal(lifecycle.find(row=>row.phase==='stopped')?.reason,'no_qualified_native_roots');
+  assert.ok(!lifecycle.some(row=>row.phase==='owner_crash'));
   const afterRetirement=rows().length;
   const configBytes=fs.readFileSync(mcpConfig);
   const imported=JSON.parse(prepare());

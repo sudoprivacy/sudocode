@@ -23,6 +23,15 @@ export class CodexEnrollmentError extends Error {
   constructor(readonly outcome: 'not_submitted' | 'unknown', detail: string) {super(detail);}
 }
 
+export interface CodexRootInventory {
+  loaded: readonly string[];
+  roots: ReadonlyArray<{
+    threadId: string; qualified: boolean; status: string | null;
+    parentThreadId?: string | null; threadSource?: string | null;
+    ephemeral?: boolean; canAcceptDirectInput?: boolean;
+  }>;
+}
+
 export interface CodexAutojoinConfig {
   native: CodexConnectionConfig;
   stateDirectory: string;
@@ -33,6 +42,8 @@ export interface CodexAutojoinConfig {
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
   onClosed?: () => void;
+  /** Diagnostic observation of the validated snapshot; never controls admission. */
+  onInventory?: (observation: CodexRootInventory) => void | Promise<void>;
 }
 
 interface Thread {
@@ -205,6 +216,12 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         if (thread.id !== id || !path.isAbsolute(thread.cwd)) throw new Error('Native inventory identity mismatch');
         threads.set(id,thread);
       }
+      const observed = [...threads.values()].map(thread => ({
+        threadId:thread.id,qualified:rootThread(thread),status:thread.status?.type ?? null,
+        parentThreadId:thread.parentThreadId,threadSource:thread.threadSource,
+        ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput,
+      }));
+      const qualified = new Set(observed.filter(thread=>thread.qualified).map(thread=>thread.threadId));
       for (const [id, owner] of owners) {
         if (!loaded.has(id) || (owner.retryAt!==undefined && performance.now()>=owner.retryAt)) {
           owners.delete(id); await stopOwner(owner);
@@ -214,7 +231,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         if (closed) break;
         const owner = owners.get(id);
         if (owner?.error) continue;
-        if (!rootThread(thread)) {
+        if (!qualified.has(id)) {
           if (owner) {owners.delete(id);await stopOwner(owner);}
         } else if (owner) {
           try {
@@ -225,6 +242,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         } else await open(thread);
       }
       inventoryError = undefined;
+      // Run after policy decisions with primitive-only copies. An observer
+      // cannot rewrite the classification used by this refresh or break it.
+      try {void Promise.resolve(config.onInventory?.({loaded:[...loaded],roots:observed})).catch(report);}
+      catch (error) {report(error);}
     }).catch(error=>{inventoryError=String(error);report(error);});
     return chain;
   };

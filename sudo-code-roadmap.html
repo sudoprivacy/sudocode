@@ -394,21 +394,26 @@ mtimes; unexpected sources and cached entry links are removed. The exclusive Lin
 lease remains and reports blocking waits in the execution log. Real Git/Cargo
 regressions check freshness, stale archives, tampering, permissions and mutual
 exclusion. Product workloads, budgets, sample counts and coverage are unchanged.</p>
-<p>Browser release and integration drivers share the same canonical candidate
-checkout and build directory. The baseline stays independent, and the copied
-production binary remains fixed across dev-feature test builds. Rendering retains
-its trusted driver; the two profiles use five target trees instead of seven.
+<p>Rendering and browser share the same canonical candidate checkout and build
+directory; browser integration drivers reuse it too. Both baselines stay
+independent, and copied production binaries remain fixed across dev-feature
+test builds. Rendering retains its trusted driver. The two profiles now use
+four target trees, down from the original seven and the previous five.
+The existing exclusive lease still covers source mutation, compilation and
+measurement. A real rendering-to-browser Cargo sequence verifies that the
+normal candidate build is reused without recompilation and has identical bytes.
 Real Cargo/npm/native-driver infrastructure acceptance checks freshness, binary
 identity and both observer stages when executor inputs change, once on the PR.
 It adds no product journey coverage. Selected execution fingerprints bind actual
 helper dependencies; unchanged native evidence survives browser-only helper edits.
 Old signed recipes require recoverable attested source, while changed used helpers,
 shared execution or images still invalidate their affected evidence.</p>
-<p>The acceptance target uses arithmetic mean CI-trigger-to-first-failure and
-final-candidate-CI-trigger-to-merge, including queues and reruns. The provisional
-Rust source/build historical means are 32.252 minutes (419 failed heads) and
-185.261 minutes (200 merged PRs), giving targets of 3.225 and 18.526 minutes.
-Mandatory local acceptance is reported separately. Early lightweight PR results
+<p>The acceptance target uses arithmetic mean first-recorded-local-validation
+to first local/hosted failure or merge, including waiting and retries. Keep
+whole-PR and final-head series. The historical hosted-only Rust source/build
+means are 32.252 minutes (419 failed heads) and 185.261 minutes (200 merged PRs),
+giving conservative reference thresholds of 3.225 and 18.526 minutes; historical
+local time is unknown. Early lightweight PR results
 and fewer runner minutes do not prove the comparable production target.</p>
 
 <p><strong>Coverage measures distinct user journeys.</strong> Halving repeated

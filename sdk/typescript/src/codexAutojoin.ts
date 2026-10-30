@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { connectCodex, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
-import { createCodexCallback, type CodexCallback } from './codexCallback';
+import { connectCodex, CodexRequestError, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
+import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
 import { connectScode, type ScodeConnection, type SessionNotification } from './scodeAcp';
-import { listScodeAgents, scodeNativeA2aAudit, ScodeA2aError } from './scodeA2a';
+import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
 import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
-  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim } from './codexBindings';
-export type { CodexAgentClaim } from './codexBindings';
+  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
+export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
 
 /** The operator's existing enrollment path owns authorization and credentials.
  * Return a private, durable profile with an EXISTING native ACP session. Never
@@ -15,6 +15,7 @@ export type { CodexAgentClaim } from './codexBindings';
 export interface CodexAgentProfile {
   actor: string;
   configFile: string;
+  workspaceBinding?: CodexWorkspaceBinding;
 }
 
 /** Only the authorized adapter can attest that no issuance was submitted. */
@@ -22,14 +23,27 @@ export class CodexEnrollmentError extends Error {
   constructor(readonly outcome: 'not_submitted' | 'unknown', detail: string) {super(detail);}
 }
 
+export interface CodexRootInventory {
+  loaded: readonly string[];
+  roots: ReadonlyArray<{
+    threadId: string; qualified: boolean; status: string | null;
+    parentThreadId?: string | null; threadSource?: string | null;
+    ephemeral?: boolean; canAcceptDirectInput?: boolean;
+  }>;
+}
+
 export interface CodexAutojoinConfig {
   native: CodexConnectionConfig;
   stateDirectory: string;
   peers: string[];
+  /** Explicitly admit peer data from the verified Node namespace; default is the fixed allowlist. */
+  peerPolicy?: 'allowlist' | 'node-namespace';
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<CodexAgentProfile>;
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
   onClosed?: () => void;
+  /** Diagnostic observation of the validated snapshot; never controls admission. */
+  onInventory?: (observation: CodexRootInventory) => void | Promise<void>;
 }
 
 interface Thread {
@@ -47,6 +61,7 @@ interface Owner {
   callback?: CodexCallback;
   error?: string;
   retryAt?: number;
+  verified?: boolean;
 }
 export interface CodexAutojoin {
   /** True only after closure or authoritative inventory with no qualified roots. */
@@ -74,6 +89,7 @@ function rootThread(thread: Thread): boolean {
 export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise<CodexAutojoin> {
   if (!path.isAbsolute(config.stateDirectory) || !Array.isArray(config.peers)
       || config.peers.some(peer => typeof peer !== 'string' || !peer)
+      || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
       || typeof config.resolveAgent !== 'function'
       || (config.pollIntervalMs !== undefined && (!Number.isFinite(config.pollIntervalMs) || config.pollIntervalMs < 100))) {
     throw new Error('Invalid Codex autojoin configuration');
@@ -119,7 +135,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
             operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
           if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
           binding.configFile = profile.configFile;
-          bindProfile(binding, readProfile(profile.configFile));
+          bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
           binding.state = 'ready';
           save(binding);
         } catch (error) {
@@ -143,15 +159,16 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       // Native audit proves which Agent was actually loaded. A copied profile
       // cannot quietly attach every root to the same credential/receiver.
       const result = await listScodeAgents(connection);
-      const audit = scodeNativeA2aAudit(result);
-      if (overflow || result.isError || audit?.actor !== binding.actor || audit.sessionId !== connection.sessionId
-          || audit.namespaceRoot !== '') {
-        throw new Error('Loaded ACP actor/session does not match the durable Codex binding');
-      }
-      callback = createCodexCallback(native.request, { threadId: thread.id, peers: config.peers,
-        log: path.join(config.stateDirectory, `${thread.id}.callback.jsonl`) }, connection.sessionId);
+      requireScodeNodeIdentity(connection,result,binding.actor);
+      if(overflow)throw new Error('ACP input overflowed while verifying the original Node identity');
+      const callbackConfig={threadId:thread.id,peers:config.peers,
+        log:path.join(config.stateDirectory,`${thread.id}.callback.jsonl`)};
+      callback = config.peerPolicy==='node-namespace'
+        ? createCodexNodeCallback(native.request,callbackConfig,connection,result)
+        : createCodexCallback(native.request,callbackConfig,connection.sessionId);
       owner.callback = callback;
       for(const notification of pending)callback.receive(notification);
+      owner.verified = true;
       void connection.exited.then(exit => {
         owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; no automatic task or send replay`;
       });
@@ -162,31 +179,59 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       report(error);
     }
   };
+  const loadedIds = async () => {
+    const loaded = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await native.request<{data: string[]; nextCursor: string | null}>('thread/loaded/list', {cursor});
+      if (!Array.isArray(page.data) || page.data.some(id => !identifier(id))
+          || (page.nextCursor !== null && typeof page.nextCursor !== 'string')) throw new Error('Invalid native root inventory');
+      for (const id of page.data) loaded.add(id);
+      if (page.nextCursor && page.nextCursor === cursor) throw new Error('Native inventory cursor did not advance');
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return loaded;
+  };
   const refresh = () => {
     chain = chain.then(async () => {
       if (closed) return;
-      const loaded = new Set<string>();
-      let cursor: string | undefined;
-      do {
-        const page = await native.request<{data: string[]; nextCursor: string | null}>('thread/loaded/list', {cursor});
-        if (!Array.isArray(page.data) || page.data.some(id => !identifier(id))
-            || (page.nextCursor !== null && typeof page.nextCursor !== 'string')) throw new Error('Invalid native root inventory');
-        for (const id of page.data) loaded.add(id);
-        if (page.nextCursor && page.nextCursor === cursor) throw new Error('Native inventory cursor did not advance');
-        cursor = page.nextCursor ?? undefined;
-      } while (cursor);
+      const loaded = await loadedIds();
+      const threads = new Map<string, Thread>();
+      for (const id of loaded) {
+        if (closed) return;
+        let thread: Thread;
+        try {
+          ({thread} = await native.request<{thread: Thread}>('thread/read', {threadId:id,includeTurns:false}));
+        } catch (error) {
+          const rpc = error instanceof CodexRequestError ? error.rpcError as {code?: unknown; message?: unknown} : undefined;
+          // Native unload can race this read after a successful inventory.
+          // Only an exact native refusal plus fresh confirmed absence permits
+          // retirement. Other failures still invalidate the whole snapshot.
+          // These are read-only observations; no command/enrollment is retried.
+          if (rpc?.code !== -32600 || rpc.message !== `thread not loaded: ${id}`
+              || (await loadedIds()).has(id)) throw error;
+          loaded.delete(id);
+          continue;
+        }
+        if (thread.id !== id || !path.isAbsolute(thread.cwd)) throw new Error('Native inventory identity mismatch');
+        threads.set(id,thread);
+      }
+      const observed = [...threads.values()].map(thread => ({
+        threadId:thread.id,qualified:rootThread(thread),status:thread.status?.type ?? null,
+        parentThreadId:thread.parentThreadId,threadSource:thread.threadSource,
+        ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput,
+      }));
+      const qualified = new Set(observed.filter(thread=>thread.qualified).map(thread=>thread.threadId));
       for (const [id, owner] of owners) {
         if (!loaded.has(id) || (owner.retryAt!==undefined && performance.now()>=owner.retryAt)) {
           owners.delete(id); await stopOwner(owner);
         }
       }
-      for (const id of loaded) {
+      for (const [id,thread] of threads) {
         if (closed) break;
         const owner = owners.get(id);
         if (owner?.error) continue;
-        const {thread} = await native.request<{thread: Thread}>('thread/read', {threadId:id,includeTurns:false});
-        if (thread.id !== id || !path.isAbsolute(thread.cwd)) throw new Error('Native inventory identity mismatch');
-        if (!rootThread(thread)) {
+        if (!qualified.has(id)) {
           if (owner) {owners.delete(id);await stopOwner(owner);}
         } else if (owner) {
           try {
@@ -197,6 +242,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         } else await open(thread);
       }
       inventoryError = undefined;
+      // Run after policy decisions with primitive-only copies. An observer
+      // cannot rewrite the classification used by this refresh or break it.
+      try {void Promise.resolve(config.onInventory?.({loaded:[...loaded],roots:observed})).catch(report);}
+      catch (error) {report(error);}
     }).catch(error=>{inventoryError=String(error);report(error);});
     return chain;
   };
@@ -228,14 +277,15 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       if (!identifier(threadId)) throw new ScodeA2aError('Native MCP threadId metadata is required; no sender argument or cwd inference', 'not_submitted');
       if(inventoryError)throw new ScodeA2aError(`Native root inventory unavailable: ${inventoryError}`,'not_submitted');
       const owner = owners.get(threadId);
-      if (closed || !owner?.connection || owner.connection.closed || owner.error) {
+      if (closed || !owner?.verified || !owner.connection || owner.connection.closed || owner.error) {
         throw new ScodeA2aError(owner?.error ?? 'No authenticated Agent is attached to this loaded root', 'not_submitted');
       }
       return owner.connection;
     },
     status: () => [...owners.values()].map(owner => ({threadId:owner.binding.threadId,actor:owner.binding.actor,
       state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
-        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected' : 'connected',error:owner.error})),
+        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
+        : owner.verified ? 'connected' : 'connecting',error:owner.error})),
     close,
   };
 }

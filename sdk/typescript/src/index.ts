@@ -7,4 +7,5 @@ export * from './codexCallback';
 export * from './codexNativeQueue';
 export * from './codexAutojoin';
 export * from './codexMcp';
+export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 export * from './lifecycle';

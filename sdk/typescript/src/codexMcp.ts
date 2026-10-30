@@ -5,7 +5,8 @@ import { connect, createServer, type Server, type Socket } from 'node:net';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { connectCodexAutojoin, CodexEnrollmentError, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import { runEnrollmentCommand } from './enrollmentCommand';
 import { validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
@@ -20,6 +21,7 @@ export interface CodexMcpConfig {
   stateDirectory: string;
   auditLog: string;
   peers: string[];
+  peerPolicy?: 'allowlist' | 'node-namespace';
   /** Explicit operator-owned adapter to the existing authorized enrollment path. */
   enrollmentArgv: string[];
   endpoint: {port: number; token: string};
@@ -29,7 +31,9 @@ export interface CodexMcpConfig {
  * Deliberately do not change a running controller, node or global configuration.
  */
 export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
-  entry: string, port = 23262): {configFile: string; registrationArgv: string[]; installed: false} {
+  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {
+    configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[]; installed: false;
+  } {
   const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
   validateCodexConnectionConfig({codexArgv});
   if(![file,codexArgv[0],entry].every(value=>typeof value==='string'&&path.isAbsolute(value))
@@ -38,12 +42,13 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
   mkdirSync(parent,{recursive:true,mode:0o700});
   const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native:{codexArgv},
     stateDirectory:path.join(parent,'codex-agents'),auditLog:path.join(parent,'codex-network.jsonl'),
-    peers,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
+    peers,peerPolicy,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
   // Validate before publishing. This initializer neither runs the enrollment
   // command nor copies its authority into the runtime package.
   validateConfig(config);
   writeFileSync(file,JSON.stringify(config,null,2)+'\n',{flag:'wx',mode:0o600});
-  return {configFile:file,registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
+  return {configFile:file,nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
+    nativeProxyArgv:[...codexArgv,'app-server','proxy'],registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
     '--codex','--config',file],installed:false};
 }
 
@@ -109,6 +114,7 @@ function validateConfig(config: CodexMcpConfig): void {
       || config.enrollmentArgv.some(arg => typeof arg !== 'string' || !arg || arg.includes('\0'))
       || !path.isAbsolute(config.enrollmentArgv[0])
       || !Array.isArray(config.peers) || config.peers.some(peer=>typeof peer!=='string'||!peer)
+      || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
       || !Number.isInteger(config.endpoint?.port) || config.endpoint.port < 1024 || config.endpoint.port > 65535
       || !/^[0-9a-f]{64}$/.test(config.endpoint.token)) throw new Error('Invalid Codex autojoin MCP configuration');
   validateCodexConnectionConfig(config.native);
@@ -150,35 +156,10 @@ function readHeader(socket: Socket): Promise<unknown> {
   });
 }
 
-function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfile> {
-  return new Promise((resolve,reject) => {
-    const child = spawn(argv[0],argv.slice(1),{stdio:['pipe','pipe','ignore'],shell:false,windowsHide:true});
-    let bytes = Buffer.alloc(0);
-    let failure: Error | undefined;
-    const kill = (error: Error) => {failure ??= error;child.kill('SIGKILL');};
-    const timer = setTimeout(()=>kill(new Error('Enrollment response timed out; recover the original operation')),30000);
-    child.on('error',error=>{failure ??= child.pid===undefined
-      ? new CodexEnrollmentError('not_submitted',`Enrollment adapter did not start: ${error.message}`) : error;});
-    child.stdin.on('error',error=>{failure ??= error;});
-    child.stdout.on('data',(chunk: Buffer)=>{
-      bytes = Buffer.concat([bytes,chunk]);
-      if(bytes.length>8192)kill(new Error('Enrollment response exceeded its bound'));
-    });
-    child.once('close',code=>{
-      clearTimeout(timer);
-      try {
-        if(failure)throw failure;
-        const profile = JSON.parse(bytes.toString('utf8')) as CodexAgentProfile & {outcome?: unknown;detail?: unknown};
-        if(profile && ['not_submitted','unknown'].includes(String(profile.outcome)) && typeof profile.detail==='string'){
-          throw new CodexEnrollmentError(profile.outcome as 'not_submitted'|'unknown',profile.detail);
-        }
-        if(code!==0)throw new Error(`Enrollment exited ${code}; recover the original operation`);
-        if(!profile || Object.keys(profile).some(key=>!['actor','configFile'].includes(key))) throw new Error('Invalid enrollment response');
-        resolve(profile);
-      } catch(error) {reject(error);}
-    });
-    child.stdin.end(JSON.stringify(claim)+'\n');
-  });
+async function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfile> {
+  const profile = await runEnrollmentCommand(argv, claim) as CodexAgentProfile;
+  if(!profile || Object.keys(profile).some(key=>!['actor','configFile','workspaceBinding'].includes(key))) throw new Error('Invalid enrollment response');
+  return profile;
 }
 
 /** One per-user owner, elected by an exclusive loopback bind. It owns the native
@@ -187,21 +168,27 @@ function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfi
 export async function runCodexMcpOwner(file: string): Promise<void> {
   const {config,sha256} = readConfig(file);
   const audit = (entry: unknown) => appendFileSync(config.auditLog,JSON.stringify({
-    at:new Date().toISOString(),provenance:'codex-autojoin-owner',...entry as object,
+    ...entry as object,at:new Date().toISOString(),provenance:'codex-autojoin-owner',pid:process.pid,
   })+'\n',{mode:0o600});
   // Audit failure must prevent opening the shared command endpoint.
-  audit({phase:'starting',pid:process.pid});
+  audit({phase:'starting',parentPid:process.ppid});
+  const observe = (entry: unknown) => {
+    try {audit(entry);} catch { /* Diagnostics cannot prevent runtime cleanup. */ }
+  };
   let network: CodexAutojoin | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
+  let lastInventory: string | undefined;
   const sockets = new Set<Socket>();
   let finish = () => {};
   const finished = new Promise<void>(resolve=>{finish=resolve;});
-  const stop = () => stopping ??= (async()=>{
+  const stop = (reason: string) => stopping ??= (async()=>{
+    observe({phase:'stopping',reason,agents:network?.status()??[]});
     clearTimeout(idleTimer);
     listener.close();
     for(const socket of sockets)socket.destroy();
     await network?.close();
+    observe({phase:'stopped',reason});
   })().finally(finish);
   const scheduleExit = () => {
     clearTimeout(idleTimer);
@@ -209,7 +196,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
       void (async()=>{
         await network?.refresh();
         if(sockets.size)return;
-        if(network?.canRetire)await stop();
+        if(network?.canRetire)await stop('no_qualified_native_roots');
         else scheduleExit();
       })().catch(()=>scheduleExit());
     },5000);
@@ -239,21 +226,29 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     })().catch(()=>socket.destroy());
   });
   await claimOwner(listener, config.endpoint.port);
-  audit({phase:'listening',pid:process.pid});
-  const onSignal = () => {void stop();};
-  process.once('SIGTERM',onSignal);process.once('SIGINT',onSignal);
-  scheduleExit();
+  const onTerm = () => {void stop('SIGTERM');};
+  const onInt = () => {void stop('SIGINT');};
+  const onCrash = (error: Error, origin: string) => observe({phase:'owner_crash',origin,error:String(error)});
   try {
+    audit({phase:'listening'});
+    process.once('SIGTERM',onTerm);process.once('SIGINT',onInt);
+    process.on('uncaughtExceptionMonitor',onCrash);
+    scheduleExit();
     network = await connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
-      onClosed:()=>{void stop();},
-      resolveAgent:claim=>enroll(config.enrollmentArgv,claim),onError:error=>{
-        try {audit({phase:'attachment_error',error:String(error)});} catch { /* No command submission. */ }
-      }});
+      peerPolicy:config.peerPolicy,
+      onClosed:()=>{void stop('native_connection_closed');},
+      onInventory:observation=>{
+        const value=JSON.stringify(observation);
+        if(value!==lastInventory){observe({phase:'native_inventory',...observation});lastInventory=value;}
+      },
+      resolveAgent:claim=>enroll(config.enrollmentArgv,claim),
+      onError:error=>observe({phase:'attachment_error',error:String(error)})});
     if(stopping)await network.close();
     await finished;
   } finally {
-    await stop();
-    process.removeListener('SIGTERM',onSignal);process.removeListener('SIGINT',onSignal);
+    await stop('owner_finally');
+    process.removeListener('SIGTERM',onTerm);process.removeListener('SIGINT',onInt);
+    process.removeListener('uncaughtExceptionMonitor',onCrash);
   }
 }
 

@@ -29,7 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          # A PR's base SHA can lag the protected branch even on a new ready
+          # event. Use current protected policy, just as the hook/publisher do;
+          # downstream jobs still pin the exact verified executor output.
+          ref: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5

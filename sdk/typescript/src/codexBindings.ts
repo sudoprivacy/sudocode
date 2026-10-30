@@ -12,6 +12,19 @@ export interface CodexAgentClaim {
   workspace: string;
 }
 
+/** The installed operator may select a private ACP context without granting it
+ * access to the native project. This is a trusted local response, not a claim
+ * from a peer and not a signature or additional-directory permission.
+ */
+export interface CodexWorkspaceBinding {
+  version: 1;
+  actor: string;
+  operationId: string;
+  threadId: string;
+  nativeCanonicalWorkspace: string;
+  acpCanonicalWorkspace: string;
+}
+
 export interface CodexBinding extends Omit<CodexAgentClaim, 'version'> {
   version: 2;
   origin: 'enrollment' | 'existing';
@@ -19,10 +32,11 @@ export interface CodexBinding extends Omit<CodexAgentClaim, 'version'> {
   state: 'pending' | 'provisioning' | 'ready' | 'recovery_required';
   configFile?: string;
   acp?: { sessionId: string; workspace: string; canonicalWorkspace: string };
+  workspaceBinding?: CodexWorkspaceBinding;
 }
 
 export function identifier(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f-]{36}$/.test(value);
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 }
 
 export function canonicalWorkspace(value: unknown): string {
@@ -48,13 +62,26 @@ export function readProfile(file: string): ScodeAcpConfig {
 /** Freeze the original ACP context before connecting; imports may have a
  * deliberately different workspace, while new enrollments retain their claim.
  */
-export function bindProfile(binding: CodexBinding, profile: ScodeAcpConfig): void {
+export function bindProfile(binding: CodexBinding, profile: ScodeAcpConfig, workspaceBinding?: CodexWorkspaceBinding): void {
   if (!sessionId(profile.acpSessionId)) throw new Error('An explicit existing ACP session ID is required');
   const canonical = canonicalWorkspace(profile.workspace);
-  if (binding.origin === 'enrollment' && canonical !== binding.canonicalWorkspace) {
+  if (workspaceBinding !== undefined) {
+    assertWorkspaceBinding(binding, canonical, workspaceBinding);
+    binding.workspaceBinding = workspaceBinding;
+  }
+  if (binding.origin === 'enrollment' && !binding.workspaceBinding && canonical !== binding.canonicalWorkspace) {
     throw new Error('Enrolled ACP workspace differs from its native workspace claim');
   }
   binding.acp = { sessionId: profile.acpSessionId, workspace: profile.workspace, canonicalWorkspace: canonical };
+}
+
+function assertWorkspaceBinding(binding: CodexBinding, acpWorkspace: string, proof: CodexWorkspaceBinding): void {
+  if (binding.origin !== 'enrollment' || !proof || proof.version !== 1
+      || Object.keys(proof).sort().join(',') !== 'acpCanonicalWorkspace,actor,nativeCanonicalWorkspace,operationId,threadId,version'
+      || proof.actor !== binding.actor || proof.operationId !== binding.operationId || proof.threadId !== binding.threadId
+      || proof.nativeCanonicalWorkspace !== binding.canonicalWorkspace || proof.acpCanonicalWorkspace !== acpWorkspace) {
+    throw new Error('Operator workspace binding differs from the original claim or ACP workspace');
+  }
 }
 
 export function boundProfile(binding: CodexBinding): ScodeAcpConfig {
@@ -65,6 +92,7 @@ export function boundProfile(binding: CodexBinding): ScodeAcpConfig {
       || canonicalWorkspace(binding.acp.workspace) !== binding.acp.canonicalWorkspace) {
     throw new Error('ACP workspace differs from its durable binding');
   }
+  if (binding.workspaceBinding) assertWorkspaceBinding(binding, binding.acp.canonicalWorkspace, binding.workspaceBinding);
   return profile;
 }
 
@@ -110,8 +138,12 @@ export function readBindings(directory: string): Map<string, CodexBinding> {
           || !binding.acp || !sessionId(binding.acp.sessionId) || !path.isAbsolute(binding.acp.workspace)
           || !path.isAbsolute(binding.acp.canonicalWorkspace)))
         || (binding.origin === 'existing' && binding.state !== 'ready')
-        || (binding.origin === 'enrollment' && binding.acp && binding.acp.canonicalWorkspace !== binding.canonicalWorkspace)) {
+        || (binding.origin === 'enrollment' && !binding.workspaceBinding && binding.acp && binding.acp.canonicalWorkspace !== binding.canonicalWorkspace)) {
       throw new Error(`Invalid or duplicate durable Codex binding: ${file}`);
+    }
+    if (binding.workspaceBinding) {
+      if (!binding.acp) throw new Error(`Operator workspace binding lacks ACP context: ${file}`);
+      assertWorkspaceBinding(binding, binding.acp.canonicalWorkspace, binding.workspaceBinding);
     }
     actors.add(binding.actor); result.set(binding.threadId, binding);
   }

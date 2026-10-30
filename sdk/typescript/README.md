@@ -33,11 +33,21 @@ as the fixed-session bridge below.
 
 This mode requires native root inventory and host-supplied tool-call metadata
 (qualified on native Codex 0.163.0), a compatible scode with native actor audit,
-and an operator-authorized enrollment adapter. **An enrollment adapter for a
-specific live Nexus installation is not supplied by this package.** Protocol
-fixtures do not establish production enrollment or current-node compatibility.
+and an operator-authorized enrollment adapter. The shared `--enroll-codex`
+adapter requires a private owner-created grant and the Nexus
+`nexus-agent-enroll` client; it never installs a Node or supplies authority
+implicitly. `--init-codex-operator` prepares that private launch policy without
+issuing an identity. Protocol fixtures do not establish production enrollment
+or current-node compatibility.
 The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
 defines that remaining integration boundary and rollout gates.
+
+Reception defaults to the exact configured peer allowlist. A network-wide
+installation can explicitly select `--peer-policy node-namespace` during
+`--init-codex`; after its owned Node actor/session audit succeeds, other
+authenticated Agents in that namespace may supply untrusted peer context.
+This grants no tool authority and does not establish common ownership or
+online presence. Existing fixed callbacks keep their original allowlists.
 
 Prepare a private machine configuration with `--init-codex --config FILE
 --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES`. The result
@@ -46,11 +56,25 @@ Use `--native-argv JSON_ARGV` instead of `--native-codex` when the official
 installation uses an interpreter and wrapper. The full argv is preserved for
 both proxy connections and MCP registration; it is never passed through a
 shell. Keep that installation's native package context intact.
+If native unload races inventory inspection, only its exact unloaded-thread
+refusal plus a fresh complete inventory confirming absence permits retirement.
+Other inspection errors refuse the command. This reads state again; it never
+resubmits a tool call or an enrollment operation.
 The initializer starts nothing and does not install global configuration. Use
 an owner-protected parent directory; it exclusively creates the file and keeps
 machine values outside the package. Keep the MCP server optional so an offline
 node cannot prevent ordinary Codex startup. Existing project or launch-time
 overrides need an explicit migration; a global entry cannot override them.
+
+The result also includes the official `nativePreparationArgv` (shared daemon
+start) and `nativeProxyArgv` for API frontends. Ordinary official CLI startup
+uses its managed package context after one-time preparation. A legacy frontend
+that directly spawns `app-server --listen stdio://` does not join that shared
+inventory merely because global MCP was configured: its own controller must
+switch to the official proxy during a sole-owner migration window, preserving
+its thread, approval policy and native package context. The initializer only
+prints those commands; it never starts/stops a native server or adopts a
+running frontend. This package adds no native daemon lifecycle implementation.
 
 Existing fixed-session Agents can be prepared offline with `--bind-codex`.
 The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
@@ -72,6 +96,10 @@ retirement policy. No Nexus enrollment or production frontend is used.
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:
+
+Source tests need Python 3 for the bundled PTY/ConPTY driver guard; the installed
+ACP runtime uses Node only. The guard runs a mock terminal and verifies that a
+close request cannot confirm an installer dialog.
 
 ```sh
 npm ci
@@ -242,10 +270,16 @@ Unix defaults to `test/fixtures/nativeCodexTui.py`. Windows uses the bundled
 `test/fixtures/nativeCodexTui.windows.py`, which calls ConPTY through Python's
 standard library without another package. Select that driver with
 `--driver '<JSON argv>'`, containing the available Python executable and the
-absolute script path. A missing driver fails before starting native processes;
+absolute script path. Keep the shared `nativeTuiPrompt.py` beside either driver.
+A missing driver fails before starting native processes;
 there is no protocol-only fallback. Use the actual `codex.exe`, not `codex.cmd`.
 `--temp-root` selects an existing private temporary directory when the platform's
 default socket path would be too long.
+
+Both native fixtures disable startup update checks and set npm's prefix inside
+their private root. Both drivers refuse upgrade dialogs before typing `/exit`.
+The managed-package variant lets the official native CLI create its private
+state directory before writing test settings, preserving its Windows DACL checks.
 
 The fixture performs these steps:
 

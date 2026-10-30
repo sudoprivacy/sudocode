@@ -29,6 +29,7 @@ for(const name of ['PATH','SystemRoot','WINDIR','COMSPEC','PATHEXT','TMPDIR','TE
 Object.assign(env,{CODEX_HOME:home,HOME:path.join(root,'user'),USERPROFILE:path.join(root,'user'),
   XDG_CONFIG_HOME:path.join(root,'xdg'),APPDATA:path.join(root,'roaming'),LOCALAPPDATA:path.join(root,'local'),
   TERM:'xterm-256color',NO_PROXY:'127.0.0.1,localhost,::1',no_proxy:'127.0.0.1,localhost,::1',
+  NPM_CONFIG_PREFIX:path.join(root,'npm-prefix'),
   NATIVE_QUEUE_FIXTURE_KEY:'isolated-fixture-only',NATIVE_LIFECYCLE_PTY_TRACE:trace,
   NATIVE_QUEUE_RELAY_JOURNAL:relayLog});
 const nonce='NATIVE_QUEUE_'+crypto.randomUUID();
@@ -36,7 +37,7 @@ const receipt={at:new Date().toISOString(),scenario:options.case,source:manifest
   fixtureSha256:hash(__filename),nativeVersion:execFileSync(options.codex,['--version'],{env,encoding:'utf8'}).trim(),
   nativeSha256:hash(options.codex),driverFiles:driver.filter(s=>fs.existsSync(s)&&fs.statSync(s).isFile()).map(file=>({file,sha256:hash(file)})),
   relaySha256:hash(path.join(__dirname,'fixtures/nativeQueueResponseLoss.cjs')),
-  isolation:{root,privateNativeHome:true,liveHomeUsed:false,productionChanged:false},
+  isolation:{root,privateNativeHome:true,nativePackageManagerPrefixIsolated:true,liveHomeUsed:false,productionChanged:false},
   modelRequests:[],tuiEvents:[],producerObservations:[],notProven:['actual Windows behavior unless run there','Node/A2A authentication and receipt',
     'namespaced toolOutput callback (this is queued UserInput)','production activation']};
 const wait=async(test,ms,label)=>{const end=Date.now()+ms;while(!test()){if(Date.now()>end)throw new Error(label+' timeout');await new Promise(r=>setTimeout(r,50));}};
@@ -90,7 +91,7 @@ const endpoint=http.createServer(async(req,res)=>{
 void(async()=>{
   try{
     endpoint.listen(0,'127.0.0.1');await once(endpoint,'listening');
-    fs.writeFileSync(path.join(home,'config.toml'),'model="gpt-5.4"\nmodel_provider="fixture"\napproval_policy="never"\nsandbox_mode="read-only"\n'+
+    fs.writeFileSync(path.join(home,'config.toml'),'check_for_update_on_startup=false\nmodel="gpt-5.4"\nmodel_provider="fixture"\napproval_policy="never"\nsandbox_mode="read-only"\n'+
       '[analytics]\nenabled=false\n[features]\napps=false\nplugins=false\n[model_providers.fixture]\nname="Isolated native queue"\n'+
       'base_url="http://127.0.0.1:'+endpoint.address().port+'/v1"\nwire_api="responses"\nenv_key="NATIVE_QUEUE_FIXTURE_KEY"\n'+
       '[projects.'+JSON.stringify(workspace)+']\ntrust_level="trusted"\n',{mode:0o600});

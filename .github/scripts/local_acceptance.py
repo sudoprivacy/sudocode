@@ -699,6 +699,7 @@ def resume_checks(directory, head, base, policy_ref, output, needed):
         reusable[name] = previous["checks"][name]
     return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
                       "commands_ref": previous_policy, "finished_at": previous["finished_at"],
+                      "timing": previous.get("timing"),
                       "profiles": sorted(reusable)}
 
 
@@ -729,6 +730,28 @@ def previous_local_output(head, base):
 
 
 def check(args):
+    """Record failed and successful local attempts, including time before CI."""
+    started = time.monotonic()
+    attempt = {"version": 1, "started_at": time.time(), "outcome": "running"}
+    try:
+        perform_check(args, attempt)
+        attempt["outcome"] = "success"
+    except BaseException as error:
+        attempt["outcome"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failure"
+        attempt["error_type"] = type(error).__name__
+        raise
+    finally:
+        attempt.update(finished_at=time.time(), elapsed_seconds=round(time.monotonic() - started, 3))
+        # This diagnostic never grants acceptance or replaces signed evidence.
+        if "output" in attempt:
+            try:
+                (Path(attempt["output"]) / "attempt.json").write_bytes(canonical(attempt))
+            except OSError as error:
+                print(f"Could not save local attempt timing: {error}", file=sys.stderr, flush=True)
+        print("LOCAL_ACCEPTANCE_TIMING=" + canonical(attempt).decode(), flush=True)
+
+
+def perform_check(args, attempt):
     import importlib.util
 
     head = value("rev-parse", args.head or "HEAD")
@@ -753,6 +776,12 @@ def check(args):
     if output == ROOT or ROOT in output.parents:
         raise RuntimeError("Keep acceptance outputs outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
+    attempt.update(head=head, tree=value("rev-parse", f"{head}^{{tree}}"), base=base,
+                   branch=git("symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None,
+                   host=host(), policy_ref=policy_ref, output=str(output))
+    (output / "attempt.json").write_bytes(canonical(attempt))
+    print("Local acceptance timing includes this invocation's setup, checks and publication; "
+          "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
     profiles = output / "protected_profiles.py"
     profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
@@ -766,6 +795,13 @@ def check(args):
     previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
     if previous:
         reusable, resumed = resume_checks(previous, head, base_ref, policy_ref, output, needed)
+    prior_timing = (resumed or {}).get("timing")
+    prior_start = prior_timing.get("first_recorded_started_at") if isinstance(prior_timing, dict) else None
+    known_start = type(prior_start) in (int, float) and 0 < prior_start <= attempt["started_at"]
+    timing = {"started_at": attempt["started_at"],
+              "first_recorded_started_at": prior_start if known_start else attempt["started_at"],
+              "prior_timing_available": known_start}
+    attempt["first_recorded_started_at"] = timing["first_recorded_started_at"]
     results = {}
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
@@ -774,7 +810,7 @@ def check(args):
                "commands_ref": value("rev-parse", policy_ref),
                "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
                "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
-               "finished_at": int(time.time()), "checks": results, "plan": plan}
+               "finished_at": int(time.time()), "checks": results, "plan": plan, "timing": timing}
     if resumed is not None:
         receipt["resumed_from"] = resumed
     try:
@@ -787,6 +823,7 @@ def check(args):
                 results[name] = module.run(name, ROOT, output / name, base, run_command)
         clean(head)
     except BaseException:
+        timing["checks_finished_at"] = time.time()
         if results:
             try:
                 clean(head)
@@ -801,6 +838,7 @@ def check(args):
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
         raise
+    timing["checks_finished_at"] = time.time()
     receipt["finished_at"] = int(time.time())
     envelope = sign_receipt(receipt, output, identity, key)
     verify_envelope(envelope, head, base_ref, policy_ref)
@@ -1009,6 +1047,9 @@ def main():
     command.add_argument("remote")
     command.add_argument("url")
     args = parser.parse_args()
+    timed = args.operation in {"check", "pre-push", "contract-update", "contract-pre-push"}
+    started = time.monotonic()
+    operation = {"version": 1, "operation": args.operation, "started_at": time.time(), "outcome": "failure"}
     try:
         # Installed runners live outside a worktree. Their caller's checkout,
         # not the installation directory, supplies the exact tested sources.
@@ -1041,9 +1082,23 @@ def main():
             contract_pre_push(args)
         else:
             pre_push(args)
+        operation["outcome"] = "success"
+    except KeyboardInterrupt:
+        operation["outcome"] = "interrupted"
+        raise
     except (RuntimeError, subprocess.CalledProcessError, OSError, ValueError, KeyError) as error:
         print(f"Local acceptance blocked: {error}", file=sys.stderr)
         return 1
+    finally:
+        if timed:
+            operation.update(finished_at=time.time(), elapsed_seconds=round(time.monotonic() - started, 3))
+            directory = Path(args.output).resolve() if getattr(args, "output", None) else None
+            if directory and directory.is_dir() and directory != ROOT and ROOT not in directory.parents:
+                try:
+                    (directory / "operation.json").write_bytes(canonical(operation))
+                except OSError as error:
+                    print(f"Could not save local operation timing: {error}", file=sys.stderr, flush=True)
+            print("LOCAL_ACCEPTANCE_OPERATION_TIMING=" + canonical(operation).decode(), flush=True)
     return 0
 
 

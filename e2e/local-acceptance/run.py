@@ -275,6 +275,9 @@ def enforcement_acceptance():
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
 
+        from profile_compat_acceptance import verify_profile_compatibility
+        verify_profile_compatibility(directory, work, command)
+
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production
         # branch-protection bypass.

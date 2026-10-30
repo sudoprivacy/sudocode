@@ -301,6 +301,8 @@ def enforcement_acceptance():
 
         from profile_compat_acceptance import verify_profile_compatibility
         verify_profile_compatibility(directory, work, command)
+        from resume_acceptance import verify_resume
+        verify_resume(directory, SOURCE, command)
 
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production

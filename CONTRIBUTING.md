@@ -199,10 +199,22 @@ scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
-Hosted complementary builds use up to two compiler workers. That hosted-only
-limit is applied after cache restore; local author builds keep one worker and
+Hosted complementary builds use the available compiler CPUs. That hosted-only
+setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
+Deterministic workspace cases use the checksum-pinned nextest runner with four
+global test workers. The runner lives in a private acceptance cache; it does not
+replace a contributor's installed tools. Retries are disabled, the first failure
+stops new work while active cases clean up, and an empty selection fails. Cargo
+still runs doctests separately. The existing live-provider commands remain on
+Cargo; no provider coverage is inferred from deterministic fixture results.
+The protected policy records exact pairs of equivalent execution hashes for the
+runner migration. Existing full-Cargo evidence for the same candidate can remain
+valid; the new runner-enforcement guard still runs. The verifier checks the old
+recipe against signed source and the pair against the current recipe. A later
+command change or newly required check cannot inherit that approval. Reuse is
+reported directly by the hook and CI verifier.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.
@@ -217,6 +229,13 @@ stale or tampered receipts block the Local acceptance required check. A signatur
 authenticates the enrolled author's statement; it is not remote execution
 attestation. Maintainers may attest a contributor's PR by actually running its
 checks on an enrolled host; forks need not receive repository secrets.
+
+After the protected commands change, `check --resume-from /path/to/previous/output`
+can reuse unchanged profiles from a signed run of the same commit, tree, base,
+native platform and architecture. The previous policy must belong to the current protected
+history, its signature must still verify, and the original logs must match their
+signed hashes. Changed profiles run again. The new receipt records which profiles
+were reused and retains their original command records and completion time.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted
@@ -325,8 +344,9 @@ update; it is not the `Local acceptance` test result. The read-only gate checks
 the actor's current role and uses the approved executor for complementary hosts.
 Failed tests, invalid signatures and missing hosts still fail normal acceptance.
 
-The command requires current main to be integrated. A changed head, changed
-trusted rules, revoked status or lost maintainer role requires a fresh update.
+The command requires intervening protected contract changes to be integrated.
+Unrelated main updates retain the checked-out head and its existing build outputs.
+A changed head, changed trusted rules, revoked status or lost maintainer role requires a fresh update.
 If authorization publication fails after the push, rerun the same command: a
 valid exact-head signed result is reused. Neither the installed global hook nor
 branch protection is disabled. Signer registry edits also require this route;

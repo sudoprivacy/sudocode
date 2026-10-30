@@ -261,7 +261,17 @@ def compatible_profile_commands(receipt, policy_ref, required):
                     reachable.get(name) != original_reachable[name] for name in required):
                 return False
         expected = reachable_profile_commands_hashes(policy_ref, required)
-        return all(original_reachable[name] == expected[name] for name in required)
+        equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
+        for name in required:
+            if original_reachable[name] == expected[name]:
+                continue
+            approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
+            predecessors = approved.get(expected[name], []) if isinstance(approved, dict) else []
+            if not isinstance(predecessors, list) or original_reachable[name] not in predecessors:
+                return False
+            print(f"Preserving exact-head {name} evidence: trusted policy approves this previous "
+                  "execution recipe as equivalent. Required checks and signed source remain verified.", flush=True)
+        return True
     except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError):
         return False
 
@@ -465,7 +475,7 @@ def run_command(command, cwd, log, env=None):
     # An explicit command environment may still select NO_COLOR below.
     environment.pop("NO_COLOR", None)
     if os.name == "nt" and not environment.get("LIB") and (
-            Path(command[0]).stem.lower() == "cargo" or any("e2e/build-metadata/run.py" in str(arg) for arg in command)):
+            Path(command[0]).stem.lower() in {"cargo", "cargo-nextest"} or any("e2e/build-metadata/run.py" in str(arg) for arg in command)):
         global MSVC_ENV
         if MSVC_ENV is None:
             configured = git("config", "--get", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()
@@ -503,7 +513,7 @@ def run_command(command, cwd, log, env=None):
                     children = psutil.Process(process.pid).children(recursive=True)
                     for child in children:
                         name = child.name().lower()
-                        if name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "cc", "clang", "clang.exe"}:
+                        if name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "cc", "clang", "clang.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}:
                             child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
                             priorities[f"{child.pid}:{name}"] = child.nice()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -638,6 +648,39 @@ def publish(head, envelope, remote):
         git("update-ref", "-d", temporary)
 
 
+def resume_checks(directory, head, base, policy_ref, output, needed):
+    """Reuse signed exact-source checks only while their commands and logs match."""
+    directory = Path(directory).resolve()
+    envelope = json.loads((directory / "envelope.json").read_text())
+    payload = base64.b64decode(envelope["payload"], validate=True)
+    if payload != (directory / "receipt.json").read_bytes():
+        raise RuntimeError("Resume receipt differs from its signed payload")
+    previous = json.loads(payload)
+    previous_policy = value("rev-parse", previous["commands_ref"])
+    if git("merge-base", "--is-ancestor", previous_policy, policy_ref, check=False).returncode:
+        raise RuntimeError("Resume policy is not an ancestor of the current protected policy")
+    previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=policy_ref)
+    if previous["host"] != host():
+        raise RuntimeError("Resume receipt belongs to a different native host")
+    reusable = {}
+    for name in needed:
+        if name not in previous["checks"] or not compatible_profile_commands(previous, policy_ref, [name]):
+            continue
+        logs = {path.name: path.read_bytes() for path in (directory / name).glob("*.log") if path.is_file()}
+        expected = {command["log_sha256"] for command in previous["checks"][name]}
+        if not expected.issubset({sha(contents) for contents in logs.values()}):
+            raise RuntimeError(f"Resume log missing or changed for {name}")
+        target = output / name
+        target.mkdir()
+        for filename, contents in logs.items():
+            if sha(contents) in expected:
+                (target / filename).write_bytes(contents)
+        reusable[name] = previous["checks"][name]
+    return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
+                      "commands_ref": previous_policy, "finished_at": previous["finished_at"],
+                      "profiles": sorted(reusable)}
+
+
 def check(args):
     import importlib.util
 
@@ -672,10 +715,17 @@ def check(args):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
+    reusable, resumed = {}, None
+    if getattr(args, "resume_from", None):
+        reusable, resumed = resume_checks(args.resume_from, head, base_ref, policy_ref, output, needed)
     results = {}
     for name in needed:
-        print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-        results[name] = module.run(name, ROOT, output / name, base, run_command)
+        if name in reusable:
+            print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+            results[name] = reusable[name]
+        else:
+            print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+            results[name] = module.run(name, ROOT, output / name, base, run_command)
     clean(head)
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
@@ -685,6 +735,8 @@ def check(args):
                "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
                "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
                "finished_at": int(time.time()), "checks": results, "plan": plan}
+    if resumed is not None:
+        receipt["resumed_from"] = resumed
     payload = output / "receipt.json"
     payload.write_bytes(canonical(receipt))
     signature = payload.with_suffix(".json.sig")
@@ -811,8 +863,10 @@ def contract_update(args):
     contract_remote(args.remote, repository)
     if branch == "main":
         raise RuntimeError("Use a non-main branch for contract-update")
-    if git("merge-base", "--is-ancestor", trusted, head, check=False).returncode:
-        raise RuntimeError("Trusted main advanced. Integrate origin/main while preserving other changes, then rerun contract-update.")
+    shared_base = value("merge-base", trusted, head)
+    if contract_hash(shared_base) != contract_hash(trusted):
+        raise RuntimeError("Trusted acceptance contract advanced. Integrate origin/main while preserving other changes, "
+                           "then rerun contract-update. Unrelated main updates do not require a cosmetic merge.")
     if not changed_contract_files(head, trusted):
         raise RuntimeError("No protected contract files changed. Next: git push --set-upstream origin HEAD")
     signer = value("config", "localAcceptance.signer")
@@ -847,7 +901,9 @@ def contract_update(args):
         raise RuntimeError("Branch was pushed, but contract authorization is incomplete. Rerun contract-update; "
                            "the existing exact-head signed receipt will be reused. " + str(error)) from error
     print(f"Contract authorization published for {head}. Local acceptance and all complementary CI checks must still pass.\n"
-          f"Next: gh pr create --draft --base main --head {branch} (or inspect the existing PR).", flush=True)
+          f"Next: gh pr create --draft --base main --head {branch} (or inspect the existing PR).\n"
+          f"When ready to land: gh pr merge {shlex.quote(branch)} --merge --auto. "
+          "Request queueing before waiting; GitHub still enforces required checks and reviews.", flush=True)
 
 
 def run_candidate_checks(head, trusted, remote, output=None):
@@ -876,6 +932,8 @@ def main():
             command.add_argument("--architecture")
         if name == "check":
             command.add_argument("--output")
+            command.add_argument("--resume-from", type=Path,
+                                 help="Reuse unchanged checks from a signed exact-source output directory")
             command.add_argument("--publish", action="store_true")
             command.add_argument("--remote", default="origin")
     command = sub.add_parser("install")

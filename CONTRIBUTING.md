@@ -223,10 +223,11 @@ command change or newly required check cannot inherit that approval. Reuse is
 reported directly by the hook and CI verifier.
 The native recovery smoke and executor guard share an immutable protected-policy
 snapshot with their matching helpers. Older candidate checkouts do not need
-those newly added files. Declared executor inputs, including helpers outside
-`.github/`, belong to the protected contract and to their owning profile's
-fingerprints; changing them requires contract authorization and fresh guard
-evidence. The full Docker decision matrix still exercises candidate sources.
+those newly added files. The protected profile pins every staged input's SHA256,
+including helpers outside `.github/`; changed bytes fail before execution until
+their protected pins are reviewed and updated. The existing profile fingerprints
+bind those pins without changing the receipt format. The full Docker decision
+matrix still exercises candidate sources.
 Toolchain discovery still uses the candidate repository.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;

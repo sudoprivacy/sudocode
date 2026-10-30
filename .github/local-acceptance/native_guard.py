@@ -14,6 +14,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--executable", type=Path, required=True)
+    parser.add_argument("--source-receipt", type=Path, required=True)
+    parser.add_argument("--options", required=True)
     args = parser.parse_args()
     repository, output = args.repository.resolve(), args.output.resolve()
     if output == SOURCE or SOURCE in output.parents or output == repository or repository in output.parents:
@@ -32,6 +35,8 @@ def main():
     commands.append(helper.run_command([
         sys.executable, str(SOURCE / ".github/local-acceptance/nextest_guard.py"),
         "--repository", str(repository), "--output", str(output / "nextest-executor"),
+        "--executable", str(args.executable), "--source-receipt", str(args.source_receipt),
+        "--options", args.options,
     ], SOURCE, output / "nextest.log"))
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,

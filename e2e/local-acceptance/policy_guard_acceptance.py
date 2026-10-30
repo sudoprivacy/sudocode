@@ -39,7 +39,7 @@ def main():
     profiles = load("policy_guard_profiles", SOURCE / ".github/local-acceptance/checks.py")
     # Capture the actual policy tool set before pointing Git helpers at fixtures.
     policy = json.loads((SOURCE / "spec/local_acceptance.json").read_text())
-    recipe = policy["checks"]["guard-contract"]["executor"]
+    pins = profiles.native_guard_files()
     # The Docker decision matrix starts from a tracked-source archive without Git history.
     # Copy the policy directories, then let the real Git contract select its own inputs.
     contents = {
@@ -99,8 +99,11 @@ def main():
         negative = json.loads((output / "old-path-negative.command.json").read_text())
         assert negative["exit_code"] == 2, negative
     entry = profiles.stage_profile_executor(candidate, protected, "guard-contract", output / "native-guard-policy")
+    executable = profiles.nextest_binary(output)
     result = authority.run_command([
         sys.executable, str(entry), "--repository", str(candidate), "--output", str(output / "positive"),
+        "--executable", str(executable), "--source-receipt", str(output / "nextest-source.json"),
+        "--options", json.dumps(profiles.nextest_options(output)),
     ], candidate, output / "native-guard.log")
     assert result["exit_code"] == 0
     assert git("rev-parse", "HEAD") == old and not git("status", "--porcelain")
@@ -111,40 +114,46 @@ def main():
     native = json.loads((output / "positive/nextest-executor/receipt.json").read_text())
     assert native["repository"] == str(candidate)
     assert [row["command"]["exit_code"] for row in native["checks"]] == [0, 100, 4]
-    bound = authority.profile_executor_inputs(protected, "guard-contract")
-    for path, digest in bound.items():
+    for path, digest in pins.items():
         actual = output / "native-guard-policy" / path
         assert hashlib.sha256(actual.read_bytes()).hexdigest() == digest, path
     names = list(policy["checks"])
     fingerprint_results = []
-    for relative in [recipe["entry_point"], *recipe["support_files"]]:
+    before = authority.reachable_profile_commands_hashes(protected, names)
+    for index, (relative, expected) in enumerate(pins.items()):
         git("switch", "--detach", protected)
         path = candidate / relative
         path.write_bytes(path.read_bytes() + b"\n# Changed protected dependency.\n")
         changed = commit("Change a protected guard dependency")
-        for method in [authority.profile_commands_hashes, authority.reachable_profile_commands_hashes]:
-            before, after = method(protected, names), method(changed, names)
-            affected = {name for name in names if before[name] != after[name]}
-            assert affected == {"guard-contract"}, (relative, method.__name__, affected)
-            fingerprint_results.append({"file": relative, "encoding": method.__name__, "affected": sorted(affected)})
+        try:
+            profiles.stage_profile_executor(candidate, changed, "guard-contract", output / f"rejected-input-{index}")
+            raise AssertionError(f"Changed executor bytes were accepted: {relative}")
+        except RuntimeError as error:
+            assert "Update its protected pin before running acceptance" in str(error), error
+        selector = candidate / ".github/local-acceptance/checks.py"
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        selector.write_text(selector.read_text().replace(expected, actual))
+        changed = commit("Bind reviewed native guard bytes in the protected profile")
+        after = authority.reachable_profile_commands_hashes(changed, names)
+        affected = {name for name in names if before[name] != after[name]}
+        assert affected == {"guard-contract"}, (relative, affected)
+        fingerprint_results.append({"file": relative, "affected": sorted(affected), "unpinned_bytes_refused": True})
         try:
             authority.check_contract_changes(changed, protected, protected)
             raise AssertionError(f"Declared executor input escaped contract authorization: {relative}")
         except RuntimeError as error:
             assert "Candidate changes the protected acceptance contract" in str(error), error
     git("switch", "--detach", protected)
-    invalid = json.loads((candidate / "spec/local_acceptance.json").read_text())
-    invalid["checks"]["guard-contract"]["executor"]["support_files"].append("../escape.py")
-    (candidate / "spec/local_acceptance.json").write_text(json.dumps(invalid))
+    selector = candidate / ".github/local-acceptance/checks.py"
+    selector.write_text(selector.read_text().replace(next(iter(pins)), "../escape.py"))
     bad = commit("Reject an executor outside the protected contract")
-    rejected_output = output / "must-not-start"
+    bad_profiles = load("invalid_policy_guard_paths", selector)
     try:
-        authority.check(argparse.Namespace(head=bad, base=protected, policy_ref=bad,
-                        output=str(rejected_output), publish=False, remote="origin", resume_from=None))
+        bad_profiles.stage_profile_executor(candidate, bad, "guard-contract", output / "must-not-start")
         raise AssertionError("Unprotected executor input was accepted")
     except RuntimeError as error:
-        assert "unique protected policy files" in str(error), error
-        assert not rejected_output.exists()
+        assert "Executor input escaped its policy snapshot" in str(error), error
+        assert not (output / "escape.py").exists()
     git("switch", "--detach", old)
     assert not git("status", "--porcelain")
     (output / "receipt.json").write_text(json.dumps({
@@ -157,7 +166,7 @@ def main():
         "old_candidate_head_and_checkout_unchanged": True,
     }, indent=2))
     print(f"Policy-owned guard E2E passed: unchanged old checkout, real native child/refusals, "
-          f"both fingerprint encodings and unprotected-input refusal; {output}")
+          f"guard-only fingerprints, changed-input and escaping-path refusals; {output}")
 
 
 if __name__ == "__main__":

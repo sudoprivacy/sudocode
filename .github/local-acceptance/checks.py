@@ -155,7 +155,10 @@ def run(name, root, output, base, execute):
         policy_ref = policy_ref or "origin/main"
         entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
         command(sys.executable, str(entry), "--repository", str(root),
-                "--output", str(output / "native-guard"))
+                "--output", str(output / "native-guard"),
+                "--executable", str(nextest_binary(output)),
+                "--source-receipt", str(output / "nextest-source.json"),
+                "--options", json.dumps(nextest_options(output)))
         contract_container(root, output, command)
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
@@ -273,19 +276,33 @@ def run(name, root, output, base, execute):
     return results
 
 
+def native_guard_files():
+    """Bind external tool bytes through the existing executable fingerprint format."""
+    return {
+        ".github/local-acceptance/native_guard.py": "ac3c83b231e731196394387920b18c1d950fd525093a038eee4afca613db92b8",
+        ".github/local-acceptance/nextest_guard.py": "fb8dde64608e19c0f451eb1ee40d83789844bf07ed884fb14a4aed52a0d45f36",
+        ".github/scripts/local_acceptance.py": "abcdad4a31825138ae23cd40236737d2fdf7ef084603b7c97786efaffc208b3c",
+        "e2e/local-acceptance/run.py": "694523a1d700eb305686f769ec4ec8749df70d8d7caee1f5af99bd70aaacc425",
+        "e2e/local-acceptance/resume_acceptance.py": "53ad5fcbe81f0c01a3b09316b7b03c162a2d54a49a24445c6da75558ee169ce9",
+    }
+
+
 def stage_profile_executor(root, policy_ref, name, policy_root):
-    """Materialize a declared tool set from one immutable policy, never a candidate."""
-    configuration = json.loads(subprocess.check_output(
-        ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
-    executor = configuration["checks"][name]["executor"]
-    for relative in [executor["entry_point"], *executor["support_files"]]:
+    """Materialize one hash-bound native tool set without changing the candidate."""
+    if name != "guard-contract":
+        raise RuntimeError(f"No policy-owned native executor for {name}")
+    for relative, expected in native_guard_files().items():
         destination = (policy_root / relative).resolve()
         if not destination.is_relative_to(policy_root.resolve()):
             raise RuntimeError("Executor input escaped its policy snapshot")
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"Native guard input {relative} changed: SHA256 {actual}. "
+                               "Update its protected pin before running acceptance.")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(subprocess.check_output(
-            ["git", "show", f"{policy_ref}:{relative}"], cwd=root))
-    return policy_root / executor["entry_point"]
+        destination.write_bytes(contents)
+    return policy_root / ".github/local-acceptance/native_guard.py"
 
 
 def contract_container(root, output, command):

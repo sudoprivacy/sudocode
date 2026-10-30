@@ -66,39 +66,11 @@ def load_policy(ref):
     return json.loads(tracked(ref, POLICY))
 
 
-def contract_files(ref):
+def contract_hash(ref):
     paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
              ".github/workflows/local-acceptance-publish.yml"]
     paths += value("ls-tree", "-r", "--name-only", ref, ".github/local-acceptance").splitlines()
-    for name in load_policy(ref)["checks"]:
-        paths += profile_executor_paths(ref, name)
-    return sorted(set(paths))
-
-
-def contract_hash(ref):
-    return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(contract_files(ref))}))
-
-
-def profile_executor_paths(ref, name):
-    """Declared executor sources are protected, including their external helpers."""
-    rule = load_policy(ref)["checks"].get(name, {})
-    if "executor" not in rule:
-        return []
-    execution = rule["executor"]
-    if (not isinstance(execution, dict) or set(execution) != {"entry_point", "support_files"}
-            or not isinstance(execution["entry_point"], str)
-            or not isinstance(execution["support_files"], list)):
-        raise RuntimeError(f"Invalid policy-owned executor for {name}")
-    paths = [execution["entry_point"], *execution["support_files"]]
-    if (not all(isinstance(path, str) for path in paths) or len(paths) != len(set(paths))
-            or any(path not in value("ls-tree", "-r", "--name-only", ref).splitlines() for path in paths)):
-        raise RuntimeError(f"Executor inputs for {name} must be unique protected policy files")
-    return sorted(paths)
-
-
-def profile_executor_inputs(ref, name):
-    """Bind policy-owned entry points and their support files only to their owner."""
-    return {path: sha(tracked(ref, path)) for path in profile_executor_paths(ref, name)}
+    return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
 
 
 def executor_source(ref):
@@ -168,12 +140,8 @@ def profile_commands_hashes(ref, names):
                          for node in ast.walk(dispatcher))
         if not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
-        components = {"version": 1, "executor": executor, "image": image,
-                      "profile": profile_ast_value(projected)}
-        dependencies = profile_executor_inputs(ref, name)
-        if dependencies:
-            components["executor_inputs"] = dependencies
-        result[name] = sha(canonical(components))
+        result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
     return result
 
 
@@ -243,12 +211,8 @@ def reachable_profile_commands_hashes(ref, names):
                     pending.append(functions[reference])
             projected.body = [node for node in projected.body
                               if not isinstance(node, ast.FunctionDef) or node.name in retained]
-        components = {"version": 2, "executor": executor, "image": image,
-                      "profile": profile_ast_value(projected)}
-        dependencies = profile_executor_inputs(ref, name)
-        if dependencies:
-            components["executor_inputs"] = dependencies
-        result[name] = sha(canonical(components))
+        result[name] = sha(canonical({"version": 2, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
     return result
 
 
@@ -412,7 +376,8 @@ def host():
 
 
 def changed_contract_files(head, base):
-    protected = set(contract_files(head)) | set(contract_files(base))
+    protected = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
+                 ".github/workflows/local-acceptance-publish.yml"]
     return sorted(path for path in changed_paths(value("merge-base", base, head), head)
                   if path in protected or path.startswith(".github/local-acceptance/"))
 
@@ -770,8 +735,6 @@ def check(args):
     needed = selected(load_policy(policy_ref), changed_paths(base, head))
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
-    for name in needed:
-        profile_executor_inputs(policy_ref, name)
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
     report_plan(plan)
     identity = value("config", "localAcceptance.signer")

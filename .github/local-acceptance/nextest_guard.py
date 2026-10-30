@@ -6,6 +6,7 @@ The intentionally failing child and empty selection must never return success.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -29,18 +30,35 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--repository", type=Path, default=SOURCE)
+    parser.add_argument("--executable", type=Path)
+    parser.add_argument("--source-receipt", type=Path)
+    parser.add_argument("--options")
     args = parser.parse_args()
     output = (args.output or (Path.home() / ".nexus/local-acceptance/nextest" / str(time.time_ns()))).resolve()
     repository = args.repository.resolve()
     if output == repository or repository in output.parents or output == SOURCE or SOURCE in output.parents:
         raise RuntimeError("Keep nextest acceptance outputs outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
-    profiles = load("acceptance_profiles", SOURCE / ".github/local-acceptance/checks.py")
     helper = load("acceptance_executor", SOURCE / ".github/scripts/local_acceptance.py")
     # Toolchain discovery must read the candidate repository configuration.
     helper.ROOT = repository
-    executable = profiles.nextest_binary(output)
-    source_receipt = json.loads((output / "nextest-source.json").read_text())
+    if args.executable is None:
+        if args.source_receipt is not None or args.options is not None:
+            raise RuntimeError("Supply the executable, source receipt and options together")
+        profiles = load("acceptance_profiles", SOURCE / ".github/local-acceptance/checks.py")
+        executable = profiles.nextest_binary(output)
+        source_path = output / "nextest-source.json"
+        options = profiles.nextest_options(output)
+    else:
+        if args.source_receipt is None or args.options is None:
+            raise RuntimeError("Supply the executable, source receipt and options together")
+        executable, source_path = args.executable.resolve(), args.source_receipt.resolve()
+        options = json.loads(args.options)
+        if not isinstance(options, list) or not all(isinstance(option, str) for option in options):
+            raise RuntimeError("Native runner options must be a string array")
+    source_receipt = json.loads(source_path.read_text())
+    if hashlib.sha256(executable.read_bytes()).hexdigest() != source_receipt["executable_sha256"]:
+        raise RuntimeError("Native runner differs from its verified source receipt")
     version = subprocess.check_output([str(executable), "nextest", "--version"], text=True).strip()
     if not version.startswith(f"cargo-nextest {source_receipt['version']} "):
         raise RuntimeError(f"Unexpected verified nextest version: {version}")
@@ -65,7 +83,7 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
 ''')
     os.environ.pop("NO_COLOR", None)
     os.environ["TERM"] = "xterm-256color"
-    arguments = [str(executable), "nextest", "run", *profiles.nextest_options(output),
+    arguments = [str(executable), "nextest", "run", *options,
                  "--manifest-path", str(fixture / "Cargo.toml"), "--locked"]
     environment = {"CARGO_TARGET_DIR": str(output / "target")}
     checks = []

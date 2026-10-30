@@ -9,6 +9,13 @@
       ]
     },
     "guard-contract": {
+      "executor": {
+        "entry_point": ".github/local-acceptance/nextest_guard.py",
+        "support_files": [
+          ".github/local-acceptance/checks.py",
+          ".github/scripts/local_acceptance.py"
+        ]
+      },
       "include": [
         ".github/local-acceptance/**",
         ".github/scripts/local_acceptance.py",

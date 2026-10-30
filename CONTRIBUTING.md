@@ -221,6 +221,11 @@ valid; the new runner-enforcement guard still runs. The verifier checks the old
 recipe against signed source and the pair against the current recipe. A later
 command change or newly required check cannot inherit that approval. Reuse is
 reported directly by the hook and CI verifier.
+The native executor guard and its matching profile/execution helpers are loaded
+from an immutable protected-policy snapshot. Older candidate checkouts do not
+need those newly added files. Declared executor inputs belong to the protected
+contract and to their owning profile's fingerprints; changing them requires
+fresh guard evidence. Toolchain discovery still uses the candidate repository.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.

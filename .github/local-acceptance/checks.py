@@ -138,8 +138,20 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
         command(sys.executable, "e2e/local-acceptance/run.py")
-        command(sys.executable, "e2e/local-acceptance/nextest.py",
-                "--output", str(output / "nextest-executor"))
+        policy_ref = getattr(run, "execution_refs", (None, None))[0] or "origin/main"
+        configuration = json.loads(subprocess.check_output(
+            ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
+        executor = configuration["checks"][name]["executor"]
+        policy_root = output / "native-guard-policy"
+        for relative in [executor["entry_point"], *executor["support_files"]]:
+            destination = (policy_root / relative).resolve()
+            if not destination.is_relative_to(policy_root.resolve()):
+                raise RuntimeError("Executor input escaped its policy snapshot")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(subprocess.check_output(
+                ["git", "show", f"{policy_ref}:{relative}"], cwd=root))
+        command(sys.executable, str(policy_root / executor["entry_point"]),
+                "--repository", str(root), "--output", str(output / "nextest-executor"))
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)

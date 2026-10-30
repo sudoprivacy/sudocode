@@ -97,7 +97,7 @@ retirement policy. No Nexus enrollment or production frontend is used.
 
 From this directory in a clean committed checkout:
 
-Source tests need Python 3 for the bundled PTY/ConPTY driver guard; the installed
+Source tests need Python 3 for the PTY/ConPTY guard and real AF_UNIX endpoint checks; the installed
 ACP runtime uses Node only. The guard runs a mock terminal and verifies that a
 close request cannot confirm an installer dialog.
 

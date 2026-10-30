@@ -3,7 +3,7 @@ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http
 const crypto=require('node:crypto'),assert=require('node:assert/strict');
 const {spawn,execFileSync}=require('node:child_process');
 const {once}=require('node:events'),{parseArgs}=require('node:util');
-const socketEntryPresent=require('./fixtures/nativeSocketReady.cjs');
+const {socketEntryPresent}=require('./fixtures/nativeSocket.cjs');
 const options=parseArgs({options:{codex:{type:'string'},output:{type:'string'},driver:{type:'string'},
   library:{type:'string'},case:{type:'string',default:'idle'},help:{type:'boolean'}}}).values;
 if(options.help){console.log('node test/nativeCodexQueue.cjs --codex ABS_NATIVE --output ABS_EVIDENCE [--case idle|response-loss] [--driver JSON_ARGV] [--library ABS_INDEX_CJS]');process.exit(0);}

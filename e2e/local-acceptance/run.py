@@ -22,8 +22,10 @@ def fixture_environment():
     """Clear hook-exported repository selectors before touching temporary repos."""
     names = subprocess.check_output(["git", "rev-parse", "--local-env-vars"],
                                     cwd=SOURCE, text=True).splitlines()
-    return {key: value for key, value in os.environ.items() if key not in names
-            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    environment = {key: value for key, value in os.environ.items() if key not in names
+                   and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
 
 
 FIXTURE_ENV = fixture_environment()
@@ -52,7 +54,7 @@ def scope_acceptance(directory):
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
 
-    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False):
+    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -65,6 +67,7 @@ def scope_acceptance(directory):
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
         assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
+        assert f"container_required={str(container).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -86,7 +89,8 @@ def scope_acceptance(directory):
              ("e2e/shared-services/check.py", False, True, False),
              (".github/local-acceptance/checks.py", False, False, False),
              (".github/scripts/local_acceptance.py", False, False, False),
-             ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False)]
+             ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False),
+             ("e2e/local-acceptance/container_inputs_acceptance.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -113,7 +117,9 @@ def scope_acceptance(directory):
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
             expect_scope(event_name, event, live, daemon, clippy, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
-                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"})
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"}, path in {
+                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"})
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -236,6 +242,9 @@ def enforcement_acceptance():
             'def browser_only_helper():\n'
             '    return "unused browser helper v1"\n'
             'def run(name, root, output, base, execute):\n'
+            '    policy_ref, candidate_ref = run.execution_refs\n'
+            '    assert policy_ref and len(policy_ref) == 40\n'
+            '    assert candidate_ref and len(candidate_ref) == 40\n'
             '    if name == "native-sdk":\n'
             '        return [execute([shared_python(), "-c", '
             '"from pathlib import Path; text=Path(\'sdk/typescript/input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
@@ -340,6 +349,8 @@ def enforcement_acceptance():
         command("git", "checkout", "feature", cwd=work)
         from contract_update_acceptance import verify_contract_update
         verify_contract_update(directory, work, FIXTURE_ENV)
+        from frozen_refs_acceptance import verify_frozen_refs
+        verify_frozen_refs(directory, work, FIXTURE_ENV)
         print("PASS: added/removed checks both block real pushes with diagnostics and unchanged remote refs")
 
         # Both a new commit and unsigned changes to a previously valid receipt
@@ -407,6 +418,8 @@ def enforcement_acceptance():
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     if sys.argv[1:] == ["--fixture-child"]:
         enforcement_acceptance()
         return

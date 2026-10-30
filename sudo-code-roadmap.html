@@ -287,6 +287,14 @@ profiles remain; no test target is deleted.</p>
 <p>Shared PTY helper inputs retain native terminal resize acceptance at both
 the CLI <code>tests/common</code> path and the shared test-crate path. This
 preserves the native guard when reducing repeated helper compilation.</p>
+<p>Local acceptance freezes candidate, PR base and authorized policy commits at
+invocation start. Docker snapshots and image context follow that fixed policy;
+the run uses the actual build's immutable image ID. Each invocation saves
+<code>container-provenance.json</code>. Real Git/SSH and Docker regressions cover
+references changing during execution, a replaced image tag and rejection of
+wrong-policy inputs. The container fixture runs only for relevant PR inputs in
+the existing preflight, with no queue/main repetition or product coverage credit.
+Rendering workloads, sampling, budgets and deadlines remain unchanged.</p>
 <p>Main pushes reuse completed pre-merge formatting, schema, docs, boundary and
 fixture checks. Their lightweight preflight retains the protocol pin and input
 scope required by existing daemon/provider jobs. PR, queue and explicit runs

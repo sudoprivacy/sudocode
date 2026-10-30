@@ -35,7 +35,7 @@ This mode requires native root inventory and host-supplied tool-call metadata
 (qualified on native Codex 0.163.0), a compatible scode with native actor audit,
 and an operator-authorized enrollment adapter. The shared `--enroll-codex`
 adapter requires a private owner-created grant and the Nexus
-`operator-agent-enroll` client; it never installs a Node or supplies authority
+`nexus-agent-enroll` client; it never installs a Node or supplies authority
 implicitly. `--init-codex-operator` prepares that private launch policy without
 issuing an identity. Protocol fixtures do not establish production enrollment
 or current-node compatibility.

@@ -29,13 +29,13 @@ async function main(){
   const sample=fs.readFileSync(config.sampleConfig,'utf8').replaceAll('https://api.anthropic.com',url).replaceAll('<YOUR_ANTHROPIC_API_KEY>','isolated-operator-no-inference');
   fs.writeFileSync(path.join(config.actors[0].configHome,'sudocode.json'),sample);
   const nodeGrant=path.join(config.root,'operator-node-grant.json');
-  const initialized=run(config.operator,['--data-dir',config.dataDirectory,'operator-agent-enroll','--initialize','--grant',nodeGrant,
+  const initialized=run(config.operator,['--data-dir',config.dataDirectory,'--initialize','--grant',nodeGrant,
     '--endpoint',config.endpoint,'--workspace-root',config.root]);
   assert.equal(initialized.issued,false);
   const grant=path.join(config.root,'operator-acp-grant.json');
   const policy={scodeArgv:[config.scode,'--auth','api-key','--model','sonnet','--permission-mode','workspace-write',
     '--allowedTools','agent_list','--allowedTools','send','acp'],env:config.actors[0].env,closeTimeoutMs:3000};
-  const prepared=sdk.prepareCodexEnrollment(grant,[config.operator,'operator-agent-enroll','--grant',nodeGrant],policy,entry);
+  const prepared=sdk.prepareCodexEnrollment(grant,[config.operator,'--grant',nodeGrant],policy,entry);
   assert.equal(prepared.issued,false);
   const original=fs.readFileSync(path.join(claimA.workspace,'.nexus/sudocode/settings.json'));
   const enroll=claim=>runAsync(process.execPath,[entry,'--enroll-codex','--config',grant],JSON.stringify(claim));

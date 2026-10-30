@@ -138,7 +138,7 @@ Do not substitute the legacy `auth mint` CLI: its peer search/offline fallback
 is unsuitable for this exact-endpoint operation.
 
 Prepare explicit Node-side policy using the operator CLI's
-`operator-agent-enroll --initialize --grant FILE --endpoint HTTPS_URI
+`nexus-agent-enroll --initialize --grant FILE --endpoint HTTPS_URI
 --workspace-root DIRECTORY` command and the selected Box's `--data-dir`.
 The [Nexus operator contract](https://github.com/nexi-lab/nexus-vfs/blob/main/docs/operator-agent-enrollment.md)
 owns its Node identity/CA pins, workspace authorization and recovery semantics.
@@ -153,7 +153,10 @@ scode-acp-bridge --init-codex-operator --config OPERATOR_POLICY
   --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]
 ```
 
-`nexus-operator` names that exact operator executable and grant. `scode-argv`
+`nexus-operator` names that exact operator-only executable and grant. The
+`operator-agent-enrollment` build feature carries this entry without adding it
+to the default daemon; CI publishes it separately under the unchanged size
+caps. `scode-argv`
 is the owner's complete selected scode command ending in `acp`, including its
 normal approval/tool policy. Optional environment values select normal scode
 configuration and the existing Node record; never put Node/CA private keys in

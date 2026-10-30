@@ -1,0 +1,9 @@
+FROM rust:1.99@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+
+RUN nice -n 10 apt-get update \
+ && nice -n 10 apt-get install -y --no-install-recommends python3-psutil \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
+COPY guard.py /opt/acceptance-guard.py
+ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

@@ -269,6 +269,17 @@ The actual Git/SSH regression exercises a successful native process followed by
 a failed rendering process, partial-note rejection, damaged logs, automatic
 discovery and a complete successful resume. This removes repeated validation
 without reducing product checks.</p>
+<p>Acceptance-contract changes run the complete Git/SSH decision matrix in a
+private local Docker container, with a pinned Rust/Python-capable image. The
+author OS retains the real checkpoint/failure/resume smoke and native nextest
+enforcement fixture. Full Windows/macOS negative-hook decision matrices are no
+longer repeated natively; that OS-specific infrastructure coverage is reduced.
+The full Linux matrix retains its cases, while product native checks and the
+complementary CI platforms remain unchanged. Guard image/entrypoint inputs bind
+the guard fingerprint without invalidating unrelated completed native profiles.
+The container takes no shared benchmark lease. In a same-source probe, the full
+matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
+single trials concern infrastructure validation, not production PR latency.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>

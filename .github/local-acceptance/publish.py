@@ -67,6 +67,9 @@ def main():
             targets = dict.fromkeys(target for job in plan["ci"] for target in job["targets"])
             description = (f"Local {plan['author']['system']} + CI {','.join(targets) or 'none'} passed; "
                            "source only, deployment separate")
+        if run["event"] == "pull_request":
+            description = description.replace("source only, deployment separate", "source only")
+            description += f". When ready: gh pr merge {event['pull_request']['number']} --auto"
         success = True
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as problem:
         error = str(problem)

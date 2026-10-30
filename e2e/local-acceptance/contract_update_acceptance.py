@@ -152,6 +152,15 @@ def verify_contract_update(directory, work, clean_environment):
         (work / "input.txt").write_text("pass")
         run("git", "add", ".")
         run("git", "commit", "-m", "Both real candidate commands pass")
+        # Independent docs updates on main must not force another source stamp
+        # and rebuild of an otherwise current acceptance contract.
+        run("git", "checkout", "main")
+        (work / "unrelated-main.md").write_text("Independent documentation update\n")
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Advance main outside the protected contract")
+        run("git", "push", "origin", "main")
+        run("git", "checkout", "authorized-contract")
+        run("git", "merge-base", "--is-ancestor", "origin/main", "HEAD", success=False)
         state["reject_next_post"] = True
         interrupted = run(sys.executable, trusted_runner, "contract-update", "--remote", "contract-origin", success=False)
         assert "Branch was pushed, but contract authorization is incomplete" in interrupted, interrupted
@@ -192,6 +201,21 @@ def verify_contract_update(directory, work, clean_environment):
             run(sys.executable, proof, success=False)
         state["statuses"][0] = approved
         run(sys.executable, proof)
+        # An independent protected-main change does require integration.
+        run("git", "checkout", "main")
+        (work / ".github/local-acceptance/Dockerfile").write_text("FROM scratch\n# independent trusted update\n")
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Advance the trusted acceptance image")
+        advanced = run("git", "rev-parse", "HEAD")
+        # Model the remote maintainer's independent update in the real bare
+        # fixture; production hooks and protections are never disabled.
+        run("git", "push", "origin", advanced + ":refs/fixture/independent-main")
+        run("git", "--git-dir", origin, "update-ref", "refs/heads/main", advanced)
+        run("git", "checkout", "authorized-contract")
+        stale = run(sys.executable, trusted_runner, "contract-update", "--remote", "contract-origin", success=False)
+        assert "Trusted acceptance contract advanced" in stale, stale
+        assert run("git", "ls-remote", "origin", "refs/heads/authorized-contract").split()[0] == head
+        assert state["statuses"] == [approved]
         print("PASS: real contract-update CLI, native child failures, actual Git transport and SSH notes; "
               "loopback API rejects writer authority, revoked/stale/wrong-target authorization; "
               "trusted-base verification executes no candidate verifier and writes no test success status")
@@ -200,3 +224,7 @@ def verify_contract_update(directory, work, clean_environment):
         server.server_close()
         thread.join()
         run("git", "checkout", original_branch)
+        run("git", "--git-dir", origin, "update-ref", "refs/heads/main", trusted)
+        run("git", "--git-dir", origin, "update-ref", "-d", "refs/fixture/independent-main")
+        run("git", "update-ref", "refs/heads/main", trusted)
+        run("git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main")

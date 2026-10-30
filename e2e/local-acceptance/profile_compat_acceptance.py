@@ -144,9 +144,55 @@ def verify_profile_compatibility(directory, work, command):
         install_note(signed_note({**legacy_payload, "commands_sha256": "0" * 64}))
         run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", future,
             success=False, error="Acceptance commands changed")
+
+        # A protected migration may explicitly recognize two equivalent recipes.
+        # The approval binds both hashes, so later command changes cannot inherit it.
+        run("git", "checkout", "-b", "compat-equivalent", future)
+        equivalent_source = future_source.replace("Path('input.txt').read_text()",
+            "Path('input.txt').read_text(encoding='utf-8')")
+        assert equivalent_source != future_source
+        checks.write_text(equivalent_source)
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Specify UTF8 for the same real assertion")
+        executable_hash = json.loads(run(sys.executable, "-c",
+            "import json,runpy; h=runpy.run_path('.github/scripts/local_acceptance.py'); "
+            "print(json.dumps(h['reachable_profile_commands_hashes']('HEAD',['real-process'])))"))["real-process"]
+        equivalence = json.loads(policy.read_text())
+        equivalence["equivalent_profile_commands"] = {"real-process": {executable_hash: [
+            original_payload["reachable_profile_commands_sha256"]["real-process"]]}}
+        policy.write_text(json.dumps(equivalence))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Approve the exact equivalent execution hashes")
+        approved = run("git", "rev-parse", "HEAD")
+        for note in variants.values():
+            install_note(note)
+            output = run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", approved)
+            assert "trusted policy approves this previous execution recipe as equivalent" in output
+            assert run("git", "notes", "--ref=local-acceptance", "show", head) == note
+
+        checks.write_text(equivalent_source.replace("raise SystemExit(text != 'pass')",
+                                                   "raise SystemExit(text != 'different')"))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Change the actual assertion after migration")
+        changed = run("git", "rev-parse", "HEAD")
+        for note in variants.values():
+            install_note(note)
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", changed,
+                success=False, error="Acceptance commands changed")
+        run("git", "checkout", "-b", "compat-equivalent-required", approved)
+        equivalence["checks"]["native-future"] = {"include": ["**"]}
+        policy.write_text(json.dumps(equivalence))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Require a new check outside the equivalent pair")
+        changed = run("git", "rev-parse", "HEAD")
+        for note in variants.values():
+            install_note(note)
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", changed,
+                success=False, error="Acceptance commands changed")
         run("git", "checkout", original_branch)
         print("PASS: real hook pushes preserve modern/legacy SSH notes without repeating unchanged execution; "
-              "selected/shared/executor/image changes, missing profiles and malformed fingerprints fail")
+              "selected/shared/executor/image changes, missing profiles and malformed fingerprints fail; "
+              "explicit equivalent recipe pairs preserve signed notes but reject changed assertions/new checks")
     finally:
         install_note(original_note)
         run("git", "fetch", str(work), f"+{original_main}:refs/heads/main", cwd=origin)

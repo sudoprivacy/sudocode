@@ -12,6 +12,16 @@ Linux ARM64 (including DGX Spark), Linux x64, macOS and Windows use the same
 JavaScript payload. CI runs actual stdio/package workflows on these platforms;
 a new machine still needs its own scode, credential and transport acceptance.
 
+## Existing-thread native queue ingress
+
+For an explicitly known legacy thread without a reachable native socket,
+the fixed-session bridge also offers an opt-in `codexCallback.transport:
+"native-queue"`. It reuses its existing SID/peer filter and records real queue
+receipts separately from native turn acceptance. The [queue ingress
+contract](../../docs/design/codex-native-queue-callback.md) specifies the explicit
+native home, bounded unloaded producer, Unknown/no-replay behavior and actual
+native/ConPTY acceptance. Socket callbacks remain the default.
+
 ## Global native Codex attachment
 
 The `--codex` entry connects all loaded user-root threads through one per-user

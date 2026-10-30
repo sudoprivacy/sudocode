@@ -287,6 +287,23 @@ profiles remain; no test target is deleted.</p>
 <p>Shared PTY helper inputs retain native terminal resize acceptance at both
 the CLI <code>tests/common</code> path and the shared test-crate path. This
 preserves the native guard when reducing repeated helper compilation.</p>
+<p>Deterministic workspace cases use checksum-pinned nextest with four global
+workers, preserving test targets and ignored markers. It stops scheduling after
+the first failure, lets running cases clean up, disables retries and refuses an
+empty selection. Cargo retains doctests; live-provider commands remain unchanged.
+A Windows comparison matched all 2,574 declared cases across 230 binaries,
+including 70 ignored cases. The same 2,504 executed cases passed: Cargo took
+892.09 seconds, nextest took 456.33 seconds, and a four-CPU nextest run took
+490.18 seconds. These single local trials measure execution, not cloud PR
+latency. Eight/sixteen-worker stress runs failed existing UI/resume checks and
+are not the acceptance configuration. No assertion deadline or unique case is
+removed to obtain these results.</p>
+<p>The protected migration policy pairs exact old and new execution hashes so
+already completed full-Cargo evidence for the same candidate can remain valid.
+The new runner-enforcement guard still executes. Real Git/SSH regressions cover
+current and legacy signed receipts, unchanged notes, changed assertions and new
+required checks. Later recipe changes cannot inherit an obsolete pair. Reuse
+appears in mandatory hook and CI output; no product coverage is removed.</p>
 <p>Local acceptance freezes candidate, PR base and authorized policy commits at
 invocation start. Docker snapshots and image context follow that fixed policy;
 the run uses the actual build's immutable image ID. Each invocation saves
@@ -295,6 +312,10 @@ references changing during execution, a replaced image tag and rejection of
 wrong-policy inputs. The container fixture runs only for relevant PR inputs in
 the existing preflight, with no queue/main repetition or product coverage credit.
 Rendering workloads, sampling, budgets and deadlines remain unchanged.</p>
+<p>Successful contract pushes and GitHub source-acceptance status descriptions
+show the merge-queue command directly. Authors request automatic queueing when
+the PR is ready to land, so required CI can finish without waiting for another
+agent turn to enqueue it. Source-only acceptance keeps its existing boundary.</p>
 <p>Main pushes reuse completed pre-merge formatting, schema, docs, boundary and
 fixture checks. Their lightweight preflight retains the protocol pin and input
 scope required by existing daemon/provider jobs. PR, queue and explicit runs

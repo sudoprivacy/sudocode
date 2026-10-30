@@ -18,7 +18,7 @@
 //! 3. Emit a synthetic `<task-notification>` envelope via
 //!    `coordinator_notification::emit` (the same call site
 //!    `persist_agent_terminal_state` uses in production).
-//! 4. Build a `ConversationRuntime` with a **capturing** ApiClient that
+//! 4. Build a `ConversationRuntime` with a **capturing** `ApiClient` that
 //!    records the exact `ApiRequest.messages` list on its very first
 //!    call, then answers with a trivial completion so `run_turn` finishes.
 //! 5. Call `runtime.run_turn("hello")`.
@@ -51,18 +51,15 @@ use runtime::{
 
 /// Process-wide env-lock 鈥?`COORDINATOR_ENV_VAR` is process-global,
 /// so parallel tests that set it would race each other.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
 }
 
 fn unique_ws(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "coord-push-wire-{label}-{nanos}-{}",
         std::process::id()
@@ -71,7 +68,7 @@ fn unique_ws(label: &str) -> std::path::PathBuf {
     path
 }
 
-/// ApiClient that records the messages of every request it receives
+/// `ApiClient` that records the messages of every request it receives
 /// and returns a trivial one-shot "done" completion so `run_turn` ends
 /// quickly.
 struct CapturingApiClient {
@@ -83,7 +80,7 @@ impl ApiClient for CapturingApiClient {
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         self.captured
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request.messages.clone());
         let events = vec![
             AssistantEvent::TextDelta("done".to_string()),
@@ -100,7 +97,7 @@ fn events_to_stream(events: Vec<AssistantEvent>) -> AssistantEventStream {
 
 #[tokio::test(flavor = "current_thread")]
 async fn run_turn_prepends_drained_task_notification_to_first_user_message() {
-    let _g = env_lock();
+    let _g = env_lock().await;
     std::env::set_var(COORDINATOR_ENV_VAR, "1");
 
     let ws = unique_ws("prepend");
@@ -205,7 +202,7 @@ async fn run_turn_prepends_drained_task_notification_to_first_user_message() {
 async fn run_turn_does_not_touch_user_input_when_coord_mode_off() {
     // Fast-path guarantee: non-coord sessions pay 0 for the drain +
     // the user's own input reaches the model untouched.
-    let _g = env_lock();
+    let _g = env_lock().await;
     std::env::remove_var(COORDINATOR_ENV_VAR);
 
     let ws = unique_ws("noop");

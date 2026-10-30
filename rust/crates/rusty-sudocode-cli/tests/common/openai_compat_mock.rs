@@ -98,19 +98,16 @@ async fn handle_connection(
 ) -> io::Result<()> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut total = Vec::new();
-    let mut headers_end: Option<usize> = None;
-    loop {
+    let head_end = loop {
         let n = socket.read(&mut buf).await?;
         if n == 0 {
             return Ok(());
         }
         total.extend_from_slice(&buf[..n]);
         if let Some(p) = find_double_crlf(&total) {
-            headers_end = Some(p + 4);
-            break;
+            break p + 4;
         }
-    }
-    let head_end = headers_end.expect("header end set above");
+    };
     let head_str = std::str::from_utf8(&total[..head_end]).unwrap_or("");
     let mut lines = head_str.split("\r\n");
     let request_line = lines.next().unwrap_or("");

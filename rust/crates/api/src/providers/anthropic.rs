@@ -445,7 +445,7 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
-        self.cache_diagnostics = CacheDiagnostics::for_session(prompt_cache.paths().session_dir);
+        self.cache_diagnostics = CacheDiagnostics::for_session(&prompt_cache.paths().session_dir);
         self.prompt_cache = Some(prompt_cache);
         self
     }
@@ -628,8 +628,7 @@ impl AnthropicClient {
                 ),
             pending: VecDeque::new(),
             done: false,
-            logically_complete: false,
-            terminal_emitted: false,
+            completion: MessageCompletion::Streaming,
             terminal_deadline: None,
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
@@ -1201,15 +1200,8 @@ pub struct MessageStream {
     parser: SseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
-    /// Set once we observe a logical end-of-message (a `message_delta` with a
-    /// `stop_reason`, or a `message_stop`). After this the response is
-    /// semantically complete, so a truncated trailing frame (e.g. a proxy
-    /// cutting the connection right after `message_stop`) is harmless noise
-    /// and must not be surfaced as an `IncompleteStream` error.
-    logically_complete: bool,
-    /// Consumers require one terminal event even when we finish on stop_reason
-    /// before the upstream's separate message_stop packet can be read.
-    terminal_emitted: bool,
+    /// Logical completion and the emitted terminal frame share one lifecycle.
+    completion: MessageCompletion,
     /// A logical stop is not permission to drop the HTTP stream immediately.
     /// Drain its real terminal event, with a bound for proxies that never send it.
     terminal_deadline: Option<tokio::time::Instant>,
@@ -1222,6 +1214,14 @@ pub struct MessageStream {
     cache_diagnostics: Option<CacheDiagnostics>,
     progress: StreamProgress,
     observation: Option<crate::CacheRequestObservation>,
+}
+
+/// A provider stop reason completes content before its terminal frame arrives.
+#[derive(Debug, PartialEq, Eq)]
+enum MessageCompletion {
+    Streaming,
+    LogicalStop,
+    TerminalStop,
 }
 
 impl MessageStream {
@@ -1267,7 +1267,7 @@ impl MessageStream {
                         return Err(self.record_refusal(error))
                     }
                     Err(error @ ApiError::InvalidSseFrame(_)) => return Err(error),
-                    Err(_) if self.logically_complete => Vec::new(),
+                    Err(_) if self.completion != MessageCompletion::Streaming => Vec::new(),
                     Err(error) => return Err(error),
                 };
                 for event in &remaining {
@@ -1281,7 +1281,7 @@ impl MessageStream {
                     self.observe_event(&event);
                     return Ok(Some(event));
                 }
-                if self.logically_complete && !self.terminal_emitted {
+                if self.completion == MessageCompletion::LogicalStop {
                     let event = StreamEvent::MessageStop(MessageStopEvent {});
                     self.observe_event(&event);
                     return Ok(Some(event));
@@ -1290,12 +1290,11 @@ impl MessageStream {
             }
 
             let chunk = if let Some(deadline) = self.terminal_deadline {
-                match tokio::time::timeout_at(deadline, self.response.chunk()).await {
-                    Ok(chunk) => chunk,
-                    Err(_) => {
-                        self.done = true;
-                        continue;
-                    }
+                if let Ok(chunk) = tokio::time::timeout_at(deadline, self.response.chunk()).await {
+                    chunk
+                } else {
+                    self.done = true;
+                    continue;
                 }
             } else {
                 self.response.chunk().await
@@ -1321,7 +1320,7 @@ impl MessageStream {
                 // stream, just like a partial SSE frame at clean HTTP EOF.
                 // Preserve that transport classification for recovery callers.
                 // A confirmed logical end may survive a broken terminal tail.
-                Err(_) if self.logically_complete => {
+                Err(_) if self.completion != MessageCompletion::Streaming => {
                     self.done = true;
                 }
                 Err(error) => {
@@ -1397,7 +1396,9 @@ impl MessageStream {
                 // One absolute grace deadline prevents a keepalive-only proxy
                 // from holding up the next turn indefinitely.
                 if delta.stop_reason.is_some() {
-                    self.logically_complete = true;
+                    if self.completion == MessageCompletion::Streaming {
+                        self.completion = MessageCompletion::LogicalStop;
+                    }
                     self.terminal_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + std::time::Duration::from_secs(1)
                     });
@@ -1408,9 +1409,8 @@ impl MessageStream {
                 }
             }
             StreamEvent::MessageStop(_) => {
-                self.terminal_emitted = true;
                 self.done = true;
-                self.logically_complete = true;
+                self.completion = MessageCompletion::TerminalStop;
                 self.record_usage_once();
             }
             _ => {}
@@ -1439,7 +1439,7 @@ impl MessageStream {
         let mut observation = self.observation.clone();
         if let Some(observation) = &mut observation {
             observation.response_completed_ms = crate::cache_observation::now_ms();
-            observation.completed = self.logically_complete;
+            observation.completed = self.completion != MessageCompletion::Streaming;
         }
         if let Some(prompt_cache) = &self.prompt_cache {
             let record = prompt_cache.record_usage_observed(
@@ -1785,12 +1785,10 @@ fn record_thinking_transformations(
 /// the server's own answer, so it distinguishes "we sent something different"
 /// from "what arrived was different from what we sent".
 fn cache_diagnostics_enabled() -> bool {
-    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS")
-        .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
+    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS").is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
 }
 
 /// Write the request body that is about to be sent to `SUDOCODE_DUMP_REQUESTS`,
@@ -1838,15 +1836,13 @@ fn write_request_dump(
     std::fs::create_dir_all(dir).ok()?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     // Nanos disambiguate requests that land in the same millisecond; without
     // them a fast tool loop silently overwrites its own earlier dumps, which
     // would make consecutive-request diffing miss exactly the pairs we care about.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     let path = dir.join(format!("{stamp}-{nanos:09}-{kind}.json"));
     std::fs::write(&path, text).ok()?;
     Some(path)
@@ -1985,7 +1981,7 @@ mod tests {
     use crate::http_transport::{request_id_from_headers, RetryPolicy};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Mutex, OnceLock};
+
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

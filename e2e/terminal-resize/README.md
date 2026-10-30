@@ -123,15 +123,35 @@ before browser keyboard dispatch and ends after xterm parses the expected cells,
 two animation frames and a PNG capture. Each typed character must change pixels.
 This is a conservative rendering/readback measurement, including automation and
 capture overhead; it does not measure physical keyboard/display scanout latency.
+The observer waits for fonts and two animation frames, then reads a PNG of the
+same terminal bounds through Chromium CDP with fast lossless compression.
+The fixture disables decorative scrollbar transitions and rejects other running
+CSS animations. Per-capture frame, bounds and PNG
+readback timings remain in the report, and the readback mode is part of the
+browser cohort identity. The settled frame supplies fresh pixel bounds through
+the same geometry provider used by link and selection hit testing.
+Both browser workflows launch through `browser.cjs`. It owns one raster worker,
+keeps the existing container CPU limit, and records the actual graphics backend
+and its own source digest. A/A and A/B reject a changed observer identity.
+Workload counts, two animation frames, PNG readback and all budgets remain.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,
-then samples 20 keys with pixel evidence. This keeps P95 from depending on only
-two scheduler-tail observations. Sampling counts and the delay schedule are
+then samples 20 keys with pixel evidence. Parsed P95 uses the larger independent
+burst; painted P95 retains its separate readback workload. Sampling counts and the delay schedule are
 owned by `gui-policy.json` and shared by the observer and completeness checks.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same
 deterministic inter-key delays outside timed regions, retained in the report.
+The finite streamed document uses consumer-driven windows: one while history is
+selected, one per measured input, and a final window after input sampling. Each
+window must send new real SSE deltas before the next input. Window count comes
+from the same sampling policy, and chunk size, inter-chunk delay and document
+stay unchanged. Waiting for each window is outside the input timer; it prevents
+slow PNG readback from exhausting the stream before the input journey finishes.
+The selection check additionally waits for new document content in xterm while
+the selection remains active. Reports retain window acknowledgments and wire
+positions; holding only the final stream terminator cannot satisfy this journey.
 Event completion uses a promise instead of frame polling. Raw key, PTY output,
 WebSocket receive and write-callback timestamps remain available for diagnosis;
 cross-process time origins are diagnostic only. Input checks read only the live

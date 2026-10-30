@@ -278,7 +278,7 @@ fn unsupported_probe_keeps_typing_and_late_replies_separate() {
         "Alt bracket does not swallow keys",
     );
     assert_eq!(
-        common::input_line_of(&sess.render(|s| s.contents())).trim(),
+        common::input_line_of(&sess.render(common::screen_contents)).trim(),
         "aftertyping"
     );
     sess.send("\x15").unwrap();
@@ -375,18 +375,7 @@ fn diff_roundtrip(light: bool) {
     std::fs::write(env.workspace_root().join("colors.rs"), &original).unwrap();
     // Hold the real tool at a user hook so the running preview can be
     // inspected and resized without racing an instant filesystem edit.
-    let config = env.workspace_root().join(".nexus/sudocode");
-    std::fs::create_dir_all(&config).unwrap();
-    let hook = if cfg!(windows) {
-        r#"if /I "%HOOK_TOOL_NAME%"=="edit_file" (for /L %i in (1,1,60) do @if not exist color-diff-release (ping -n 2 127.0.0.1 >nul))"#
-    } else {
-        r#"case "$HOOK_TOOL_NAME" in edit_file|Edit) while [ ! -f color-diff-release ]; do sleep 0.05; done;; esac"#
-    };
-    std::fs::write(
-        config.join("settings.json"),
-        serde_json::json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
-    )
-    .unwrap();
+    seed_diff_reader_hook(&env);
     let mut sess = colored_session(&env, light);
     sess.resize(60, 100).unwrap();
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
@@ -968,4 +957,19 @@ fn bash_diff_handles_new_deleted_and_truncated_files() {
         .render(|s| s.raw().contents())
         .contains("full output preserved in session"));
     finish(&mut sess);
+}
+
+fn seed_diff_reader_hook(env: &TestEnv) {
+    let config = env.workspace_root().join(".nexus/sudocode");
+    std::fs::create_dir_all(&config).unwrap();
+    let hook = if cfg!(windows) {
+        r#"if /I "%HOOK_TOOL_NAME%"=="edit_file" (for /L %i in (1,1,60) do @if not exist color-diff-release (ping -n 2 127.0.0.1 >nul))"#
+    } else {
+        r#"case "$HOOK_TOOL_NAME" in edit_file|Edit) while [ ! -f color-diff-release ]; do sleep 0.05; done;; esac"#
+    };
+    std::fs::write(
+        config.join("settings.json"),
+        serde_json::json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
+    )
+    .unwrap();
 }

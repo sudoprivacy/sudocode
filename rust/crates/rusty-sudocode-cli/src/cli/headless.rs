@@ -279,7 +279,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
             .map(crate::load_session_reference)
             .transpose()?;
         let cli = LiveCli::new(
-            options.model,
+            &options.model,
             options.allowed_tools,
             options.permission_mode,
             options.reasoning_effort,

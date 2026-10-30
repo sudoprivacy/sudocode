@@ -143,7 +143,7 @@ mod tests {
     /// Holds the process-wide env lock because `SUDOCODE_PLAN_FILE` is global —
     /// parallel tests mutating it would race each other.
     struct ScopedPlanFile {
-        _dir: PathBuf,
+        dir: PathBuf,
         _guard: std::sync::MutexGuard<'static, ()>,
     }
     impl ScopedPlanFile {
@@ -153,16 +153,13 @@ mod tests {
                 std::env::temp_dir().join(format!("plan_store_{label}_{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             std::env::set_var("SUDOCODE_PLAN_FILE", dir.join("plan.md"));
-            Self {
-                _dir: dir,
-                _guard: guard,
-            }
+            Self { dir, _guard: guard }
         }
     }
     impl Drop for ScopedPlanFile {
         fn drop(&mut self) {
             std::env::remove_var("SUDOCODE_PLAN_FILE");
-            let _ = std::fs::remove_dir_all(&self._dir);
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 

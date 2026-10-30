@@ -92,9 +92,10 @@ pub(crate) fn render_message(
             for block in &msg.blocks {
                 match block {
                     runtime::ContentBlock::Text { text } if !text.is_empty() => {
-                        let rendered = renderer.render_markdown_with_width(text, term_width);
+                        let formatted_text = renderer.render_markdown_with_width(text, term_width);
                         crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out, &rendered,
+                            &mut out,
+                            &formatted_text,
                         );
                     }
                     runtime::ContentBlock::Thinking { thinking, .. }
@@ -1302,9 +1303,7 @@ fn stdout_stderr_card(header: String, stdout: &str, stderr: &str, failed: bool) 
         return ToolCardContent::header_only(header);
     }
 
-    let term_width = crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80);
+    let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
     // 4 = frame + space prefix applied by render_tool_card, plus safety margin
     // to avoid wrapping.
     let max_content_width = term_width.saturating_sub(6);
@@ -1810,7 +1809,8 @@ fn search_identity(label: &str, input: &serde_json::Value) -> String {
     let mut header = format!("{tool_name}({pattern})");
     if let Some(scope) = input.get("path").and_then(serde_json::Value::as_str) {
         if !scope.is_empty() {
-            header.push_str(&format!(" {DIM}in {scope}{RESET}"));
+            let _ =
+                std::fmt::Write::write_fmt(&mut header, format_args!(" {DIM}in {scope}{RESET}"));
         }
     }
     header.push_str(&identity_annotation(input));
@@ -1828,7 +1828,10 @@ pub(crate) fn glob_card(
             .get("numFiles")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        header.push_str(&format!(" {DIM}→ {num_files} files{RESET}"));
+        let _ = std::fmt::Write::write_fmt(
+            &mut header,
+            format_args!(" {DIM}→ {num_files} files{RESET}"),
+        );
     }
     ToolCardContent::header_only(header)
 }
@@ -1848,9 +1851,10 @@ pub(crate) fn grep_card(
             .get("numFiles")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        header.push_str(&format!(
-            " {DIM}→ {num_matches} matches across {num_files} files{RESET}"
-        ));
+        let _ = std::fmt::Write::write_fmt(
+            &mut header,
+            format_args!(" {DIM}→ {num_matches} matches across {num_files} files{RESET}"),
+        );
     }
     ToolCardContent::header_only(header)
 }
@@ -1866,7 +1870,7 @@ pub(crate) fn generic_tool_card(
     // called with, then any LLM description.
     let args = summarize_scalar_args(input);
     if !args.is_empty() {
-        header.push_str(&format!("({args})"));
+        let _ = std::fmt::Write::write_fmt(&mut header, format_args!("({args})"));
     }
     header.push_str(&identity_annotation(input));
     let Some(output) = output else {
@@ -2056,10 +2060,10 @@ fn read_tool_output_card(
             if !body.is_empty() {
                 body.push('\n');
             }
-            body.push_str(&format!(
-                "{DIM}{line}:{RESET} {}",
-                truncate_for_summary(text, 120)
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut body,
+                format_args!("{DIM}{line}:{RESET} {}", truncate_for_summary(text, 120)),
+            );
         }
         return if body.is_empty() {
             ToolCardContent::header_only(header)
@@ -3056,8 +3060,8 @@ mod tests {
     /// Render a completed (`Ok`) tool card and strip ANSI, in one step — the
     /// shape every card test needs. Collapses the repeated
     /// `render_tool_card(&x_card(…), ToolStatus::Ok)` + `strip_ansi` pair.
-    fn ok_card_plain(content: ToolCardContent) -> String {
-        strip_ansi(&render_tool_card(&content, ToolStatus::Ok))
+    fn ok_card_plain(content: &ToolCardContent) -> String {
+        strip_ansi(&render_tool_card(content, ToolStatus::Ok))
     }
 
     #[test]
@@ -3102,7 +3106,7 @@ mod tests {
         let header = "PowerShell(command=cd foo\ngit status)".to_string();
         let body = "col1\tcol2\tcol3".to_string();
         let content = ToolCardContent::new(header, body);
-        let plain = ok_card_plain(content);
+        let plain = ok_card_plain(&content);
         for line in plain.lines() {
             let first = line.trim_start().chars().next().unwrap_or(' ');
             assert!(
@@ -3387,7 +3391,7 @@ mod tests {
         assert!(plain.contains("[claude-opus-4-6]"), "{plain}");
         assert!(plain.contains("turn 3"), "{plain}");
         assert!(plain.contains("1.5k Σ1.5k tokens"), "{plain}");
-        assert!(plain.contains("$"), "expected cost segment in {plain}");
+        assert!(plain.contains('$'), "expected cost segment in {plain}");
         assert!(plain.contains("1.2s"), "{plain}");
     }
 
@@ -3406,7 +3410,7 @@ mod tests {
             account: None,
         });
         let plain = strip_ansi(&rendered);
-        assert!(!plain.contains("$"), "{plain}");
+        assert!(!plain.contains('$'), "{plain}");
     }
 
     #[test]
@@ -3723,7 +3727,7 @@ mod tests {
                 "totalLines": 3
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3748,7 +3752,7 @@ mod tests {
                 "totalLines": 137
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3767,7 +3771,7 @@ mod tests {
                 "total_lines": 42
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3841,7 +3845,7 @@ mod tests {
                 "totalLines": 0
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4014,7 +4018,7 @@ mod tests {
             "replaceAll": true,
             "userModified": false,
         });
-        let plain = ok_card_plain(edit_card(
+        let plain = ok_card_plain(&edit_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4030,7 +4034,7 @@ mod tests {
             "content": "a\nb\nc\nd\n",
             "originalFile": "a\nx\nc\n",
         });
-        let plain = ok_card_plain(write_card(
+        let plain = ok_card_plain(&write_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4050,7 +4054,7 @@ mod tests {
             "filePath": "new.txt",
             "content": "hello\nworld\n",
         });
-        let plain = ok_card_plain(write_card(
+        let plain = ok_card_plain(&write_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4133,7 +4137,7 @@ mod tests {
         // searched. The pattern (from input) must appear.
         let input = serde_json::json!({ "pattern": "TODO", "path": "src/" });
         let output = serde_json::json!({ "numMatches": 0, "numFiles": 1 });
-        let plain = ok_card_plain(grep_card(&input, Some(&output), ToolStatus::Ok));
+        let plain = ok_card_plain(&grep_card(&input, Some(&output), ToolStatus::Ok));
         assert!(plain.contains("Grep(TODO)"), "{plain}");
         assert!(plain.contains("in src/"), "{plain}");
         assert!(plain.contains("0 matches across 1 files"), "{plain}");
@@ -4143,7 +4147,7 @@ mod tests {
     fn glob_card_shows_the_search_pattern() {
         let input = serde_json::json!({ "pattern": "*.rs" });
         let output = serde_json::json!({ "numFiles": 3 });
-        let plain = ok_card_plain(glob_card(&input, Some(&output), ToolStatus::Ok));
+        let plain = ok_card_plain(&glob_card(&input, Some(&output), ToolStatus::Ok));
         assert!(plain.contains("Glob(*.rs)"), "{plain}");
         assert!(plain.contains("3 files"), "{plain}");
     }
@@ -4173,7 +4177,7 @@ mod tests {
         // The optional `description` (bash schema supports it) renders as a
         // ` · ...` suffix — LLM-authored transparency next to the real command.
         let input = serde_json::json!({ "command": "ls -la", "description": "list files" });
-        let plain = ok_card_plain(shell_card("Bash", &input, None));
+        let plain = ok_card_plain(&shell_card("Bash", &input, None));
         assert!(plain.contains("Bash(ls -la)"), "{plain}");
         assert!(plain.contains("· list files"), "{plain}");
     }
@@ -4185,7 +4189,7 @@ mod tests {
         // transparency: the exact command run is never hidden.
         let input = serde_json::json!({ "command": "cd foo\ngit status" });
         let output = serde_json::json!({ "stdout": "On branch main", "stderr": "" });
-        let plain = ok_card_plain(shell_card("Bash", &input, Some(&output)));
+        let plain = ok_card_plain(&shell_card("Bash", &input, Some(&output)));
         assert!(plain.contains("$ cd foo"), "{plain}");
         assert!(plain.contains("$ git status"), "{plain}");
         assert!(plain.contains("On branch main"), "{plain}");
@@ -4202,7 +4206,7 @@ mod tests {
         // is just the output — no redundant `$ ` echo.
         let input = serde_json::json!({ "command": "ls -la" });
         let output = serde_json::json!({ "stdout": "file.txt", "stderr": "" });
-        let plain = ok_card_plain(shell_card("Bash", &input, Some(&output)));
+        let plain = ok_card_plain(&shell_card("Bash", &input, Some(&output)));
         assert!(plain.contains("Bash(ls -la)"), "{plain}");
         assert!(
             !plain.contains("$ ls -la"),

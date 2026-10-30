@@ -3,7 +3,7 @@
 //! These tests are gated on the `PROXY_AUTH_TOKEN` environment variable (a
 //! sudorouter API key; `PROXY_BASE_URL` selects the endpoint). When the token
 //! is absent or empty the tests silently pass (return early). On CI they run
-//! only on main merges / workflow_dispatch where the GitHub secret is available.
+//! only on main merges / `workflow_dispatch` where the GitHub secret is available.
 //! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
 //! defaults to `sonnet` for compatibility with existing live runs.
 //!
@@ -33,7 +33,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-const RECV_TIMEOUT: Duration = Duration::from_secs(120);
+const RECV_TIMEOUT: Duration = Duration::from_mins(2);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fail with the real cause when the provider answered with a credential rejection
@@ -58,14 +58,13 @@ fn fail_clearly_if_the_credential_was_rejected(text: &str) {
         "unauthorized",
     ];
     let lowered = text.to_lowercase();
-    if MARKERS.iter().any(|m| lowered.contains(m)) {
-        panic!(
-            "the provider rejected this run's credential — it answered with an \
-             authentication failure instead of a model reply, so this is NOT a \
-             model-behaviour failure. Rotate the live API credential this job uses. \
-             The provider said: {text:?}"
-        );
-    }
+    assert!(
+        !MARKERS.iter().any(|m| lowered.contains(m)),
+        "the provider rejected this run's credential — it answered with an \
+         authentication failure instead of a model reply, so this is NOT a \
+         model-behaviour failure. Rotate the live API credential this job uses. \
+         The provider said: {text:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -537,26 +536,7 @@ async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
 }
 
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
-    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
-    let tasks: Vec<_> = ["101 + 102", "201 + 202", "301 + 302"]
-        .into_iter()
-        .enumerate()
-        .map(|(index, expression)| {
-            json!({
-                "model": model,
-                "description": format!("calc {}", index + 1),
-                "prompt": format!("What is {expression}? Reply with ONLY the number."),
-            })
-        })
-        .collect();
-    let prompt = format!(
-        "Use the Agent tool exactly three times, once for each complete argument object below.\n\
-         Do not answer the calculations yourself or reuse a different task's prompt.\n\
-         Omit auth_mode: every child must inherit this session's current credential path.\n\
-         No switch to subscription or api-key authentication is requested.\n\n{}\n\n\
-         After all three agents return, output only JSON with a results array in task order.",
-        serde_json::to_string_pretty(&tasks).unwrap()
-    );
+    let prompt = subagent_calculation_prompt();
     let (notifs, resp) = client
         .send_request(
             "session/prompt",
@@ -619,39 +599,13 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         })
         .collect();
 
-    // Log all notifications for diagnostics on CI failures.
-    eprintln!(
-        "subagent test: {} notifications, {} Agent starts, {} completed updates, {} failed updates, results: {:?}",
-        notifs.len(),
-        agent_starts.len(),
-        completed_updates.len(),
-        failed_updates.len(),
-        spawn_manifests,
+    report_subagent_notifications(
+        &notifs,
+        &agent_starts,
+        &completed_updates,
+        &failed_updates,
+        &spawn_manifests,
     );
-    for (i, n) in notifs.iter().enumerate() {
-        let update = &n["params"]["update"];
-        let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
-        eprintln!(
-            "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
-            update["title"], update["status"]
-        );
-    }
-    for start in &agent_starts {
-        let update = &start["params"]["update"];
-        eprintln!(
-            "  delegated[{}]: {}",
-            update["toolCallId"], update["rawInput"]
-        );
-    }
-    for (i, u) in completed_updates.iter().enumerate() {
-        eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
-    }
-    for (i, u) in failed_updates.iter().enumerate() {
-        eprintln!(
-            "  failed[{i}]: rawOutput={}",
-            u["params"]["update"]["rawOutput"]
-        );
-    }
 
     // Collect the model's text output for fallback verification.
     let text_output: String = notifs
@@ -720,18 +674,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
     // some other way" and for "the turn failed and told us why" alike. The first
     // time this assertion ever ran it reported `left: Null`, which narrowed
     // nothing.
-    let result = &resp["result"];
-    assert_eq!(
-        result["stopReason"],
-        "end_turn",
-        "subagent prompt stopReason should be end_turn; full response: {}",
-        serde_json::to_string(&resp).unwrap_or_default()
-    );
-    assert!(
-        result.get("usage").is_some(),
-        "subagent prompt response should include usage; full response: {}",
-        serde_json::to_string(&resp).unwrap_or_default()
-    );
+    assert_subagent_turn_response(&resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -778,8 +721,7 @@ fn verify_session_model_in_jsonl(workspace: &TestWorkspace) {
         assert!(
             model.is_some_and(|m| !m.is_empty()),
             "assistant message in session JSONL should have a non-empty model field, \
-             but got: {:?}",
-            model
+             but got: {model:?}"
         );
         eprintln!(
             "session JSONL: assistant message model = {:?}",
@@ -845,15 +787,16 @@ async fn live_anthropic_smoke_stdio() {
 /// A real model must read the summary, send it back, and preserve its record.
 #[tokio::test]
 async fn live_peer_summary_reaches_model_client_and_saved_session() {
-    let Some(token) = proxy_token() else {
-        return;
-    };
     const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
     const PEER: &str = "acp-summary-peer";
     const BODY: &str = concat!(
         "Use send to reply to me with this message's summary verbatim. ",
         "Then say ACP-SUMMARY-COMPLETE. Do not write files or run shell commands."
     );
+
+    let Some(token) = proxy_token() else {
+        return;
+    };
     let workspace = TestWorkspace::new("live-peer-summary");
     workspace.create();
     workspace.write_sudocode_json();
@@ -1109,4 +1052,84 @@ fn find_jsonl_file(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn subagent_calculation_prompt() -> String {
+    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+    let tasks: Vec<_> = ["101 + 102", "201 + 202", "301 + 302"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            json!({
+                "model": model,
+                "description": format!("calc {}", index + 1),
+                "prompt": format!("What is {expression}? Reply with ONLY the number."),
+            })
+        })
+        .collect();
+    format!(
+        "Use the Agent tool exactly three times, once for each complete argument object below.\n\
+         Do not answer the calculations yourself or reuse a different task's prompt.\n\
+         Omit auth_mode: every child must inherit this session's current credential path.\n\
+         No switch to subscription or api-key authentication is requested.\n\n{}\n\n\
+         After all three agents return, output only JSON with a results array in task order.",
+        serde_json::to_string_pretty(&tasks).unwrap()
+    )
+}
+
+fn report_subagent_notifications(
+    notifs: &[Value],
+    agent_starts: &[&Value],
+    completed_updates: &[&Value],
+    failed_updates: &[&Value],
+    spawn_manifests: &[String],
+) {
+    // Log all notifications for diagnostics on CI failures.
+    eprintln!(
+        "subagent test: {} notifications, {} Agent starts, {} completed updates, {} failed updates, results: {:?}",
+        notifs.len(),
+        agent_starts.len(),
+        completed_updates.len(),
+        failed_updates.len(),
+        spawn_manifests,
+    );
+    for (i, n) in notifs.iter().enumerate() {
+        let update = &n["params"]["update"];
+        let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
+        eprintln!(
+            "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
+            update["title"], update["status"]
+        );
+    }
+    for start in agent_starts {
+        let update = &start["params"]["update"];
+        eprintln!(
+            "  delegated[{}]: {}",
+            update["toolCallId"], update["rawInput"]
+        );
+    }
+    for (i, u) in completed_updates.iter().enumerate() {
+        eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
+    }
+    for (i, u) in failed_updates.iter().enumerate() {
+        eprintln!(
+            "  failed[{i}]: rawOutput={}",
+            u["params"]["update"]["rawOutput"]
+        );
+    }
+}
+
+fn assert_subagent_turn_response(resp: &Value) {
+    let result = &resp["result"];
+    assert_eq!(
+        result["stopReason"],
+        "end_turn",
+        "subagent prompt stopReason should be end_turn; full response: {}",
+        serde_json::to_string(resp).unwrap_or_default()
+    );
+    assert!(
+        result.get("usage").is_some(),
+        "subagent prompt response should include usage; full response: {}",
+        serde_json::to_string(resp).unwrap_or_default()
+    );
 }

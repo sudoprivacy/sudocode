@@ -16,18 +16,18 @@
 //!
 //! ## Scenarios
 //!
-//! 1. **Fresh manifest → record_agent_telemetry writes both counters.**
+//! 1. **Fresh manifest → `record_agent_telemetry` writes both counters.**
 //!    Confirms the read-modify-write cycle survives a manifest that
 //!    predates the telemetry fields (missing keys deserialise as
 //!    `None`, get filled).
 //! 2. **Two records overwrite in place.** Multi-turn runs update
 //!    telemetry after each turn — the LAST write wins.
 //! 3. **Terminal-state persist preserves prior mid-run mutations.**
-//!    Sets `result_full_path` inline, then calls persist_terminal —
+//!    Sets `result_full_path` inline, then calls `persist_terminal` —
 //!    the field survives instead of being clobbered by the caller's
 //!    stale manifest snapshot (fixes a pre-existing bug where
-//!    Commit 11's AgentSummary sidecar path could be lost).
-//! 4. **persist_terminal + telemetry lands in the JSON manifest and
+//!    Commit 11's `AgentSummary` sidecar path could be lost).
+//! 4. **`persist_terminal` + telemetry lands in the JSON manifest and
 //!    survives round-trip.** End-to-end: pretend we're the runtime
 //!    telling `persist_terminal_state_with_telemetry` about a
 //!    completed sub-agent, then read the manifest back and confirm
@@ -44,14 +44,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn unique_workspace(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "sudocode-agent-telemetry-{label}-{nanos}-{}",
         std::process::id()

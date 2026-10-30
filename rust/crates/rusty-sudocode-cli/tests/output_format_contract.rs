@@ -84,10 +84,13 @@ fn inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(agents["action"], "list");
     assert_eq!(agents["count"], 0);
     assert_eq!(agents["summary"]["active"], 0);
-    assert!(agents["agents"]
-        .as_array()
-        .expect("agents array")
-        .is_empty());
+    assert_eq!(
+        agents["agents"]
+            .as_array()
+            .expect("agents array")
+            .as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     let mcp = assert_json_command(&root, &["--output-format", "json", "mcp"]);
     assert_eq!(mcp["kind"], "mcp");

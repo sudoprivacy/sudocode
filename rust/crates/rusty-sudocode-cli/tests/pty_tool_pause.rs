@@ -18,7 +18,7 @@ fn request(terminal: &mut PtySession, id: u64, method: &str, params: Value) -> S
     let mut message = json!({"jsonrpc":"2.0","id":id,"method":method});
     message["params"] = params;
     terminal
-        .send(&format!("{}{newline}", message))
+        .send(&format!("{message}{newline}"))
         .expect("send ACP request");
     terminal
         .expect(&format!(r#"(?s)"(?:result|error)":.*?"id":{id}\}}"#))
@@ -60,7 +60,7 @@ fn host_takeover_stops_a_foreground_shell_before_human_edit() {
         .next()
         .unwrap();
     let prompt = if env.is_mock() {
-        let batch = json!([{"id":"pause-shell","name":"Bash","input":{"command":"sh main-loop.sh","timeout":180000,"run_in_background":false}}]);
+        let batch = json!([{"id":"pause-shell","name":"Bash","input":{"command":"sh main-loop.sh","timeout":180_000,"run_in_background":false}}]);
         format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}")
     } else {
         "Run Bash with exactly command 'sh main-loop.sh', timeout180000 and run_in_background false. This is a disposable acceptance fixture bounded to120 seconds and1200 bytes. The harness pauses the session after it starts and releases it during cleanup. Do not edit the script or create a separate background job.".to_string()
@@ -68,7 +68,7 @@ fn host_takeover_stops_a_foreground_shell_before_human_edit() {
     let newline = if cfg!(windows) { "\r" } else { "\n" };
     terminal.send(&format!("{}{newline}", json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":prompt}]}}))).unwrap();
     let receipt = env.workspace_root().join("main-ticks.txt");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while !receipt.exists() {
         assert!(
             Instant::now() < deadline,

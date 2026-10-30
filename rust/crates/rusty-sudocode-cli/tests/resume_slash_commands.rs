@@ -71,7 +71,7 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
         .expect("clear output includes the fresh session path");
     assert_ne!(fresh_path, session_path);
     let restored = Session::load_from_path(&fresh_path).expect("cleared session should load");
-    assert!(restored.messages().is_empty());
+    assert_eq!(restored.messages(), []);
     assert_ne!(restored.session_id, session.session_id);
     assert_eq!(
         Session::load_from_path(&session_path)

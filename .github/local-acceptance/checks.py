@@ -137,8 +137,8 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
-        print("Local contract validation: native recovery smoke, full private Docker decision matrix, "
-              "then native nextest enforcement. No product build or benchmark lease.", flush=True)
+        print("Local contract validation: policy-owned native recovery, nextest and release guards, "
+              "then the full private Docker decision matrix. No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
                                "then retry this push or the printed acceptance command.")

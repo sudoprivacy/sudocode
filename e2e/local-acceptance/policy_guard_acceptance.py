@@ -116,7 +116,8 @@ def main():
     assert [row["command"]["exit_code"] for row in native["checks"]] == [0, 100, 4]
     release = json.loads((output / "positive/release-executor/result.json").read_text())
     assert release["status"] == "PASS"
-    assert release["commands"][-1]["exit_code"] == 101
+    wrong_artifact = json.loads((output / "positive/release-executor/wrong-artifact.command.json").read_text())
+    assert wrong_artifact["exit_code"] == 101
     for path, digest in pins.items():
         actual = output / "native-guard-policy" / path
         assert hashlib.sha256(actual.read_bytes()).hexdigest() == digest, path

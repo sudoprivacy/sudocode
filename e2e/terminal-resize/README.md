@@ -130,6 +130,10 @@ CSS animations. Per-capture frame, bounds and PNG
 readback timings remain in the report, and the readback mode is part of the
 browser cohort identity. The settled frame supplies fresh pixel bounds through
 the same geometry provider used by link and selection hit testing.
+Both browser workflows launch through `browser.cjs`. It owns one raster worker,
+keeps the existing container CPU limit, and records the actual graphics backend
+and its own source digest. A/A and A/B reject a changed observer identity.
+Workload counts, two animation frames, PNG readback and all budgets remain.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,

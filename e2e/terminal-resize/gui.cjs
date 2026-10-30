@@ -8,6 +8,7 @@ const { performance } = require('node:perf_hooks');
 const { resources: processResource } = require('./resources.cjs');
 const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
+const { launchBrowser } = require('./browser.cjs');
 const { WebSocketServer } = require('ws');
 const { launch } = require('./host.cjs');
 
@@ -59,10 +60,10 @@ async function run(config) {
     });
   });
   try {
-    browser = await chromium.launch({ headless: process.env.SCODE_GUI_HEADED !== '1' });
-    cdp = await browser.newBrowserCDPSession();
+    const observer = await launchBrowser(chromium, { headless: process.env.SCODE_GUI_HEADED !== '1' });
+    ({ browser, cdp } = observer);
     page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1 });
-    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling };
+    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling, observer: observer.environment };
     report.browser = await browser.version();
     report.xterm = require('@xterm/xterm/package.json').version;
     await page.goto(`http://127.0.0.1:${server.address().port}/?options=${encodeURIComponent(JSON.stringify({ cols: config.cols, rows: config.rows }))}`);

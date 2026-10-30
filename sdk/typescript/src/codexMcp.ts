@@ -31,7 +31,9 @@ export interface CodexMcpConfig {
  * Deliberately do not change a running controller, node or global configuration.
  */
 export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
-  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {configFile: string; registrationArgv: string[]; installed: false} {
+  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {
+    configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[]; installed: false;
+  } {
   const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
   validateCodexConnectionConfig({codexArgv});
   if(![file,codexArgv[0],entry].every(value=>typeof value==='string'&&path.isAbsolute(value))
@@ -45,7 +47,8 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
   // command nor copies its authority into the runtime package.
   validateConfig(config);
   writeFileSync(file,JSON.stringify(config,null,2)+'\n',{flag:'wx',mode:0o600});
-  return {configFile:file,registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
+  return {configFile:file,nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
+    nativeProxyArgv:[...codexArgv,'app-server','proxy'],registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
     '--codex','--config',file],installed:false};
 }
 

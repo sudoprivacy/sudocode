@@ -62,6 +62,16 @@ machine values outside the package. Keep the MCP server optional so an offline
 node cannot prevent ordinary Codex startup. Existing project or launch-time
 overrides need an explicit migration; a global entry cannot override them.
 
+The result also includes the official `nativePreparationArgv` (shared daemon
+start) and `nativeProxyArgv` for API frontends. Ordinary official CLI startup
+uses its managed package context after one-time preparation. A legacy frontend
+that directly spawns `app-server --listen stdio://` does not join that shared
+inventory merely because global MCP was configured: its own controller must
+switch to the official proxy during a sole-owner migration window, preserving
+its thread, approval policy and native package context. The initializer only
+prints those commands; it never starts/stops a native server or adopts a
+running frontend. This package adds no native daemon lifecycle implementation.
+
 Existing fixed-session Agents can be prepared offline with `--bind-codex`.
 The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
 specifies its explicit mapping document, original SID and separate native/ACP

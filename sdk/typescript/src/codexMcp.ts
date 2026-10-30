@@ -21,6 +21,7 @@ export interface CodexMcpConfig {
   stateDirectory: string;
   auditLog: string;
   peers: string[];
+  peerPolicy?: 'allowlist' | 'node-namespace';
   /** Explicit operator-owned adapter to the existing authorized enrollment path. */
   enrollmentArgv: string[];
   endpoint: {port: number; token: string};
@@ -30,7 +31,7 @@ export interface CodexMcpConfig {
  * Deliberately do not change a running controller, node or global configuration.
  */
 export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
-  entry: string, port = 23262): {configFile: string; registrationArgv: string[]; installed: false} {
+  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {configFile: string; registrationArgv: string[]; installed: false} {
   const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
   validateCodexConnectionConfig({codexArgv});
   if(![file,codexArgv[0],entry].every(value=>typeof value==='string'&&path.isAbsolute(value))
@@ -39,7 +40,7 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
   mkdirSync(parent,{recursive:true,mode:0o700});
   const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native:{codexArgv},
     stateDirectory:path.join(parent,'codex-agents'),auditLog:path.join(parent,'codex-network.jsonl'),
-    peers,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
+    peers,peerPolicy,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
   // Validate before publishing. This initializer neither runs the enrollment
   // command nor copies its authority into the runtime package.
   validateConfig(config);
@@ -110,6 +111,7 @@ function validateConfig(config: CodexMcpConfig): void {
       || config.enrollmentArgv.some(arg => typeof arg !== 'string' || !arg || arg.includes('\0'))
       || !path.isAbsolute(config.enrollmentArgv[0])
       || !Array.isArray(config.peers) || config.peers.some(peer=>typeof peer!=='string'||!peer)
+      || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
       || !Number.isInteger(config.endpoint?.port) || config.endpoint.port < 1024 || config.endpoint.port > 65535
       || !/^[0-9a-f]{64}$/.test(config.endpoint.token)) throw new Error('Invalid Codex autojoin MCP configuration');
   validateCodexConnectionConfig(config.native);
@@ -221,6 +223,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   scheduleExit();
   try {
     network = await connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
+      peerPolicy:config.peerPolicy,
       onClosed:()=>{void stop();},
       resolveAgent:claim=>enroll(config.enrollmentArgv,claim),onError:error=>{
         try {audit({phase:'attachment_error',error:String(error)});} catch { /* No command submission. */ }

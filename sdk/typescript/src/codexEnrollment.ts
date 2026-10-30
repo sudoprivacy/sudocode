@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { connectScode, type ScodeAcpConfig } from './scodeAcp';
-import { listScodeAgents, scodeNativeA2aAudit } from './scodeA2a';
+import { listScodeAgents, requireScodeNodeIdentity } from './scodeA2a';
 import { CodexEnrollmentError, type CodexAgentProfile } from './codexAutojoin';
 import { canonicalWorkspace, identifier, type CodexAgentClaim } from './codexBindings';
 import { runEnrollmentCommand } from './enrollmentCommand';
@@ -132,10 +132,7 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
     // Persist the actual native SID before any subsequent validation/close.
     createRecord(path.join(actorDirectory,'session.json'),{sessionId:connection.sessionId,workspace});
     const listed=await listScodeAgents(connection);
-    const audit=scodeNativeA2aAudit(listed);
-    if(listed.isError || audit?.actor!==claim.actor || audit.sessionId!==connection.sessionId || audit.namespaceRoot!=='') {
-      throw new Error('Real ACP Agent/Node namespace does not match the granted enrollment');
-    }
+    requireScodeNodeIdentity(connection,listed,claim.actor);
     const configFile=path.join(actorDirectory,'profile.json');
     createRecord(configFile,{...profile,acpSessionId:connection.sessionId});
     await connection.close();

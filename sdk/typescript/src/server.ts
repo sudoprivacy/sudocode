@@ -44,6 +44,7 @@ async function main(): Promise<void> {
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
+    'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
     'enroll-codex': {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
       + 'scode-acp-bridge --init-codex --config FILE --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES [--port 23262]\n'
       + '  Use --native-argv JSON_ARGV instead of --native-codex to preserve an official wrapper command.\n'
+      + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
@@ -80,7 +82,7 @@ async function main(): Promise<void> {
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace
-      ||values['session-id']||values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port)throw new Error('Select one preparation mode');
+      ||values['session-id']||values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Select one preparation mode');
     if(!values.binding||!path.isAbsolute(values.binding))throw new Error('--binding must be an absolute private mapping file');
     console.log(JSON.stringify(await prepareExistingCodexBinding(values.config,JSON.parse(fs.readFileSync(values.binding,'utf8')))));
     return;
@@ -90,10 +92,11 @@ async function main(): Promise<void> {
     if(values.init||values.codex||values['codex-owner']||values.scode||values.workspace||values['session-id'])throw new Error('Select one initializer mode');
     if(Boolean(values['native-codex'])===Boolean(values['native-argv']))throw new Error('Select exactly one native executable or argv');
     console.log(JSON.stringify(prepareCodexMcp(values.config,values['native-argv']?JSON.parse(values['native-argv']):values['native-codex']!,JSON.parse(values.enrollment??'null'),
-      JSON.parse(values.peers??'null'),__filename,values.port===undefined?undefined:Number(values.port))));
+      JSON.parse(values.peers??'null'),__filename,values.port===undefined?undefined:Number(values.port),
+      values['peer-policy'] as 'allowlist'|'node-namespace'|undefined)));
     return;
   }
-  if(values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port)throw new Error('Codex initializer fields require --init-codex');
+  if(values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Codex initializer fields require --init-codex');
   if (values.init) {
     const executable = values.scode;
     const workspace = values.workspace;

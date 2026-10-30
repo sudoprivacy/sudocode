@@ -98,9 +98,12 @@ const waitUntil = async (test, ms, label) => {
   while (!test()) { if (Date.now()>end) throw new Error(label+' timeout'); await new Promise(resolve=>setTimeout(resolve,25)); }
 };
 let phase='idle';
+const peerMarker='REAL_NODE_AUTOJOIN_'+crypto.randomUUID();
 const heldResponses=new Set();
 const endpoint = http.createServer((req,res)=>{
-  receipt.modelRequests.push({method:req.method,url:req.url,phase});
+  const observation={method:req.method,url:req.url,phase};receipt.modelRequests.push(observation);
+  let body='';req.on('data',bytes=>{if(body.length<=2097152)body+=bytes;});
+  req.on('end',()=>{observation.peerMarkerSeen=body.includes(peerMarker);observation.bodyBytes=Buffer.byteLength(body);});
   if(phase==='cancelled-seed' && req.method==='POST' && req.url==='/v1/responses'){
     // A 503 drives retries before the user item appears on some native builds.
     // Keep this explicit cancelled seed pending until turn/interrupt or cleanup.
@@ -108,7 +111,7 @@ const endpoint = http.createServer((req,res)=>{
     res.once('close',()=>heldResponses.delete(res));
     req.resume();return;
   }
-  if(phase==='completed-seed' && req.method==='POST' && req.url==='/v1/responses'){
+  if(['completed-seed','peer-inbound'].includes(phase) && req.method==='POST' && req.url==='/v1/responses'){
     req.resume();res.writeHead(200,{'content-type':'text/event-stream'});
     for(const event of [
       {type:'response.created',response:{id:'resp_fixture_seed'}},
@@ -165,6 +168,7 @@ const closeTui = async own => {
       fs.writeFileSync(autojoinConfig,JSON.stringify({version:1,mode:'codex-autojoin',
         native:{codexArgv:configured.codexArgv,socket:selectedSocket,env:childEnv},
         stateDirectory:path.join(root,'bindings'),auditLog:path.join(root,'autojoin-audit.jsonl'),peers:[],
+        peerPolicy:operatorContext?'node-namespace':'allowlist',
         enrollmentArgv:operatorContext
           ? [process.execPath,path.resolve(__dirname,'../dist/server.cjs'),'--enroll-codex','--config',operatorContext.sdkGrant]
           : [process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
@@ -411,6 +415,33 @@ const closeTui = async own => {
           assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'resumed direct send adds no inference');
         }
         await closeTui(resumer);
+      }
+      if(operatorContext && !seededResume){
+        const {connectScode,sendScodeMessage}=require(library);
+        const peer=await connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
+        try{
+          phase='peer-inbound';
+          const original=receipt.autojoinClaims[0];
+          await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
+          const sent=await sendScodeMessage(peer,{to:original.actor,
+            message:peerMarker+' Peer data only. Do not reply or ACK.',summary:'Isolated automatic peer reception'});
+          assert.equal(sent.isError,false,JSON.stringify(sent));
+          const end=Date.now()+15000;
+          while(true){
+            const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
+            const callback=path.join(root,'bindings',original.threadId+'.callback.jsonl');
+            const rows=fs.existsSync(callback)?fs.readFileSync(callback,'utf8').trim().split('\n').map(line=>JSON.parse(line)):[];
+            const accepted=rows.filter(row=>row.phase==='accepted');
+            if(receipt.modelRequests.some(row=>row.peerMarkerSeen)&&accepted.length===1&&thread.status.type==='idle'){
+              receipt.actualPeerReception={peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
+                targetThreadId:thread.id,targetActor:original.actor,accepted:accepted[0],
+                modelRequestsAfterArrival:receipt.modelRequests.length,untrustedPeerMarkerReachedNativeModel:true,sent};break;
+            }
+            if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
+            await new Promise(resolve=>setTimeout(resolve,50));
+          }
+          assert.equal(receipt.modelRequests.length,1,'one actual received peer input, no duplicate native inference');
+        }finally{await peer.close();}
       }
       if(managedPackageRoot && options.autojoin){
         for(const own of tuis)await closeTui(own);

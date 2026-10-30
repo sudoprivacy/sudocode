@@ -99,7 +99,19 @@ profile references.
 Before accepting a binding, the bridge executes the real `agent_list` helper
 and requires native audit to match the intended Agent and ACP session, with the
 Node namespace root (`""`). A copied profile or workspace-disk namespace fails
-before any send. Peer callbacks remain subject to the configured peer allowlist.
+before any send. The same native identity guard is shared by provisioning and
+attachment; hostAudit version 1 is required.
+
+Peer reception defaults to the configured exact-name allowlist, including when
+the list is empty. For an explicitly selected network-wide installation,
+`--init-codex --peer-policy node-namespace` admits untrusted peer data from that
+verified Node namespace. It applies only after the actual owned session's
+actor/SID/namespace audit succeeds, retains the same SID filter, bounded lane,
+provenance wrapper and no-replay behavior, and does not grant send/tool authority.
+Other authenticated Agents in that namespace can then supply peer context;
+this is not a claim that they share an owner or are online. Fixed-session
+callbacks and existing configs keep their exact-name allowlists. Directory
+visibility alone never enables the wider policy.
 
 Legacy responses retain the equal-cwd requirement. A trusted operator can now
 select an actor-private ACP workspace by additionally returning `workspaceBinding`:

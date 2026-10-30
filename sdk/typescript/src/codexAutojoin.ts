@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { connectCodex, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
-import { createCodexCallback, type CodexCallback } from './codexCallback';
+import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
 import { connectScode, type ScodeConnection, type SessionNotification } from './scodeAcp';
-import { listScodeAgents, scodeNativeA2aAudit, ScodeA2aError } from './scodeA2a';
+import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
 import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
   readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
@@ -27,6 +27,8 @@ export interface CodexAutojoinConfig {
   native: CodexConnectionConfig;
   stateDirectory: string;
   peers: string[];
+  /** Explicitly admit peer data from the verified Node namespace; default is the fixed allowlist. */
+  peerPolicy?: 'allowlist' | 'node-namespace';
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<CodexAgentProfile>;
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
@@ -48,6 +50,7 @@ interface Owner {
   callback?: CodexCallback;
   error?: string;
   retryAt?: number;
+  verified?: boolean;
 }
 export interface CodexAutojoin {
   /** True only after closure or authoritative inventory with no qualified roots. */
@@ -75,6 +78,7 @@ function rootThread(thread: Thread): boolean {
 export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise<CodexAutojoin> {
   if (!path.isAbsolute(config.stateDirectory) || !Array.isArray(config.peers)
       || config.peers.some(peer => typeof peer !== 'string' || !peer)
+      || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
       || typeof config.resolveAgent !== 'function'
       || (config.pollIntervalMs !== undefined && (!Number.isFinite(config.pollIntervalMs) || config.pollIntervalMs < 100))) {
     throw new Error('Invalid Codex autojoin configuration');
@@ -144,15 +148,16 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       // Native audit proves which Agent was actually loaded. A copied profile
       // cannot quietly attach every root to the same credential/receiver.
       const result = await listScodeAgents(connection);
-      const audit = scodeNativeA2aAudit(result);
-      if (overflow || result.isError || audit?.actor !== binding.actor || audit.sessionId !== connection.sessionId
-          || audit.namespaceRoot !== '') {
-        throw new Error('Loaded ACP actor/session does not match the durable Codex binding');
-      }
-      callback = createCodexCallback(native.request, { threadId: thread.id, peers: config.peers,
-        log: path.join(config.stateDirectory, `${thread.id}.callback.jsonl`) }, connection.sessionId);
+      requireScodeNodeIdentity(connection,result,binding.actor);
+      if(overflow)throw new Error('ACP input overflowed while verifying the original Node identity');
+      const callbackConfig={threadId:thread.id,peers:config.peers,
+        log:path.join(config.stateDirectory,`${thread.id}.callback.jsonl`)};
+      callback = config.peerPolicy==='node-namespace'
+        ? createCodexNodeCallback(native.request,callbackConfig,connection,result)
+        : createCodexCallback(native.request,callbackConfig,connection.sessionId);
       owner.callback = callback;
       for(const notification of pending)callback.receive(notification);
+      owner.verified = true;
       void connection.exited.then(exit => {
         owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; no automatic task or send replay`;
       });
@@ -229,14 +234,15 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       if (!identifier(threadId)) throw new ScodeA2aError('Native MCP threadId metadata is required; no sender argument or cwd inference', 'not_submitted');
       if(inventoryError)throw new ScodeA2aError(`Native root inventory unavailable: ${inventoryError}`,'not_submitted');
       const owner = owners.get(threadId);
-      if (closed || !owner?.connection || owner.connection.closed || owner.error) {
+      if (closed || !owner?.verified || !owner.connection || owner.connection.closed || owner.error) {
         throw new ScodeA2aError(owner?.error ?? 'No authenticated Agent is attached to this loaded root', 'not_submitted');
       }
       return owner.connection;
     },
     status: () => [...owners.values()].map(owner => ({threadId:owner.binding.threadId,actor:owner.binding.actor,
       state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
-        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected' : 'connected',error:owner.error})),
+        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
+        : owner.verified ? 'connected' : 'connecting',error:owner.error})),
     close,
   };
 }

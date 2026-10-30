@@ -23,6 +23,7 @@ const grant={version:1,purpose:'codex-a2a',stateDirectory:path.join(root,'operat
     env:{HYDRA_DIRECT_FIXTURE_JOURNAL:journal},closeTimeoutMs:900}};
 fs.writeFileSync(grantFile,JSON.stringify(grant));
 const ids=[randomUUID(),randomUUID()];let loaded=[...ids];
+const gatedId=randomUUID(),gate=path.join(root,'list-release');let gatedSession: string|undefined;
 const calls: string[]=[];
 const server=new WebSocketServer({host:'127.0.0.1',port:0});
 server.on('connection',socket=>socket.on('message',bytes=>{
@@ -30,7 +31,8 @@ server.on('connection',socket=>socket.on('message',bytes=>{
   if(call.id===undefined)return;
   const result=call.method==='initialize'?{}:call.method==='thread/loaded/list'?{data:loaded,nextCursor:null}
     :call.method==='thread/read'?{thread:{id:call.params.threadId,cwd:workspace,status:{type:'idle'},
-      parentThreadId:null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true}}:{};
+      parentThreadId:null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true}}
+    :call.method==='turn/start'?{turn:{id:randomUUID()}}:{};
   socket.send(JSON.stringify({id:call.id,result}));
 }));
 const mintRows=()=>fs.readFileSync(path.join(root,'mint.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
@@ -40,7 +42,15 @@ async function main(){
   const config={native:{codexArgv:[process.execPath,path.join(sdk,'test/fixtures/codex-stdio-proxy.mjs'),String(address.port),'normal'],
     socket:'fixture-native.sock',env:{...Object.fromEntries(Object.entries(process.env).filter(([key,value])=>key!=='CODEX_THREAD_ID'&&value!==undefined)),SCODE_NATIVE_ENV_SENTINEL:'owned-proxy'},
     closeTimeoutMs:600},stateDirectory:path.join(root,'bindings'),peers:[],pollIntervalMs:100000,
-    resolveAgent:(input: CodexAgentClaim)=>enrollCodexAgent(grantFile,input)};
+    resolveAgent:async(input: CodexAgentClaim)=>{
+      const result=await enrollCodexAgent(grantFile,input);
+      if(input.threadId===gatedId){
+        const profile=JSON.parse(fs.readFileSync(result.configFile,'utf8'));
+        gatedSession=profile.acpSessionId;profile.env.SCODE_DIRECT_FIXTURE_LIST_GATE=gate;
+        fs.writeFileSync(result.configFile,JSON.stringify(profile));
+      }
+      return result;
+    }};
   let network=await connectCodexAutojoin(config);
   try {
     assert.equal(network.status().filter(row=>row.state==='connected').length,2,JSON.stringify(network.status()));
@@ -55,9 +65,17 @@ async function main(){
     }
     loaded=[];await network.refresh();loaded=[...ids];await network.refresh();
     assert.equal(network.connectionFor(ids[0]).sessionId,sid);
-    await network.close();network=await connectCodexAutojoin(config);
+    await network.connectionFor(ids[0]).request('_fixture/peer',{from:'new-network-peer',text:'fixed allowlist must refuse'});
+    await network.close();
+    assert.equal(calls.filter(method=>method==='turn/start').length,0,'default reception remains the explicit allowlist');
+    network=await connectCodexAutojoin({...config,peerPolicy:'node-namespace'});
     assert.equal(network.connectionFor(ids[0]).sessionId,sid);
     assert.equal(mintRows().length,2,'unload, resume and owner restart never mint or create another ACP session');
+    await network.connectionFor(ids[0]).request('_fixture/peer',{from:'new-network-peer',text:'wrong session must refuse',wrongSession:true});
+    await network.connectionFor(ids[0]).request('_fixture/peer',{from:'new-network-peer',text:'new Node peer data'});
+    await network.close();
+    assert.equal(calls.filter(method=>method==='turn/start').length,1,'explicit Node reception admits the new peer once, with original SID filtering');
+    network=await connectCodexAutojoin(config);
     assert.deepEqual(fs.readFileSync(projectConfig),original);
     const replay=mintRows()[0];const ready=await enrollCodexAgent(grantFile,{...replay});
     assert.equal(ready.actor,replay.actor);assert.equal(mintRows().length,2);
@@ -81,13 +99,26 @@ async function main(){
     const old=await connectCodexAutojoin(badConfig);
     try {assert.ok(old.status().every(row=>row.state==='recovery_required' && row.error?.includes('ACP workspace differs')));}
     finally {await old.close();}
+    loaded.push(gatedId);const inFlight=network.refresh();
+    try {
+      const end=Date.now()+5000;
+      while(true){
+        const rows=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+        if(gatedSession&&rows.filter(row=>row.method==='_sudocode/a2a/agent_list'&&row.input.sessionId===gatedSession).length===2)break;
+        if(Date.now()>end)throw new Error('Actual owner identity check did not reach the controlled barrier');
+        await new Promise(resolve=>setTimeout(resolve,10));
+      }
+      assert.equal(network.status().find(row=>row.threadId===gatedId)?.state,'connecting');
+      assert.throws(()=>network.connectionFor(gatedId),/authenticated Agent/,'a live ACP transport is not admitted before Node identity verification');
+    }finally {fs.writeFileSync(gate,'release');await inFlight;}
+    assert.equal(network.connectionFor(gatedId).sessionId,gatedSession);
     const firstFile=path.join(config.stateDirectory,ids[0]+'.json');
     const binding=JSON.parse(fs.readFileSync(firstFile,'utf8'));binding.workspaceBinding.operationId=randomUUID();
     fs.writeFileSync(firstFile,JSON.stringify(binding));
     await assert.rejects(connectCodexAutojoin(config),/Operator workspace binding differs/);
     const protocol=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.ok(!protocol.some(row=>row.method==='session/prompt'),'no inference translation');
-    assert.ok(!calls.some(method=>['thread/start','thread/resume','turn/start'].includes(method)));
+    assert.ok(!calls.some(method=>['thread/start','thread/resume'].includes(method)));
     console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry; protocol fixture only');
   } finally {await network.close();}
 }

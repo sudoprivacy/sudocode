@@ -49,6 +49,19 @@ export function scodeNativeA2aAudit(result: ScodeA2aResult): Record<string, unkn
   return record(record(record(record(result._meta)?.sudocode)?.directA2a)?.audit);
 }
 
+/** Bind a real, already checked agent_list result to its owned Node session.
+ * Directory entries establish neither identity nor whether a peer is online.
+ */
+export function requireScodeNodeIdentity(connection: ScodeConnection, result: ScodeA2aResult, actor?: string): Record<string, unknown> {
+  const audit=scodeNativeA2aAudit(result);
+  if(directCapability(connection)?.hostAudit!==1 || result.isError || !audit || audit.version!==1
+      || audit.tool!=='agent_list' || typeof audit.actor!=='string' || !audit.actor
+      || (actor!==undefined && audit.actor!==actor) || audit.sessionId!==connection.sessionId || audit.namespaceRoot!=='') {
+    throw new Error('Loaded ACP actor/session does not match its authenticated Node context');
+  }
+  return audit;
+}
+
 function frame(hash: Hash, bytes: Buffer): void {
   const length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length));

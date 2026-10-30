@@ -42,6 +42,13 @@ or current-node compatibility.
 The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
 defines that remaining integration boundary and rollout gates.
 
+Reception defaults to the exact configured peer allowlist. A network-wide
+installation can explicitly select `--peer-policy node-namespace` during
+`--init-codex`; after its owned Node actor/session audit succeeds, other
+authenticated Agents in that namespace may supply untrusted peer context.
+This grants no tool authority and does not establish common ownership or
+online presence. Existing fixed callbacks keep their original allowlists.
+
 Prepare a private machine configuration with `--init-codex --config FILE
 --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES`. The result
 contains the exact native `codex mcp add nexus_scode -- ...` argv for review.

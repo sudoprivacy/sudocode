@@ -76,7 +76,8 @@ async function main(){
   if(config.nativeCodex){
     await Promise.all(connections.map(connection=>connection.close()));connections.length=0;
     const context=path.join(config.root,'native-operator-context.json');
-    fs.writeFileSync(context,JSON.stringify({fixtureOnly:true,fixtureRoot:config.root,sdkGrant:grant,recipient:config.actors[1].name}));
+    fs.writeFileSync(context,JSON.stringify({fixtureOnly:true,fixtureRoot:config.root,sdkGrant:grant,
+      recipient:config.actors[1].name,inboundSenderProfile:a.configFile}));
     for(const scenario of ['idle','cancelled-resume','completed-resume']){
       const args=[path.join(__dirname,'nativeCodexLifecycle.cjs'),'--codex',config.nativeCodex,'--output',config.root,
         '--case',scenario,'--autojoin','--operator-context',context,'--temp-root',config.root];

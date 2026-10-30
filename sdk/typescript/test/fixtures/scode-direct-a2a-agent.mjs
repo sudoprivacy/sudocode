@@ -1,5 +1,5 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
@@ -49,6 +49,12 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   .onRequest(acp.methods.agent.session.new, () => {
     sessionId=`session-${randomUUID()}`;log({method:'session/new',sessionId});return {sessionId};
   })
+  .onRequest('_fixture/peer', value=>value, async ctx=>{
+    await ctx.client.notify(acp.methods.client.session.update,{sessionId:ctx.params.wrongSession?'another-session':sessionId,
+      update:{sessionUpdate:'user_message_chunk',content:{type:'text',text:ctx.params.text}},
+      _meta:{sudocode:{a2a:{from:ctx.params.from,kind:'message'}}}});
+    return {};
+  })
   .onRequest(acp.methods.agent.session.load, ctx => { sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId }); return {}; })
   .onRequest(acp.methods.agent.session.prompt, async ctx => {
     log({ method: 'session/prompt' });
@@ -74,8 +80,10 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     if (scenario === 'malformed') return { queued: true };
     return result({ success: true, routing: { sender: actor, to: ctx.params.to }, text: ctx.params.message }, 'send', ctx.params);
   })
-  .onRequest('_sudocode/a2a/agent_list', value => value, ctx => {
+  .onRequest('_sudocode/a2a/agent_list', value => value, async ctx => {
     log({ method: '_sudocode/a2a/agent_list', input: ctx.params });
+    const gate=process.env.SCODE_DIRECT_FIXTURE_LIST_GATE;
+    while(gate&&!existsSync(gate))await new Promise(resolve=>setTimeout(resolve,10));
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })
   .onRequest(acp.methods.agent.session.close, () => ({}));

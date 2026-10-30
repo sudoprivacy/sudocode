@@ -148,6 +148,17 @@ def run(args, root):
             arguments += ['--owner-root', str(owner_root)]
         return cli(arguments, environment=environment)
 
+    def acp():
+        caller = Rpc(args.scode, services, arguments=('acp',), environment=env)
+        try:
+            initialized = caller.request('initialize', {'protocolVersion': 1,
+                'clientCapabilities': {}, 'clientInfo': {'name': 'existing-box-acceptance', 'version': '1'}}, timeout=55)
+            assert initialized['protocolVersion'] == 1, initialized
+        finally:
+            caller.close()
+        assert caller.child.returncode == 0, 'ACP frontend did not exit cleanly'
+        receipt['acpInitializations'] = receipt.get('acpInitializations', 0) + 1
+
     def broker(method):
         discovery = json.loads((services / 'run/service.json').read_bytes())
         request = urllib.request.Request(discovery['endpoint'], data=json.dumps({
@@ -191,6 +202,9 @@ def run(args, root):
         preference = json.loads(Path(env['SCODE_GLOBAL_CONFIG_DIR']).joinpath('runtime-profile.json').read_bytes())
         assert preference['ownerRoot'] == str(services)
         assert external['managed'] is False and bootstrap.poll() is None
+        assert not (services / 'run/service.json').exists()
+        acp()
+        assert bootstrap.poll() is None
         assert not (services / 'run/service.json').exists()
         print('PASS: explicit pins/refusals; registration and occupied-Box reuse start no replacement', flush=True)
 
@@ -256,14 +270,18 @@ def run(args, root):
         assert stopped['stopped'] and stopped['gracefulRaftDrain'] is False
         children.clear()
         assert not (services / 'run/service.json').exists()
-        restarted = setup()['service']
+        # Only ACP starts this stopped owner: setup cannot mask a missing
+        # protocol startup path. Its exit must leave the shared Node alive.
+        acp()
+        restarted = broker('service.status')['result']
         discovery = json.loads((services / 'run/service.json').read_bytes())
         children.append(discovery)
         assert restarted['instance'] != old_instance
         assert restarted['persistedNodeId'] == profile['nodeId']
+        assert setup()['service']['instance'] == restarted['instance']
         peer_messaging_resident()
         assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
-        print('PASS: acknowledged exact-target operator termination and recovery preserve state', flush=True)
+        print('PASS: acknowledged exact-target termination and ACP recovery/CLI reuse preserve state', flush=True)
         receipt.update(nodeId=profile['nodeId'], before=before, after=after,
             ownerPid=discovery['supervisor_pid'], nexusPid=discovery['nexus_pid'], status='PASS')
     finally:

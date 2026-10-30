@@ -78,10 +78,13 @@ No installation, version transition, client-record publication or credential
 mint occurs on this path. A rotated Node certificate requires a new explicit
 operator ownership transition rather than silently accepting a changed pin.
 
-After multi-agent selection, fresh interactive startup and interactive
-`scode --resume` resume only the registered owner matching the saved Box
-endpoint. Resume never offers first-run setup. Protocol/headless entrypoints
-do not provision services. A live external owner is authenticated and reused; it
+After multi-agent selection, fresh interactive startup, interactive
+`scode --resume`, and `scode acp` share preparation of the selected runtime.
+Resume and ACP never offer first-run setup. ACP honors an existing saved choice
+without writing setup output into its protocol stream; with no saved choice or
+single-agent mode it does not prepare services. Other headless entrypoints do
+not provision services. An existing Box resumes only through the registered
+owner matching its saved endpoint. A live external owner is authenticated and reused; it
 is never killed or replaced. A stopped Node resumes through the same supervisor
 and lifetime lock, with an additional lock in its original data directory.
 External-owner detection checks the declared native bind address, including a

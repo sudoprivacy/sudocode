@@ -850,6 +850,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if is_interactive_session {
         cli::setup::startup_prompt(matches!(&action, CliAction::Repl { .. }))?;
         cli::update::startup_prompt()?;
+    } else if matches!(&action, CliAction::Acp { .. }) {
+        cli::setup::prepare_selected_runtime()?;
     }
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.

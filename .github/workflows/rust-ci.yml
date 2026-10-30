@@ -301,7 +301,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Match this workflow and its downstream jobs on the immutable event
+          # tree. An older PR head can lack checks introduced by protected main.
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable

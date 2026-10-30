@@ -487,12 +487,18 @@ def benchmark_locked(name, root, output, base, command, target):
     # budget and sample assertions. Changing execution host changes none of them.
     inputs = root.parent
     work, targets = benchmark_storage(name)
+    # Both profiles compile the same candidate. Keep its canonical source path
+    # and Cargo outputs together, under the existing shared exclusion lease.
+    candidate_work, candidate_targets = benchmark_storage("rendering")
+    checkouts = {label: (candidate_work if label == "candidate" else work) / label
+                 for label in ["candidate", "baseline", "trusted"]}
+    build_targets = {"baseline": targets / "baseline", "candidate": candidate_targets / "candidate"}
     work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
-        destination = work / label
+        destination = checkouts[label]
         # Sources are disposable copies from this invocation's exact Git archive.
         replace_checkout(inputs / label, destination)
-    candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
+    candidate, baseline, trusted = (checkouts[label] for label in ["candidate", "baseline", "trusted"])
     driver_source = trusted if name == "rendering" else candidate
     terminal = driver_source / "e2e/terminal-resize"
     # Dependencies must match the checkout's lock; the image supplies the exact
@@ -501,11 +507,11 @@ def benchmark_locked(name, root, output, base, command, target):
     driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+                "--target-dir", str(build_targets[label]), "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(build_targets[label] / "release/scode", output / f"scode-{label}")
     # Share artifacts only with the same canonical source checkout. The copied
     # production binaries above stay fixed when dev features build the drivers.
-    driver_target = targets / ("driver" if name == "rendering" else "candidate")
+    driver_target = targets / "driver" if name == "rendering" else build_targets["candidate"]
     log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
                   "--target-dir", str(driver_target), "-p", "rusty-sudocode-cli", "--test", driver_name,
                   "--no-run", "--message-format=json-render-diagnostics")
@@ -527,7 +533,7 @@ def benchmark_locked(name, root, output, base, command, target):
         # Move the existing viewport gates too; deleting the old release job
         # must not silently drop its headless/browser CPU and painting checks.
         manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = str(targets / "candidate")
+        viewport_target = str(build_targets["candidate"])
         viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
                         "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
         log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,

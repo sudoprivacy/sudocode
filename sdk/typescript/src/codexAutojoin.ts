@@ -1,18 +1,12 @@
-import { mkdirSync, readFileSync, realpathSync, renameSync, writeSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { connectCodex, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
 import { createCodexCallback, type CodexCallback } from './codexCallback';
-import { connectScode, type ScodeAcpConfig, type ScodeConnection, type SessionNotification } from './scodeAcp';
+import { connectScode, type ScodeConnection, type SessionNotification } from './scodeAcp';
 import { listScodeAgents, scodeNativeA2aAudit, ScodeA2aError } from './scodeA2a';
-
-export interface CodexAgentClaim {
-  version: 1;
-  actor: string;
-  operationId: string;
-  threadId: string;
-  workspace: string;
-}
+import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
+  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim } from './codexBindings';
+export type { CodexAgentClaim } from './codexBindings';
 
 /** The operator's existing enrollment path owns authorization and credentials.
  * Return a private, durable profile with an EXISTING native ACP session. Never
@@ -35,15 +29,9 @@ export interface CodexAutojoinConfig {
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<CodexAgentProfile>;
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
+  onClosed?: () => void;
 }
 
-type State = 'pending' | 'provisioning' | 'ready' | 'recovery_required';
-interface Binding extends CodexAgentClaim {
-  /** Freeze the resolved workspace path while preserving the original claim bytes. */
-  canonicalWorkspace: string;
-  state: State;
-  configFile?: string;
-}
 interface Thread {
   id: string;
   cwd: string;
@@ -61,6 +49,8 @@ interface Owner {
   retryAt?: number;
 }
 export interface CodexAutojoin {
+  /** True only after closure or authoritative inventory with no qualified roots. */
+  readonly canRetire: boolean;
   /** Host-supplied MCP metadata selects an already loaded root, never arguments. */
   connectionFor(threadId: unknown): ScodeConnection;
   status(): Array<{threadId: string; actor: string; state: string; error?: string}>;
@@ -77,22 +67,6 @@ function rootThread(thread: Thread): boolean {
     && ['idle', 'active'].includes(thread.status?.type);
 }
 
-function identifier(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f-]{36}$/.test(value);
-}
-
-function canonicalWorkspace(value: unknown): string {
-  if (typeof value !== 'string' || !path.isAbsolute(value)) throw new Error('An absolute workspace is required');
-  return realpathSync.native(value);
-}
-
-function assertWorkspace(binding: Binding, workspace: unknown): void {
-  if (canonicalWorkspace(workspace) !== binding.canonicalWorkspace
-      || canonicalWorkspace(binding.workspace) !== binding.canonicalWorkspace) {
-    throw new Error('Native root workspace differs from its durable binding');
-  }
-}
-
 /** One composition owner per native endpoint. The caller fences that owner;
  * individual MCP clients must not each run this inventory/receiver loop.
  * Lifetime is the loaded native root, including work that outlives a frontend.
@@ -104,44 +78,19 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       || (config.pollIntervalMs !== undefined && (!Number.isFinite(config.pollIntervalMs) || config.pollIntervalMs < 100))) {
     throw new Error('Invalid Codex autojoin configuration');
   }
-  mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
-  const bindings = new Map<string, Binding>();
+  const bindings = readBindings(config.stateDirectory);
   const owners = new Map<string, Owner>();
-  const seenActors = new Set<string>();
   let closed = false;
   let chain = Promise.resolve();
   let native: CodexConnection;
   let inventoryError: string | undefined;
   const report = (error: unknown) => { try { config.onError?.(error); } catch { /* Observer only. */ } };
-  const save = (binding: Binding) => {
-    const file = path.join(config.stateDirectory, `${binding.threadId}.json`);
-    const temporary = `${file}.${randomUUID()}.tmp`;
-    const handle = openSync(temporary,'wx',0o600);
-    try {writeSync(handle,JSON.stringify(binding)+'\n');fsyncSync(handle);} finally {closeSync(handle);}
-    renameSync(temporary, file);
-    if(process.platform!=='win32'){
-      const directory = openSync(config.stateDirectory,'r');
-      try {fsyncSync(directory);} finally {closeSync(directory);}
-    }
-  };
-  for (const file of readdirSync(config.stateDirectory).filter(file => file.endsWith('.json'))) {
-    const binding = JSON.parse(readFileSync(path.join(config.stateDirectory, file), 'utf8')) as Binding;
-    if (typeof binding.canonicalWorkspace !== 'string' || !path.isAbsolute(binding.canonicalWorkspace)) {
-      throw new Error(`Durable Codex binding lacks a canonical workspace; operator migration required: ${file}`);
-    }
-    if (!identifier(binding.threadId) || file !== `${binding.threadId}.json` || binding.version !== 1
-        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(binding.actor) || !identifier(binding.operationId)
-        || !path.isAbsolute(binding.workspace) || seenActors.has(binding.actor)
-        || !['pending', 'provisioning', 'ready', 'recovery_required'].includes(binding.state)
-        || (binding.state === 'ready' && (!binding.configFile || !path.isAbsolute(binding.configFile)))) {
-      throw new Error(`Invalid or duplicate durable Codex binding: ${file}`);
-    }
+  const save = (binding: Binding, create = false) => writeBinding(config.stateDirectory, binding, create);
+  for (const binding of bindings.values()) {
     if (binding.state === 'provisioning') {
       binding.state = 'recovery_required';
       save(binding);
     }
-    seenActors.add(binding.actor);
-    bindings.set(binding.threadId, binding);
   }
   const stopOwner = async (owner: Owner) => {
     await owner.callback?.close();
@@ -150,11 +99,11 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   const open = async (thread: Thread) => {
     let binding = bindings.get(thread.id);
     if (!binding) {
-      binding = { version: 1, actor: `codex-${randomUUID().replaceAll('-', '')}`,
+      binding = { version: 2, origin: 'enrollment', actor: `codex-${randomUUID().replaceAll('-', '')}`,
         operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd,
         canonicalWorkspace: canonicalWorkspace(thread.cwd), state: 'pending' };
       // Persist the original operation BEFORE asking any enrollment authority.
-      save(binding);
+      save(binding, true);
       bindings.set(thread.id, binding);
     }
     const owner: Owner = { binding };
@@ -170,6 +119,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
             operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
           if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
           binding.configFile = profile.configFile;
+          bindProfile(binding, readProfile(profile.configFile));
           binding.state = 'ready';
           save(binding);
         } catch (error) {
@@ -179,11 +129,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
           throw error;
         }
       }
-      const profile = JSON.parse(readFileSync(binding.configFile!, 'utf8')) as ScodeAcpConfig;
-      assertWorkspace(binding,profile.workspace);
-      if (!profile.acpSessionId?.trim()) {
-        throw new Error('Autoconnect requires this root workspace and an existing ACP session; no fresh-session fallback');
-      }
+      const profile = boundProfile(binding);
       let callback: CodexCallback | undefined;
       const pending: SessionNotification[] = [];
       let overflow = false;
@@ -243,7 +189,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         if (!rootThread(thread)) {
           if (owner) {owners.delete(id);await stopOwner(owner);}
         } else if (owner) {
-          try {assertWorkspace(owner.binding,thread.cwd);}
+          try {
+            assertWorkspace(owner.binding,thread.cwd);
+            if (owner.binding.state === 'ready') boundProfile(owner.binding);
+          }
           catch (error) {owner.error=String(error);await stopOwner(owner);report(error);}
         } else await open(thread);
       }
@@ -262,13 +211,18 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     closed = true;
     clearInterval(timer);
     await chain;
-    const results = await Promise.allSettled([...owners.values()].map(stopOwner));
-    await native.close();
-    const error = results.find(result => result.status === 'rejected');
-    if(error?.status==='rejected')throw error.reason;
+    try {
+      const results = await Promise.allSettled([...owners.values()].map(stopOwner));
+      await native.close();
+      const error = results.find(result => result.status === 'rejected');
+      if(error?.status==='rejected')throw error.reason;
+    } finally {
+      try {config.onClosed?.();} catch(error) {report(error);}
+    }
   })();
   void native.exited.then(()=>close()).catch(report);
   return {
+    get canRetire() {return closed || (!inventoryError && owners.size === 0);},
     refresh,
     connectionFor(threadId) {
       if (!identifier(threadId)) throw new ScodeA2aError('Native MCP threadId metadata is required; no sender argument or cwd inference', 'not_submitted');

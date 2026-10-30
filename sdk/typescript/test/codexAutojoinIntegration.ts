@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -23,6 +24,7 @@ let offline = true;
 let loaded = ids.slice(0,4);
 let owner: CodexAutojoin | undefined;
 let mcp: Client | undefined;
+let mcpOwnerPid: number | undefined;
 let holdReads = false;
 const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
@@ -75,6 +77,18 @@ async function main() {
   assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
   assert.equal(enrollments[0].workspace,workspaceAlias,'canonical lookup must preserve the original issuance input');
   assert.equal(enrollments.length,2,'unload/reload reuses the committed identity/profile');
+  const originalBinding=JSON.parse(fs.readFileSync(path.join(config.stateDirectory,ids[0]+'.json'),'utf8'));
+  const originalProfile=fs.readFileSync(originalBinding.configFile,'utf8');
+  const replacedProfile=JSON.parse(originalProfile);replacedProfile.acpSessionId='another-session-for-the-same-actor';
+  fs.writeFileSync(originalBinding.configFile,JSON.stringify(replacedProfile));
+  await owner.refresh();
+  assert.throws(()=>owner!.connectionFor(ids[0]),/ACP session differs/,
+    'a mutable same-actor profile cannot replace the original ACP session');
+  fs.writeFileSync(originalBinding.configFile,originalProfile);
+  loaded=loaded.filter(id=>id!==ids[0]);await owner.refresh();
+  loaded.push(ids[0]);await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId,originalSession);
+  assert.equal(enrollments.length,2,'restoring the original profile reuses its original claim');
   loaded.push(ids[4],ids[5]);await owner.refresh();
   assert.equal(owner.status().find(row=>row.threadId===ids[4])?.state,'recovery_required');
   assert.throws(()=>owner!.connectionFor(ids[4]),/lost response/);
@@ -163,13 +177,73 @@ async function main() {
   assert.equal((await sending).isError,false);
   assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,3,'resumed command appends exactly once');
   assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
+  const legacyId=randomUUID();
+  const legacyProfile=path.join(directory,'legacy-profile.json');
+  const legacySession='original-existing-acp-session';
+  fs.writeFileSync(legacyProfile,JSON.stringify({scodeArgv:[process.execPath,path.join(root,'test/fixtures/scode-direct-a2a-agent.mjs')],
+    workspace:otherWorkspace,acpSessionId:legacySession,closeTimeoutMs:300,
+    env:{HYDRA_DIRECT_FIXTURE_JOURNAL:journal,SCODE_DIRECT_FIXTURE_ACTOR:'existing-agent'},
+  }));
+  const mappingFile=path.join(directory,'existing-mapping.json');
+  fs.writeFileSync(mappingFile,JSON.stringify({threadId:legacyId,workspace:directory,actor:'existing-agent',
+    configFile:legacyProfile,acpSessionId:legacySession}));
+  const importArgs=[path.join(root,'dist/server.cjs'),'--bind-codex','--config',mcpConfig,'--binding',mappingFile];
+  const prepare=()=>execFileSync(process.execPath,importArgs,{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+  const beforeImport=rows().length;
+  assert.throws(prepare,/owner is already running/,'preparation shares the running owner exclusion');
+  assert.equal(rows().length,beforeImport,'refused preparation cannot start another receiver');
+  const status=await mcp.callTool({name:'scode_status',arguments:{}});
+  mcpOwnerPid=JSON.parse((status.content as Array<{text:string}>)[0].text).ownerPid;
+  assert.ok(mcpOwnerPid);
   await mcp.close();mcp=undefined;
-  console.log('PASS native autojoin processes: root filtering, distinct identities, exact routing, canonical workspace alias and retarget refusal, unload/reload, first-MCP attachment readiness, restart, legacy recovery, ambiguous enrollment, wrong actor refusal and no inference/replay');
+  await new Promise(resolve=>setTimeout(resolve,6000));
+  assert.doesNotThrow(()=>process.kill(mcpOwnerPid!,0),'loaded native roots keep their owner after MCP clients disconnect');
+  loaded=[];
+  const retirement=Date.now()+12000;
+  for(;;){
+    try {process.kill(mcpOwnerPid!,0);}
+    catch(error){assert.equal((error as NodeJS.ErrnoException).code,'ESRCH');break;}
+    assert.ok(Date.now()<retirement,'owner did not retire after authoritative root unload');
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  mcpOwnerPid=undefined;
+  const afterRetirement=rows().length;
+  const configBytes=fs.readFileSync(mcpConfig);
+  const imported=JSON.parse(prepare());
+  assert.equal(imported.startedAgent,false);assert.equal(imported.acpSessionId,legacySession);
+  assert.deepEqual(fs.readFileSync(mcpConfig),configBytes);
+  assert.equal(rows().length,afterRetirement,'offline import performs no ACP operation');
+  const frozenFile=path.join(directory,'mcp-bindings',legacyId+'.json');
+  const frozenBytes=fs.readFileSync(frozenFile);
+  assert.throws(prepare,/cannot be overwritten/);
+  assert.deepEqual(fs.readFileSync(frozenFile),frozenBytes);
+  const claimsBeforeImport=enrollments.length;
+  loaded=[legacyId];
+  owner=await connectCodexAutojoin({...config,stateDirectory:path.join(directory,'mcp-bindings')});
+  assert.equal(owner.connectionFor(legacyId).sessionId,legacySession);
+  assert.equal(owner.status()[0].actor,'existing-agent');
+  assert.equal(enrollments.length,claimsBeforeImport,'existing import cannot enroll or remint');
+  const sent=await sendScodeMessage(owner.connectionFor(legacyId),{to:'fixture-peer',message:'legacy original',summary:'original identity'});
+  assert.equal(JSON.parse(sent.content).routing.sender,'existing-agent');
+  const profileBytes=fs.readFileSync(legacyProfile);
+  const changed=JSON.parse(profileBytes.toString());changed.workspace=directory;
+  fs.writeFileSync(legacyProfile,JSON.stringify(changed));await owner.refresh();
+  assert.throws(()=>owner!.connectionFor(legacyId),/ACP workspace differs/);
+  fs.writeFileSync(legacyProfile,profileBytes);loaded=[];await owner.refresh();loaded=[legacyId];await owner.refresh();
+  assert.equal(owner.connectionFor(legacyId).sessionId,legacySession);
+  await owner.close();owner=await connectCodexAutojoin({...config,stateDirectory:path.join(directory,'mcp-bindings')});
+  assert.equal(owner.connectionFor(legacyId).sessionId,legacySession);
+  assert.equal(enrollments.length,claimsBeforeImport);
+  assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,4);
+  assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
+  console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, first-MCP readiness and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
+  loaded=[];
   holdReads=false;for(const reply of pendingReads.splice(0))reply();
   await owner?.close();
   await mcp?.close();
+  for(const client of server.clients)client.terminate();
   await new Promise<void>(resolve=>server.close(()=>resolve()));
   fs.rmSync(directory,{recursive:true,force:true});
 });

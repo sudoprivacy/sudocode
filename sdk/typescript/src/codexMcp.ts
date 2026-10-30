@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
+import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
-import { connect, createServer, type Socket } from 'node:net';
+import { connect, createServer, type Server, type Socket } from 'node:net';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -10,6 +10,8 @@ import { validateCodexConnectionConfig, type CodexConnectionConfig } from './cod
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
 import { ScodeA2aError } from './scodeA2a';
+import { bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
+  type CodexBinding } from './codexBindings';
 
 export interface CodexMcpConfig {
   version: 1;
@@ -26,21 +28,78 @@ export interface CodexMcpConfig {
 /** Prepare the portable private config and the native global-MCP command.
  * Deliberately do not change a running controller, node or global configuration.
  */
-export function prepareCodexMcp(file: string, nativeExecutable: string, enrollmentArgv: string[], peers: string[],
+export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
   entry: string, port = 23262): {configFile: string; registrationArgv: string[]; installed: false} {
-  if(![file,nativeExecutable,entry].every(value=>typeof value==='string'&&path.isAbsolute(value))
-      || !statSync(nativeExecutable).isFile() || !statSync(entry).isFile())throw new Error('Existing absolute native executable/entry and private config paths are required');
+  const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
+  validateCodexConnectionConfig({codexArgv});
+  if(![file,codexArgv[0],entry].every(value=>typeof value==='string'&&path.isAbsolute(value))
+      || !statSync(codexArgv[0]).isFile() || !statSync(entry).isFile())throw new Error('Existing absolute native executable/entry and private config paths are required');
   const parent = path.dirname(file);
   mkdirSync(parent,{recursive:true,mode:0o700});
-  const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native:{codexArgv:[nativeExecutable]},
+  const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native:{codexArgv},
     stateDirectory:path.join(parent,'codex-agents'),auditLog:path.join(parent,'codex-network.jsonl'),
     peers,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
   // Validate before publishing. This initializer neither runs the enrollment
   // command nor copies its authority into the runtime package.
   validateConfig(config);
   writeFileSync(file,JSON.stringify(config,null,2)+'\n',{flag:'wx',mode:0o600});
-  return {configFile:file,registrationArgv:[nativeExecutable,'mcp','add','nexus_scode','--',process.execPath,entry,
+  return {configFile:file,registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
     '--codex','--config',file],installed:false};
+}
+
+export interface ExistingCodexAgentBinding {
+  threadId: string;
+  workspace: string;
+  actor: string;
+  configFile: string;
+  acpSessionId: string;
+}
+
+/** Prepare one explicit legacy mapping, without connecting either session.
+ * The normal owner's same exclusive endpoint prevents an import while it runs.
+ */
+export async function prepareExistingCodexBinding(file: string, existing: ExistingCodexAgentBinding): Promise<{
+  prepared: true; startedAgent: false; threadId: string; actor: string; acpSessionId: string;
+}> {
+  const {config} = readConfig(file);
+  if (!existing || Object.keys(existing).some(key=>!['threadId','workspace','actor','configFile','acpSessionId'].includes(key))
+      || !identifier(existing.threadId) || typeof existing.actor !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(existing.actor)
+      || typeof existing.workspace !== 'string' || !path.isAbsolute(existing.workspace)
+      || typeof existing.configFile !== 'string' || !path.isAbsolute(existing.configFile)
+      || typeof existing.acpSessionId !== 'string' || !existing.acpSessionId.trim()) {
+    throw new Error('An explicit existing thread, actor, native workspace, ACP profile and session are required');
+  }
+  const listener = createServer(socket=>socket.destroy());
+  await claimOwner(listener, config.endpoint.port);
+  try {
+    const bindings = readBindings(config.stateDirectory);
+    if (bindings.has(existing.threadId) || [...bindings.values()].some(binding=>binding.actor===existing.actor)) {
+      throw new Error('An existing thread or actor binding cannot be overwritten or assigned twice');
+    }
+    const profile = readProfile(existing.configFile);
+    if (profile.acpSessionId !== existing.acpSessionId) throw new Error('Existing ACP session differs from the explicit import');
+    const binding: CodexBinding = {version:2,origin:'existing',operationId:randomUUID(),
+      threadId:existing.threadId,workspace:existing.workspace,canonicalWorkspace:canonicalWorkspace(existing.workspace),
+      actor:existing.actor,configFile:existing.configFile,state:'ready'};
+    bindProfile(binding, profile);
+    writeBinding(config.stateDirectory, binding, true);
+    return {prepared:true,startedAgent:false,threadId:existing.threadId,actor:existing.actor,acpSessionId:existing.acpSessionId};
+  } finally {await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));}
+}
+
+async function claimOwner(listener: Server, port: number): Promise<void> {
+  try {
+    await new Promise<void>((resolve,reject)=>{
+      listener.once('error',reject);listener.listen(port,'127.0.0.1',resolve);
+    });
+  } catch (error) {
+    listener.close();
+    if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      throw new Error('The Codex bridge owner is already running; wait for its natural exit before preparing a binding');
+    }
+    throw error;
+  }
 }
 
 function validateConfig(config: CodexMcpConfig): void {
@@ -146,7 +205,14 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   })().finally(finish);
   const scheduleExit = () => {
     clearTimeout(idleTimer);
-    if(!sockets.size)idleTimer=setTimeout(()=>{void stop();},5000);
+    if(!sockets.size)idleTimer=setTimeout(()=>{
+      void (async()=>{
+        await network?.refresh();
+        if(sockets.size)return;
+        if(network?.canRetire)await stop();
+        else scheduleExit();
+      })().catch(()=>scheduleExit());
+    },5000);
   };
   const listener = createServer(socket=>{
     sockets.add(socket);clearTimeout(idleTimer);
@@ -172,15 +238,14 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
       socket.resume();
     })().catch(()=>socket.destroy());
   });
-  await new Promise<void>((resolve,reject)=>{
-    listener.once('error',reject);listener.listen(config.endpoint.port,'127.0.0.1',resolve);
-  });
+  await claimOwner(listener, config.endpoint.port);
   audit({phase:'listening',pid:process.pid});
   const onSignal = () => {void stop();};
   process.once('SIGTERM',onSignal);process.once('SIGINT',onSignal);
   scheduleExit();
   try {
     network = await connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
+      onClosed:()=>{void stop();},
       resolveAgent:claim=>enroll(config.enrollmentArgv,claim),onError:error=>{
         try {audit({phase:'attachment_error',error:String(error)});} catch { /* No command submission. */ }
       }});

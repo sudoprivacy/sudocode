@@ -52,9 +52,11 @@ real output, policy, approvals, actor audit and conservative Unknown semantics.
 Ownership follows **loaded native root runtimes**, including work that outlives
 a frontend. This does not establish whether a TUI window is currently visible.
 An unloaded root closes its owned scode; loading it again uses the saved profile.
-When the native proxy exits, all of this owner's scode connections close. The
-shared owner exits after its last MCP connection closes. It never stops the
-native server or the Nexus Node.
+When the native proxy exits, all of this owner's scode connections close. After
+the last MCP connection closes, the shared owner refreshes inventory and exits
+only when no qualified root remains. Unavailable inventory keeps the owner
+alive and tools unavailable; it does not establish that roots have exited.
+It never stops the native server or the Nexus Node.
 
 ## Existing enrollment capability
 
@@ -106,15 +108,20 @@ has no Node, credential or issuer and cannot fulfill that deployment gate.
 
 ## Durable state and recovery
 
-The private binding file `<threadId>.json` contains the original actor, operation,
-workspace, canonical workspace and state. The original enrollment workspace
+The version-2 private binding file `<threadId>.json` contains the original actor,
+operation, origin, native workspace, canonical workspace and state. A ready row
+also freezes its original ACP session ID and original/canonical ACP workspace.
+The original enrollment workspace
 bytes stay unchanged; canonical filesystem resolution accepts aliases such as
 macOS `/var` and `/private/var` across unload/resume. The frozen canonical path
 also rejects an alias redirected to another workspace.
 The shared inventory refresh applies the same workspace check to cached
 connections before admitting another tool, not only during first attachment.
-Older preview bindings without that field require operator migration after verifying the original
-workspace; the bridge never replaces their identity or enrollment operation.
+Older preview bindings require explicit operator migration after verifying the
+original identity and both contexts; the bridge never guesses their original
+SID or replaces their identity or enrollment operation. Changing a ready
+profile's SID or redirecting its workspace is refused even for a cached
+connection with the same actor.
 A new random actor is independent of the native thread ID,
 session ID and profile. The original claim is written and synced before invoking
 the adapter. Atomic replacement publishes ready profile references. POSIX also
@@ -135,18 +142,35 @@ status distinguish attachment from directory visibility; an unavailable native
 inventory prevents tool admission. Callback errors remain pending/Unknown and
 are not automatically replayed.
 
-For an existing fixed-session Agent, the operator may prepare a **ready** binding
-with its existing actor and ACP profile before the announced migration window.
-Set `canonicalWorkspace` from the verified workspace's native real path.
-The same actor cannot be assigned to two thread bindings. Stop the previous
-owner naturally before the new owner loads that profile. Merely installing the
-global entry does not retire a private launch-time override or old receiver.
+For an existing fixed-session Agent, prepare a private mapping document with
+exactly `threadId`, `workspace` (native cwd), `actor`, `configFile` (existing ACP
+profile), and `acpSessionId` (original SID). Run the common package's
+`--bind-codex --config GLOBAL_FILE --binding MAPPING_FILE` while the global bridge
+owner is stopped. This is an offline preparation operation: it starts neither
+native nor ACP sessions, performs no enrollment, and returns
+`prepared:true, startedAgent:false`. Its exclusive endpoint is the same one
+used by the runtime, so it cannot prepare against a running global owner.
+
+An explicit existing mapping can retain deliberately different native and ACP
+workspaces. Both canonical paths and the original ACP SID are frozen separately;
+new enrollments still require their claimed native and ACP workspace to match.
+The same actor cannot be assigned to two threads, and an existing row cannot be
+overwritten, including by repeating an import. Preview-state recovery needs
+separate operator verification; import never repairs or overwrites it.
+
+Offline preparation does not prove the actor's current credentials or retire a
+legacy receiver. At the coordinated window, let the previous fixed owner exit
+naturally before the global owner loads its profile. The normal authenticated
+`agent_list` audit then verifies actor/SID/Node namespace before sends become
+available. Merely installing the global entry does not retire a private
+launch-time override or old receiver.
 
 ## Validation and activation
 
 `npm test` runs real proxy/ACP processes for root filtering, same-cwd identity
 separation, unload/reload, owner restart, ambiguous enrollment, wrong-actor
-rejection, exact direct sends, absence of inner prompts and absence of retries.
+rejection, original SID/workspace substitution refusal, offline import and owner
+retirement, exact direct sends, absence of inner prompts and absence of retries.
 Offline package tests verify exclusive private configuration and a global MCP
 registration command without installing it.
 

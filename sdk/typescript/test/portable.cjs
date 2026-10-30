@@ -60,6 +60,16 @@ void [connectScode, sendScodeMessage, runScodeMcp, connectCodex, forwardScodeToC
   assert.equal(auto.workspace,undefined,'global config must not infer identity from a workspace');
   assert.throws(()=>run(process.execPath,initCodex,{stdio:'pipe'}),/EEXIST/);
   assert.deepEqual(fs.readFileSync(autoConfig),autoBytes);
+  const argvConfig=path.join(directory,'private/codex-wrapper.json');
+  const nativeArgv=[process.execPath,path.join(directory,'official wrapper.cjs')];
+  const argvInit=[entry,'--init-codex','--config',argvConfig,'--native-argv',JSON.stringify(nativeArgv),
+    '--enrollment',JSON.stringify([process.execPath,'operator-owned-adapter.cjs']),'--peers','[]'];
+  assert.throws(()=>run(process.execPath,[...argvInit,'--native-codex',process.execPath],{stdio:'pipe'}),/exactly one/);
+  assert.equal(fs.existsSync(argvConfig),false,'rejected preparation cannot publish a config');
+  const wrapper=JSON.parse(run(process.execPath,argvInit));
+  assert.deepEqual(JSON.parse(fs.readFileSync(argvConfig)).native.codexArgv,nativeArgv);
+  assert.deepEqual(wrapper.registrationArgv,[...nativeArgv,'mcp','add','nexus_scode','--',process.execPath,
+    fs.realpathSync(entry),'--codex','--config',argvConfig]);
   const output = run(process.execPath, [path.join(root, 'dist/testing/mcpIntegration.cjs'), entry]);
   process.stdout.write(output);
   process.stdout.write(run(process.execPath, [path.join(root, 'dist/testing/codexConnectionIntegration.cjs'), path.join(modules, '@sudocode/acp/dist/index.cjs')]));

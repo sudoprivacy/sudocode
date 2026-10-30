@@ -32,11 +32,22 @@ defines that remaining integration boundary and rollout gates.
 Prepare a private machine configuration with `--init-codex --config FILE
 --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES`. The result
 contains the exact native `codex mcp add nexus_scode -- ...` argv for review.
+Use `--native-argv JSON_ARGV` instead of `--native-codex` when the official
+installation uses an interpreter and wrapper. The full argv is preserved for
+both proxy connections and MCP registration; it is never passed through a
+shell. Keep that installation's native package context intact.
 The initializer starts nothing and does not install global configuration. Use
 an owner-protected parent directory; it exclusively creates the file and keeps
 machine values outside the package. Keep the MCP server optional so an offline
 node cannot prevent ordinary Codex startup. Existing project or launch-time
 overrides need an explicit migration; a global entry cannot override them.
+
+Existing fixed-session Agents can be prepared offline with `--bind-codex`.
+The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
+specifies its explicit mapping document, original SID and separate native/ACP
+workspaces. Preparation refuses a running global owner or an existing mapping.
+It does not start a receiver; the previous owner must exit in the coordinated
+window before the normal global entry loads that same actor/session.
 
 ## Build a source-bound archive
 

@@ -9,8 +9,23 @@ const run = (file, args, options = {}) => execFileSync(file, args, {
   cwd: directory, encoding: 'utf8', env: { ...process.env, NODE_PATH: '' }, ...options,
 });
 try {
+  // Exercise both actual scripts with a foreign repository/index, as supplied
+  // by Git hooks. The manifest must still bind this clean SDK checkout.
+  const originalManifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json')));
+  const foreign=path.join(directory,'foreign.git');
+  const gitEnv={};
+  for(const name of ['PATH','SystemRoot','WINDIR','TMPDIR','TEMP','TMP']){
+    if(process.env[name]!==undefined)gitEnv[name]=process.env[name];
+  }
+  execFileSync('git',['init','--bare',foreign],{env:gitEnv,stdio:'pipe'});
+  const hookEnv={...process.env,GIT_DIR:foreign,GIT_WORK_TREE:directory,
+    GIT_INDEX_FILE:path.join(directory,'foreign.index'),NODE_PATH:''};
+  run(process.execPath,[path.join(root,'scripts/build.cjs')],{env:hookEnv});
+  const rebuilt=JSON.parse(fs.readFileSync(path.join(root,'manifest.json')));
+  assert.equal(rebuilt.sourceCommit,originalManifest.sourceCommit,'foreign hook cannot substitute the source commit');
+  assert.equal(rebuilt.dirty,false,'foreign hook cannot misclassify a clean source checkout');
   const archiveDir = path.join(directory, 'archives');
-  const packed = JSON.parse(run(process.execPath, [path.join(root, 'scripts/pack.cjs'), archiveDir]));
+  const packed = JSON.parse(run(process.execPath, [path.join(root, 'scripts/pack.cjs'), archiveDir],{env:hookEnv}));
   const install = path.join(directory, 'install');
   run(process.execPath, [process.env.npm_execpath, 'install', '--offline', '--ignore-scripts',
     '--no-audit', '--no-fund', '--prefix', install, packed.path]);

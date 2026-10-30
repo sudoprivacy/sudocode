@@ -1,11 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFileSync } = require('node:child_process');
+const git = require('./sourceGit.cjs');
 const { build } = require('esbuild');
 async function main() {
 const root = path.resolve(__dirname, '..');
-const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 const shared = { absWorkingDir: root, bundle: true, platform: 'node', format: 'cjs', target: 'node20' };
 const library = await build({ ...shared, entryPoints: ['src/index.ts'], outfile: 'dist/index.cjs', metafile: true });
 if (Object.keys(library.metafile.inputs).some(name => /(?:node-pty|electron|grpc|packages\/desktop\/)/.test(name))) {

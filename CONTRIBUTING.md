@@ -203,8 +203,13 @@ the performance workloads must include the corresponding measurement scenario.
 Each invocation builds each image context once and reuses that actual immutable
 image ID across profiles, recording and checking it before reuse. A missing
 captured image fails acceptance; a tag or an unrelated prior build cannot replace it.
-Selected measurements keep their existing baselines, rounds, assertions and budgets. They have no
-scheduled or manual cloud replacement. Documentation-only changes run preflight;
+Selected measurements keep their existing baselines, rounds, assertions and budgets.
+Rendering and browser use the same canonical candidate checkout and Cargo
+outputs under the existing exclusive benchmark lease. Each baseline and the
+trusted rendering driver keep separate outputs. Copied normal release binaries
+stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
+cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.

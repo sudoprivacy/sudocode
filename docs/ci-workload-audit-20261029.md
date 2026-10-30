@@ -76,19 +76,23 @@ failed a real terminal exit check; that incomplete run is not a fast pass.
 
 ## Browser build reuse and selected execution evidence
 
-The browser profile builds its release CLI and both integration drivers against
-the same canonical candidate checkout and target directory. The independent
-baseline stays separate. Copy production binaries before test builds, because
-dev dependency features can change the CLI binary in Cargo's output directory.
-Rendering keeps its independent trusted driver. This reduces the seven target
-trees across both profiles to five; actual full-profile savings still need
+Rendering and browser profiles share the candidate's canonical source checkout
+and Cargo output directory. Browser drivers use that same candidate tree too;
+the independent baselines and rendering's trusted driver stay separate. Copy
+production binaries before test builds, because dev dependency features can
+change the CLI binary in Cargo's output directory. This reduces the original
+seven target trees across both profiles to four (from five after the first reuse
+change). The existing exclusive lease still covers mutation, compilation and
+measurement, so another head cannot replace inputs mid-run. Full-profile savings still need
 measurement. No workloads, sample counts, budgets or product cases are removed.
 
-`benchmark_targets_acceptance.py` executes the production browser builder with
+`benchmark_targets_acceptance.py` executes both production builders with
 real Cargo, npm and native fixture drivers in private state. It checks distinct
 baseline/candidate results, dev feature unification, immutable measured binaries,
-both observer stages and Cargo-fresh viewport dependencies. Restoring separate
-driver targets makes that check fail. CI runs it only for changed executor,
+both observer stages and Cargo-fresh viewport dependencies. The complete
+rendering-to-browser sequence must keep the same normal candidate bytes and
+reuse the candidate build without compilation; restoring separate candidate
+paths/targets makes the real Cargo regression fail. CI runs it only for changed executor,
 image, fixture or workflow inputs on the PR; queue/main reuse that execution.
 These are infrastructure checks and earn no product journey coverage credit.
 

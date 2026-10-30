@@ -1,4 +1,4 @@
-"""Run the production browser build pipeline with real Cargo and native drivers.
+"""Run both production benchmark builders with real Cargo and native drivers.
 
 Tiny fixture executables exercise compilation, feature unification and binary
 identity. This infrastructure acceptance does not claim product browser coverage.
@@ -49,6 +49,20 @@ fn {name}() {{
     assert_eq!(shared_support::flavor(), "dev");
 }}
 '''
+    measurement = '''import argparse,hashlib,json,os
+from pathlib import Path
+import subprocess
+p=argparse.ArgumentParser()
+for name in ["driver","base","candidate","output"]: p.add_argument("--"+name,required=True)
+p.add_argument("--policy");p.add_argument("--profile");a=p.parse_args()
+assert subprocess.check_output([a.base]).decode().strip()=="baseline:normal"
+assert subprocess.check_output([a.candidate]).decode().strip()=="candidate:normal"
+case="rendering_driver_runs_release" if a.policy else "browser_terminal_links_and_interaction"
+if a.policy: assert a.profile=="core" and json.loads(Path(a.policy).read_text())=={"fixture":True}
+subprocess.run([a.driver,"--ignored","--exact",case],env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
+out=Path(a.output);out.mkdir()
+(out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
+'''
     for label in ["baseline", "candidate", "trusted"]:
         checkout = inputs / label
         files = {
@@ -63,22 +77,13 @@ fn {name}() {{
             "rust/support/src/lib.rs": 'pub fn flavor() -> &\'static str { if cfg!(feature="dev") { "dev" } else { "normal" } }\n',
             "rust/tests/pty_hyperlinks.rs": driver.format(name="browser_terminal_links_and_interaction"),
             "rust/tests/pty_prompt_viewport.rs": driver.format(name="viewport_browser_interaction"),
+            "rust/tests/pty_render_performance.rs": driver.format(name="rendering_driver_runs_release"),
             "e2e/terminal-resize/package.json": '{"name":"browser-builder-acceptance","version":"1.0.0"}\n',
             "e2e/terminal-resize/package-lock.json": '{"name":"browser-builder-acceptance","version":"1.0.0",'
                 '"lockfileVersion":3,"packages":{"":{"name":"browser-builder-acceptance","version":"1.0.0"}}}\n',
-            "e2e/terminal-resize/gui-benchmark.py": '''import argparse,hashlib,json,os
-from pathlib import Path
-import subprocess
-p=argparse.ArgumentParser()
-for name in ["driver","base","candidate","output"]: p.add_argument("--"+name,required=True)
-a=p.parse_args()
-assert subprocess.check_output([a.base]).decode().strip()=="baseline:normal"
-assert subprocess.check_output([a.candidate]).decode().strip()=="candidate:normal"
-subprocess.run([a.driver,"--ignored","--exact","browser_terminal_links_and_interaction"],
-    env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
-out=Path(a.output);out.mkdir()
-(out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
-''',
+            "e2e/terminal-resize/gui-benchmark.py": measurement,
+            "e2e/terminal-resize/benchmark.py": measurement,
+            "e2e/terminal-resize/performance-policy.json": '{"fixture":true}\n',
             "scripts/benchmark_prompt_viewport.py": '''import argparse,hashlib,json,os
 from pathlib import Path
 import subprocess
@@ -101,17 +106,16 @@ out=Path(a.output);out.mkdir()
             (checkout / "rust/src/main.rs").write_text('compile_error!("Browser must build the candidate, not trusted source");\n')
         command("cargo", "generate-lockfile", "--manifest-path", str(checkout / "rust/Cargo.toml"))
 
-    work, targets = output / "state/browser", output / "state/target/browser"
     # Replace only the storage location with private state. Every production
     # command and target/checkout decision executes unmodified; no global cache
     # or another workline's lease is mounted or written.
-    checks.benchmark_storage = lambda name: (work, targets)
+    checks.benchmark_storage = lambda name: (output / "state" / name, output / "state/target" / name)
     evidence = output / "browser"
     evidence.mkdir()
     locks = output / "locks"
     locks.mkdir()
     with checks.exclusive_benchmark_state(locks):
-        checks.benchmark_locked("browser", inputs / "candidate", evidence, "fixture-base", command, targets)
+        checks.benchmark_locked("browser", inputs / "candidate", evidence, "fixture-base", command, output / "unused-target")
 
     viewport = [output / "commands" / f"{index:03d}.log" for index, row in enumerate(commands)
                 if "pty_prompt_viewport" in row["command"] and "--no-run" in row["command"]]
@@ -126,9 +130,38 @@ out=Path(a.output);out.mkdir()
     for relative in ["measurements", "viewport-headless", "viewport-browser"]:
         data = json.loads((evidence / relative / "fixture.json").read_text())
         assert data["candidate_sha256"] == digest, "A driver replaced the production binary"
-    assert subprocess.check_output([str(targets / "candidate/release/scode")]).decode().strip() == "candidate:dev"
+    candidate_build = next(row["command"] for row in commands if "build" in row["command"]
+                           and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml"))
+    candidate_target = Path(candidate_build[candidate_build.index("--target-dir") + 1])
+    assert subprocess.check_output([str(candidate_target / "release/scode")]).decode().strip() == "candidate:dev"
     assert len(commands) == 12, "A production build/driver/observer stage was omitted"
+
+    # First retain the browser-only guard against accidentally compiling trusted
+    # source. Then exercise the usual rendering -> browser order in the same
+    # private state, including normal/dev feature switching in real Cargo.
+    (inputs / "trusted/rust/src/main.rs").write_text('fn main() {}\n', encoding="utf-8")
+    stage_digests = []
+    for name in ["rendering", "browser"]:
+        stage = output / ("subsequent-" + name)
+        stage.mkdir()
+        with checks.exclusive_benchmark_state(locks):
+            checks.benchmark_locked(name, inputs / "candidate", stage, "fixture-base", command, output / "unused-target")
+        stage_digests += [hashlib.sha256((stage / "scode-candidate").read_bytes()).hexdigest(),
+                          json.loads((stage / "measurements/fixture.json").read_text())["candidate_sha256"]]
+    candidate_builds = [(index, row["command"]) for index, row in enumerate(commands)
+                        if "build" in row["command"] and "--manifest-path" in row["command"]
+                        and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml")]
+    assert len(candidate_builds) == 3
+    assert len({args[args.index("--manifest-path") + 1] for _, args in candidate_builds}) == 1, "Candidate source path must stay canonical across profiles"
+    assert len({args[args.index("--target-dir") + 1] for _, args in candidate_builds}) == 1, "Candidate outputs must stay with the same source path"
+    assert all(value == digest for value in stage_digests), "Production candidate changed between profiles"
+    final_build_log = (output / "commands" / f"{candidate_builds[-1][0]:03d}.log").read_text(encoding="utf-8")
+    assert "Compiling " not in final_build_log, "Browser redundantly compiled the candidate after rendering"
+    target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
+                           for row in commands if "--target-dir" in row["command"]})
+    assert len(target_trees) == 4, target_trees
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
+              "target_trees": target_trees, "cross_profile_candidate_build_reused": True,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production browser build executor, Cargo and npm; distinct baseline/candidate and native integration drivers, reusable dev artifacts, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

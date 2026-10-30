@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { spawn, execFileSync, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
+const socketEntryPresent = require('./fixtures/nativeSocketReady.cjs');
 
 const { parseArgs } = require('node:util');
 const options = parseArgs({ options: {
@@ -189,7 +190,7 @@ const closeTui = async own => {
           receipt.preparedNativeVersion=value.managedCodexVersion;
         }
       }
-      assert(!fs.existsSync(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
+      assert(!socketEntryPresent(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
     }else{
       native=spawn(configured.codexArgv[0],[...configured.codexArgv.slice(1),'app-server','--listen','unix://'],
         {cwd:workspace,env:childEnv,stdio:['ignore','ignore','pipe']});
@@ -208,12 +209,7 @@ const closeTui = async own => {
         return own;
       };
       for(const label of ['first','second'])await spawnTui(label);
-      await waitUntil(()=>{
-        // Windows AF_UNIX entries cannot be stat'ed; the canonical connection
-        // below verifies readiness after this non-opening directory check.
-        try{return fs.readdirSync(path.dirname(selectedSocket)).includes(path.basename(selectedSocket));}
-        catch(error){if(error.code==='ENOENT')return false;throw error;}
-      },10000,'isolated native listener');
+      await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'isolated native listener');
       const observer=await connect('observer',receipt.observerNotifications);
       if(managedPackageRoot){
         receipt.nativeManagedVersion=JSON.parse(execFileSync(configured.codexArgv[0],

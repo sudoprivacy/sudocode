@@ -3,6 +3,7 @@ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http
 const crypto=require('node:crypto'),assert=require('node:assert/strict');
 const {spawn,execFileSync}=require('node:child_process');
 const {once}=require('node:events'),{parseArgs}=require('node:util');
+const socketEntryPresent=require('./fixtures/nativeSocketReady.cjs');
 const options=parseArgs({options:{codex:{type:'string'},output:{type:'string'},driver:{type:'string'},
   library:{type:'string'},case:{type:'string',default:'idle'},help:{type:'boolean'}}}).values;
 if(options.help){console.log('node test/nativeCodexQueue.cjs --codex ABS_NATIVE --output ABS_EVIDENCE [--case idle|response-loss] [--driver JSON_ARGV] [--library ABS_INDEX_CJS]');process.exit(0);}
@@ -106,7 +107,7 @@ void(async()=>{
     assert(receipt.modelRequests.every(row=>row.originPid===originalPid));
     const seedTurns=turnItems();assert.equal(seedTurns.filter(row=>row.item.payload.type==='task_started').length,1);
     assert.equal(seedTurns.filter(row=>row.item.payload.type==='task_complete').length,1);
-    const socket=path.join(home,'app-server-control','app-server-control.sock');assert.equal(fs.existsSync(socket),false);
+    const socket=path.join(home,'app-server-control','app-server-control.sock');assert.equal(socketEntryPresent(socket),false);
     receipt.controlSocketBefore=false;receipt.seedHttpRequests=receipt.modelRequests.length;
     // This fixture owns only its fresh thread; preserve the fixed-owner guard.
     process.env.CODEX_THREAD_ID=threadId;
@@ -152,7 +153,7 @@ void(async()=>{
     assert(receipt.modelRequests.every(row=>row.originPid===originalPid),'all inference belongs to the original target');
     assert(receipt.modelRequests.some(row=>row.containsNonce));
     receipt.producerInferenceRequests=0;
-    assert.doesNotThrow(()=>process.kill(originalPid,0));assert.equal(fs.existsSync(socket),false);
+    assert.doesNotThrow(()=>process.kill(originalPid,0));assert.equal(socketEntryPresent(socket),false);
     assert.equal(sessionItems().filter(row=>row.item.type==='session_meta').length,1);
     if(options.case==='response-loss'){
       // Observe another native scheduler interval with the callback still open.

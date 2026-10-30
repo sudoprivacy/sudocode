@@ -496,7 +496,7 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
-    # Normalize inherited/platform color settings before explicit fixture overrides.
+    # Normalize platform/inherited color settings before explicit fixture overrides.
     environment.pop("NO_COLOR", None)
     environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
@@ -504,7 +504,6 @@ def run_command(command, cwd, log, env=None):
     command = [shutil.which(str(command[0])) or str(command[0]), *map(str, command[1:])]
     started = time.monotonic()
     priorities = {}
-    observation_denials = 0
     log.parent.mkdir(parents=True, exist_ok=True)
     print("+ " + shlex.join(map(str, command)), flush=True)
     with log.open("wb") as stream:
@@ -516,25 +515,17 @@ def run_command(command, cwd, log, env=None):
                     children = psutil.Process(process.pid).children(recursive=True)
                     for child in children:
                         try:
-                            name = child.name().lower()
-                            if name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "cc", "clang", "clang.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}:
+                            # name() may read argv on macOS and trigger psutil
+                            # 7.2.2's KERN_PROCARGS2 error path for short-lived children.
+                            name = Path(child.exe()).name.lower()
+                            if (name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
+                                    or re.fullmatch(r"(?:.*-)?(?:clang(?:\+\+)?|gcc|g\+\+)(?:-\d+(?:\.\d+)*)?(?:\.exe)?", name)):
                                 child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
                                 priorities[f"{child.pid}:{name}"] = child.nice()
-                        except psutil.NoSuchProcess:
-                            pass
-                        except psutil.AccessDenied:
-                            observation_denials += 1
-                        except SystemError as error:
-                            # psutil 7.2.2 wraps this macOS permission failure:
-                            # https://github.com/giampaolo/psutil/pull/2854
-                            if sys.platform != "darwin" or not isinstance(
-                                    error.__cause__ or error.__context__, PermissionError):
-                                raise
-                            observation_denials += 1
-                except psutil.NoSuchProcess:
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-                except psutil.AccessDenied:
-                    observation_denials += 1
                 time.sleep(0.15)
         except BaseException:
             # Interrupting owned validation must not orphan compiler children.
@@ -548,8 +539,7 @@ def run_command(command, cwd, log, env=None):
             raise
     result = {"command": list(map(str, command)), "exit_code": process.returncode,
               "elapsed_seconds": round(time.monotonic() - started, 3),
-              "log_sha256": sha(log.read_bytes()), "compiler_priorities": priorities,
-              "process_observation_denials": observation_denials}
+              "log_sha256": sha(log.read_bytes()), "compiler_priorities": priorities}
     log.with_suffix(".command.json").write_bytes(canonical(result))
     if process.returncode:
         print(log.read_text(errors="replace")[-10000:], file=sys.stderr)

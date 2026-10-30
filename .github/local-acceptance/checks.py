@@ -281,8 +281,18 @@ def contract_container(root, output, command):
     context = output / "guard-image"
     context.mkdir()
     inputs_hash = hashlib.sha256()
+    # Keep image bindings inside the existing executable fingerprint format.
+    # A changed image/entrypoint must update its pin before any Docker work.
+    pins = {
+        "Dockerfile.guard": "7ac3c2e7507240482a89938560d1fc7786575b72866b54280e4a11feca85fa9b",
+        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+    }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
         contents = subprocess.check_output(["git", "show", f"{protected}:.github/local-acceptance/{name}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != pins[name]:
+            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its contract_container pin "
+                               "with the reviewed input, then rerun acceptance; no image build started.")
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
     image_receipt = output / "guard-image-id.txt"

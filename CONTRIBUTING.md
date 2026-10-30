@@ -223,6 +223,8 @@ Per-profile fingerprints retain the selected literal dispatch branch and all
 shared code, process execution and image inputs. Adding an unselected branch
 preserves that evidence. Legacy receipts require the exact attested executor to
 be recoverable from their immutable signed source or base; their signatures stay unchanged.
+The versioned semantic AST encoding ignores empty optional fields so author and
+CI Python versions compute the same execution fingerprint.
 Provider tests on main run only for changed provider inputs, and real-daemon
 queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays

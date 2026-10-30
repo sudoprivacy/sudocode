@@ -88,6 +88,26 @@ def commands_hash(ref):
                           **{p: sha(tracked(ref, p)) for p in paths}}))
 
 
+def profile_ast_value(value):
+    """Serialize semantic AST fields independently of Python's dump formatting."""
+    if isinstance(value, ast.AST):
+        return {"node": type(value).__name__, "fields": {
+            name: profile_ast_value(field) for name, field in ast.iter_fields(value)
+            if field is not None and not (isinstance(field, list) and not field)
+        }}
+    if isinstance(value, list):
+        return [profile_ast_value(item) for item in value]
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, complex):
+        return {"complex": [value.real, value.imag]}
+    if value is Ellipsis:
+        return {"ellipsis": True}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise RuntimeError(f"Unsupported acceptance AST value: {type(value).__name__}")
+
+
 def profile_commands_hashes(ref, names):
     """Bind each literal dispatch branch and all common code without importing it."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
@@ -119,8 +139,8 @@ def profile_commands_hashes(ref, names):
                          for node in ast.walk(dispatcher))
         if not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
-        result[name] = sha(canonical({"executor": executor, "image": image,
-                                     "profile": ast.dump(projected, include_attributes=False)}))
+        result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
+                                     "profile": profile_ast_value(projected)}))
     return result
 
 

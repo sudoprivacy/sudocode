@@ -3,6 +3,7 @@
 import base64
 import json
 from pathlib import Path
+import shutil
 import sys
 
 
@@ -75,6 +76,13 @@ def verify_profile_compatibility(directory, work, command):
             assert "Running real-process" not in output, "Unchanged real execution was unnecessarily repeated"
             assert run("git", "ls-remote", "origin", f"refs/heads/compat-{label}").split()[0] == head
             assert run("git", "notes", "--ref=local-acceptance", "show", head) == note
+            interpreters = {str(Path(sys.executable).resolve())}
+            for name in ["python3.12", "python3.14"]:
+                executable = shutil.which(name)
+                if executable:
+                    interpreters.add(str(Path(executable).resolve()))
+            for interpreter in sorted(interpreters):
+                run(interpreter, trusted, "verify", "--head", head, "--policy-ref", future)
 
         # Selected commands, common state, process execution and images must
         # reject the genuinely signed prior execution, in both receipt formats.

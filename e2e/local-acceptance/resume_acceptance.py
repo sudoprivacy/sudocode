@@ -4,6 +4,7 @@ import base64
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -164,6 +165,77 @@ def verify_resume(directory, source, command):
           error="Acceptance is for another commit or tree")
     assert events() == before_events
     print("PASS: actual signed CLI resume reruns changed profiles; tampered/missing logs, signatures, host, head and unaccepted policy are refused")
+
+    # A later failing process must not discard successful earlier profiles.
+    run("git", "checkout", "main")
+    profiles.write_text(profiles.read_text().replace(
+        '    elif name == "rendering":\n',
+        '    elif name == "rendering":\n'
+        '        if not (root.parent / "allow-rendering").exists():\n'
+        '            return [execute([sys.executable, "-c", "print(\'expected later failure\'); raise SystemExit(23)"], '
+        'root, output / "failed.log")]\n'))
+    run("git", "add", ".")
+    run("git", "commit", "-m", "Protected recipe with an actual failing later process")
+    run("git", "push", "origin", "main")
+    run("git", "checkout", "feature")
+    failed_head = run("git", "rev-parse", "HEAD")
+    before_events = events()
+    before_notes = run("git", "ls-remote", "origin", "refs/notes/local-acceptance")
+    failed = fixture / "failed-later-profile"
+    text = check(failed, success=False, error="Local acceptance failed (23)")
+    assert "Saved completed profiles" in text and "--resume-from" in text, text
+    assert events() == before_events + ["native-v1"]
+    assert not (failed / "envelope.json").exists()
+    checkpoint = json.loads((failed / "checkpoint/receipt.json").read_text())
+    assert checkpoint["kind"] == "completed-profiles"
+    assert set(checkpoint["checks"]) == {"native-workspace"}
+    assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
+    proof = json.loads((failed / "checkpoint/envelope.json").read_text())
+    note = fixture / "checkpoint-note.json"
+    note.write_text(json.dumps({"version": 1, "attestations": {"fixture": proof}}))
+    run("git", "notes", "--ref=refs/notes/local-acceptance", "add", "-F", note, failed_head)
+    run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main", success=False,
+        error="completed profiles do not satisfy full acceptance")
+    run("git", "notes", "--ref=refs/notes/local-acceptance", "remove", failed_head)
+    # The SSH namespace also rejects a checkpoint independently of JSON kind checks.
+    signature = failed / "checkpoint/receipt.json.sig"
+    allowed = fixture / "checkpoint-allowed-signers"
+    allowed.write_text("fixture " + key.with_suffix(".pub").read_text().strip() + "\n")
+    verification = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "fixture",
+        "-n", "sudocode-local-acceptance", "-s", str(signature)],
+        input=(failed / "checkpoint/receipt.json").read_bytes(), capture_output=True)
+    assert verification.returncode != 0, "checkpoint signature must not authorize full acceptance"
+    damaged = fixture / "damaged-checkpoint"
+    shutil.copytree(failed, damaged)
+    (damaged / "native-workspace/000.log").write_text("changed checkpoint evidence\n")
+    check(fixture / "rejected-checkpoint-log", damaged, success=False,
+          error="Resume log missing or changed for native-workspace")
+    assert events() == before_events + ["native-v1"]
+    (fixture / "allow-rendering").write_text("the external service recovered\n")
+    completed = fixture / "completed-after-failure"
+    check(completed, failed)
+    receipt = json.loads((completed / "receipt.json").read_text())
+    assert events() == before_events + ["native-v1", "render-v2"]
+    assert receipt["resumed_from"]["profiles"] == ["native-workspace"]
+    assert receipt["checks"]["native-workspace"] == checkpoint["checks"]["native-workspace"]
+    run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
+    run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main")
+
+    # The installed hook's ordinary check path discovers the same-head checkpoint
+    # without requiring the author to remember a new command or documentation.
+    isolated_home = fixture / "author-home"
+    cached = isolated_home / ".nexus/local-acceptance/results" / failed_head / "1000000000"
+    shutil.copytree(failed, cached)
+    automatic = fixture / "automatic-after-failure"
+    from run import FIXTURE_ENV
+    environment = {**FIXTURE_ENV, "HOME": str(isolated_home), "USERPROFILE": str(isolated_home)}
+    result = subprocess.run([sys.executable, str(helper), "check", "--base", "main", "--policy-ref", "main",
+        "--output", str(automatic)], cwd=work, env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Reusing signed native-workspace" in result.stdout, result.stdout
+    assert events() == before_events + ["native-v1", "render-v2", "render-v2"]
+    assert json.loads((automatic / "receipt.json").read_text())["resumed_from"]["profiles"] == ["native-workspace"]
+    print("PASS: actual later failure preserves completed signed profiles; partial notes and wrong SSH purpose cannot pass; explicit/automatic resume reruns only unfinished work")
 
 
 if __name__ == "__main__":

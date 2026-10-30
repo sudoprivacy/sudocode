@@ -554,9 +554,11 @@ def read_note(head, ref=NOTE_REF):
     return obj
 
 
-def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
+def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, completed_only=False):
     payload = base64.b64decode(envelope["payload"], validate=True)
     receipt = json.loads(payload)
+    if receipt.get("kind") != ("completed-profiles" if completed_only else None):
+        raise RuntimeError("Wrong receipt kind; completed profiles do not satisfy full acceptance")
     signer_id = envelope["signer"]
     registry = json.loads(tracked(signers_ref or policy_ref, SIGNERS))["signers"]
     signer = registry.get(signer_id)
@@ -569,7 +571,8 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
         (directory / "allowed").write_text(f"{signer_id} {signer['public_key']}\n", encoding="utf-8")
         (directory / "proof.sig").write_bytes(base64.b64decode(envelope["signature"], validate=True))
         result = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(directory / "allowed"),
-                                 "-I", signer_id, "-n", NAMESPACE, "-s", str(directory / "proof.sig")],
+                                 "-I", signer_id, "-n", NAMESPACE + ("-checkpoint" if completed_only else ""),
+                                 "-s", str(directory / "proof.sig")],
                                 input=payload, capture_output=True)
         if result.returncode:
             raise RuntimeError("Invalid SSH acceptance signature")
@@ -582,10 +585,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
     required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
     if not required:
         raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
+    checks = receipt.get("checks", {})
+    if completed_only and (not checks or not set(checks).issubset(required)):
+        raise RuntimeError("Checkpoint must contain nonempty completed profiles from its protected plan")
     compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
     if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
             or (not compatible and "commands_sha256" in receipt)):
-        compatible = compatible_profile_commands(receipt, policy_ref, required)
+        compatible = compatible_profile_commands(receipt, policy_ref, list(checks) if completed_only else required)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and
@@ -598,8 +604,7 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
     if not compatible:
         raise RuntimeError("Acceptance commands changed; rerun local acceptance")
     check_contract_changes(head, base, policy_ref)
-    checks = receipt.get("checks", {})
-    if not set(required).issubset(checks):
+    if not completed_only and not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
     for name, commands in checks.items():
         if not isinstance(commands, list) or not commands:
@@ -610,8 +615,11 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None):
     plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
     if receipt.get("plan", plan) != plan:
         raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
-    report_plan(plan)
-    print(f"Verified {head[:12]} on {signer['platform']} ({signer_id}): {', '.join(required)}", flush=True)
+    if completed_only:
+        print(f"Verified completed profiles for {head[:12]}: {', '.join(checks)}; full acceptance still required.", flush=True)
+    else:
+        report_plan(plan)
+        print(f"Verified {head[:12]} on {signer['platform']} ({signer_id}): {', '.join(required)}", flush=True)
     return receipt
 
 
@@ -654,15 +662,18 @@ def publish(head, envelope, remote):
 def resume_checks(directory, head, base, policy_ref, output, needed):
     """Reuse signed exact-source checks only while their commands and logs match."""
     directory = Path(directory).resolve()
-    envelope = json.loads((directory / "envelope.json").read_text())
+    proof = directory if (directory / "envelope.json").is_file() else directory / "checkpoint"
+    completed_only = proof != directory
+    envelope = json.loads((proof / "envelope.json").read_text())
     payload = base64.b64decode(envelope["payload"], validate=True)
-    if payload != (directory / "receipt.json").read_bytes():
+    if payload != (proof / "receipt.json").read_bytes():
         raise RuntimeError("Resume receipt differs from its signed payload")
     previous = json.loads(payload)
     previous_policy = value("rev-parse", previous["commands_ref"])
     if git("merge-base", "--is-ancestor", previous_policy, policy_ref, check=False).returncode:
         raise RuntimeError("Resume policy is not an ancestor of the current protected policy")
-    previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=policy_ref)
+    previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=policy_ref,
+                               completed_only=completed_only)
     if previous["host"] != host():
         raise RuntimeError("Resume receipt belongs to a different native host")
     reusable = {}
@@ -682,6 +693,32 @@ def resume_checks(directory, head, base, policy_ref, output, needed):
     return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
                       "commands_ref": previous_policy, "finished_at": previous["finished_at"],
                       "profiles": sorted(reusable)}
+
+
+def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
+    """Sign immutable local evidence; checkpoint signatures cannot authorize a push."""
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = directory / "receipt.json"
+    payload.write_bytes(canonical(receipt))
+    signature = payload.with_suffix(".json.sig")
+    subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", namespace, str(payload)], check=True)
+    return {"signer": identity, "payload": base64.b64encode(payload.read_bytes()).decode(),
+            "signature": base64.b64encode(signature.read_bytes()).decode()}
+
+
+def previous_local_output(head, base):
+    """Find exact-source local progress automatically for the installed push hook."""
+    parent = Path.home() / ".nexus/local-acceptance/results" / head
+    if not parent.is_dir():
+        return None
+    for directory in sorted(parent.iterdir(), reverse=True):
+        proof = directory if (directory / "envelope.json").is_file() else directory / "checkpoint"
+        if not (proof / "envelope.json").is_file():
+            continue
+        receipt = json.loads((proof / "receipt.json").read_bytes())
+        if receipt.get("head") == head and receipt.get("base") == base and receipt.get("host") == host():
+            return directory
+    return None
 
 
 def check(args):
@@ -719,17 +756,10 @@ def check(args):
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
     reusable, resumed = {}, None
-    if getattr(args, "resume_from", None):
-        reusable, resumed = resume_checks(args.resume_from, head, base_ref, policy_ref, output, needed)
+    previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
+    if previous:
+        reusable, resumed = resume_checks(previous, head, base_ref, policy_ref, output, needed)
     results = {}
-    for name in needed:
-        if name in reusable:
-            print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
-            results[name] = reusable[name]
-        else:
-            print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-            results[name] = module.run(name, ROOT, output / name, base, run_command)
-    clean(head)
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
@@ -740,19 +770,37 @@ def check(args):
                "finished_at": int(time.time()), "checks": results, "plan": plan}
     if resumed is not None:
         receipt["resumed_from"] = resumed
-    payload = output / "receipt.json"
-    payload.write_bytes(canonical(receipt))
-    signature = payload.with_suffix(".json.sig")
-    if signature.exists():
-        signature.unlink()
-    subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", NAMESPACE, str(payload)], check=True)
-    envelope = {"signer": identity, "payload": base64.b64encode(payload.read_bytes()).decode(),
-                "signature": base64.b64encode(signature.read_bytes()).decode()}
+    try:
+        for name in needed:
+            if name in reusable:
+                print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+                results[name] = reusable[name]
+            else:
+                print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+                results[name] = module.run(name, ROOT, output / name, base, run_command)
+        clean(head)
+    except BaseException:
+        if results:
+            try:
+                clean(head)
+                checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
+                directory = output / "checkpoint"
+                envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
+                verify_envelope(envelope, head, base_ref, policy_ref, completed_only=True)
+                (directory / "envelope.json").write_bytes(canonical(envelope))
+                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
+                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+            except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
+                print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
+        raise
+    receipt["finished_at"] = int(time.time())
+    envelope = sign_receipt(receipt, output, identity, key)
     verify_envelope(envelope, head, base_ref, policy_ref)
     (output / "envelope.json").write_bytes(canonical(envelope))
     if args.publish:
         publish(head, envelope, args.remote)
-    print(f"Local acceptance complete: {payload}")
+    print(f"Local acceptance complete: {output / 'receipt.json'}")
 
 
 def install(args):

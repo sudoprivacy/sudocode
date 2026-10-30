@@ -242,6 +242,14 @@ native platform and architecture. The previous policy must belong to the current
 history, its signature must still verify, and the original logs must match their
 signed hashes. Changed profiles run again. The new receipt records which profiles
 were reused and retains their original command records and completion time.
+If a later profile fails or validation is interrupted, the runner signs a separate
+checkpoint for already completed profiles while the source remains clean and
+unchanged. The failed and unrun profiles remain required. Ordinary pushes
+automatically discover compatible checkpoints for the exact head, base and native
+host; custom output directories can use the printed `check --resume-from` command.
+Checkpoint signatures use a different SSH namespace and cannot satisfy the required
+GitHub check or authorize a branch push. Original logs must still match their hashes.
+An abrupt process termination can prevent checkpoint creation.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted

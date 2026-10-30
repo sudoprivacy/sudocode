@@ -15,7 +15,7 @@ const run=(exe,args,input)=>JSON.parse(execFileSync(exe,args,{input,encoding:'ut
 const runAsync=(exe,args,input)=>new Promise((resolve,reject)=>{
   const child=spawn(exe,args,{stdio:['pipe','pipe','pipe'],shell:false});let output='',error='';
   child.on('error',reject);child.stdout.on('data',bytes=>{output+=bytes;});child.stderr.on('data',bytes=>{error+=bytes;});
-  child.once('close',code=>{if(code!==0){reject(new Error(`Fixture child exited ${code}: ${error}`));return;}
+  child.once('close',code=>{if(code!==0){reject(new Error(`Fixture child exited ${code}: ${error}\n${output}`));return;}
     try{resolve(JSON.parse(output));}catch(reason){reject(reason);}});
   child.stdin.end(input);
 });

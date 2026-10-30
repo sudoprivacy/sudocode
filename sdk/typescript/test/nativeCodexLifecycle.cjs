@@ -73,6 +73,7 @@ const loopbackHosts='127.0.0.1,localhost,::1';
 Object.assign(childEnv,{CODEX_HOME:isolatedHome,HOME:userHome,USERPROFILE:userHome,XDG_CONFIG_HOME:path.join(root,'xdg'),
   APPDATA:path.join(root,'roaming'),LOCALAPPDATA:path.join(root,'local'),
   NATIVE_LIFECYCLE_FIXTURE_KEY:'isolated-fixture-only',TERM:'xterm-256color',
+  NPM_CONFIG_PREFIX:path.join(root,'npm-prefix'),
   NO_PROXY:loopbackHosts,no_proxy:loopbackHosts});
 // Preserve the official npm wrapper's package context, only in this private
 // fixture home. No running user daemon or global configuration is adopted.
@@ -90,7 +91,7 @@ const receipt = {
   })),
   nativeSha256: crypto.createHash('sha256').update(fs.readFileSync(configured.codexArgv[0])).digest('hex'),
   nativeVersion: execFileSync(configured.codexArgv[0], ['--version'], {encoding:'utf8',env:childEnv}).trim(),
-  isolation: {root, isolatedCodexHome:true, liveEndpointUsed:false, nexusUsed:!!operatorContext, liveConfigChanged:false},
+  isolation: {root, isolatedCodexHome:true, nativePackageManagerPrefixIsolated:true, liveEndpointUsed:false, nexusUsed:!!operatorContext, liveConfigChanged:false},
   requests: [], observerNotifications: [], modelRequests: [], stages: [], tuiProcesses: [],
 };
 const bounded = (promise, ms, label) => Promise.race([promise, new Promise((_, reject) => {
@@ -156,7 +157,7 @@ const closeTui = async own => {
   }
   receipt.tuiProcesses.push({label:own.label,events:own.lines,stderr:own.stderr});
   const final=own.lines.find(line=>line.event==='exit');
-  assert(final && final.returncode===0 && !own.lines.some(line=>['terminate','kill','normal_exit_timeout'].includes(line.event)),
+  assert(final && final.returncode===0 && !own.lines.some(line=>['terminate','kill','normal_exit_timeout','unsafe_update_prompt'].includes(line.event)),
     'Actual TUI must exit normally; forced cleanup is not lifecycle acceptance');
 };
 const spawnTui = async (label,args=[],env=childEnv) => {
@@ -190,7 +191,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     }
     fs.writeFileSync(path.join(isolatedHome,'config.toml'),
       (managedPackageRoot?'thread_unload_delay_secs = 1\n':'')+
-      'model = "gpt-5.4"\nmodel_provider = "lifecycle_fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n'+
+      'check_for_update_on_startup = false\nmodel = "gpt-5.4"\nmodel_provider = "lifecycle_fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n'+
       '[features]\napps = false\nplugins = false\n[analytics]\nenabled = false\n[model_providers.lifecycle_fixture]\nname = "No inference lifecycle fixture"\n'+
       'base_url = "http://127.0.0.1:'+apiPort+'/v1"\nwire_api = "responses"\nenv_key = "NATIVE_LIFECYCLE_FIXTURE_KEY"\n'+
       '[projects.'+JSON.stringify(workspace)+']\ntrust_level = "trusted"\n'+

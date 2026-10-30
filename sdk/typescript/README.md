@@ -97,6 +97,10 @@ retirement policy. No Nexus enrollment or production frontend is used.
 
 From this directory in a clean committed checkout:
 
+Source tests need Python 3 for the bundled PTY/ConPTY driver guard; the installed
+ACP runtime uses Node only. The guard runs a mock terminal and verifies that a
+close request cannot confirm an installer dialog.
+
 ```sh
 npm ci
 npm test
@@ -266,10 +270,16 @@ Unix defaults to `test/fixtures/nativeCodexTui.py`. Windows uses the bundled
 `test/fixtures/nativeCodexTui.windows.py`, which calls ConPTY through Python's
 standard library without another package. Select that driver with
 `--driver '<JSON argv>'`, containing the available Python executable and the
-absolute script path. A missing driver fails before starting native processes;
+absolute script path. Keep the shared `nativeTuiPrompt.py` beside either driver.
+A missing driver fails before starting native processes;
 there is no protocol-only fallback. Use the actual `codex.exe`, not `codex.cmd`.
 `--temp-root` selects an existing private temporary directory when the platform's
 default socket path would be too long.
+
+Both native fixtures disable startup update checks and set npm's prefix inside
+their private root. Both drivers refuse upgrade dialogs before typing `/exit`.
+The managed-package variant lets the official native CLI create its private
+state directory before writing test settings, preserving its Windows DACL checks.
 
 The fixture performs these steps:
 

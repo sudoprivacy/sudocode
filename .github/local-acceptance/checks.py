@@ -138,7 +138,11 @@ def run(name, root, output, base, execute):
         command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
     elif name == "guard-contract":
         command(sys.executable, "e2e/local-acceptance/run.py")
-        policy_ref = getattr(run, "execution_refs", (None, None))[0] or "origin/main"
+        try:
+            policy_ref, _ = run.execution_refs
+        except AttributeError:
+            policy_ref = "origin/main"
+        policy_ref = policy_ref or "origin/main"
         configuration = json.loads(subprocess.check_output(
             ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
         executor = configuration["checks"][name]["executor"]

@@ -64,8 +64,8 @@
         "rust/.cargo/**",
         "rust/crates/*/Cargo.toml",
         "rust/crates/*/build.rs",
-        "rust/crates/*/src/**",
         "rust/vendor/**",
+        "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
@@ -84,8 +84,8 @@
         "rust/.cargo/**",
         "rust/crates/*/Cargo.toml",
         "rust/crates/*/build.rs",
-        "rust/crates/*/src/**",
         "rust/vendor/**",
+        "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
@@ -149,46 +149,117 @@
     "preflight": {
       "a2911e937e577d702e8d789bad79918b10a67c610ceedc75afbd26e7c88a1e05": [
         "34d7d4d526d116a07326dce720381296c08c965e6b1280b56aa682a75a6a6674"
+      ],
+      "19eead3fca406fbdc7cc09df22ae39798942593ea494c1fd6357a422f663246a": [
+        "34d7d4d526d116a07326dce720381296c08c965e6b1280b56aa682a75a6a6674",
+        "a2911e937e577d702e8d789bad79918b10a67c610ceedc75afbd26e7c88a1e05"
+      ],
+      "d23e8b8f3917d2f11e59b6f8692f4affc29740361c86667c30afbd6dd9ac2001": [
+        "19eead3fca406fbdc7cc09df22ae39798942593ea494c1fd6357a422f663246a",
+        "34d7d4d526d116a07326dce720381296c08c965e6b1280b56aa682a75a6a6674",
+        "a2911e937e577d702e8d789bad79918b10a67c610ceedc75afbd26e7c88a1e05"
       ]
     },
     "native-sdk": {
       "d8588f96aface167bb4b2667c1db11e1a336ec3574c4778db689e8ab2395dc84": [
         "1a5fbb7a5bf1bf2ad8fe64697b6a2ea4c8b8116715664fd6eefe4ac1edd25dc6"
+      ],
+      "abc7e540b45073a8e6eef18f2f685f92464857ea6dea3b9f2a63e12b6cc0444f": [
+        "1a5fbb7a5bf1bf2ad8fe64697b6a2ea4c8b8116715664fd6eefe4ac1edd25dc6",
+        "d8588f96aface167bb4b2667c1db11e1a336ec3574c4778db689e8ab2395dc84"
+      ],
+      "7a347f461cb9b0a874de5ca9e9434f3225046494adb20c7928e8c0f244aa751b": [
+        "1a5fbb7a5bf1bf2ad8fe64697b6a2ea4c8b8116715664fd6eefe4ac1edd25dc6",
+        "abc7e540b45073a8e6eef18f2f685f92464857ea6dea3b9f2a63e12b6cc0444f",
+        "d8588f96aface167bb4b2667c1db11e1a336ec3574c4778db689e8ab2395dc84"
       ]
     },
     "native-workspace": {
       "92ba77aea0190aa57fa97a996a3afc001baa8e106001ac5052d2273512dfb01d": [
         "80ac0dbf2628c12fb66761cbb082552ca2a9d2913e06f1e5e694ac10b84c107d"
+      ],
+      "d7e204b09f93b8b674a5cfeedb5a28b0f0b8458e9ecb465732d84bc2f8d58682": [
+        "80ac0dbf2628c12fb66761cbb082552ca2a9d2913e06f1e5e694ac10b84c107d",
+        "92ba77aea0190aa57fa97a996a3afc001baa8e106001ac5052d2273512dfb01d"
+      ],
+      "089ec601270c6b8b4b919998e3ef1c34870ecc5479cecb5c0f21c1ae9841e68b": [
+        "80ac0dbf2628c12fb66761cbb082552ca2a9d2913e06f1e5e694ac10b84c107d",
+        "92ba77aea0190aa57fa97a996a3afc001baa8e106001ac5052d2273512dfb01d",
+        "d7e204b09f93b8b674a5cfeedb5a28b0f0b8458e9ecb465732d84bc2f8d58682"
       ]
     },
     "native-resize": {
       "b8fb09c42fdff03c8665a7950adc62b2c6d338c4eca574b8350a19bb95ef2d00": [
         "27996b0facd8f4047e05eb7c3672f18db8d50df032c26a2c405e5fee8fb8930e"
+      ],
+      "0f3910701bf0de634c19d9074d6a3cd5e537587278b4f08a55bef59852478abc": [
+        "27996b0facd8f4047e05eb7c3672f18db8d50df032c26a2c405e5fee8fb8930e",
+        "b8fb09c42fdff03c8665a7950adc62b2c6d338c4eca574b8350a19bb95ef2d00"
+      ],
+      "6954bb00e6ca2a62bde989e271d28f6355e157485ce8b05f6e9bcb5a215ac5a5": [
+        "0f3910701bf0de634c19d9074d6a3cd5e537587278b4f08a55bef59852478abc",
+        "27996b0facd8f4047e05eb7c3672f18db8d50df032c26a2c405e5fee8fb8930e",
+        "b8fb09c42fdff03c8665a7950adc62b2c6d338c4eca574b8350a19bb95ef2d00"
       ]
     },
     "rendering": {
       "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86": [
         "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f"
+      ],
+      "10482a55554c2c4991d375c5cf6fd1ce4264093e1890b2dbd2e678aab36de46f": [
+        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f",
+        "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86"
+      ],
+      "63ff1ac041a33ecda073abe9c6ffb6fc98f8231a54cb120eb8d8102386a3ce57": [
+        "52bc5afc8283f093336d7af424e6fa87ef5940383419f6f536471abb38736fba"
       ]
     },
     "browser": {
       "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86": [
         "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f"
+      ],
+      "10482a55554c2c4991d375c5cf6fd1ce4264093e1890b2dbd2e678aab36de46f": [
+        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f",
+        "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86"
+      ],
+      "63ff1ac041a33ecda073abe9c6ffb6fc98f8231a54cb120eb8d8102386a3ce57": [
+        "52bc5afc8283f093336d7af424e6fa87ef5940383419f6f536471abb38736fba"
       ]
     },
     "native-release": {
       "3f870c1faf02081177c891e41697fc81efe507657d2b12b0f4118f180187c1d0": [
         "d91fafe2a7e4268199195033e3be52839bebcffa9ff0bacf27cd9a7c09558691"
+      ],
+      "675e6ed7c936ea55908b23950c92500413a957818fe06ad5f7ce9be614f2aa7d": [
+        "850ce58521ea0b9f2079da64db3e775154796bac5ca5ac030462a2d22af46bd1"
       ]
     },
     "native-services": {
       "6805472b7bc8e96764b07984f0c1d746ecd6b4b19b6bfa0720a9397f18d36b8c": [
+        "d32a837988e05a828139dd4f16a0edcb70598e193df2c2e5c0f8fde860156e57"
+      ],
+      "5e7ed12474634b2330f647d9973b3f0f05e62d61f5b6ab8bcc7f1f3325793afa": [
+        "6805472b7bc8e96764b07984f0c1d746ecd6b4b19b6bfa0720a9397f18d36b8c",
+        "d32a837988e05a828139dd4f16a0edcb70598e193df2c2e5c0f8fde860156e57"
+      ],
+      "0908ee3ad54101762c17afabd78c42ce76dd20e8562a97ff27cc1cd4b9907789": [
+        "5e7ed12474634b2330f647d9973b3f0f05e62d61f5b6ab8bcc7f1f3325793afa",
+        "6805472b7bc8e96764b07984f0c1d746ecd6b4b19b6bfa0720a9397f18d36b8c",
         "d32a837988e05a828139dd4f16a0edcb70598e193df2c2e5c0f8fde860156e57"
       ]
     },
     "native-cohost": {
       "f2b09243d30b81372614c84fa0120a454e49af81cbb590b802912ba2cbdbde88": [
         "a8f0f6b079a6ac94603973a4b4d6014bf37fae890e9234468dde4a0389cf9552"
+      ],
+      "1d45c77823f53f6b70f09409a7cbfbfa6b0b41de1d835679f23356a20d3c4a66": [
+        "a8f0f6b079a6ac94603973a4b4d6014bf37fae890e9234468dde4a0389cf9552",
+        "f2b09243d30b81372614c84fa0120a454e49af81cbb590b802912ba2cbdbde88"
+      ],
+      "018666ff97a169ee11adfb5d31abcce72df6d7e574f71fe4f1477a2f13a8bcb2": [
+        "1d45c77823f53f6b70f09409a7cbfbfa6b0b41de1d835679f23356a20d3c4a66",
+        "a8f0f6b079a6ac94603973a4b4d6014bf37fae890e9234468dde4a0389cf9552",
+        "f2b09243d30b81372614c84fa0120a454e49af81cbb590b802912ba2cbdbde88"
       ]
     }
   }

@@ -81,6 +81,9 @@ def scope_acceptance(directory):
     cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, False, False),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
              ("spec/cache_metrics.json", True, False, False), ("rust/crates/runtime/src/prompt.md", True, True, True),
+             ("spec/local_acceptance.json", False, False, False),
+             ("spec/local_acceptance_signers.json", False, False, False),
+             ("spec/cache_ttl_prices.json", True, False, False),
              ("rust/crates/engine-acp/src/ui.html", True, True, True), ("rust/crates/runtime/README.md", False, False, False),
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
@@ -147,6 +150,66 @@ def scope_acceptance(directory):
     command("git", "commit", "-m", "deleted target keeps full acceptance", cwd=repository)
     expect_native_targets(base, None)
     print("PASS: real Git scopes for PR/push/queue, native test targets, shared fixtures, source rename and explicit dispatch")
+
+
+def performance_scope_acceptance(directory):
+    """Check committed changes through the public planner, including both rename paths."""
+    repository = directory / "performance-scope"
+    command("git", "init", "--initial-branch=main", repository, cwd=directory)
+    command("git", "config", "user.name", "Performance scope E2E", cwd=repository)
+    command("git", "config", "user.email", "scope@example.invalid", cwd=repository)
+    for path in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
+        destination = repository / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(SOURCE / path, destination)
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Protected performance selection", cwd=repository)
+    policy = command("git", "rev-parse", "HEAD", cwd=repository)
+    helper = repository / ".github/scripts/local_acceptance.py"
+
+    def expect(base, expected):
+        text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
+                       "--host", "windows", "--architecture", "AMD64", cwd=repository)
+        plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                               if line.startswith("ACCEPTANCE_PLAN=")))
+        names = set(plan["local_checks"])
+        assert names & {"rendering", "browser"} == set(expected), text
+        assert "Statistical performance profiles:" in text, text
+        if not expected:
+            assert "indirect performance effects" in text, text
+        assert "native-workspace" in names, text
+        assert {job["os"] for job in plan["ci"]} == {"ubuntu-latest", "macos-latest"}, text
+        for job in plan["ci"]:
+            assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
+
+    both = ["rendering", "browser"]
+    cases = [(f"rust/crates/{crate}/src/fixture.rs", [])
+             for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host"]]
+    cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
+        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs", "rust/crates/engine-core/src/lib.rs",
+        "rust/crates/pty-harness/src/lib.rs", "rust/crates/rusty-sudocode-cli/tests/common/mod.rs",
+        "rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/host.cjs"]]
+    cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
+              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"])]
+    for index, (path, expected) in enumerate(cases):
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        file = repository / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("actual changed input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", f"Performance input {index}", cwd=repository)
+        expect(base, expected)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "mv", "rust/crates/rusty-sudocode-cli/src/render.rs",
+            "rust/crates/runtime/src/moved.rs", cwd=repository)
+    command("git", "commit", "-m", "Move UI source into another crate", cwd=repository)
+    expect(base, both)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", "e2e/terminal-resize/host.cjs", cwd=repository)
+    command("git", "commit", "-m", "Delete measurement input", cwd=repository)
+    expect(base, both)
+    print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
 
 
 def plan_acceptance(directory):
@@ -216,8 +279,10 @@ def enforcement_acceptance():
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
         scope_acceptance(directory)
+        performance_scope_acceptance(directory)
         plan_acceptance(directory)
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
+        print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)
@@ -420,8 +485,8 @@ def enforcement_acceptance():
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
     if sys.argv[1:] == ["--fixture-child"]:
         enforcement_acceptance()
         return

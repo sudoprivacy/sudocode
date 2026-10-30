@@ -39,16 +39,31 @@ measurements run through the changed-input local Docker profile.
 
 ## End-to-end acceptance metric
 
-The primary target is at most 10% of the comparable historical arithmetic means
-for candidate CI trigger to first failed job and final-candidate CI trigger to
-merge. Include queueing, same-head retries and merge queue. Record mandatory
-local acceptance separately so moving work cannot hide a local bottleneck.
+The primary clock starts at the first recorded local validation/acceptance
+operation and ends at the first local or hosted failure, or at merge. Include
+local setup, compilation, test execution, benchmark-lock waiting, publication,
+hosted queueing, retries and merge queue. Keep both whole-PR and final-head
+series. Moving work onto the author's box is not a reduction in total time.
 Runner-minutes and execution counts are supporting measurements.
+
+`check` writes `attempt.json` for running, successful and failed attempts and
+prints `LOCAL_ACCEPTANCE_TIMING` on the mandatory interface. Signed full receipts
+and completed-profile checkpoints retain the local start and earliest recorded
+start from a verified resume chain. `LOCAL_ACCEPTANCE_OPERATION_TIMING` also
+covers the outer push/contract operation, including authority checks and Git
+publication; explicit output directories retain it as `operation.json`.
+Use the earliest applicable timestamp when joining local records to hosted PR
+outcomes. Do not add overlapping operation/check intervals together.
+Abrupt termination can leave a running record without an end; keep it censored.
+Older or manual attempts can be unknown. Missing local history must not be
+replaced with zero or silently included in a complete end-to-end average.
 
 The provisional September 29–October 29 Rust source/build cohort contains 419
 failed candidate heads averaging 32.252 minutes to first failure and 200 merged
 PRs averaging 185.261 minutes from their final candidate's CI trigger to merge.
-The corresponding targets are 3.225 and 18.526 minutes. Scope comes from final
+The corresponding hosted-clock reference targets are 3.225 and 18.526 minutes.
+Historical local timing was not collected, so these are conservative reference
+thresholds, not a measured historical total-time baseline. Scope comes from final
 PR diffs; open outcomes are censored and same-head human idle time remains in
 merge elapsed time. These are elapsed means, not the older completion medians.
 
@@ -61,19 +76,23 @@ failed a real terminal exit check; that incomplete run is not a fast pass.
 
 ## Browser build reuse and selected execution evidence
 
-The browser profile builds its release CLI and both integration drivers against
-the same canonical candidate checkout and target directory. The independent
-baseline stays separate. Copy production binaries before test builds, because
-dev dependency features can change the CLI binary in Cargo's output directory.
-Rendering keeps its independent trusted driver. This reduces the seven target
-trees across both profiles to five; actual full-profile savings still need
+Rendering and browser profiles share the candidate's canonical source checkout
+and Cargo output directory. Browser drivers use that same candidate tree too;
+the independent baselines and rendering's trusted driver stay separate. Copy
+production binaries before test builds, because dev dependency features can
+change the CLI binary in Cargo's output directory. This reduces the original
+seven target trees across both profiles to four (from five after the first reuse
+change). The existing exclusive lease still covers mutation, compilation and
+measurement, so another head cannot replace inputs mid-run. Full-profile savings still need
 measurement. No workloads, sample counts, budgets or product cases are removed.
 
-`benchmark_targets_acceptance.py` executes the production browser builder with
+`benchmark_targets_acceptance.py` executes both production builders with
 real Cargo, npm and native fixture drivers in private state. It checks distinct
 baseline/candidate results, dev feature unification, immutable measured binaries,
-both observer stages and Cargo-fresh viewport dependencies. Restoring separate
-driver targets makes that check fail. CI runs it only for changed executor,
+both observer stages and Cargo-fresh viewport dependencies. The complete
+rendering-to-browser sequence must keep the same normal candidate bytes and
+reuse the candidate build without compilation; restoring separate candidate
+paths/targets makes the real Cargo regression fail. CI runs it only for changed executor,
 image, fixture or workflow inputs on the PR; queue/main reuse that execution.
 These are infrastructure checks and earn no product journey coverage credit.
 

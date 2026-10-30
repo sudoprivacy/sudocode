@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 
+from local_acceptance import POLICY, SIGNERS
+
 
 def git(*args):
     return subprocess.check_output(["git", *args]).decode().strip()
@@ -43,7 +45,11 @@ def main():
             live_inputs = ["rust/**", "spec/**", "e2e/thinking/**", ".github/scripts/probe_live_usage*",
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
             daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**"]
-            live = any(fnmatch.fnmatchcase(path, rule) for path in relevant for rule in live_inputs)
+            # Acceptance metadata changes execution authorization, not provider
+            # requests. Keep these identities with the acceptance authority.
+            live = any(fnmatch.fnmatchcase(path, rule)
+                       for path in relevant if path not in {POLICY, SIGNERS}
+                       for rule in live_inputs)
             # Test modules remain part of all-target/all-feature linting even
             # when they do not rebuild or exercise the daemon binary.
             clippy = any(path.startswith("rust/") for path in relevant)

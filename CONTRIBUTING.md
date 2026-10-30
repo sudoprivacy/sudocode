@@ -193,9 +193,20 @@ Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
-run automatically in local Docker when production or measurement inputs change.
-They keep their existing baselines, rounds, assertions and budgets. They have no
-scheduled or manual cloud replacement. Documentation-only changes run preflight;
+run automatically in local Docker when CLI, engine-core, shared PTY helpers,
+measurement sources or Rust build/dependency inputs change. Other crates' source
+changes keep their selected native functional checks but skip these statistical
+performance comparisons. This deliberately reduces performance coverage for
+indirect effects from API, runtime, tools, ACP and service implementations; it
+does not establish that those effects are impossible. A change known to affect
+the performance workloads must include the corresponding measurement scenario.
+Selected measurements keep their existing baselines, rounds, assertions and budgets.
+Rendering and browser use the same canonical candidate checkout and Cargo
+outputs under the existing exclusive benchmark lease. Each baseline and the
+trusted rendering driver keep separate outputs. Copied normal release binaries
+stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
+cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
@@ -209,12 +220,37 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+Release acceptance builds the normal release `scode` once, copies it outside
+Cargo outputs, and points the native workspace's test-profile driver at that
+exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
+feature graph; release-only dev-dependency compilation is no longer repeated.
+The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
+An actual Cargo/native-process fixture checks driver reuse, the release binary's
+identity and rejection of a substituted debug binary. The test driver and its
+in-process fixture helpers now execute in the test profile; the product process
+still uses the normal release graph.
+Ordinary Windows shells also receive the configured/discovered MSVC environment
+when the startup measurement script compiles its native reference process.
 The protected policy records exact pairs of equivalent execution hashes for the
 runner migration. Existing full-Cargo evidence for the same candidate can remain
 valid; the new runner-enforcement guard still runs. The verifier checks the old
 recipe against signed source and the pair against the current recipe. A later
 command change or newly required check cannot inherit that approval. Reuse is
 reported directly by the hook and CI verifier.
+The native recovery smoke and executor guard share an immutable protected-policy
+snapshot with their matching helpers. Older candidate checkouts do not need
+those newly added files. The protected profile pins every staged input's SHA256,
+including helpers outside `.github/`; changed bytes fail before execution until
+their protected pins are reviewed and updated. The existing profile fingerprints
+bind those pins without changing the receipt format. The full Docker decision
+matrix still exercises candidate sources.
+Toolchain discovery still uses the candidate repository.
+Compiler monitoring uses executable identity, including versioned and target-prefixed
+compiler names, without reading command-line arguments. This avoids psutil 7.2.2's
+macOS process-name fallback failure. One compiler worker, lowered compiler priority,
+Normal test priority, commands and budgets remain unchanged; protected equivalence
+pins retain successful earlier evidence for those unchanged commands. The new native
+guard always needs its own actual run, including a refused process-name query.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.
@@ -236,6 +272,30 @@ native platform and architecture. The previous policy must belong to the current
 history, its signature must still verify, and the original logs must match their
 signed hashes. Changed profiles run again. The new receipt records which profiles
 were reused and retains their original command records and completion time.
+If a later profile fails or validation is interrupted, the runner signs a separate
+checkpoint for already completed profiles while the source remains clean and
+unchanged. The failed and unrun profiles remain required. Ordinary pushes
+automatically discover compatible checkpoints for the exact head, base and native
+host; custom output directories can use the printed `check --resume-from` command.
+Checkpoint signatures use a different SSH namespace and cannot satisfy the required
+GitHub check or authorize a branch push. Original logs must still match their hashes.
+An abrupt process termination can prevent checkpoint creation.
+The required interface prints `LOCAL_ACCEPTANCE_TIMING` and retains
+`attempt.json` for each started check, including failures. Signed receipts and
+checkpoints retain the first recorded start across verified resumes. Outer push
+and contract operations also print `LOCAL_ACCEPTANCE_OPERATION_TIMING`; explicit
+output directories retain `operation.json`. Measure local setup, builds, lease
+waiting, retries and publication through CI failure or merge. Use the earliest
+applicable start, without adding overlapping intervals. Older/manual history can
+be missing; these diagnostics neither authorize a push nor prove complete history.
+For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
+in a private local Docker container. A native host smoke retains the actual failing
+process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
+native nextest/Cargo enforcement fixture also remains on the author OS. The full
+negative decision matrix is no longer repeated natively on Windows or macOS, so
+OS-specific negative hook paths have less coverage. The container uses its own
+temporary source/fixtures and does not take the shared performance lease or build
+the product. Product native acceptance and complementary CI hosts are unchanged.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted
@@ -252,6 +312,10 @@ Provider tests on main run only for changed provider inputs, and real-daemon
 queue tests run only for changed daemon inputs. Documentation/CI-only changes
 skip those unchanged expensive journeys. The explicit provider dispatch stays
 available for gateway diagnosis.
+The acceptance policy and signer registry are CI authorization metadata; changing
+them selects their acceptance checks without selecting unchanged provider calls.
+Other `spec/` inputs retain provider coverage. Source renames/deletions and explicit
+provider dispatch retain their existing selection rules.
 CLI integration-test-only edits retain native PTYs and the existing provider
 checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
 CLI manifests, production source and daemon harness edits still select it.

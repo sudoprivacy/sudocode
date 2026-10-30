@@ -4,11 +4,12 @@ import base64
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
 
-def verify_resume(directory, source, command):
+def verify_resume(directory, source, command, host_smoke=False):
     fixture = directory / "resume"
     fixture.mkdir()
     work, origin = fixture / "work", fixture / "origin.git"
@@ -41,6 +42,8 @@ def verify_resume(directory, source, command):
         '    elif name == "rendering":\n'
         '        return step(root, output, execute, rendering_recipe())\n'
     )
+    if host_smoke:
+        profiles.write_text(profiles.read_text().replace('return "render-v1"', 'return "render-v2"'))
     (profiles.parent / "Dockerfile").write_text("FROM scratch\n")
     workflows = work / ".github/workflows"
     workflows.mkdir()
@@ -85,89 +88,177 @@ def verify_resume(directory, source, command):
     def events():
         return (fixture / "events.log").read_text().splitlines()
 
-    check(first)
-    assert events() == ["native-v1", "render-v1"]
-    original = json.loads((first / "receipt.json").read_text())
+    if host_smoke:
+        (fixture / "events.log").touch()
+    else:
+        check(first)
+        assert events() == ["native-v1", "render-v1"]
+        original = json.loads((first / "receipt.json").read_text())
+        run("git", "checkout", "main")
+        profiles.write_text(profiles.read_text().replace('return "render-v1"', 'return "render-v2"'))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Update only the protected rendering command")
+        run("git", "push", "origin", "main")
+        run("git", "checkout", "feature")
+        assert run("git", "rev-parse", "HEAD") == head
+        check(second, first)
+        resumed = json.loads((second / "receipt.json").read_text())
+        assert events() == ["native-v1", "render-v1", "render-v2"]
+        assert resumed["resumed_from"]["profiles"] == ["native-workspace"]
+        assert resumed["checks"]["native-workspace"] == original["checks"]["native-workspace"]
+        assert (second / "native-workspace/000.log").read_bytes() == (first / "native-workspace/000.log").read_bytes()
+        run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
+        run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main")
+        check(third, second)
+        assert events() == ["native-v1", "render-v1", "render-v2"]
+        assert json.loads((third / "receipt.json").read_text())["resumed_from"]["profiles"] == ["native-workspace", "rendering"]
+
+        before_events = events()
+        before_notes = run("git", "ls-remote", "origin", "refs/notes/local-acceptance")
+        for label in ["payload", "signature", "log", "missing-log"]:
+            damaged = fixture / ("damaged-" + label)
+            shutil.copytree(first, damaged)
+            if label == "payload":
+                (damaged / "receipt.json").write_text("{}")
+                error = "Resume receipt differs from its signed payload"
+            elif label == "signature":
+                envelope = json.loads((damaged / "envelope.json").read_text())
+                envelope["signature"] = base64.b64encode(b"invalid signature").decode()
+                (damaged / "envelope.json").write_text(json.dumps(envelope))
+                error = "Invalid SSH acceptance signature"
+            else:
+                log = damaged / "native-workspace/000.log"
+                if label == "log":
+                    log.write_text("damaged evidence\n")
+                else:
+                    log.unlink()
+                error = "Resume log missing or changed for native-workspace"
+            check(fixture / ("rejected-" + label), damaged, success=False, error=error)
+            assert events() == before_events
+            assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
+
+        # Even a valid SSH signature cannot transfer evidence to another architecture.
+        different_host = fixture / "different-host"
+        shutil.copytree(first, different_host)
+        envelope = json.loads((different_host / "envelope.json").read_text())
+        payload = json.loads(base64.b64decode(envelope["payload"]))
+        payload["host"]["architecture"] = "different-architecture"
+        payload["plan"]["author"]["architecture"] = "different-architecture"
+        data = different_host / "receipt.json"
+        data.write_text(json.dumps(payload))
+        signature = data.with_suffix(".json.sig")
+        signature.unlink()
+        run("ssh-keygen", "-Y", "sign", "-f", key, "-n", "sudocode-local-acceptance", data)
+        envelope.update(payload=base64.b64encode(data.read_bytes()).decode(),
+                        signature=base64.b64encode(signature.read_bytes()).decode())
+        (different_host / "envelope.json").write_text(json.dumps(envelope))
+        check(fixture / "rejected-host", different_host, success=False,
+              error="Resume receipt belongs to a different native host")
+        assert events() == before_events
+
+        # An unaccepted policy cannot lend valid signed evidence to protected main.
+        unaccepted = run("git", "commit-tree", "main^{tree}", "-p", "main", "-m", "Unaccepted policy")
+        run("git", "update-ref", "refs/heads/unaccepted-policy", unaccepted)
+        untrusted = fixture / "unaccepted"
+        check(untrusted, policy="unaccepted-policy")
+        before_events = events()
+        check(fixture / "rejected-policy", untrusted, success=False,
+              error="Resume policy is not an ancestor of the current protected policy")
+        assert events() == before_events
+        run("git", "commit", "--allow-empty", "-m", "A new head still needs its own acceptance")
+        check(fixture / "rejected-head", first, success=False,
+              error="Acceptance is for another commit or tree")
+        assert events() == before_events
+        print("PASS: actual signed CLI resume reruns changed profiles; tampered/missing logs, signatures, host, head and unaccepted policy are refused")
+
+    # A later failing process must not discard successful earlier profiles.
     run("git", "checkout", "main")
-    profiles.write_text(profiles.read_text().replace('return "render-v1"', 'return "render-v2"'))
+    profiles.write_text(profiles.read_text().replace(
+        '    elif name == "rendering":\n',
+        '    elif name == "rendering":\n'
+        '        if not (root.parent / "allow-rendering").exists():\n'
+        '            return [execute([sys.executable, "-c", "print(\'expected later failure\'); raise SystemExit(23)"], '
+        'root, output / "failed.log")]\n'))
     run("git", "add", ".")
-    run("git", "commit", "-m", "Update only the protected rendering command")
+    run("git", "commit", "-m", "Protected recipe with an actual failing later process")
     run("git", "push", "origin", "main")
     run("git", "checkout", "feature")
-    assert run("git", "rev-parse", "HEAD") == head
-    check(second, first)
-    resumed = json.loads((second / "receipt.json").read_text())
-    assert events() == ["native-v1", "render-v1", "render-v2"]
-    assert resumed["resumed_from"]["profiles"] == ["native-workspace"]
-    assert resumed["checks"]["native-workspace"] == original["checks"]["native-workspace"]
-    assert (second / "native-workspace/000.log").read_bytes() == (first / "native-workspace/000.log").read_bytes()
-    run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
-    run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main")
-    check(third, second)
-    assert events() == ["native-v1", "render-v1", "render-v2"]
-    assert json.loads((third / "receipt.json").read_text())["resumed_from"]["profiles"] == ["native-workspace", "rendering"]
-
+    failed_head = run("git", "rev-parse", "HEAD")
     before_events = events()
     before_notes = run("git", "ls-remote", "origin", "refs/notes/local-acceptance")
-    for label in ["payload", "signature", "log", "missing-log"]:
-        damaged = fixture / ("damaged-" + label)
-        shutil.copytree(first, damaged)
-        if label == "payload":
-            (damaged / "receipt.json").write_text("{}")
-            error = "Resume receipt differs from its signed payload"
-        elif label == "signature":
-            envelope = json.loads((damaged / "envelope.json").read_text())
-            envelope["signature"] = base64.b64encode(b"invalid signature").decode()
-            (damaged / "envelope.json").write_text(json.dumps(envelope))
-            error = "Invalid SSH acceptance signature"
-        else:
-            log = damaged / "native-workspace/000.log"
-            if label == "log":
-                log.write_text("damaged evidence\n")
-            else:
-                log.unlink()
-            error = "Resume log missing or changed for native-workspace"
-        check(fixture / ("rejected-" + label), damaged, success=False, error=error)
-        assert events() == before_events
-        assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
+    failed = fixture / "failed-later-profile"
+    text = check(failed, success=False, error="Local acceptance failed (23)")
+    assert "Saved completed profiles" in text and "--resume-from" in text, text
+    assert events() == before_events + ["native-v1"]
+    assert not (failed / "envelope.json").exists()
+    checkpoint = json.loads((failed / "checkpoint/receipt.json").read_text())
+    failed_attempt = json.loads((failed / "attempt.json").read_text())
+    assert failed_attempt["outcome"] == "failure" and failed_attempt["elapsed_seconds"] > 0
+    assert failed_attempt["started_at"] <= failed_attempt["finished_at"]
+    assert checkpoint["timing"]["started_at"] == failed_attempt["started_at"]
+    assert checkpoint["timing"]["started_at"] <= checkpoint["timing"]["checks_finished_at"] <= failed_attempt["finished_at"]
+    assert checkpoint["kind"] == "completed-profiles"
+    assert set(checkpoint["checks"]) == {"native-workspace"}
+    assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
+    proof = json.loads((failed / "checkpoint/envelope.json").read_text())
+    note = fixture / "checkpoint-note.json"
+    note.write_text(json.dumps({"version": 1, "attestations": {"fixture": proof}}))
+    run("git", "notes", "--ref=refs/notes/local-acceptance", "add", "-F", note, failed_head)
+    run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main", success=False,
+        error="completed profiles do not satisfy full acceptance")
+    run("git", "notes", "--ref=refs/notes/local-acceptance", "remove", failed_head)
+    # The SSH namespace also rejects a checkpoint independently of JSON kind checks.
+    signature = failed / "checkpoint/receipt.json.sig"
+    allowed = fixture / "checkpoint-allowed-signers"
+    allowed.write_text("fixture " + key.with_suffix(".pub").read_text().strip() + "\n")
+    verification = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "fixture",
+        "-n", "sudocode-local-acceptance", "-s", str(signature)],
+        input=(failed / "checkpoint/receipt.json").read_bytes(), capture_output=True)
+    assert verification.returncode != 0, "checkpoint signature must not authorize full acceptance"
+    damaged = fixture / "damaged-checkpoint"
+    shutil.copytree(failed, damaged)
+    (damaged / "native-workspace/000.log").write_text("changed checkpoint evidence\n")
+    check(fixture / "rejected-checkpoint-log", damaged, success=False,
+          error="Resume log missing or changed for native-workspace")
+    assert events() == before_events + ["native-v1"]
+    (fixture / "allow-rendering").write_text("the external service recovered\n")
+    completed = fixture / "completed-after-failure"
+    check(completed, failed)
+    receipt = json.loads((completed / "receipt.json").read_text())
+    completed_attempt = json.loads((completed / "attempt.json").read_text())
+    assert completed_attempt["outcome"] == "success" and completed_attempt["elapsed_seconds"] > 0
+    assert receipt["timing"]["started_at"] > failed_attempt["finished_at"]
+    assert receipt["timing"]["first_recorded_started_at"] == failed_attempt["started_at"]
+    assert receipt["timing"]["prior_timing_available"] is True
+    assert completed_attempt["first_recorded_started_at"] == failed_attempt["started_at"]
+    assert events() == before_events + ["native-v1", "render-v2"]
+    assert receipt["resumed_from"]["profiles"] == ["native-workspace"]
+    assert receipt["checks"]["native-workspace"] == checkpoint["checks"]["native-workspace"]
+    run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
+    run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main")
 
-    # Even a valid SSH signature cannot transfer evidence to another architecture.
-    different_host = fixture / "different-host"
-    shutil.copytree(first, different_host)
-    envelope = json.loads((different_host / "envelope.json").read_text())
-    payload = json.loads(base64.b64decode(envelope["payload"]))
-    payload["host"]["architecture"] = "different-architecture"
-    payload["plan"]["author"]["architecture"] = "different-architecture"
-    data = different_host / "receipt.json"
-    data.write_text(json.dumps(payload))
-    signature = data.with_suffix(".json.sig")
-    signature.unlink()
-    run("ssh-keygen", "-Y", "sign", "-f", key, "-n", "sudocode-local-acceptance", data)
-    envelope.update(payload=base64.b64encode(data.read_bytes()).decode(),
-                    signature=base64.b64encode(signature.read_bytes()).decode())
-    (different_host / "envelope.json").write_text(json.dumps(envelope))
-    check(fixture / "rejected-host", different_host, success=False,
-          error="Resume receipt belongs to a different native host")
-    assert events() == before_events
-
-    # An unaccepted policy cannot lend valid signed evidence to protected main.
-    unaccepted = run("git", "commit-tree", "main^{tree}", "-p", "main", "-m", "Unaccepted policy")
-    run("git", "update-ref", "refs/heads/unaccepted-policy", unaccepted)
-    untrusted = fixture / "unaccepted"
-    check(untrusted, policy="unaccepted-policy")
-    before_events = events()
-    check(fixture / "rejected-policy", untrusted, success=False,
-          error="Resume policy is not an ancestor of the current protected policy")
-    assert events() == before_events
-    run("git", "commit", "--allow-empty", "-m", "A new head still needs its own acceptance")
-    check(fixture / "rejected-head", first, success=False,
-          error="Acceptance is for another commit or tree")
-    assert events() == before_events
-    print("PASS: actual signed CLI resume reruns changed profiles; tampered/missing logs, signatures, host, head and unaccepted policy are refused")
+    # The installed hook's ordinary check path discovers the same-head checkpoint
+    # without requiring the author to remember a new command or documentation.
+    isolated_home = fixture / "author-home"
+    cached = isolated_home / ".nexus/local-acceptance/results" / failed_head / "1000000000"
+    shutil.copytree(failed, cached)
+    automatic = fixture / "automatic-after-failure"
+    from run import FIXTURE_ENV
+    environment = {**FIXTURE_ENV, "HOME": str(isolated_home), "USERPROFILE": str(isolated_home)}
+    result = subprocess.run([sys.executable, str(helper), "check", "--base", "main", "--policy-ref", "main",
+        "--output", str(automatic)], cwd=work, env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Reusing signed native-workspace" in result.stdout, result.stdout
+    assert events() == before_events + ["native-v1", "render-v2", "render-v2"]
+    automatic_receipt = json.loads((automatic / "receipt.json").read_text())
+    assert automatic_receipt["resumed_from"]["profiles"] == ["native-workspace"]
+    assert automatic_receipt["timing"]["first_recorded_started_at"] == failed_attempt["started_at"]
+    assert "LOCAL_ACCEPTANCE_TIMING=" in result.stdout and "LOCAL_ACCEPTANCE_OPERATION_TIMING=" in result.stdout
+    print("PASS: actual later failure preserves completed signed profiles; partial notes and wrong SSH purpose cannot pass; explicit/automatic resume reruns only unfinished work")
 
 
 if __name__ == "__main__":
     from run import SOURCE, command
 
     with tempfile.TemporaryDirectory(prefix="scode-resume-acceptance-") as temporary:
-        verify_resume(Path(temporary), SOURCE, command)
+        verify_resume(Path(temporary), SOURCE, command, host_smoke=sys.argv[1:] == ["--host-smoke"])

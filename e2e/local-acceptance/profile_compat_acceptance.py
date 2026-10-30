@@ -47,8 +47,10 @@ def verify_profile_compatibility(directory, work, command):
         return json.dumps(note)
 
     original_payload = json.loads(base64.b64decode(json.loads(original_note)["attestations"]["fixture"]["payload"]))
-    legacy_payload = {key: value for key, value in original_payload.items() if key != "profile_commands_sha256"}
-    variants = {"modern": original_note, "legacy": signed_note(legacy_payload)}
+    v1_payload = {key: value for key, value in original_payload.items()
+                  if key not in {"reachable_profile_commands_sha256", "commands_ref"}}
+    legacy_payload = {key: value for key, value in v1_payload.items() if key != "profile_commands_sha256"}
+    variants = {"modern": original_note, "v1": signed_note(v1_payload), "legacy": signed_note(legacy_payload)}
     try:
         run("git", "checkout", "-b", "compat-future", "origin/main")
         previous_source = checks.read_text()
@@ -58,6 +60,7 @@ def verify_profile_compatibility(directory, work, command):
             '        raise RuntimeError("UNSELECTED_PROFILE_EXECUTED")\n'
             '    return [execute(',
         )
+        future_source = future_source.replace("unused browser helper v1", "unused browser helper v2")
         assert future_source != previous_source
         checks.write_text(future_source)
         rules = json.loads(policy.read_text())
@@ -92,9 +95,11 @@ def verify_profile_compatibility(directory, work, command):
         mutations = [
             ("selected", checks, future_source.replace("Path('input.txt')", "Path('different-input.txt')")),
             ("common", checks, "SHARED_PROFILE_REVISION = 2\n" + future_source),
+            ("nested-helper", checks, future_source.replace("return sys.executable", "return sys.executable + '.changed'")),
             ("executor", helper, helper_source.replace('    import psutil\n',
                 '    import psutil\n    print("CHANGED_EXECUTOR")\n', 1)),
             ("image", image, image_source + "\nENV SCODE_CHANGED_IMAGE=1\n"),
+            ("reflection", checks, future_source + '\ndef reflect_helpers():\n    return globals()\n'),
         ]
         for label, path, content in mutations:
             run("git", "checkout", "-b", "compat-changed-" + label, future)
@@ -125,6 +130,15 @@ def verify_profile_compatibility(directory, work, command):
         for hashes in [None, {}, {"real-process": "0" * 64}]:
             payload = {**original_payload, "profile_commands_sha256": hashes}
             install_note(signed_note(payload))
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", future,
+                success=False, error="Acceptance commands changed")
+        for hashes in [None, {}, {"real-process": "0" * 64}]:
+            payload = {**original_payload, "reachable_profile_commands_sha256": hashes}
+            install_note(signed_note(payload))
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", future,
+                success=False, error="Acceptance commands changed")
+        for source in [None, "HEAD", "0" * 40]:
+            install_note(signed_note({**original_payload, "commands_ref": source}))
             run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", future,
                 success=False, error="Acceptance commands changed")
         install_note(signed_note({**legacy_payload, "commands_sha256": "0" * 64}))

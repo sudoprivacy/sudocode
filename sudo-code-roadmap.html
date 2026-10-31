@@ -320,16 +320,24 @@ Keep whole-PR and final-head observations. Older/manual local history may be
 unknown, and abrupt termination can leave an unfinished record; neither counts
 as zero elapsed time or a complete end-to-end sample. Historical hosted means
 remain reference thresholds because historical local timing was not collected.</p>
-<p>Later local failures preserve SSH-signed checkpoints of already completed
-profiles when the source is still clean and unchanged. The installed push path
+<p>Every successful local profile preserves an SSH-signed checkpoint while the
+source is still clean and unchanged, before starting the next profile. Complete
+signed generations are immutable; an atomic <code>checkpoint.json</code> pointer
+advertises only a verified generation. This preserves earlier completed work
+even when a later profile exits without exception cleanup. The installed push path
 automatically reuses compatible same-head, same-base, same-host evidence and its
 original log hashes. Custom output runs print an executable resume command.
 Only unfinished or changed profiles rerun. Checkpoints have a separate signature
 purpose and cannot substitute for full acceptance, publish a successful GitHub
-status or authorize a push. Abrupt termination may prevent a checkpoint.
+status or authorize a push. Legacy <code>checkpoint/</code> records remain readable.
+An unfinished profile cannot be reused, and this does not claim host power-loss
+recovery. An unsigned abandoned generation cannot replace completed proof.
 The actual Git/SSH regression exercises a successful native process followed by
 a failed rendering process, partial-note rejection, damaged logs, automatic
-discovery and a complete successful resume. This removes repeated validation
+discovery and a complete successful resume. It additionally uses a real abrupt CLI
+exit, explicit/automatic recovery without repeating the completed process, a
+legacy checkpoint, an unsigned generation and an escaped-pointer refusal. The
+earliest recorded local time remains in the resumed receipt. This removes repeated validation
 without reducing product checks.</p>
 <p>Acceptance-contract changes run the complete Git/SSH decision matrix in a
 private local Docker container, with a pinned Rust/Python-capable image. The

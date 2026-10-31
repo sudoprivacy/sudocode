@@ -677,10 +677,29 @@ def publish(head, envelope, remote):
         git("update-ref", "-d", temporary)
 
 
+def local_proof_directory(directory):
+    """Read one atomic checkpoint pointer to an immutable signed generation."""
+    if (directory / "envelope.json").is_file():
+        return directory
+    pointer = directory / "checkpoint.json"
+    if pointer.exists():
+        value = json.loads(pointer.read_bytes())
+        generation = value.get("generation")
+        if value.get("version") != 1 or not isinstance(generation, str) or not re.fullmatch(r"[0-9]+", generation):
+            raise RuntimeError("Invalid checkpoint generation; keep the original signed evidence")
+        proof = directory / "checkpoints" / generation
+        if (pointer.is_symlink() or proof.is_symlink() or (directory / "checkpoints").is_symlink()
+                or not proof.resolve().is_relative_to(directory.resolve())):
+            raise RuntimeError("Checkpoint generation escaped its acceptance output")
+        return proof
+    # Earlier runners wrote one checkpoint directly in this directory.
+    return directory / "checkpoint"
+
+
 def resume_checks(directory, head, base, policy_ref, output, needed):
     """Reuse signed exact-source checks only while their commands and logs match."""
     directory = Path(directory).resolve()
-    proof = directory if (directory / "envelope.json").is_file() else directory / "checkpoint"
+    proof = local_proof_directory(directory)
     completed_only = proof != directory
     envelope = json.loads((proof / "envelope.json").read_text())
     payload = base64.b64decode(envelope["payload"], validate=True)
@@ -725,13 +744,27 @@ def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
             "signature": base64.b64encode(signature.read_bytes()).decode()}
 
 
+def save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref):
+    """Publish complete signed files before atomically advertising their generation."""
+    clean(head)
+    checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
+    generation = str(time.time_ns())
+    directory = output / "checkpoints" / generation
+    envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
+    verify_envelope(envelope, head, base_ref, policy_ref, completed_only=True)
+    (directory / "envelope.json").write_bytes(canonical(envelope))
+    pointer = output / "checkpoint.next.json"
+    pointer.write_bytes(canonical({"version": 1, "generation": generation}))
+    os.replace(pointer, output / "checkpoint.json")
+
+
 def previous_local_output(head, base):
     """Find exact-source local progress automatically for the installed push hook."""
     parent = Path.home() / ".nexus/local-acceptance/results" / head
     if not parent.is_dir():
         return None
     for directory in sorted(parent.iterdir(), reverse=True):
-        proof = directory if (directory / "envelope.json").is_file() else directory / "checkpoint"
+        proof = local_proof_directory(directory)
         if not (proof / "envelope.json").is_file():
             continue
         receipt = json.loads((proof / "receipt.json").read_bytes())
@@ -832,17 +865,18 @@ def perform_check(args, attempt):
             else:
                 print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
                 results[name] = module.run(name, ROOT, output / name, base, run_command)
+            timing["checks_finished_at"] = time.time()
+            save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+            print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
+                  "If this process exits, resume with: "
+                  f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                  f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()
         if results:
             try:
-                clean(head)
-                checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
-                directory = output / "checkpoint"
-                envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
-                verify_envelope(envelope, head, base_ref, policy_ref, completed_only=True)
-                (directory / "envelope.json").write_bytes(canonical(envelope))
+                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
                 print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
                       f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
                       f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)

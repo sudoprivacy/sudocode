@@ -316,14 +316,23 @@ native platform and architecture. The previous policy must belong to the current
 history, its signature must still verify, and the original logs must match their
 signed hashes. Changed profiles run again. The new receipt records which profiles
 were reused and retains their original command records and completion time.
-If a later profile fails or validation is interrupted, the runner signs a separate
-checkpoint for already completed profiles while the source remains clean and
-unchanged. The failed and unrun profiles remain required. Ordinary pushes
+After each successful profile, the runner signs a separate checkpoint while the
+source remains clean and unchanged, before it starts the next profile. Complete
+receipt/signature/envelope files live in immutable numbered generations; an atomic
+`checkpoint.json` pointer advertises only a verified complete generation. An
+abrupt process exit can therefore retain earlier completed profiles without
+running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
 host; custom output directories can use the printed `check --resume-from` command.
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
-An abrupt process termination can prevent checkpoint creation.
+Earlier `checkpoint/` records remain readable. An incomplete unadvertised generation
+does not replace earlier signed progress. The active profile still needs to finish
+before its result can be saved; this does not recover a partial profile or claim
+protection against host power loss. The required command prints progress and the
+resume command directly. Real Git/SSH acceptance uses an actual abrupt CLI exit,
+explicit and automatically discovered resume, a legacy record, an unsigned partial
+generation and an escaped pointer; the earliest recorded local time is retained.
 The required interface prints `LOCAL_ACCEPTANCE_TIMING` and retains
 `attempt.json` for each started check, including failures. Signed receipts and
 checkpoints retain the first recorded start across verified resumes. Outer push

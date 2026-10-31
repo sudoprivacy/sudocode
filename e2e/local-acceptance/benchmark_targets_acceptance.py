@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -69,7 +70,9 @@ def cache_migration(output, checks, command):
     changed.write_text('fn main() { println!("candidate-B"); }\n')
     checks.copy_checkout_file(changed, source / "main.rs")
     log = build()
-    assert "Compiling " in log.read_text(), "Changed source was falsely Cargo-fresh"
+    changed_artifacts = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    changed_artifacts = [row for row in changed_artifacts if row.get("reason") == "compiler-artifact"]
+    assert changed_artifacts and all(not row["fresh"] for row in changed_artifacts), "Changed source was falsely Cargo-fresh"
     assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-B"
     assert subprocess.check_output([str(legacy / "leased-benchmarks-v1/target/rendering/candidate/debug/cache-migration")]).decode().strip() == "candidate-A"
     # A partially copied destination has no completion receipt. Re-entering
@@ -381,6 +384,9 @@ out=Path(a.output);out.mkdir()
     assert len({args[args.index("--target-dir") + 1] for _, args in candidate_builds}) == 1, "Candidate outputs must stay with the same source path"
     assert all(value == digest for value in stage_digests), "Production candidate changed between profiles"
     final_build_log = (output / "commands" / f"{candidate_builds[-1][0]:03d}.log").read_text(encoding="utf-8")
+    # This production build does not request JSON; decode its status output
+    # before checking it, including the CI runner's CARGO_TERM_COLOR=always.
+    final_build_log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", final_build_log)
     assert "Compiling " not in final_build_log, "Browser redundantly compiled the candidate after rendering"
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})

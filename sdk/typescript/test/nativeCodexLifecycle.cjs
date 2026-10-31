@@ -148,6 +148,7 @@ const processAlive = pid => {
   try{process.kill(pid,0);return true;}
   catch(error){if(error.code==='ESRCH')return false;throw error;}
 };
+const protocolRows = profile => fs.readFileSync(profile.protocolLog,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line));
 const closeTui = async own => {
   if(own.closed)return;
   own.closed=true;
@@ -249,7 +250,8 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       assert.equal(imported.startedAgent,false);
       receipt.legacyImport={originalThreadId:original.id,actor,originalAcpSessionId:profile.acpSessionId,
         nativeCanonicalWorkspace:fs.realpathSync(workspace),acpCanonicalWorkspace:fs.realpathSync(profile.workspace),
-        oldBackendExitedBeforeManagedStartup:true,oldTuiExitedNormally:true,legacySeedModelRequests:1,imported};
+        oldBackendExitedBeforeManagedStartup:true,oldTuiExitedNormally:true,legacySeedModelRequests:1,imported,
+        priorAcpRequests:protocolRows(profile).filter(row=>row.direction==='outgoing').map(row=>row.message.method)};
       fs.writeFileSync(file,standard);
     }
     const startupModelRequests=receipt.modelRequests.length;
@@ -367,30 +369,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         assert.equal(new Set(receipt.autojoinClaims.map(claim=>claim.actor)).size,2,'same-cwd roots need distinct Agents');
         assert.deepEqual(receipt.autojoinClaims.map(claim=>claim.threadId).sort(),receipt.inventory.slice().sort());
         assert(receipt.autojoinClaims.every(claim=>!claim.actor.includes(claim.threadId)),'Agent name is not a transcript id');
-        if(operatorContext){
-          await waitUntil(()=>receipt.autojoinClaims.every(claim=>{
-            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
-            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
-            return fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
-              .filter(row=>row.direction==='outgoing'&&row.message?.method==='_sudocode/a2a/agent_list').length>=2;
-          }),10000,'actual creator and owner ACP identity checks');
-          receipt.realNodeEnrollment=receipt.autojoinClaims.map(claim=>{
-            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
-            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
-            const calls=fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
-              .filter(row=>row.direction==='outgoing').map(row=>row.message.method);
-            assert.equal(calls.filter(method=>method==='session/new').length,1);
-            assert.equal(calls.filter(method=>method==='session/load').length,binding.origin==='existing'?3:1);
-            assert(!calls.includes('session/prompt'));
-            if(binding.origin==='existing'){
-              assert.equal(claim.actor,receipt.legacyImport.actor);
-              assert.equal(profile.acpSessionId,receipt.legacyImport.originalAcpSessionId);
-            }else assert.equal(binding.workspaceBinding.operationId,claim.operationId);
-            assert.notEqual(binding.acp.canonicalWorkspace,binding.canonicalWorkspace);
-            return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,sessionId:profile.acpSessionId,calls};
-          });
-          assert(!fs.existsSync(path.join(workspace,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
-        }else{
+        if(!operatorContext){
           const log=path.join(root,'acp.jsonl');
           await waitUntil(()=>fs.existsSync(log)&&fs.readFileSync(log,'utf8').trim().split('\n').filter(line=>JSON.parse(line).method==='_sudocode/a2a/agent_list').length===2,10000,'authenticated ACP identity checks');
           receipt.autojoinAcp=fs.readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
@@ -417,6 +396,37 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         assert.equal(new Set(receipt.autojoinCommandAudit.map(row=>row.pid)).size,2,'distinct actual receiver processes execute the two roots');
         assert(receipt.autojoinCommandAudit.every(row=>receipt.autojoinClaims.some(claim=>
           row.nativeThreadId===claim.threadId&&row.nativeAudit.actor===claim.actor)));
+        if(operatorContext){
+          // The real commands above prove this owner's attachment completed.
+          // Historical list calls cannot establish readiness for an imported SID.
+          receipt.realNodeEnrollment=receipt.autojoinClaims.map(claim=>{
+            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
+            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
+            const rows=protocolRows(profile);
+            const calls=rows.filter(row=>row.direction==='outgoing').map(row=>row.message.method);
+            const epoch=rows.slice(rows.findLastIndex(row=>row.direction==='outgoing'&&row.message.method==='initialize'));
+            const ownerAttachmentRequests=epoch.filter(row=>row.direction==='outgoing').map(row=>row.message.method);
+            assert.equal(calls.filter(method=>method==='session/new').length,1);
+            const priorLoads=binding.origin==='existing'
+              ? receipt.legacyImport.priorAcpRequests.filter(method=>method==='session/load').length : 0;
+            assert.equal(calls.filter(method=>method==='session/load').length,priorLoads+1,
+              'this owner adds exactly one load after the closed prior ACP epoch');
+            assert.equal(ownerAttachmentRequests.filter(method=>method==='session/load').length,1);
+            assert.equal(ownerAttachmentRequests.filter(method=>method==='_sudocode/a2a/agent_list').length,1);
+            const loaded=epoch.find(row=>row.direction==='outgoing'&&row.message.method==='session/load').message;
+            assert.equal(loaded.params.sessionId,profile.acpSessionId);
+            assert.equal(receipt.autojoinCommandAudit.find(row=>row.nativeThreadId===claim.threadId).nativeAudit.sessionId,profile.acpSessionId);
+            assert(!calls.includes('session/prompt'));
+            if(binding.origin==='existing'){
+              assert.equal(claim.actor,receipt.legacyImport.actor);
+              assert.equal(profile.acpSessionId,receipt.legacyImport.originalAcpSessionId);
+            }else assert.equal(binding.workspaceBinding.operationId,claim.operationId);
+            assert.notEqual(binding.acp.canonicalWorkspace,binding.canonicalWorkspace);
+            return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,
+              sessionId:profile.acpSessionId,calls,ownerAttachmentRequests};
+          });
+          assert(!fs.existsSync(path.join(workspace,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
+        }
         assert.equal(receipt.modelRequests.length,startupModelRequests,'autojoin must not start the native model');
       }
       if(seededResume){

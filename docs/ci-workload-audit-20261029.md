@@ -590,3 +590,33 @@ Editing that exact fixture alone no longer selects unrelated native product
 builds on the author host and both complementary CI hosts. Public-planner Git
 regressions retain native validation for mixed source, unknown fixtures and
 renames crossing this boundary. Product scenarios and their assertions stay.
+
+## Development-only Cargo inputs
+
+Normal release/service/cohost selection and the daemon CI selector now share a
+Git/TOML comparison. It removes only unchanged workspace metadata or existing
+crate manifests whose differences are confined to dev dependencies, plus lock
+changes preserving all existing packages and normal/build edges. Added versions
+of an existing name, removed nodes, features, normal/build declarations,
+workspace changes and invalid data retain the ordinary scope. Sources and
+release/service assertions keep their existing path rules. Native tests/lint,
+provider, resize and performance scopes do not use this filter.
+
+For helper source `0d1619aa` against `238692c8`, actual locked Cargo normal/build
+graphs and features matched for CLI and cohost on Windows, Linux and macOS.
+The static planner drops only cohost: one author and two complementary profile
+executions. Other seven profiles stay selected. This is a scope comparison, not
+a measured PR latency saving; another observed Windows cohost build took 23.55
+minutes, but cache/source conditions differ.
+
+Actual Git/Cargo fixtures enable a dev-only feature, execute its native case,
+then verify the normal canary's output and bytes remain unchanged. Windows uses
+reproducible linking only for this private canary because an identical relink
+otherwise changes COFF/debug timestamps and its PDB GUID. Product flags stay.
+The native historical-runner probe and portable protected-policy transitions
+exercise real signed full notes and checkpoints. Earlier broader completed
+evidence is reusable without rewriting it; new required checks and required
+normal-input failures remain blocking. Old failed logs and first timing remain.
+The guard runs these fixtures automatically, including from Docker's snapshot
+without repository history. The overall 10% target still needs comparable
+whole-lifecycle observations.

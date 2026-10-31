@@ -541,6 +541,21 @@ mixed product changes, unknown fixtures and renames across that boundary retain
 native coverage. This catches avoidable work before a full gate; it does not
 prove the 10% latency target or detect main changes after the check.</p>
 
+<p>Normal release, service, co-host and daemon build selection shares one
+Git/TOML comparison for development-only Cargo metadata. Resolver 2, workspace
+settings and normal/build dependency declarations must stay unchanged; existing
+lock packages/normal edges cannot change. New versions of existing names,
+deleted nodes and malformed/unknown metadata retain the ordinary scope. Rust
+sources and changed release/service assertions retain their own input rules.
+Native workspace/lint, provider, resize and both performance scopes remain.
+The mandatory interface prints ignored normal-build inputs. Earlier broader
+signed full receipts/checkpoints retain valid completed work and original timing;
+the current canonical plan supplies required checks and missing hosts. New checks
+and still-required failures remain blocking. Real Git/Cargo/process/SSH regressions
+cover these boundaries, dev-feature isolation, unchanged normal binary bytes,
+legacy receipts and actual failed-profile recovery. This reduces redundant
+execution for qualifying inputs; it is not measured proof of the 10% target.</p>
+
 <h3>Test infrastructure — two layers, one of them counts</h3>
 
 <p>Release UI and resource checks use a frozen binary built with the normal

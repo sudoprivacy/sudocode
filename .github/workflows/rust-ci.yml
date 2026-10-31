@@ -84,6 +84,7 @@ jobs:
   clippy-workspace:
     # Local/complementary acceptance owns the native suites. Preserve the
     # stronger all-feature lint contract, including the integrated queue tree.
+    # Stop at its first error so matrix fail-fast can cancel peer platforms.
     if: >-
       !inputs.live_only && !inputs.cache_only &&
       needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' &&
@@ -113,7 +114,7 @@ jobs:
           env-vars: ImageOS
           save-if: false
       - name: Run workspace clippy
-        run: cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   integrated-acceptance:
     # A required job must fail when a dependency fails or is unexpectedly
@@ -453,18 +454,33 @@ jobs:
         id: scope
         run: python3 .github/scripts/ci_input_scope.py
 
+      - name: Install focused executor observer dependencies
+        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true')
+        run: python3 -m pip install psutil
       - name: Exercise acceptance executors with real Cargo, Git and Docker
         # Only changed executor/fixture inputs, once on the PR. Queue/main
         # reuse this result instead of rebuilding the same tiny fixture.
         if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true')
         run: |
-          python3 -m pip install psutil
           if [[ '${{ steps.scope.outputs.benchmark_required }}' == 'true' ]]; then
             python3 e2e/local-acceptance/benchmark_targets_acceptance.py --output "$RUNNER_TEMP/benchmark-build-reuse"
           fi
           if [[ '${{ steps.scope.outputs.container_required }}' == 'true' ]]; then
             python3 e2e/local-acceptance/container_inputs_acceptance.py --output "$RUNNER_TEMP/container-inputs"
           fi
+      - name: Verify lint stops on the first error and covers a clean workspace
+        id: clippy_executor
+        if: github.event_name == 'pull_request' && steps.scope.outputs.clippy_executor_required == 'true'
+        run: |
+          rustup component add clippy
+          python3 e2e/local-acceptance/clippy_fail_fast.py --output "$RUNNER_TEMP/clippy-fail-fast"
+      - uses: actions/upload-artifact@v4
+        if: always() && contains(fromJSON('["success","failure"]'), steps.clippy_executor.outcome)
+        with:
+          name: clippy-fail-fast
+          path: ${{ runner.temp }}/clippy-fail-fast
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'pull_request' && steps.scope.outputs.benchmark_required == 'true'
         with:

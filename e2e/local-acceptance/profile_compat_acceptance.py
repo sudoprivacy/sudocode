@@ -178,6 +178,50 @@ def verify_profile_compatibility(directory, work, command):
             assert "trusted policy approves this previous execution recipe as equivalent" in output
             assert run("git", "notes", "--ref=local-acceptance", "show", head) == note
 
+        # A grouping-only migration can retain the original target selection
+        # only for committed sources without group files or declarations.
+        run("git", "checkout", "-b", "compat-conditional", approved)
+        conditional = json.loads(json.dumps(equivalence))
+        conditional.pop("equivalent_profile_commands")
+        conditional["equivalent_profile_commands_without_test_groups"] = {
+            "real-process": {executable_hash: [
+                original_payload["reachable_profile_commands_sha256"]["real-process"]]}}
+        policy.write_text(json.dumps(conditional))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Approve original selection only for sources without groups")
+        conditional_policy = run("git", "rev-parse", "HEAD")
+        for note in variants.values():
+            install_note(note)
+            output = run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", conditional_policy)
+            assert "without test groups" in output, output
+            assert "Running real-process" not in output
+            assert run("git", "notes", "--ref=local-acceptance", "show", head) == note
+        for label, files in [
+            ("group-file", {"rust/crates/example/tests/acceptance_groups/known.rs": "// committed group marker\n"}),
+            ("escaped-declaration", {"rust/Cargo.toml":
+                '[package]\nname="conditional-case"\nversion="0.0.0"\n[[test]]\nname="known"\n'
+                'path="tests/acceptance_\\u0067roups/known.rs"\ntest=false\n'}),
+            ("unknown-manifest", {"rust/Cargo.toml": "[invalid\n"}),
+            ("external-workspace", {"rust/Cargo.toml": '[workspace]\nmembers=["../external"]\n'}),
+        ]:
+            run("git", "checkout", "-b", "compat-conditional-" + label, head)
+            for relative, content in files.items():
+                destination = work / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(content)
+            run("git", "add", ".")
+            run("git", "commit", "-m", "Commit conditional selection boundary " + label)
+            candidate = run("git", "rev-parse", "HEAD")
+            output = run(sys.executable, trusted, "check", "--head", candidate,
+                         "--base", original_main, "--policy-ref", original_main,
+                         "--output", fixture / ("conditional-" + label), "--publish")
+            assert "Running real-process" in output, "Each fixture head needs an actual new native-process receipt"
+            run(sys.executable, trusted, "verify", "--head", candidate,
+                "--base", original_main, "--policy-ref", conditional_policy,
+                success=False, error="Acceptance commands changed")
+        run("git", "checkout", "compat-equivalent")
+        print("PASS: modern/legacy real SSH notes retain ungrouped source execution; committed groups, escaped TOML declarations, malformed metadata and external workspaces require fresh validation")
+
         checks.write_text(equivalent_source.replace("raise SystemExit(text != 'pass')",
                                                    "raise SystemExit(text != 'different')"))
         run("git", "add", ".")

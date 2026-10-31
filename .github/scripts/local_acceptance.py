@@ -12,6 +12,7 @@ import base64
 import copy
 import fnmatch
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 try:
@@ -235,6 +237,45 @@ def attested_commands_ref(receipt):
     return None
 
 
+def committed_test_groups(head):
+    """Conservatively inspect committed group files/declarations without running Cargo."""
+    if tomllib is None:
+        return True
+    try:
+        paths = value("ls-tree", "-r", "--name-only", head, "rust").splitlines()
+        if any("/tests/acceptance_groups/" in path.lower() for path in paths):
+            return True
+        manifests = [path for path in paths if path.endswith("/Cargo.toml")]
+        if not manifests:
+            return False
+        bundle = git("archive", "--format=tar", head, "--", *manifests).stdout
+        seen = set()
+        with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:") as archive:
+            for entry in archive:
+                if entry.isdir():
+                    continue
+                if entry.name not in manifests or not entry.isfile():
+                    return True
+                seen.add(entry.name)
+                manifest = tomllib.loads(archive.extractfile(entry).read().decode("utf-8"))
+                targets = manifest.get("test", [])
+                if not isinstance(targets, list):
+                    return True
+                for target in targets:
+                    path = target.get("path", "")
+                    if not isinstance(path, str) or "acceptance_groups" in path.lower():
+                        return True
+                members = manifest.get("workspace", {}).get("members", [])
+                if not isinstance(members, list):
+                    return True
+                for member in members:
+                    if not isinstance(member, str) or Path(member).is_absolute() or ".." in Path(member).parts:
+                        return True
+        return seen != set(manifests)
+    except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, OSError, tarfile.TarError):
+        return True
+
+
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
     try:
@@ -266,13 +307,22 @@ def compatible_profile_commands(receipt, policy_ref, required):
                 return False
         expected = reachable_profile_commands_hashes(policy_ref, required)
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
+        ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
         for name in required:
             if original_reachable[name] == expected[name]:
                 continue
             approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
             predecessors = approved.get(expected[name], []) if isinstance(approved, dict) else []
             if not isinstance(predecessors, list) or original_reachable[name] not in predecessors:
-                return False
+                conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
+                predecessors = conditional.get(expected[name], []) if isinstance(conditional, dict) else []
+                if (not isinstance(predecessors, list) or original_reachable[name] not in predecessors
+                        or committed_test_groups(receipt["head"])):
+                    return False
+                print(f"Preserving exact-head {name} evidence for a committed source without test groups; "
+                      "the exact protected recipe pair applies only to unchanged original target selection. "
+                      "Grouped or unknown sources still need fresh validation.", flush=True)
+                continue
             print(f"Preserving exact-head {name} evidence: trusted policy approves this previous "
                   "execution recipe as equivalent. Required checks and signed source remain verified.", flush=True)
         return True

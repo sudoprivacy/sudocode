@@ -309,6 +309,11 @@ their names and wrapper paths are new, their fields are exactly name/path/test,
 and workspace/existing manifest inputs are unchanged. Existing target edits,
 extra fields, missing files and unknown metadata retain ordinary checks. This
 exception does not cover changed dev dependencies or measurement sources.
+An exact protected migration pair can retain an earlier full workspace receipt
+for a committed source without group files or declarations. The verifier reads
+Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
+members and grouped sources require fresh validation. This conditional pair
+cannot authorize the new grouped execution from an old original-target pass.
 Release acceptance builds the normal release `scode` once, copies it outside
 Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox

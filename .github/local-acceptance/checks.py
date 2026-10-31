@@ -363,12 +363,13 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        "e2e/local-acceptance/profile_compat_acceptance.py": "b3e9ad5bb52c8a85d0dba5b368ed6de9a879a0c43a5d4b71ce8cb8415790e37b",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "39b9f8434b95f347f95d99042c279f1914b923435e07a06f5912dbedcc8c2acb",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "acea14254302c6255123b1f3b68f61ed4b9c2e048f9bcd9c7e4fa456ad1751d0",
         ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
-        ".github/scripts/local_acceptance.py": "dbaba7f24a107aa7bbab5335b759a628ef4bc9769f48bb54c1c400205a64987e",
+        ".github/scripts/local_acceptance.py": "248f3fc7aaa6b09159417bae325e1c5ca9b90b4aaeee585443e5c59e07a64480",
         "e2e/local-acceptance/run.py": "88e055f0772a6fdd28033e71650db03ea13cf90534d49fe1f5b2dfa30a1ac9f7",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",

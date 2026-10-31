@@ -29,9 +29,13 @@ or resuming a session preserves existing recording files unchanged.
 
 ## Streaming and resource use
 
-The HTTP reader copies bytes into a bounded background queue. A worker performs
-archive setup, gzip compression and filesystem writes, batching small chunks
-over 20 ms. The queue holds at most 1 MiB; a worker batch holds at most another
+The HTTP reader copies bytes into a bounded background queue. The existing
+blocking pool performs archive setup, gzip compression and filesystem writes,
+batching small chunks over 20 ms. Between batches, a response retains its
+recorder without parking a blocking thread while the network is idle. A queue
+lock makes the handoff atomic: new bytes or completion either reach the running
+worker or schedule the next worker, with at most one worker using that recorder.
+The queue holds at most 1 MiB; a worker batch holds at most another
 1 MiB, in addition to the compressor's state. Existing gzip bodies are not
 decompressed during session loading, rendering, compaction or model requests.
 Storage-budget scanning and log writes use the attachment fence and do not hold

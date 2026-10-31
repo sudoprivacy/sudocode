@@ -171,7 +171,10 @@ impl LocalBox {
     /// An occupied endpoint belongs to the existing owner. It is never stopped,
     /// adopted by PID, or taken as permission to start another Node.
     pub(crate) fn external_running(&self) -> Result<bool> {
-        match TcpListener::bind(self.local_endpoint) {
+        // Probe the declared listener, not the loopback client address: Windows
+        // can bind loopback beside an existing wildcard listener. Binding the
+        // same address also avoids inferring liveness from connect timeouts.
+        match TcpListener::bind(self.bind_addr) {
             Ok(listener) => {
                 drop(listener);
                 Ok(false)

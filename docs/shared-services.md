@@ -4,8 +4,9 @@ Sudocode owns the local Nexus service used by its frontends. Each OS user has on
 supervisor in a service root. The default root is `~/.nexus-vfs`;
 `SCODE_SERVICE_ROOT` selects an absolute root for a container or an isolated test.
 
-The CLI offers runtime selection on its first interactive launch with a fresh
-configuration home. Single-agent mode skips Nexus setup. Multi-agent mode first
+The CLI offers the same runtime selection on its first interactive `scode` or
+`scode --resume` launch with a fresh configuration home. Single-agent mode skips
+Nexus setup. Multi-agent mode first
 reuses the Box configured in `~/.nexus/run/node.json`. If no Box is configured,
 it prepares local services using the same supervisor and verified artifact
 installer as SudoWork. Existing
@@ -20,7 +21,11 @@ scode setup --check --output-format json
 The preference lives in the CLI's configuration home, while service lifetime
 remains owned by the OS-user supervisor. Selecting local does not stop services
 used by another frontend. Inspection installs and starts nothing. ACP, service
-stdio, headless commands and resume do not display the onboarding picker.
+stdio and headless commands do not display the onboarding picker. An interactive
+resume with a saved choice reuses it without asking again. An existing
+configuration home without a saved choice retains its prior behavior until
+explicit `scode setup`; a directory's presence is this compatibility boundary,
+not evidence that the user selected multi-agent mode.
 `shared` selects multi-agent mode. A configured Box takes precedence even if it
 is temporarily offline or the new Agent still needs credentials: setup never
 replaces that choice with a second local service. Malformed records report their
@@ -78,12 +83,22 @@ No installation, version transition, client-record publication or credential
 mint occurs on this path. A rotated Node certificate requires a new explicit
 operator ownership transition rather than silently accepting a changed pin.
 
-After multi-agent selection, fresh interactive startup and interactive
-`scode --resume` resume only the registered owner matching the saved Box
-endpoint. Resume never offers first-run setup. Protocol/headless entrypoints
-do not provision services. A live external owner is authenticated and reused; it
+After multi-agent selection, fresh interactive startup, interactive
+`scode --resume`, and `scode acp` share preparation of the selected runtime.
+Interactive resume uses the same first-run picker and saved-choice policy as a
+new interactive CLI. ACP never offers first-run setup; it honors an existing saved choice
+without writing setup output into its protocol stream; with no saved choice or
+single-agent mode it does not prepare services. Other headless entrypoints do
+not provision services. An existing Box resumes only through the registered
+owner matching its saved endpoint. A live external owner is authenticated and reused; it
 is never killed or replaced. A stopped Node resumes through the same supervisor
 and lifetime lock, with an additional lock in its original data directory.
+External-owner detection checks the declared native bind address, including a
+wildcard listener, separately from the loopback client endpoint. An occupied
+listener must authenticate using the declared TLS configuration. Only a free
+declared listener permits recovery. Other bind errors and authentication failures
+report an error rather than starting a replacement. Connection-refusal timing
+does not decide whether the Node is stopped.
 Closing the selecting CLI leaves that shared owner running. The broker exposes
 only lifecycle status for this profile: it does not turn the Node's privileged
 readiness certificate into an Agent file, Vault or session credential. Ordinary
@@ -179,17 +194,17 @@ plane and the published Nexus codec.
 
 ## Acceptance
 
-[Shared services E2E](../.github/workflows/shared-services.yml) builds the actual
-CLI on Linux, Windows and both macOS architectures. Its
-[process harness](../e2e/shared-services/run.py) verifies signed runtime loading,
+Mandatory author-local and complementary native service acceptance use the same
+[process harness](../e2e/shared-services/run.py) to verify signed runtime loading,
 concurrent discovery, broker authentication, Vault versions, typed links, session
 waits, runtime ownership and durable recovery after restart and installation
 repair. A controlled real OS-lock handoff also checks that concurrent frontend
 start requests recover after a retiring owner releases its lifetime lock.
 
 On failure, the harness copies `run/runtime*.log` into the optional `--artifacts`
-directory before removing its temporary root. CI retains the per-platform
-`shared-services-<runner>` artifacts for seven days. To retain local evidence,
+directory before removing its temporary root. The managed local acceptance runner
+retains logs under `~/.nexus/local-acceptance/results`; complementary CI retains
+its native evidence. To retain evidence from a direct harness invocation,
 add `--artifacts ./shared-services-evidence` to the command below.
 
 ```sh
@@ -199,3 +214,18 @@ python e2e/shared-services/run.py --scode rust/target/debug/scode
 
 Use `scode.exe` on Windows. Frontend acceptance lives with each frontend, including
 Sudowork's desktop adapter and browser workflows.
+
+The [existing-Box harness](../e2e/shared-services/existing_box.py) runs both
+loopback and wildcard native listeners by default, with separate temporary Nodes
+and `loopback`/`wildcard` evidence directories. `--bind-host` selects one listener
+and preserves the direct invocation's original evidence layout. Each case keeps
+all four recovery phases and their existing deadlines. Both the local and CI
+service checks call this shared entry, so listener coverage does not depend on a
+second workflow.
+
+The existing-Box harness prepares its original isolated Node only after the
+single-voter zones have leaders and the VFS serves read-only readiness checks.
+Membership RPCs alone can answer before native boot finishes. This preparation
+uses the existing 30-second observation and 3-second RPC deadlines; writes are
+issued once. Failure evidence includes the method, target and result of each
+fixture RPC alongside the native bootstrap and owner logs.

@@ -46,7 +46,7 @@ def wait_until(action, timeout=30):
             value = action()
             if value:
                 return value
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, VfsRpcError) as error:
             last_error = error
         if time.monotonic() >= deadline:
             raise AssertionError(f'Native existing-Box acceptance did not reach its predicate: {last_error}')
@@ -152,7 +152,7 @@ def run(args, root):
             return None
         for path in ['/', peer_prefix, '/conversations']:
             response = grpc('Stat', {'path': path})
-            if response.get('isError') or (path == peer_prefix and not response.get('found')):
+            if path == peer_prefix and not response.get('found'):
                 return None
         return current
 

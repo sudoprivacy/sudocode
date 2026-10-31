@@ -347,6 +347,16 @@ is not established. Required output prints pair counts; both changed recipes
 need fresh execution. Real native infrastructure canaries verify counts,
 alternating sides, regression refusals and minimum-round refusals without claiming
 product performance coverage. Actual production latency savings remain unmeasured.</p>
+<p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
+Performance drivers use a binary-free Cargo package that references the same CLI
+test sources and launches the copied normal release through
+<code>SCODE_TEST_BIN</code>. Distinct opt-in target names avoid duplicating cases
+in normal workspace acceptance. Real Cargo/native-process fixtures inspect
+artifacts, keep an unused trusted CLI deliberately uncompilable, verify normal/dev
+feature separation and execute every observer stage. Older author snapshots use
+their original targets; a present but broken new package is refused. These
+infrastructure checks add no product journey coverage. Sampling, assertions,
+baselines and budgets remain unchanged; end-to-end savings need measurement.</p>
 <p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
 Source-only changes in API, runtime, tools, ACP and services no longer select
 these two Docker profiles. Their selected native functional checks, including
@@ -700,7 +710,10 @@ script remains available for diagnosis and earns no additional coverage credit.<
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Grouping fixtures use small native programs.</td>
+      identity. Grouping fixtures use small native programs. Benchmark builder
+      fixtures also inspect real Cargo artifacts, reject broken standalone driver
+      packages and exercise original targets for older candidates; no unused
+      CLI binary is built with standalone drivers.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>

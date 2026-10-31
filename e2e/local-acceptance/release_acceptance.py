@@ -25,6 +25,52 @@ def load(name, path):
     return module
 
 
+def color_environment(output):
+    """Exercise actual Cargo/SDK setup with inherited and explicit color settings."""
+    output.mkdir()
+    helper = load("color_environment_executor", SOURCE / ".github/scripts/local_acceptance.py")
+    project = output / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "Cargo.toml").write_text(
+        '[package]\nname="color-environment-fixture"\nversion="0.0.1"\nedition="2021"\n', encoding="utf-8")
+    (project / "src/main.rs").write_text('''fn main() {
+    let color = match std::env::var("NO_COLOR") {
+        Ok(value) if value.is_empty() => "<empty>".to_owned(),
+        Ok(value) => value,
+        Err(_) => "<unset>".to_owned(),
+    };
+    println!("NO_COLOR={color}");
+    println!("SDK_READY={}", std::env::var("LIB").is_ok_and(|value| !value.is_empty()));
+}
+''', encoding="utf-8")
+    previous_color, previous_lib = os.environ.get("NO_COLOR"), os.environ.get("LIB")
+    records = []
+    try:
+        os.environ["NO_COLOR"] = "1"
+        if os.name == "nt":
+            os.environ.pop("LIB", None)
+        for stage, explicit, expected in [("inherited", {}, "<unset>"),
+                ("explicit", {"NO_COLOR": "1"}, "1"), ("empty", {"NO_COLOR": ""}, "<empty>")]:
+            log = output / (stage + ".log")
+            records.append(helper.run_command(["cargo", "run", "--offline", "--quiet"], project, log,
+                {"CARGO_TARGET_DIR": str(output / "target"), **explicit}))
+            content = log.read_text(encoding="utf-8")
+            assert f"NO_COLOR={expected}\n" in content, (
+                "Windows SDK setup restored the launcher's NO_COLOR preference; clear inherited "
+                f"NO_COLOR after SDK setup and retain explicit fixture values. {stage}: {content}")
+            if os.name == "nt":
+                assert "SDK_READY=true\n" in content, "The actual compiler child lost its SDK environment"
+                assert helper.MSVC_ENV.get("NO_COLOR") == "1", "SDK setup did not capture the controlled parent"
+            assert os.environ.get("NO_COLOR") == "1", "The executor changed its parent environment"
+    finally:
+        for name, previous in [("NO_COLOR", previous_color), ("LIB", previous_lib)]:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+    return records
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     profiles = load("release_profiles", SOURCE / ".github/local-acceptance/checks.py")
@@ -143,11 +189,13 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         negative = json.loads((output / "wrong-artifact.command.json").read_text(encoding="utf-8"))
         assert negative["exit_code"] == 101, negative
         assert "debug=true,flavor=dev" in (output / "wrong-artifact.log").read_text(encoding="utf-8")
+    color_records = color_environment(output / "color-environment")
     (output / "result.json").write_text(json.dumps({
         "status": "PASS", "commands": commands, "release_sha256": digest,
+        "color_environment_commands": color_records,
         "driver_sha256": before[1], "startup": startup_report,
         "scope": "Real Cargo/native release executor fixture; not product PTY or provider coverage."}, indent=2), encoding="utf-8")
-    print(f"PASS: normal release child, reused native workspace driver, unchanged startup budget and wrong-artifact refusal; {output}", flush=True)
+    print(f"PASS: normal release child, reused driver, startup budget, wrong-artifact refusal and inherited/explicit color settings after Cargo/SDK setup; {output}", flush=True)
 
 
 if __name__ == "__main__":

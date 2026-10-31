@@ -298,6 +298,10 @@ guard always needs its own actual run, including a refused process-name query.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.
+Inherited `NO_COLOR` is cleared after SDK initialization so the launcher's log
+preference cannot suppress colored fixtures. A command's explicit `NO_COLOR`
+value is still honored. The native guard runs actual Cargo/SDK processes to
+verify inherited, explicit and empty values, including cached SDK setup.
 
 A signed Git note binds the successful command list and log hashes to the exact
 commit, tree, diff base, policy and native host. The hook publishes that note

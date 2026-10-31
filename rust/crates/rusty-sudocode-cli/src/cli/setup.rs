@@ -185,16 +185,13 @@ pub(crate) fn prepare_selected_runtime() -> Result<bool> {
 }
 
 /// Existing installations retain their current behavior until explicit setup.
-/// Interactive resume honors that choice without offering first-run onboarding.
-/// Only an interactive fresh CLI offers the runtime-choice picker.
-pub(crate) fn startup_prompt(allow_onboarding: bool) -> Result<()> {
+/// Interactive new and resumed sessions share the same first-run choice.
+/// Only an interactive fresh configuration offers the runtime-choice picker.
+pub(crate) fn startup_prompt() -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Ok(());
     }
-    if !prepare_selected_runtime()?
-        && allow_onboarding
-        && !runtime::config::default_config_home().exists()
-    {
+    if !prepare_selected_runtime()? && !runtime::config::default_config_home().exists() {
         run(None, None, false, CliOutputFormat::Text)?;
     }
     Ok(())

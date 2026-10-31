@@ -848,7 +848,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let is_interactive_session = matches!(&action, CliAction::Repl { .. })
         || matches!(&action, CliAction::ResumeSession { commands, output_format: CliOutputFormat::Text, .. } if commands.is_empty());
     if is_interactive_session {
-        cli::setup::startup_prompt(matches!(&action, CliAction::Repl { .. }))?;
+        cli::setup::startup_prompt()?;
         cli::update::startup_prompt()?;
     } else if matches!(&action, CliAction::Acp { .. }) {
         cli::setup::prepare_selected_runtime()?;

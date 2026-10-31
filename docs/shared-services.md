@@ -4,8 +4,9 @@ Sudocode owns the local Nexus service used by its frontends. Each OS user has on
 supervisor in a service root. The default root is `~/.nexus-vfs`;
 `SCODE_SERVICE_ROOT` selects an absolute root for a container or an isolated test.
 
-The CLI offers runtime selection on its first interactive launch with a fresh
-configuration home. Single-agent mode skips Nexus setup. Multi-agent mode first
+The CLI offers the same runtime selection on its first interactive `scode` or
+`scode --resume` launch with a fresh configuration home. Single-agent mode skips
+Nexus setup. Multi-agent mode first
 reuses the Box configured in `~/.nexus/run/node.json`. If no Box is configured,
 it prepares local services using the same supervisor and verified artifact
 installer as SudoWork. Existing
@@ -20,7 +21,11 @@ scode setup --check --output-format json
 The preference lives in the CLI's configuration home, while service lifetime
 remains owned by the OS-user supervisor. Selecting local does not stop services
 used by another frontend. Inspection installs and starts nothing. ACP, service
-stdio, headless commands and resume do not display the onboarding picker.
+stdio and headless commands do not display the onboarding picker. An interactive
+resume with a saved choice reuses it without asking again. An existing
+configuration home without a saved choice retains its prior behavior until
+explicit `scode setup`; a directory's presence is this compatibility boundary,
+not evidence that the user selected multi-agent mode.
 `shared` selects multi-agent mode. A configured Box takes precedence even if it
 is temporarily offline or the new Agent still needs credentials: setup never
 replaces that choice with a second local service. Malformed records report their
@@ -80,7 +85,8 @@ operator ownership transition rather than silently accepting a changed pin.
 
 After multi-agent selection, fresh interactive startup, interactive
 `scode --resume`, and `scode acp` share preparation of the selected runtime.
-Resume and ACP never offer first-run setup. ACP honors an existing saved choice
+Interactive resume uses the same first-run picker and saved-choice policy as a
+new interactive CLI. ACP never offers first-run setup; it honors an existing saved choice
 without writing setup output into its protocol stream; with no saved choice or
 single-agent mode it does not prepare services. Other headless entrypoints do
 not provision services. An existing Box resumes only through the registered

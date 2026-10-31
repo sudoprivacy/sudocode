@@ -419,7 +419,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "60ee84d57f41a7fcfa0a056bac0f1524db68e9595e7e60914c0bbd3d1d63a00b":
+    if actual_scope != "ea5b3b5a70d4deaf34d51844e21a18d5e5bd2640954eefe0976d39c84123c18b":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

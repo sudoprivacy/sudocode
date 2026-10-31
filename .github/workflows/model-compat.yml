@@ -1,8 +1,7 @@
 name: Model Compatibility
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
+  # Paid compatibility discovery is explicit; no scheduled model fan-out.
   workflow_dispatch:
     inputs:
       models:
@@ -67,6 +66,11 @@ jobs:
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install shared native process monitor
+        run: python -m pip install psutil==7.2.2
       - name: Build the PTY test
         run: cargo test --locked --test pty_model_compat --no-run
         timeout-minutes: 20
@@ -88,7 +92,7 @@ jobs:
           SCODE_TEST_BACKEND: live
           SCODE_COMPAT_MODELS: ${{ matrix.models }}
           SCODE_COMPAT_REPORT: ${{ github.workspace }}/artifacts/model-compat-${{ matrix.shard }}.json
-        run: cargo test --locked --test pty_model_compat -- --test-threads=1 --nocapture
+        run: python ../.github/scripts/live_model_acceptance.py --suite compat --execute --output "${{ github.workspace }}/artifacts/model-acceptance-${{ matrix.shard }}"
         timeout-minutes: 15
       - name: Upload batch report, including partial failures
         if: always()

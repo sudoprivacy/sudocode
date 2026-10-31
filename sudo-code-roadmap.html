@@ -405,7 +405,7 @@ execution-count reduction, not a measured percentage of runner minutes.</p>
 model precedence and stderr cases remain in the workspace. Standalone Mermaid
 tests and benchmark type checking remain explicit. Dev/test symbols are omitted
 while debug assertions and normal release settings remain. Real provider/API
-assertions on main are unchanged and mock results earn no live-model coverage
+assertions remain explicit local/manual acceptance and mock results earn no live-model coverage
 credit. Rust caches retain the 10 GB quota and three shared main publishers;
 sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
@@ -452,15 +452,20 @@ including 70 ignored cases. The same 2,504 executed cases passed: Cargo took
 latency. Eight/sixteen-worker stress runs failed existing UI/resume checks and
 are not the acceptance configuration. No assertion deadline or unique case is
 removed to obtain these results.</p>
-<p><strong>Reduce repeated native test linking (2026-10-31).</strong> The full
-workspace opts into eight declarative integration wrappers for 128 existing CLI
-targets. Integration executables drop from 211 to 91; original per-file Cargo
-commands remain available and newly added ungrouped targets are selected
+<p><strong>Qualify native grouping before activation (2026-10-31).</strong> The
+executor supports declarative integration wrappers; this contract prerequisite
+keeps the current original-target graph. Rust wrapper activation lands separately
+after installed verifiers understand its selection. A Windows prototype grouped
+128 CLI targets into eight wrappers, selecting 91 instead of 211 integration
+targets. Original per-file Cargo commands remain available and newly added ungrouped targets are selected
 automatically. Self-spawning cases and named release, performance and terminal
 drivers stay standalone. Every case still runs in its own nextest process, with
-four workers, no retries and the same fail-fast cleanup. A Windows discovery run
-matched all 2,505 previously executed cases and retained 70 ignored markers;
-discovery alone is not a passing full suite or a cross-platform claim. The first
+four workers, no retries and the same fail-fast cleanup. The prototype's real
+Windows run passed all 2,505 active cases with 70 ignored markers; doctests and
+Clippy also passed. Publication then stopped because the old installed selector
+required seven profiles while the new selector required three; this prerequisite
+avoids that bootstrap mismatch without authorizing missing product checks.
+It is not a cross-platform or merged-wrapper claim. The first
 grouped compilation/list command took 322.78 seconds. Its earlier reference used
 another helper graph and cache state, so this is not a controlled latency saving.</p>
 <p>Selection reads real Cargo metadata and accepts only canonical wrapper path

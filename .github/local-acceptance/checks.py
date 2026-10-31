@@ -135,7 +135,9 @@ def run(name, root, output, base, execute):
 
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
-        command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
+        entry = stage_profile_executor(root, execution_policy_ref(), name, output / "history-policy")
+        print("History preflight uses the protected policy checker; the author branch stays unchanged.", flush=True)
+        command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
         print("Local contract validation: policy-owned native recovery, nextest and release guards, "
               "then the full private Docker decision matrix. No product build or benchmark lease.", flush=True)
@@ -148,11 +150,7 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
                                f"guard log above. Native smoke and matrix have not started: {error}") from error
-        try:
-            policy_ref, _ = run.execution_refs
-        except AttributeError:
-            policy_ref = "origin/main"
-        policy_ref = policy_ref or "origin/main"
+        policy_ref = execution_policy_ref()
         entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
         command(sys.executable, str(entry), "--repository", str(root),
                 "--output", str(output / "native-guard"),
@@ -280,9 +278,19 @@ def run(name, root, output, base, execute):
     return results
 
 
+def execution_policy_ref():
+    """Use the dispatcher's frozen policy even for an older author checkout."""
+    try:
+        policy_ref, _ = run.execution_refs
+    except AttributeError:
+        policy_ref = None
+    return policy_ref or "origin/main"
+
+
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "0339203b8d92282754548373a5f0eab29488a65adcd531a5142b2729830020ad",
         ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
         ".github/scripts/local_acceptance.py": "dc2c4de2f304152752220cacc7216805b0d6f9e2b5111bf2ca7b5c47f1d2133d",
@@ -296,9 +304,12 @@ def native_guard_files():
 
 def stage_profile_executor(root, policy_ref, name, policy_root):
     """Materialize one hash-bound native tool set without changing the candidate."""
-    if name != "guard-contract":
+    files = native_guard_files()
+    if name == "preflight":
+        files = {".github/scripts/check_pr_history.py": files[".github/scripts/check_pr_history.py"]}
+    elif name != "guard-contract":
         raise RuntimeError(f"No policy-owned native executor for {name}")
-    for relative, expected in native_guard_files().items():
+    for relative, expected in files.items():
         destination = (policy_root / relative).resolve()
         if not destination.is_relative_to(policy_root.resolve()):
             raise RuntimeError("Executor input escaped its policy snapshot")
@@ -309,6 +320,8 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
                                "Update its protected pin before running acceptance.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents)
+    if name == "preflight":
+        return policy_root / ".github/scripts/check_pr_history.py"
     # The release fixture imports this module. Bind the exact branch it executes
     # without a cyclic byte hash of a file containing its own execution pins.
     spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")

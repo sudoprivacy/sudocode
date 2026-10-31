@@ -12,6 +12,7 @@
       "include": [
         ".github/local-acceptance/**",
         ".github/scripts/local_acceptance.py",
+        ".github/scripts/check_pr_history.py",
         "e2e/local-acceptance/**",
         "spec/local_acceptance*.json",
         ".github/workflows/local-acceptance*.yml",

@@ -255,7 +255,9 @@ ordinary test-only changes do not rebuild an unchanged performance pair. Local
 preflight checks actual conflicts against its supplied base and fetched
 `origin/main` before product builds and benchmark leases. It prints the exact
 paths and recovery step without changing the checkout or index. Clean branches
-may stay behind main. The Git-only `e2e/pr-history/run.py` fixture stays required
+may stay behind main. Preflight stages the exact hash-pinned checker from its
+protected policy, so an older author branch does not need a source update to
+receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays required
 in CI preflight; editing it alone skips unrelated native product builds.
 Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.

@@ -89,6 +89,8 @@ def main():
         git("config", "localAcceptance.vsdevcmd", toolchain)
     old_files = {
         "README.md": "An old candidate must not acquire new guard files.\n",
+        ".github/scripts/check_doc_source_of_truth.py": 'print("actual old-branch doc fixture")\n',
+        ".github/scripts/check_pr_history.py": 'raise RuntimeError("old candidate history checker was invoked")\n',
         ".github/local-acceptance/checks.py": 'raise RuntimeError("candidate profile helper was imported")\n',
         ".github/scripts/local_acceptance.py": 'raise RuntimeError("candidate executor was imported")\n',
         "e2e/local-acceptance/run.py": 'import os\nfrom pathlib import Path\n'
@@ -107,6 +109,15 @@ def main():
     protected = commit("Immutable protected executor policy")
     git("update-ref", "refs/remotes/origin/main", protected)
     git("switch", "--detach", old)
+    # The mandatory profile must use its frozen protected checker, including
+    # when the author checkout still contains the old implementation.
+    profiles.run.execution_refs = (protected, old)
+    preflight = profiles.run("preflight", candidate, output / "old-branch-preflight", old, authority.run_command)
+    assert all(row["exit_code"] == 0 for row in preflight)
+    checked = output / "old-branch-preflight/history-policy/.github/scripts/check_pr_history.py"
+    assert checked.read_bytes() == contents[".github/scripts/check_pr_history.py"]
+    assert "old candidate history checker" in (candidate / ".github/scripts/check_pr_history.py").read_text()
+    assert git("rev-parse", "HEAD") == old and not git("status", "--porcelain")
     # The former mandatory command really fails; never count this as product coverage.
     print("Expected negative: the old checkout lacks the newly added guard path.", flush=True)
     try:
@@ -158,7 +169,7 @@ def main():
         changed = commit("Bind reviewed native guard bytes in the protected profile")
         after = authority.reachable_profile_commands_hashes(changed, names)
         affected = {name for name in names if before[name] != after[name]}
-        assert affected == {"guard-contract"}, (relative, affected)
+        assert affected == {"guard-contract", "preflight"}, (relative, affected)
         fingerprint_results.append({"file": relative, "affected": sorted(affected), "unpinned_bytes_refused": True})
         try:
             authority.check_contract_changes(changed, protected, protected)
@@ -189,7 +200,7 @@ def main():
         "old_candidate_head_and_checkout_unchanged": True,
     }, indent=2))
     print(f"Policy-owned guard E2E passed: unchanged old checkout, real native child/refusals, "
-          f"guard-only fingerprints, changed-input and escaping-path refusals; {output}")
+          f"preflight/guard fingerprints, changed-input and escaping-path refusals; {output}")
 
 
 if __name__ == "__main__":

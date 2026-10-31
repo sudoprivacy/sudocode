@@ -580,6 +580,10 @@ the checkout and index untouched. Its required output lists exact paths and the
 next step, including machine-readable `LOCAL_ACCEPTANCE_MERGE_CONFLICTS`. Clean
 branches behind main remain valid; changes landing after this check can still
 introduce conflicts. Provenance and conflict-marker checks remain.
+The protected dispatcher stages the hash-pinned checker from its frozen policy
+instead of executing the older copy in an author branch. Real native-process/Git
+acceptance exercises that old checkout with a deliberately unusable local checker;
+the protected checker runs and the author HEAD, index and source remain unchanged.
 
 The Git-only `e2e/pr-history/run.py` regression remains mandatory in CI preflight.
 Editing that exact fixture alone no longer selects unrelated native product

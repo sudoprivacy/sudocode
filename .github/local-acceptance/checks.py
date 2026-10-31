@@ -381,7 +381,7 @@ def native_guard_files():
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "73bb0489909a9a99607b9430a12585349d17df72895e03355096dab406c6e7c2",
-        ".github/local-acceptance/nextest_guard.py": "a59a5f82e5185a2d7617c57a3db24e337b0ca22c2a821205dbec8fa356592477",
+        ".github/local-acceptance/nextest_guard.py": "2f6f5099618db991080d6bf459bb6ec7c1f96ae4f41692615392e43bfb5e0e0d",
         ".github/scripts/local_acceptance.py": "3fc6533bdf3b3040aae46896bc6de1fffeb4966edcf2d8c66f0c6995f0086b3b",
         "e2e/local-acceptance/run.py": "73713e7e051e29846c98de2ad312c76a6dd8470bf032db8bc642b03b7de86307",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",

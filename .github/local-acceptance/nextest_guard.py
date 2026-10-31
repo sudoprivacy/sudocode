@@ -150,7 +150,8 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
     arguments = [str(executable), "nextest", "run", *options,
                  "--manifest-path", str(fixture / "Cargo.toml"), "--locked"]
     environment = {"CARGO_TARGET_DIR": str(output / "target")}
-    checks = [git_environment_acceptance(helper, output)]
+    git_environment = git_environment_acceptance(helper, output)
+    checks = []
 
     def execute(command, log):
         # Real Cargo/native processes run while the unsafe name-to-argv fallback
@@ -174,6 +175,7 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
             checks.append({"scenario": name, "status": "expected refusal", "command": result})
     (output / "receipt.json").write_text(json.dumps({
         "version": version, "repository": str(repository), "checks": checks,
+        "git_environment": git_environment,
         "unsafe_process_name_fallback_forbidden_during_real_commands": True,
     }, indent=2))
     print(f"nextest executor E2E passed: {len(checks)} real execution/refusal scenarios; {output}")

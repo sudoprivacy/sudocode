@@ -477,6 +477,17 @@ regression compares exact case/ignore inventories, checks independent native
 process state, executes original developer and named driver commands, rejects
 invalid wrappers, and verifies a Cargo-fresh, byte-identical normal product.
 This infrastructure fixture adds no product feature coverage.</p>
+<p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
+confirmed that default selection compiles examples, while explicit grouped
+target selection omits them. Grouped or unknown sources therefore select the
+separate <code>native-examples</code> profile on the author and complementary
+hosts: normal Cargo build/link with the workspace mailbox feature graph, without
+running example entry points. Known ungrouped sources keep their existing
+selection and avoid a duplicate build. The mandatory plan prints
+<code>EXAMPLE_BUILD_SCOPE</code>. Real native guard processes prove compilation,
+linking, no implicit execution and refusal of a broken example. Existing signed
+workspace execution stays reusable for the same head when its recipe is
+unchanged; the newly selected example check still requires actual execution.</p>
 <p>Only newly added <code>test=false</code> declarations with exact name/path/test
 fields and previously absent names/paths can skip unchanged product and named
 performance builds. Workspace and existing manifest inputs must be unchanged;
@@ -646,6 +657,14 @@ script remains available for diagnosis and earns no additional coverage credit.<
       identity. Grouping fixtures use small native programs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
+    </tr>
+    <tr>
+      <td>Compile-only examples</td>
+      <td>Normal example binaries are compiled and linked. Grouped/unknown
+      sources use <code>native-examples</code>; original selection retains its
+      existing behavior. Entry points are not run by this check.</td>
+      <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
+      <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Mock parity harness</td>

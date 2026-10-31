@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use telemetry::{ResponseCaptureEnd, ResponseCaptureMetadata, SessionTracer};
+use telemetry::{ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder, SessionTracer};
 
 const MAX_PENDING_BYTES: usize = 1024 * 1024;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(20);
@@ -85,12 +85,21 @@ struct CaptureState {
     end: Option<&'static str>,
     error: Option<&'static str>,
     disabled: bool,
+    running: bool,
 }
 
-#[derive(Default)]
 struct CaptureQueue {
     state: Mutex<CaptureState>,
     ready: Condvar,
+    worker: Mutex<CaptureWorker>,
+    runtime: tokio::runtime::Handle,
+}
+
+struct CaptureWorker {
+    tracer: SessionTracer,
+    metadata: Option<ResponseCaptureMetadata>,
+    recorder: Option<Box<dyn ResponseRecorder>>,
+    lease: Option<CaptureLease>,
 }
 
 impl CaptureQueue {
@@ -99,24 +108,35 @@ impl CaptureQueue {
         lock(&self.state)
     }
 
-    fn run(&self, tracer: &SessionTracer, metadata: ResponseCaptureMetadata) {
-        let Some(mut recorder) = tracer.begin_response_capture(metadata) else {
+    fn run(&self) {
+        // Keep the recorder between batches, not a parked blocking worker.
+        // A different archive can still finalize while this one acquires its fence.
+        let mut worker = lock(&self.worker);
+        if worker.lease.is_none() {
+            return;
+        }
+        if let Some(metadata) = worker.metadata.take() {
+            worker.recorder = worker.tracer.begin_response_capture(metadata);
+        }
+        let Some(recorder) = worker.recorder.as_mut() else {
             let mut state = self.lock();
             state.disabled = true;
             state.pending = Vec::new();
+            worker.lease.take();
             return;
         };
         loop {
             let (batch, end) = {
                 let mut state = self.lock();
-                while state.pending.is_empty() && state.end.is_none() {
-                    state = self
-                        .ready
-                        .wait(state)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.pending.is_empty() && state.end.is_none() {
+                    state.running = false;
+                    return;
                 }
                 // Batch small network chunks; an end notification flushes immediately.
-                if state.end.is_none() && state.pending.len() < 64 * 1024 {
+                if state.end.is_none()
+                    && !state.pending.is_empty()
+                    && state.pending.len() < 64 * 1024
+                {
                     (state, _) = self
                         .ready
                         .wait_timeout(state, FLUSH_INTERVAL)
@@ -137,9 +157,16 @@ impl CaptureQueue {
                     observed_bytes,
                     capture_error,
                 });
+                worker.recorder.take();
+                worker.lease.take();
                 return;
             }
         }
+    }
+
+    fn schedule(self: &Arc<Self>) {
+        let queue = Arc::clone(self);
+        self.runtime.spawn_blocking(move || queue.run());
     }
 }
 
@@ -156,13 +183,22 @@ impl std::fmt::Debug for BackgroundCapture {
 impl BackgroundCapture {
     #[inline]
     fn new(tracer: SessionTracer, metadata: ResponseCaptureMetadata) -> Self {
-        let queue = Arc::new(CaptureQueue::default());
-        let worker = Arc::clone(&queue);
         let lease = CaptureLease::new(tracer.session_id());
-        tokio::task::spawn_blocking(move || {
-            let _lease = lease;
-            worker.run(&tracer, metadata);
+        let queue = Arc::new(CaptureQueue {
+            state: Mutex::new(CaptureState {
+                running: true,
+                ..CaptureState::default()
+            }),
+            ready: Condvar::new(),
+            worker: Mutex::new(CaptureWorker {
+                tracer,
+                metadata: Some(metadata),
+                recorder: None,
+                lease: Some(lease),
+            }),
+            runtime: tokio::runtime::Handle::current(),
         });
+        queue.schedule();
         Self { queue }
     }
 
@@ -189,16 +225,29 @@ impl BackgroundCapture {
             // Preserve a contiguous prefix and explicitly report missing bytes.
             state.error = Some("response_capture_queue_saturated");
         }
+        let schedule = !std::mem::replace(&mut state.running, true);
         drop(state);
         if was_empty {
             self.queue.ready.notify_one();
+        }
+        if schedule {
+            self.queue.schedule();
         }
     }
 
     #[inline]
     fn finish(&mut self, reason: &'static str) {
-        self.queue.lock().end.get_or_insert(reason);
+        let mut state = self.queue.lock();
+        if state.disabled || state.end.is_some() {
+            return;
+        }
+        state.end = Some(reason);
+        let schedule = !std::mem::replace(&mut state.running, true);
+        drop(state);
         self.queue.ready.notify_one();
+        if schedule {
+            self.queue.schedule();
+        }
     }
 }
 

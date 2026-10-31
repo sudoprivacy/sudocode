@@ -168,7 +168,14 @@ fn session_delete_can_cancel_then_confirm_without_force() {
 
     for cancel in ["\x1b", "\r"] {
         child.send(&format!("/session delete {target}\r")).unwrap();
-        child.expect("This cannot be undone").unwrap();
+        child
+            .expect("This cannot be undone")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "delete confirmation before {cancel:?}: {error}; {}",
+                    common::screen_tail(&child, 6000)
+                )
+            });
         child.send(cancel).unwrap();
         common::expect_input_line_cleared(&child, env.timeout(), "cancel returns to prompt");
         assert!(path.exists(), "cancel must preserve the saved session");
@@ -179,7 +186,14 @@ fn session_delete_can_cancel_then_confirm_without_force() {
         assert_active_session(&mut child, &current);
     }
     child.send(&format!("/session delete {target}\r")).unwrap();
-    child.expect("This cannot be undone").unwrap();
+    child
+        .expect("This cannot be undone")
+        .unwrap_or_else(|error| {
+            panic!(
+                "final delete confirmation: {error}; {}",
+                common::screen_tail(&child, 6000)
+            )
+        });
     child.send("\x1b[B\r").unwrap();
     child.expect("Session deleted").unwrap();
     common::expect_input_line_cleared(&child, common::DEFAULT_TIMEOUT, "session prompt");

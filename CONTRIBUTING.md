@@ -185,12 +185,32 @@ the installed runner automatically, including when pushing an older worktree.
 The hook runs applicable real checks before a branch push. A Windows author runs
 the Windows workspace, resize, release and service checks locally; CI runs Linux
 and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
-author runs Linux locally; CI runs Windows and macOS. Co-host release verification
+author runs Linux locally; CI runs Windows and macOS. Co-host build verification
 follows the same host split when its inputs change. SDK changes additionally
 require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Pre-merge co-host acceptance uses the workspace dev profile with the deployed
+`daemon,driver-ai,egress-gate-presidio` features and runs the resulting binary to
+verify its exact source revision stamp. This avoids a separate optimized build
+graph on each PR. Optimized co-host builds and platform size budgets remain
+required on release tags before publication. This reduces pre-merge coverage:
+optimization-specific failures and footprint regressions are caught at release
+time. The required command prints this split. A real Git/Cargo/native-process
+guard verifies feature compilation, dev execution and refusal of a missing stamp;
+it adds no product journey coverage.
+
+One acceptance runs per host at a time. Every `check`, whether from the hook,
+`contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
+while its profiles run; a second invocation prints the holder from
+`host-lease.json` and starts when that holder exits, including an abrupt exit.
+Concurrent suites on one machine contend for CPU, memory and temporary paths,
+which turns timing budgets into failures that cost whole profile reruns.
+Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
+fixture checks nested inside an acceptance run without waiting for their parent.
+`attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
+is unchanged.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when CLI, engine-core, shared PTY helpers,
@@ -292,6 +312,44 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+The full native workspace opts into eight declarative integration wrappers for
+128 CLI targets, selecting 91 instead of 211 integration targets. The selector
+contract was qualified before this Rust activation so installed verifiers agree
+on its required checks. A Windows prototype passed all 2,505 active cases with
+70 ignored markers; activation still requires fresh exact-head author and
+complementary native acceptance. Original per-file Cargo commands stay available,
+and new ungrouped targets are selected automatically.
+The selector checks real Cargo metadata and exact declarative wrapper bytes;
+missing, duplicated, redirected, unregistered or feature-hidden members fail.
+Wrappers retain the original helper namespaces and explicitly allow only
+Clippy's `duplicate_mod` diagnostic there. Other lint rules and test assertions
+remain required. Self-spawning cases and named release, performance and terminal
+drivers stay standalone. Nextest still isolates every case in a fresh process.
+Real Cargo/nextest regression compares inventories and ignored markers, proves
+process-state isolation, runs the original developer/driver commands and checks
+that the normal product stays Cargo-fresh with identical bytes.
+New `test=false` targets skip unchanged product/performance builds only when
+their names and wrapper paths are new, their fields are exactly name/path/test,
+and workspace/existing manifest inputs are unchanged. Existing target edits,
+extra fields, missing files and unknown metadata retain ordinary checks. This
+exception does not cover changed dev dependencies or measurement sources.
+An exact protected migration pair can retain an earlier full workspace receipt
+for a committed source without group files or declarations. The verifier reads
+Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
+members and grouped sources require fresh validation. This conditional pair
+cannot authorize the new grouped execution from an old original-target pass.
+Grouped or unknown sources also select `native-examples`: a separate normal
+`cargo build --workspace --locked --features engine-acp/mailbox --examples` on
+the author and complementary hosts. It compiles and links examples without
+running their entry points. Explicit nextest target selection otherwise omits
+this original default Cargo/nextest compile-only coverage. Known ungrouped
+sources retain their existing selection without adding a duplicate example
+build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
+native guard proves normal linking, no implicit example execution and refusal
+of a deliberately broken example. These checks add no product PTY coverage.
+Contract validation checks the Docker Git/signature/authorization matrix before
+Cargo fixtures and author-host native guards. Passing runs keep every existing
+check; an early metadata failure leaves later compilation unrun.
 Release acceptance builds the normal release `scode` once, copies it outside
 Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox

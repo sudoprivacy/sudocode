@@ -199,6 +199,58 @@ fn multi_agent_setup_keeps_an_offline_box_without_installing_a_replacement() {
 }
 
 #[test]
+fn acp_honors_the_selected_runtime_without_prompting_or_replacing_an_unowned_box() {
+    for mode in [None, Some("local"), Some("shared")] {
+        let root = tempfile::tempdir().unwrap();
+        let services = root.path().join("unregistered-owner");
+        let record = configured_box(
+            root.path(),
+            &serde_json::json!({"version": 1, "endpoint": "127.0.0.1:1",
+                "agents_dir": root.path().join("existing-agents")}),
+        );
+        let before_record = std::fs::read(&record).unwrap();
+        let preference = root.path().join("config/runtime-profile.json");
+        let saved = mode.map(|mode| {
+            std::fs::create_dir_all(preference.parent().unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1, "mode": mode, "ownerRoot": services,
+            }))
+            .unwrap();
+            std::fs::write(&preference, &bytes).unwrap();
+            bytes
+        });
+        let log = root.path().join("setup-diagnostics.jsonl");
+        let result = command(root.path())
+            .env("SCODE_LOG_PATH", &log)
+            .arg("acp")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stdout.is_empty(),
+            "Setup must not write into ACP stdio"
+        );
+        let diagnostics = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            diagnostics.contains("automatic_shared_setup"),
+            mode == Some("shared")
+        );
+        if mode == Some("shared") {
+            assert!(diagnostics.contains("The selected owner root has no registered local Box"));
+        }
+        assert!(!services.exists());
+        assert!(!root.path().join("services").exists());
+        assert!(!root.path().join("existing-agents").exists());
+        assert_eq!(std::fs::read(&record).unwrap(), before_record);
+        assert_eq!(std::fs::read(&preference).ok(), saved);
+    }
+}
+
+#[test]
 fn multi_agent_setup_preserves_invalid_box_records_without_provisioning() {
     let root = tempfile::tempdir().unwrap();
     let path = configured_box(root.path(), &serde_json::json!({}));
@@ -341,7 +393,7 @@ fn interactive_resume_keeps_an_unavailable_box_and_reports_the_actual_session_er
 }
 
 #[test]
-fn interactive_resume_without_a_saved_choice_skips_onboarding() {
+fn first_interactive_resume_offers_setup_before_its_session_error() {
     let env = common::TestEnv::new("runtime-resume-no-choice");
     let config = env.workspace_root().join("fresh-configuration");
     let services = env.workspace_root().join("resume-services");
@@ -353,8 +405,72 @@ fn interactive_resume_without_a_saved_choice_skips_onboarding() {
             ("SCODE_CHECK_UPDATES", "0"),
         ],
     );
+    child.expect("Choose how to run scode").unwrap();
+    child.send("\r").unwrap();
+    child.expect("Runtime preference saved").unwrap();
     child.expect("no managed sessions found").unwrap();
     assert_ne!(child.expect_eof().unwrap(), 0);
-    assert!(!config.join("runtime-profile.json").exists());
+    let preference: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(config.join("runtime-profile.json")).unwrap())
+            .unwrap();
+    assert_eq!(preference["mode"], "local");
+    assert!(!services.exists());
+}
+
+#[test]
+fn first_interactive_resume_multi_agent_choice_reuses_the_configured_box() {
+    let env = common::TestEnv::new("runtime-first-resume-box");
+    let config = env.workspace_root().join("fresh-configuration");
+    let services = env.workspace_root().join("resume-services");
+    let agents = env.workspace_root().join("existing-agents");
+    let record = configured_box(
+        env.workspace_root(),
+        &serde_json::json!({"version": 1, "endpoint": "127.0.0.1:1",
+            "agents_dir": agents}),
+    );
+    let before = std::fs::read(&record).unwrap();
+    let home = env.workspace_root().join("home");
+    let mut child = env.spawn_with_env(
+        &["--resume"],
+        &[
+            ("SCODE_GLOBAL_CONFIG_DIR", &config.to_string_lossy()),
+            ("SCODE_SERVICE_ROOT", &services.to_string_lossy()),
+            ("HOME", &home.to_string_lossy()),
+            ("USERPROFILE", &home.to_string_lossy()),
+            ("SCODE_CHECK_UPDATES", "0"),
+        ],
+    );
+    child.expect("Choose how to run scode").unwrap();
+    child.send("\u{1b}[B\r").unwrap();
+    child.expect("Using configured Box at 127.0.0.1:1").unwrap();
+    // The fixture deliberately has no session. Choosing shared must not hide
+    // that admission error or provision a replacement for its selected Box.
+    child.expect("no managed sessions found").unwrap();
+    assert_ne!(child.expect_eof().unwrap(), 0);
+    let preference: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(config.join("runtime-profile.json")).unwrap())
+            .unwrap();
+    assert_eq!(preference["mode"], "shared");
+    assert_eq!(std::fs::read(record).unwrap(), before);
+    assert!(!agents.exists());
+    assert!(!services.exists());
+}
+
+#[test]
+fn existing_configuration_without_a_choice_preserves_resume_behavior() {
+    let env = common::TestEnv::new("runtime-legacy-resume");
+    let services = env.workspace_root().join("resume-services");
+    assert!(env.config_home().exists());
+    assert!(!env.config_home().join("runtime-profile.json").exists());
+    let mut child = env.spawn_with_env(
+        &["--resume"],
+        &[
+            ("SCODE_SERVICE_ROOT", &services.to_string_lossy()),
+            ("SCODE_CHECK_UPDATES", "0"),
+        ],
+    );
+    child.expect("no managed sessions found").unwrap();
+    assert_ne!(child.expect_eof().unwrap(), 0);
+    assert!(!env.config_home().join("runtime-profile.json").exists());
     assert!(!services.exists());
 }

@@ -66,6 +66,7 @@ impl ResponseRecordingConfig {
 /// This lock never takes the transcript commit barrier.
 pub(crate) struct ResponseArchiveWriter {
     lock: Arc<dyn FsLock>,
+    renewal: Mutex<()>,
 }
 
 impl ResponseArchiveWriter {
@@ -94,10 +95,19 @@ impl ResponseArchiveWriter {
             std::thread::sleep(Duration::from_millis(5));
         };
         crate::subagent_completion::check_response_storage(fs, transcript)?;
-        Ok(Arc::new(Self { lock }))
+        Ok(Arc::new(Self {
+            lock,
+            renewal: Mutex::new(()),
+        }))
     }
 
     fn check(&self) -> Result<(), String> {
+        // The backend lease excludes deletion for this Arc's whole lifetime.
+        // Serialize renewals, not independent files' compression or fsyncs.
+        let _guard = self
+            .renewal
+            .lock()
+            .map_err(|_| "response writer poisoned")?;
         if !self.lock.renew().map_err(|error| error.to_string())? {
             return Err("session_writer_lost".into());
         }
@@ -362,7 +372,7 @@ impl ResponseRecorder for SessionResponseRecorder {
                     false
                 }
             });
-        // The shared lease excludes reclamation until every recorder finalizes.
+        // Retain the attachment lease through this file's final atomic write.
         if self.writer.check().is_ok() {
             let _ = self.write_metadata(end.reason, complete);
         }

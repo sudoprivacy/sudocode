@@ -247,31 +247,30 @@ fn completed_turn_identity_survives_wrapping_and_advances_after_the_next_turn() 
     common::expect_input_line_cleared(&session, env.timeout(), "first turn ready");
     let first = common::turn_status_marker(&session);
     assert_ne!(first, "");
-    // ConPTY logical contents join soft-wrapped rows. Physical rows prove
-    // layout reflow; the logical marker below still identifies the same turn.
-    let narrow_rule = "─".repeat(80);
-    let before = common::expect_screen_rows_settled(
-        &session,
-        |screen| {
-            screen.lines().any(|line| line.trim() == narrow_rule) && screen.contains("· turn 1")
-        },
-        env.timeout(),
-        "completed status at the narrow width",
-    );
-    let before = common::turn_status_line(&before);
+    // contents() joins soft wraps, so compare physical status rows after resizing.
+    let physical_status = |screen: &pty_expect::Screen<'_>| {
+        common::turn_status_line(
+            &screen
+                .raw()
+                .rows(0, screen.raw().size().1)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
+    let before = session.render(physical_status);
 
     session.resize(24, 120).unwrap();
-    let screen = common::expect_screen_rows_settled(
+    common::expect_screen_settled(
         &session,
-        |screen| {
-            screen.contains(&"─".repeat(120))
-                && screen.contains("· turn 1")
-                && common::turn_status_line(screen) != before
-        },
+        |screen| screen.contains(&"─".repeat(120)) && screen.contains("· turn 1"),
         env.timeout(),
         "completed status repainted at the new width",
     );
-    assert_ne!(common::turn_status_line(&screen), before);
+    let after = session.render(physical_status);
+    assert_ne!(
+        after, before,
+        "resizing must change the physical status row"
+    );
     assert_eq!(
         common::turn_status_marker(&session),
         first,

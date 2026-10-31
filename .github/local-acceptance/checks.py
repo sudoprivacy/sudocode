@@ -466,7 +466,7 @@ def contract_container(root, output, command):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "7ac3c2e7507240482a89938560d1fc7786575b72866b54280e4a11feca85fa9b",
+        "Dockerfile.guard": "6e43e2b96e7da5bc4515fce3579a91e3ceab7da0a29894dd52d52f8694b8bad7",
         "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:

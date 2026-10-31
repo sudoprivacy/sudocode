@@ -1,13 +1,15 @@
 """Verify frozen Git inputs and image identity through the real Docker launcher.
 
-The image runs a small input probe, not product benchmarks. No shared benchmark
-checkout, target, lease or developer credentials are mounted by this fixture.
+The image calls the production main/dispatcher with a small native workload in
+place of statistical benchmarks. No shared benchmark checkout, target, lease or
+developer credentials are mounted by this fixture.
 """
 
 import argparse
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import uuid
 
@@ -70,18 +72,29 @@ package=json.loads(Path('/context/package.json').read_text())
 assert package['fixturePolicy']==expected['policy'],'image context used another policy'
 spec=importlib.util.spec_from_file_location('actual_profiles','/inputs/runner/.github/local-acceptance/checks.py')
 checks=importlib.util.module_from_spec(spec);spec.loader.exec_module(checks)
-reused=checks.verified_candidate_release(Path('/inputs'))
-assert bool(reused)==expected.get('reuse',False),'unexpected release reuse decision'
-binary=Path('/evidence/scode-candidate')
-shutil.copy2(sys.executable,binary)
-if reused:
-    assert reused.read_bytes()==binary.read_bytes(),'another candidate release was reused'
-    observed=subprocess.check_output([str(reused),'-c','print("REUSED_NATIVE_BINARY_EXECUTED")'],text=True).strip()
-    assert observed=='REUSED_NATIVE_BINARY_EXECUTED','retained Linux executable cannot run after host staging'
-report=Path('/evidence/container/rendering/measurements/report.json')
-report.parent.mkdir(parents=True)
-report.write_text(json.dumps({'status':'passed','candidate_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}))
-Path('/evidence/observed.json').write_text(json.dumps({'sources':actual,'image_policy':image,'reused':bool(reused)}))
+observed={'sources':actual,'image_policy':image}
+def workload(name,root,output,base,command,target):
+    # Keep the real main(), run(), output creation and command executor. Only
+    # replace the expensive product workload; it must use the supplied output.
+    reused=checks.verified_candidate_release(root.parent) if name=='browser' else None
+    assert bool(reused)==expected.get('reuse',False),'unexpected release reuse decision'
+    binary=output/'scode-candidate'
+    shutil.copy2(reused or sys.executable,binary)
+    assert binary.read_bytes()==Path(sys.executable).read_bytes(),'another candidate release was reused'
+    log=command(str(binary),'-c','print("REUSED_NATIVE_BINARY_EXECUTED")')
+    assert log.read_text().strip()=='REUSED_NATIVE_BINARY_EXECUTED','staged native Linux executable cannot run'
+    report=output/'measurements/report.json'
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({'status':'passed','candidate_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}))
+    observed.update(reused=bool(reused),profile_output=str(output.relative_to('/evidence')))
+checks.benchmark=workload
+assert sys.argv[1]=='/inputs/runner/.github/local-acceptance/checks.py'
+sys.argv=sys.argv[1:]
+checks.main()
+profile=Path('/evidence')/observed['profile_output']
+rows=json.loads((profile/'commands.json').read_text())
+assert len(rows)==1 and rows[0]['exit_code']==0,'production main did not persist the native command'
+Path('/evidence/observed.json').write_text(json.dumps(observed))
 print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
 '''
 
@@ -90,6 +103,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             "marker.txt": label,
             "probe.py": probe,
             ".github/local-acceptance/Dockerfile": f'FROM {base_image}\n'
+                'RUN pip install --no-cache-dir psutil==7.2.2\n'
                 f'LABEL scode.container-input-fixture="{token}"\n'
                 f'RUN python3 -c "from pathlib import Path; Path(\'/fixture-policy\').write_text(\'{label}\')"\n'
                 'COPY e2e/terminal-resize/package*.json /context/\n'
@@ -123,6 +137,12 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         (evidence / "expected.json").write_text(json.dumps(expected))
 
         def execute_profile(arguments, cwd, log, environment=None):
+            if list(arguments[:2]) == ["docker", "run"]:
+                # The launcher normally stages its executor from the callback's
+                # source file. This fixture wraps that callback to observe real
+                # Docker operations, so stage the actual executor it delegates to.
+                shutil.copyfile(SOURCE / ".github/scripts/local_acceptance.py",
+                                evidence / "inputs/runner/.github/scripts/local_acceptance.py")
             if list(arguments[:2]) == ["docker", "run"] and corrupt:
                 reused = evidence / "inputs/candidate-release"
                 if corrupt == "bytes":
@@ -152,6 +172,8 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         observed = json.loads((evidence / "observed.json").read_text())
         assert observed["sources"] == expected["sources"]
         assert observed["reused"] == expected.get("reuse", False)
+        assert observed["profile_output"] == f"container/{profile}"
+        assert not (evidence / "scode-candidate").exists(), "Fixture bypassed the production output layout"
         assert provenance["candidate"] == candidate and provenance["policy"] == policy_ref
         assert provenance["baseline"] == (protected if profile == "browser" else
                                            baseline if policy_ref == protected else protected)
@@ -210,9 +232,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
         result = {"status": "PASS", "cases": 10,
+            "production_main_and_dispatcher_layout": True,
             "same_invocation_image_and_binary_reused": True, "fresh_invocation_does_not_reuse": True,
             "changed_identity_and_bytes_refused": True,
-            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected/candidate policies and actual ref/tag moves retain frozen inputs. Same-invocation browser reuses the exact image and executes a retained native Linux binary after host staging; another invocation builds normally. Five corrupted release identities/bytes and a wrong-policy image are rejected inside real containers. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
+            "scope": "Real production container launcher, main/dispatcher, command executor, Git commits/archives and Docker builds/runs. The native workload replaces statistical benchmarks and writes only to the output supplied by the dispatcher. Protected/candidate policies and actual ref/tag moves retain frozen inputs. Same-invocation browser reuses the exact image and executes a retained native Linux binary after host staging; another invocation builds normally. Five corrupted release identities/bytes and a wrong-policy image are rejected inside real containers. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
     finally:
         (output / "commands.json").write_text(json.dumps(commands, indent=2))
         # All tags and IDs below were produced by this UUID-labelled fixture.

@@ -215,7 +215,7 @@ def run(name, root, output, base, execute):
         command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
         print("Local contract validation: full private Docker matrix, with Git/signature checks before Cargo; "
-              "then author-host native recovery, nextest, release and grouping guards. "
+              "then author-host native recovery, nextest, release, grouping and example guards. "
               "No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
@@ -272,6 +272,10 @@ def run(name, root, output, base, execute):
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
             cargo("clippy", "--workspace", "--locked")
+    elif name == "native-examples":
+        print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
+              "This profile never runs example entry points.", flush=True)
+        cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
     elif name == "native-resize":
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
@@ -370,14 +374,15 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
-        "e2e/local-acceptance/policy_guard_acceptance.py": "dbbd39de176e9a7298eaa4398b3b127d7451156989889e760758d73b486f0975",
+        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "6ac93a84fcf01f07e9d201948566cef15f06f4f0f0a03a4909cc2915ac6459e2",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "9deb55f9d48a134e41a26da3a876fdadb954db822517a16c690c0094c32ec1bc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
-        ".github/local-acceptance/native_guard.py": "acea14254302c6255123b1f3b68f61ed4b9c2e048f9bcd9c7e4fa456ad1751d0",
+        ".github/local-acceptance/native_guard.py": "73bb0489909a9a99607b9430a12585349d17df72895e03355096dab406c6e7c2",
         ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
-        ".github/scripts/local_acceptance.py": "cbbc6f8d9aceaa507730caf4545c239ffa569656cfb99f71f05df13c18472d75",
+        ".github/scripts/local_acceptance.py": "24183c9241ee0812283d8568c37d4f330b6638fd5b3907fb2695ae462ff55287",
         "e2e/local-acceptance/run.py": "73713e7e051e29846c98de2ad312c76a6dd8470bf032db8bc642b03b7de86307",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
@@ -414,7 +419,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "37c59877c043ecf6f4a7516a5ba17d25ba14b7ba4433c3ecfdd53ff5690879a5":
+    if actual_scope != "524bc892fcd10dbf73663e67ef363367f904b2904ae89b188d1d2c9e85d92dd9":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

@@ -48,6 +48,14 @@
         "**/README.md"
       ]
     },
+    "native-examples": {
+      "include": [
+        "rust/**"
+      ],
+      "exclude": [
+        "**/README.md"
+      ]
+    },
     "native-resize": {
       "include": [
         "rust/crates/pty-harness/**",
@@ -202,6 +210,21 @@
         "4bbb53e5eaf02f2a3de9c3119800835b57f0913a4b9e36b070b4b0c833616734",
         "765dfae909c635216a03bb708aeeaf883d10d4abd23224a190f8cf8741667306",
         "81669a108d0578b2e3c04cfd7a64f99d65c05fa31cf183f2e63989fd23d52ed1",
+        "c29a95d19fda4c91a5aa31e8b8b5b21afb13eaef792230f6d19de05627deb70f"
+      ],
+      "3993916138f466922a7550baaed605f58ff07e497b481f9d51af56efab625e8d": [
+        "4bbb53e5eaf02f2a3de9c3119800835b57f0913a4b9e36b070b4b0c833616734",
+        "765dfae909c635216a03bb708aeeaf883d10d4abd23224a190f8cf8741667306",
+        "81669a108d0578b2e3c04cfd7a64f99d65c05fa31cf183f2e63989fd23d52ed1",
+        "91f650b0451557f6d271a643b49fc2e43be11f07367fa17d8e0c204056d0a0c9",
+        "c29a95d19fda4c91a5aa31e8b8b5b21afb13eaef792230f6d19de05627deb70f"
+      ],
+      "0495f2113e6ae7a2acaf72c3249b004e00a625610b98d138ab3610f22785df77": [
+        "3993916138f466922a7550baaed605f58ff07e497b481f9d51af56efab625e8d",
+        "4bbb53e5eaf02f2a3de9c3119800835b57f0913a4b9e36b070b4b0c833616734",
+        "765dfae909c635216a03bb708aeeaf883d10d4abd23224a190f8cf8741667306",
+        "81669a108d0578b2e3c04cfd7a64f99d65c05fa31cf183f2e63989fd23d52ed1",
+        "91f650b0451557f6d271a643b49fc2e43be11f07367fa17d8e0c204056d0a0c9",
         "c29a95d19fda4c91a5aa31e8b8b5b21afb13eaef792230f6d19de05627deb70f"
       ]
     },

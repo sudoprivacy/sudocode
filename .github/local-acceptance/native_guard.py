@@ -51,10 +51,14 @@ def main():
         "--repository", str(repository), "--output", str(output / "grouped-targets"),
         "--executable", str(args.executable), "--options", args.options,
     ], SOURCE, output / "grouped-targets.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/examples_acceptance.py"),
+        "--output", str(output / "examples"),
+    ], SOURCE, output / "examples.log"))
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,
     }, indent=2))
-    print(f"Native policy guard passed: signed recovery, nextest and release enforcement; {output}")
+    print(f"Native policy guard passed: signed recovery, nextest, release, grouping and example enforcement; {output}")
 
 
 if __name__ == "__main__":

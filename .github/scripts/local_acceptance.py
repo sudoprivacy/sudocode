@@ -500,6 +500,12 @@ def production_build_paths(paths, base, head, *, opt_in=None):
 
 def selected(policy, paths, *, base=None, head=None):
     paths = list(paths)
+    separate_examples = False
+    if "native-examples" in policy["checks"] and any(path.startswith("rust/") for path in paths):
+        separate_examples = head is None or committed_test_groups(head)
+        if head is not None:
+            print("EXAMPLE_BUILD_SCOPE=" + json.dumps({"head": head, "separate_profile": separate_examples,
+                  "reason": "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
     opt_in = opt_in_test_target_inputs(paths, base, head) if base and head else set()
     product_paths = production_build_paths(paths, base, head, opt_in=opt_in) if base and head else paths
     if product_paths != paths:
@@ -516,11 +522,12 @@ def selected(policy, paths, *, base=None, head=None):
         print("OPT_IN_TEST_TARGET_SCOPE=" + json.dumps({"base": base, "head": head,
               "unchanged_benchmark_metadata": sorted(opt_in)}), flush=True)
     return [name for name, rule in policy["checks"].items()
-            if name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
+            if (name != "native-examples" or separate_examples)
+            and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
                              else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
-                             else paths))]
+                             else paths)))]
 
 
 NATIVE_TARGETS = {

@@ -250,20 +250,29 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
-Rendering completes and judges one scenario at a time. Each scenario keeps its
-two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
-counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases
-the lease; later scenarios remain unrun. A successful core matrix still runs all
-156 samples. Scenario ordering and the placement of warm-ups change, so future
-noise and latency still need observation. The mandatory command prints the active
-scenario and its evidence path. `measurements/report.json` combines the original
+Rendering completes and judges one scenario at a time. All six scenarios keep
+two warm-ups, per-run interaction counts and budgets. The short scenario keeps
+five A/A and seven alternating A/B pairs, preserving the full check that caught
+a real RSS regression. Other core scenarios use three A/A and three A/B pairs;
+the core matrix runs 96 native samples instead of 156. Browser comparison uses
+three A/A and three A/B pairs plus two warm-ups: 14 runs instead of 26. Its
+per-run parsed/painted interactions and the separate viewport checks stay intact.
+This reduces repeat coverage and precision: intermittent regressions have fewer
+chances to appear. It does not establish equivalent statistical sensitivity.
+The repeated-turn stress scenario retains five A/A and seven A/B pairs.
+A failed/noisy/invalid scenario stops the matrix and releases the lease; later
+scenarios remain unrun. The mandatory command prints the declared pair counts,
+active scenario and evidence path. `measurements/report.json` combines the original
 case reports, with original policy and binary/observer hashes, completed scenarios
 and remaining work. Real Cargo/native-process infrastructure acceptance exercises
 full success, relative RSS regression, broken drivers and changed observers with
 the unchanged paired evaluator; it does not claim product performance coverage.
-The changed rendering recipe requires new evidence. Eight other profile recipes
-are byte-for-byte unchanged; the unchanged browser command list has an exact
-approved hash pair so existing signed browser evidence remains reusable.
+Both changed performance recipes require new execution; earlier full-matrix
+results cannot authorize the reduced sampling policy. Native profile recipes
+remain unchanged. Actual native fixture processes verify the 96/14 schedules,
+alternating sides, the full short check and rejection of relative RSS/browser
+regressions and policies below their minimum rounds. These fixtures add no
+product performance coverage credit.
 These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 preflight checks actual conflicts against its supplied base and fetched

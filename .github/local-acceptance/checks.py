@@ -766,8 +766,8 @@ def rendering_cases(terminal, arguments, output, command):
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     for case in cases:
-        # Only partition the selected scenarios. Workloads, sample counts,
-        # A/A calibration, alternating A/B pairs and every budget stay intact.
+        # Partition the declared scenarios without changing their workloads,
+        # paired round policy, interaction samples or budgets.
         selected = dict(policy, profiles={**policy["profiles"], "core": [case]})
         selected_path = output / f"{case}-policy.json"
         selected_path.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
@@ -775,6 +775,7 @@ def rendering_cases(terminal, arguments, output, command):
         report["active_case"] = case
         save()
         print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
+              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; two warm-ups. "
               f"Complete paired result: {output / case / 'report.json'}. "
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
@@ -821,8 +822,8 @@ def rendering_cases(terminal, arguments, output, command):
 
 
 def benchmark_locked(name, root, output, base, command, target):
-    # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
-    # budget and sample assertions. Changing execution host changes none of them.
+    # Run the declared workload and paired sampling policy. Moving execution
+    # hosts does not change budgets or per-run interaction assertions.
     inputs = root.parent
     work, targets = benchmark_storage(name)
     # Both profiles compile the same candidate. Keep its canonical source path

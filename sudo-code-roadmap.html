@@ -300,9 +300,8 @@ passed. Previous failed records remain failed; raw output is not promoted into
 signed acceptance.
 Both Docker recipes require new evidence; native recipes stay unchanged.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
-(2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
-alternating A/B pairs and all interaction counts and budgets. The successful
-six-scenario matrix still runs 156 samples. A failed, noisy or invalid scenario
+(2026-10-31).</strong> Each scenario retains two warm-ups, all per-run
+interaction counts and budgets. A failed, noisy or invalid scenario
 stops later scenarios, preserving their unrun status and releasing the shared
 lease. Warm-ups and measurements now group by scenario; this changes scheduling,
 and future noise still needs observation. The required interface prints the active
@@ -314,7 +313,23 @@ one complete real failed run preserved its verdict and metric rows: the first
 scenario accounted for 360.46 of 1,989.19 recorded driver seconds. That projects
 81.9% less sample work before this failure; it is not a measured new production
 latency result and excludes compilation and lease waiting. Passing-run cost is
-not reduced by this change.</p>
+not reduced by that scheduling change.</p>
+<p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
+scenarios remain. Short retains five A/A and seven alternating A/B pairs,
+preserving the full check that caught a real RSS regression. Long, cap, markdown,
+foreground and background use three A/A and three A/B pairs. With two warm-ups
+per scenario this is 96 native samples instead of 156. Browser comparison uses
+three A/A and three A/B pairs plus two warm-ups: 14 instead of 26 runs. Per-run
+interaction counts, workloads, budgets, relative evaluator and separate viewport
+checks stay unchanged. The repeated-turn stress scenario retains five A/A and
+seven A/B pairs. This removes 72 of 182 repeated rendering/browser runs (39.6%);
+it does not imply a 39.6% reduction in total CI or local elapsed time.
+<strong>Coverage reduction:</strong> fewer repetitions reduce precision and the
+chance of exposing intermittent regressions. Equivalent statistical sensitivity
+is not established. Required output prints pair counts; both changed recipes
+need fresh execution. Real native infrastructure canaries verify counts,
+alternating sides, regression refusals and minimum-round refusals without claiming
+product performance coverage. Actual production latency savings remain unmeasured.</p>
 <p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
 Source-only changes in API, runtime, tools, ACP and services no longer select
 these two Docker profiles. Their selected native functional checks, including
@@ -671,6 +686,15 @@ script remains available for diagnosis and earns no additional coverage credit.<
       identity. Grouping fixtures use small native programs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
+    </tr>
+    <tr>
+      <td>Paired rendering/browser measurements</td>
+      <td>Six rendering scenarios and browser interactions remain; 96 and 14
+      native runs respectively. Short retains its full 5/7 paired rounds; other
+      core scenarios and browser use 3/3. Lower repeat coverage can miss
+      intermittent regressions. Budgets and per-run interactions stay intact.</td>
+      <td>No additional journey credit from repeated measurements.</td>
+      <td><code>benchmark.py</code> / <code>gui-benchmark.py</code></td>
     </tr>
     <tr>
       <td>Compile-only examples</td>

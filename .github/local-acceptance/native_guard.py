@@ -55,6 +55,10 @@ def main():
         sys.executable, str(SOURCE / "e2e/local-acceptance/examples_acceptance.py"),
         "--output", str(output / "examples"),
     ], SOURCE, output / "examples.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/cohost_acceptance.py"),
+        "--output", str(output / "cohost"),
+    ], SOURCE, output / "cohost.log"))
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,
     }, indent=2))

@@ -207,9 +207,10 @@ def performance_scope_acceptance(directory):
         assert ("native-workspace" in names) == native, text
         if guard is not None:
             assert ("guard-contract" in names) == guard, text
-        assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native else set()), text
+        native_checks = {name for name in names if name.startswith("native-")}
+        assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native_checks else set()), text
         for job in plan["ci"]:
-            assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
+            assert set(job["checks"]) == native_checks, text
 
     both = ["rendering", "browser"]
     cases = [(f"rust/crates/{crate}/src/fixture.rs", [])

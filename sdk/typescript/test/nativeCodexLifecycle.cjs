@@ -311,11 +311,17 @@ const spawnTui = async (label,args=[],env=childEnv) => {
               .map(line=>JSON.parse(line)).find(row=>row.phase==='listening');
             return !!receipt.firstOwnerBeforeSecondFrontend;
           },10000,'first frontend elects its shared owner before the second starts');
+          receipt.autojoinOwner=[receipt.firstOwnerBeforeSecondFrontend];
           observer=await connect('observer',receipt.observerNotifications);
-          const snapshot=await request(observer,'existing first root before second frontend','thread/loaded/list',{});
-          assert.equal(snapshot.nextCursor,null);
-          assert.equal(snapshot.data.length,1,'only the first native root exists before the second frontend');
-          receipt.inventoryBeforeSecondFrontend=snapshot.data;
+          await bounded((async()=>{
+            for(;;){
+              const snapshot=await request(observer,'existing first root before second frontend','thread/loaded/list',{});
+              assert.equal(snapshot.nextCursor,null);
+              assert.ok(snapshot.data.length<=1,'a second root cannot precede the second frontend');
+              if(snapshot.data.length===1){receipt.inventoryBeforeSecondFrontend=snapshot.data;return;}
+              await new Promise(resolve=>setTimeout(resolve,50));
+            }
+          })(),5000,'first native root becomes visible before the second frontend');
         }
       }
       await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'isolated native listener');

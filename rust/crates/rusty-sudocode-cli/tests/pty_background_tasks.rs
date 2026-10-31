@@ -228,18 +228,39 @@ fn assert_background_activity(session: &PtySession, view: &str, background: &str
         } else {
             ("Idx(214)", "Idx(247)")
         };
-        for (column, color) in [
-            (0, activity),
-            (5, activity),
-            (
-                unicode_width::UnicodeWidthStr::width(&line[..line.find(" · turn ").unwrap()]),
-                metadata,
-            ),
-        ] {
+        // ConPTY may retain the preceding style on invisible separator spaces.
+        // Assert every visible metadata glyph, including the separator itself.
+        let metadata_start = line.find("· turn ").unwrap();
+        let metadata_cells = line[metadata_start..]
+            .char_indices()
+            .filter(|(_, ch)| !ch.is_whitespace())
+            .map(|(offset, _)| {
+                (
+                    unicode_width::UnicodeWidthStr::width(&line[..metadata_start + offset]),
+                    metadata,
+                )
+            });
+        for (column, color) in [(0, activity), (5, activity)]
+            .into_iter()
+            .chain(metadata_cells)
+        {
             let cell = raw
                 .cell(row.try_into().unwrap(), column.try_into().unwrap())
                 .unwrap();
-            assert_eq!(format!("{:?}", cell.fgcolor()), color);
+            assert_eq!(
+                format!("{:?}", cell.fgcolor()),
+                color,
+                "status cell at row {row}, column {column}: {:?}; line {line:?}; nearby cells {:?}",
+                cell.contents(),
+                (column.saturating_sub(3)..(column + 20).min(usize::from(raw.size().1)))
+                    .map(|column| {
+                        let cell = raw
+                            .cell(row.try_into().unwrap(), column.try_into().unwrap())
+                            .unwrap();
+                        (column, cell.contents(), format!("{:?}", cell.fgcolor()))
+                    })
+                    .collect::<Vec<_>>()
+            );
             assert!(
                 !cell.dim() && !cell.bold(),
                 "theme spans have normal font weight"

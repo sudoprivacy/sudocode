@@ -6,6 +6,7 @@ and empty-selection refusal. It does not establish product/model acceptance.
 """
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,13 +14,63 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+
+import psutil
 
 
 SOURCE = Path(__file__).resolve().parents[2]
 
 
+def supervisor_cleanup(output):
+    """Stop an owned detached child while preserving an unrelated native process."""
+    source = SOURCE / ".github/scripts/live_model_acceptance.py"
+    spec = importlib.util.spec_from_file_location("live_native_supervisor", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ready = output / "detached-child.json"
+    program = ("import subprocess,sys,json,pathlib; "
+               "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],start_new_session=(sys.platform!='win32')); "
+               "pathlib.Path(sys.argv[1]).write_text(json.dumps({'pid':child.pid})); child.wait()")
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=os.name != "nt")
+    process = subprocess.Popen([sys.executable, "-c", program, str(ready)], start_new_session=os.name != "nt")
+    child = None
+    try:
+        deadline = time.monotonic() + 45
+        while not ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(.05)
+        assert ready.exists(), "Native detached-child fixture did not become ready"
+        identifier = json.loads(ready.read_text())["pid"]
+        child = psutil.Process(identifier)
+        created = child.create_time()
+        assert child.ppid() == process.pid
+        if os.name != "nt":
+            assert os.getpgid(child.pid) != os.getpgid(process.pid)
+        module.stop_process(process)
+        assert process.poll() is not None
+        try:
+            assert child.create_time() != created or child.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            pass
+        assert unrelated.poll() is None, "Do not terminate a process outside the owned tree"
+        print("PASS: actual detached native descendant stopped; unrelated native process preserved")
+    finally:
+        if process.poll() is None:
+            module.stop_process(process)
+        if child is not None:
+            try:
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        unrelated.terminate()
+        unrelated.wait(timeout=10)
+
+
 def run(output):
     output.mkdir(parents=True)
+    supervisor_cleanup(output)
     repository = output / "repository"
     repository.mkdir()
     environment = {key: value for key, value in os.environ.items()

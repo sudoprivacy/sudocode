@@ -292,6 +292,35 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+The native executor supports declarative opt-in integration wrappers. This
+contract prerequisite keeps the current original-target graph; the Rust wrapper
+activation lands separately after installed verifiers understand its selection.
+A Windows prototype grouped 128 CLI targets into eight wrappers, selecting 91
+instead of 211 integration targets, and passed all 2,505 active cases with 70
+ignored markers. Original per-file Cargo commands stay available, and new
+ungrouped targets are selected automatically.
+The selector checks real Cargo metadata and exact declarative wrapper bytes;
+missing, duplicated, redirected, unregistered or feature-hidden members fail.
+Wrappers retain the original helper namespaces and explicitly allow only
+Clippy's `duplicate_mod` diagnostic there. Other lint rules and test assertions
+remain required. Self-spawning cases and named release, performance and terminal
+drivers stay standalone. Nextest still isolates every case in a fresh process.
+Real Cargo/nextest regression compares inventories and ignored markers, proves
+process-state isolation, runs the original developer/driver commands and checks
+that the normal product stays Cargo-fresh with identical bytes.
+New `test=false` targets skip unchanged product/performance builds only when
+their names and wrapper paths are new, their fields are exactly name/path/test,
+and workspace/existing manifest inputs are unchanged. Existing target edits,
+extra fields, missing files and unknown metadata retain ordinary checks. This
+exception does not cover changed dev dependencies or measurement sources.
+An exact protected migration pair can retain an earlier full workspace receipt
+for a committed source without group files or declarations. The verifier reads
+Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
+members and grouped sources require fresh validation. This conditional pair
+cannot authorize the new grouped execution from an old original-target pass.
+Contract validation checks the Docker Git/signature/authorization matrix before
+Cargo fixtures and author-host native guards. Passing runs keep every existing
+check; an early metadata failure leaves later compilation unrun.
 Release acceptance builds the normal release `scode` once, copies it outside
 Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox

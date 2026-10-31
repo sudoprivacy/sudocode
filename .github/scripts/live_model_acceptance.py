@@ -85,13 +85,30 @@ def failure_kind(text):
 
 
 def stop_process(process):
+    import psutil
+
+    if process.poll() is not None:
+        return
+    try:
+        owner = psutil.Process(process.pid)
+        descendants = [(child, child.create_time()) for child in owner.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        return
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True)
     else:
+        # A real PTY and its tool processes can have separate process groups.
+        # Retain descendant identity before terminating the supervisor.
+        for child, created in reversed(descendants):
+            try:
+                if child.create_time() == created:
+                    child.terminate()
+            except psutil.NoSuchProcess:
+                pass
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
-            return
+            pass
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -101,6 +118,14 @@ def stop_process(process):
             except ProcessLookupError:
                 pass
         process.wait()
+    _, alive = psutil.wait_procs([child for child, _ in descendants], timeout=5)
+    identities = {child.pid: created for child, created in descendants}
+    for child in alive:
+        try:
+            if child.create_time() == identities[child.pid] and child.status() != psutil.STATUS_ZOMBIE:
+                child.kill()
+        except psutil.NoSuchProcess:
+            pass
 
 
 def main():

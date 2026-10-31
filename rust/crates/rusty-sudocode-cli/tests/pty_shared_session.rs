@@ -174,6 +174,25 @@ fn wait_for_file_with_diagnostics(path: &std::path::Path, diagnostics: impl Fn()
     }
 }
 
+/// What the durable transcript, request dump and both CLIs show while a
+/// concurrent-context barrier is still pending.
+fn concurrent_context_diagnostics(
+    transcript: &std::path::Path,
+    dump: &std::path::Path,
+    first: &PtySession,
+    second: &PtySession,
+) -> String {
+    let durable = fs::read_to_string(transcript).unwrap_or_default();
+    format!(
+        "first recorded: {}; second recorded: {}; dumped files: {}\nFirst CLI:\n{}\nSecond CLI:\n{}",
+        durable.contains("FIRST_CONTEXT_PROMPT"),
+        durable.contains("SECOND_CONTEXT_PROMPT"),
+        fs::read_dir(dump).map(Iterator::count).unwrap_or_default(),
+        first.render(common::screen_contents),
+        second.render(common::screen_contents),
+    )
+}
+
 fn exit_cli(env: &TestEnv, cli: &mut PtySession) {
     common::expect_input_line_cleared(cli, env.timeout(), "completed runtime accepts input");
     cli.send("/exit").unwrap();
@@ -305,15 +324,7 @@ fn run_two_cli_contexts(is_second_started_late: bool, is_legacy_seed: bool) {
     );
     second.send("\r").unwrap();
     wait_for_file_with_diagnostics(&second_ready, || {
-        let durable = fs::read_to_string(&transcript).unwrap_or_default();
-        format!(
-            "first recorded: {}; second recorded: {}; dumped files: {}\nFirst CLI:\n{}\nSecond CLI:\n{}",
-            durable.contains("FIRST_CONTEXT_PROMPT"),
-            durable.contains("SECOND_CONTEXT_PROMPT"),
-            fs::read_dir(&dump).map(|entries| entries.count()).unwrap_or_default(),
-            first.render(|screen| screen.contents()),
-            second.render(|screen| screen.contents()),
-        )
+        concurrent_context_diagnostics(&transcript, &dump, &first, second)
     });
     let waiting = fs::read_to_string(&transcript).unwrap();
     assert!(waiting.contains("FIRST_CONTEXT_PROMPT") && waiting.contains("SECOND_CONTEXT_PROMPT"));

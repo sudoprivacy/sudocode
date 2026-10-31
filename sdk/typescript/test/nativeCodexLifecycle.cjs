@@ -134,6 +134,7 @@ const tuis = [];
 let native;
 let nativeExited;
 let nativeStderr = '';
+let windowsOwnerPreparation;
 const request = async (client,label,method,params) => {
   receipt.requests.push({client:label,method,threadId:params.threadId});
   return client.request(method,params);
@@ -196,6 +197,14 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           : [process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
         endpoint:{port,token:crypto.randomBytes(32).toString('hex')},
       }),{mode:0o600});
+      if(process.platform==='win32'){
+        const prepared=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
+        const registered=execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),
+          {encoding:'utf8',timeout:10000,windowsHide:true});
+        windowsOwnerPreparation=prepared;
+        receipt.windowsOwnerTask={...prepared,registered:true,registrationOutput:registered,
+          scope:'private fixture only; canonical owner is launched by the user scheduler, never by an MCP Job'};
+      }
     }
     fs.writeFileSync(path.join(isolatedHome,'config.toml'),
       (managedPackageRoot?'thread_unload_delay_secs = 1\n':'')+
@@ -703,6 +712,14 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     const ownerAudit=path.join(root,'autojoin-audit.jsonl');
     if(fs.existsSync(ownerAudit))receipt.ownerLifecycle=fs.readFileSync(ownerAudit,'utf8').trim().split('\n')
       .map(line=>JSON.parse(line)).filter(row=>row.provenance==='codex-autojoin-owner');
+    if(windowsOwnerPreparation){
+      try{
+        const prepared=windowsOwnerPreparation;
+        const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
+          {encoding:'utf8',timeout:10000,windowsHide:true});
+        receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,output});
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
+    }
     receipt.nativeStderr=nativeStderr;
     const name='native-codex-lifecycle-'+receipt.at.replace(/[:.]/g,'')+'.receipt.json';
     fs.writeFileSync(path.join(evidence,name),JSON.stringify(receipt,null,2)+'\n',{mode:0o600,flag:'wx'});

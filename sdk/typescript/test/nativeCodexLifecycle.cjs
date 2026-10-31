@@ -135,6 +135,7 @@ let native;
 let nativeExited;
 let nativeStderr = '';
 let windowsOwnerPreparation;
+let legacySocket;
 const request = async (client,label,method,params) => {
   receipt.requests.push({client:label,method,threadId:params.threadId});
   return client.request(method,params);
@@ -226,11 +227,17 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       fs.writeFileSync(file,withoutGlobal+'[mcp_servers.nexus_legacy]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--config',legacyProfile].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n');
       const legacyEnv={...childEnv};delete legacyEnv.CODEX_MANAGED_PACKAGE_ROOT;delete legacyEnv.CODEX_MANAGED_BY_NPM;
-      const legacySocket=path.join(os.tmpdir(),'cx-legacy-'+crypto.randomUUID()+'.sock');
+      // Let the official listener create its parent with the platform's private
+      // permissions. The shared temporary directory cannot satisfy Windows DACLs.
+      legacySocket=path.join(os.tmpdir(),'cx-legacy-'+crypto.randomUUID(),'s.sock');
+      assert(!fs.existsSync(path.dirname(legacySocket)),'The native listener must create its own private parent');
+      receipt.legacyListenerPreparation={socket:legacySocket,parentInitiallyAbsent:true,
+        createdBy:'official native app-server listener'};
       native=spawn(configured.codexArgv[0],['app-server','--listen','unix://'+legacySocket],
         {cwd:workspace,env:legacyEnv,stdio:['ignore','ignore','pipe']});nativeExited=once(native,'close');
       native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
       await waitUntil(()=>socketEntryPresent(legacySocket),10000,'private legacy listener');
+      receipt.legacyListenerPreparation.listenerReady=true;
       const old=await connect('legacy observer',receipt.observerNotifications,legacySocket,legacyEnv);
       const tui=await spawnTui('legacy',['--remote','unix://'+legacySocket],legacyEnv);
       let original;
@@ -256,7 +263,6 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       assert.equal(receipt.modelRequests.length,1,'one explicit legacy seed; direct send does not infer');
       phase='legacy-closed';await closeTui(tui);await old.close();
       native.kill('SIGTERM');await bounded(nativeExited,5000,'owned legacy backend exit');native=undefined;
-      if(fs.existsSync(legacySocket))fs.unlinkSync(legacySocket);
       const imported=await require(library).prepareExistingCodexBinding(autojoinConfig,{threadId:original.id,
         workspace,actor,configFile:operatorContext.inboundSenderProfile,acpSessionId:profile.acpSessionId});
       assert.equal(imported.startedAgent,false);
@@ -718,6 +724,13 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
           {encoding:'utf8',timeout:10000,windowsHide:true});
         receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,output});
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
+    }
+    if(legacySocket){
+      try{
+        try{fs.unlinkSync(legacySocket);}catch(error){if(error.code!=='ENOENT')throw error;}
+        if(fs.existsSync(path.dirname(legacySocket)))fs.rmdirSync(path.dirname(legacySocket));
+        receipt.cleanup.push({privateLegacySocketDirectoryRemoved:path.dirname(legacySocket)});
       }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     receipt.nativeStderr=nativeStderr;

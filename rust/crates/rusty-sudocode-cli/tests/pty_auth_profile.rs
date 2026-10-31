@@ -41,14 +41,14 @@ fn config_set_auth_profile_persists_to_settings_local() {
     // so this line is proof the write went through `tools::set_config_setting`.
     sess.expect("auth_profile = client-acct")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("should confirm auth_profile persisted: {e}\nPTY screen:\n{screen}");
         });
 
     sess.expect("❯").expect("prompt after set");
     sess.send("/exit\r").expect("send exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
@@ -89,11 +89,11 @@ fn doctor_resolves_selected_account_when_auth_profile_set() {
     // Only the Account check prints `account=<resolved>`, so matching
     // `account=team-b` proves the selector actually drove resolution.
     sess.expect("account=team-b").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("doctor should resolve auth_profile=team-b: {e}\nPTY screen:\n{screen}");
     });
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("doctor exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
@@ -124,13 +124,13 @@ fn doctor_reports_ambiguity_when_no_account_is_selected() {
     // its wording is covered by the `select_proxy_account` unit tests instead.
     sess.expect("could not resolve a proxy account")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("doctor should report the ambiguity: {e}\nPTY screen:\n{screen}");
         });
     // `doctor` must still run to completion — it is the command someone reaches
     // for to diagnose this, so it cannot be taken down by the thing it reports.
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("doctor exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
@@ -216,13 +216,13 @@ fn write_auth_profile(env: &TestEnv, profile: &str) {
 /// different cost from the command under test.
 fn exit_cleanly(sess: &mut pty_expect::PtySession) {
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL should return to the prompt: {e}\nPTY screen:\n{screen}");
     });
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "clean exit code");
@@ -249,7 +249,7 @@ fn account_lists_configured_accounts_and_marks_current() {
     sess.send("/account\r").expect("send /account");
     for expected in ["Accounts", "sudorouter", "team-b"] {
         sess.expect(expected).unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("/account should list {expected}: {e}\nPTY screen:\n{screen}");
         });
     }
@@ -279,7 +279,7 @@ fn account_switch_persists_the_selection() {
     sess.send("/account team-b\r")
         .expect("send /account team-b");
     sess.expect("Account updated").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("/account <name> should report the switch: {e}\nPTY screen:\n{screen}");
     });
 
@@ -327,11 +327,11 @@ fn account_refuses_a_name_that_is_not_configured() {
     sess.send("/account no-such-account\r")
         .expect("send /account no-such-account");
     sess.expect("no account named").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("/account should refuse an unconfigured name: {e}\nPTY screen:\n{screen}");
     });
     sess.expect("team-b").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("the refusal should name what is configured: {e}\nPTY screen:\n{screen}");
     });
 
@@ -366,7 +366,7 @@ fn turn_status_line_names_the_billing_account() {
     }
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(2)));
     sess.expect("❯").expect("async REPL prompt");
 
     sess.send("Reply with the single word: ok\r")
@@ -374,7 +374,7 @@ fn turn_status_line_names_the_billing_account() {
     // `acct ` is emitted only by the status-line renderer, so unlike the model
     // name it cannot be matched against the echo of the prompt.
     sess.expect("acct ").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("turn status line should name the account: {e}\nPTY screen:\n{screen}");
     });
 

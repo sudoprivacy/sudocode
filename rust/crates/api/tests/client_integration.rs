@@ -1469,7 +1469,7 @@ async fn gemini_preserves_nullable_enum_on_the_http_wire() {
         base_url: server.base_url(),
         credential: Credential::ApiKey("fixture-key".into()),
         model_id: "gemini-test".into(),
-        extra_body: Default::default(),
+        extra_body: serde_json::Map::default(),
         cache_ttl_1h: Some(false),
     })
     .expect("Gemini client");

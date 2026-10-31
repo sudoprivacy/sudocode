@@ -30,7 +30,7 @@ use common::spawn_scode;
 /// other PTY test inherits the same wiring.
 ///
 /// Cross-platform. pty-expect v0.1.1 (this PR's dep) responds to
-/// ConPTY's DSR(6) handshake automatically, so Windows local +
+/// `ConPTY`'s DSR(6) handshake automatically, so Windows local +
 /// Windows CI both run this test the same way Unix does.
 #[test]
 fn scode_help_prints_usage_and_exits_cleanly() {

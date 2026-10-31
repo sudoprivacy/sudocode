@@ -11,35 +11,32 @@ use crate::common::TestEnv;
 pub fn write_fixture_png(path: &std::path::Path) {
     use std::io::Write;
 
-    let (w, h) = (128u32, 128u32);
-    let mut raw = Vec::with_capacity((w * h * 3 + h) as usize);
-    for y in 0..h {
-        raw.push(0u8); // filter byte
-        for x in 0..w {
-            let (r, g, b) = if (20..=60).contains(&x) && (40..=90).contains(&y) {
-                (210u8, 20u8, 20u8) // red rect
-            } else if {
-                let dx = x as i32 - 90;
-                let dy = y as i32 - 64;
-                dx * dx + dy * dy <= 25 * 25
-            } {
-                (30u8, 200u8, 240u8) // cyan circle
+    let (width, height) = (128_u32, 128_u32);
+    let mut raw = Vec::with_capacity(usize::try_from(width * height * 3 + height).unwrap());
+    for y in 0..height {
+        raw.push(0_u8); // filter byte
+        for x in 0..width {
+            let dx = i64::from(x) - 90;
+            let dy = i64::from(y) - 64;
+            let is_circle = dx * dx + dy * dy <= 25 * 25;
+            let (red, green, blue) = if (20..=60).contains(&x) && (40..=90).contains(&y) {
+                (210_u8, 20_u8, 20_u8)
+            } else if is_circle {
+                (30_u8, 200_u8, 240_u8)
             } else {
-                (240u8, 224u8, 64u8) // yellow bg
+                (240_u8, 224_u8, 64_u8)
             };
-            raw.push(r);
-            raw.push(g);
-            raw.push(b);
+            raw.extend_from_slice(&[red, green, blue]);
         }
     }
     let compressed = deflate_zlib(&raw);
 
     let mut png = Vec::new();
     png.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    write_png_chunk(&mut png, b"IHDR", &{
+    write_png_chunk(&mut png, *b"IHDR", &{
         let mut d = Vec::new();
-        d.extend_from_slice(&w.to_be_bytes());
-        d.extend_from_slice(&h.to_be_bytes());
+        d.extend_from_slice(&width.to_be_bytes());
+        d.extend_from_slice(&height.to_be_bytes());
         d.push(8); // 8-bit depth
         d.push(2); // color type 2 = RGB
         d.push(0);
@@ -47,18 +44,18 @@ pub fn write_fixture_png(path: &std::path::Path) {
         d.push(0);
         d
     });
-    write_png_chunk(&mut png, b"IDAT", &compressed);
-    write_png_chunk(&mut png, b"IEND", &[]);
+    write_png_chunk(&mut png, *b"IDAT", &compressed);
+    write_png_chunk(&mut png, *b"IEND", &[]);
 
     let mut f = fs::File::create(path).expect("create fixture png");
     f.write_all(&png).expect("write fixture png");
 }
 
-fn write_png_chunk(png: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
-    let len = data.len() as u32;
+fn write_png_chunk(png: &mut Vec<u8>, tag: [u8; 4], data: &[u8]) {
+    let len = u32::try_from(data.len()).expect("fixture PNG chunk fits u32");
     png.extend_from_slice(&len.to_be_bytes());
     let crc_start = png.len();
-    png.extend_from_slice(tag);
+    png.extend_from_slice(&tag);
     png.extend_from_slice(data);
     let crc = crc32(&png[crc_start..]);
     png.extend_from_slice(&crc.to_be_bytes());
@@ -74,7 +71,7 @@ fn deflate_zlib(raw: &[u8]) -> Vec<u8> {
 }
 
 fn crc32(data: &[u8]) -> u32 {
-    // Inline table-driven CRC-32 (PNG polynomial 0xedb88320).
+    // Inline table-driven CRC-32 (PNG polynomial 0xedb8_8320).
     // Avoids adding a crc32 dep to the test-only tree.
     static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
     let table = TABLE.get_or_init(|| {
@@ -83,7 +80,7 @@ fn crc32(data: &[u8]) -> u32 {
             let mut c = i;
             for _ in 0..8 {
                 c = if c & 1 != 0 {
-                    0xedb88320 ^ (c >> 1)
+                    0xedb8_8320 ^ (c >> 1)
                 } else {
                     c >> 1
                 };
@@ -92,17 +89,17 @@ fn crc32(data: &[u8]) -> u32 {
         }
         t
     });
-    let mut c = 0xffffffffu32;
+    let mut c = 0xffff_ffff_u32;
     for &b in data {
         c = table[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
     }
-    c ^ 0xffffffff
+    c ^ 0xffff_ffff
 }
 
 /// Mark the mock's model as text-only, so an image must be rejected.
 pub fn mark_model_text_only(env: &TestEnv) {
     env.set_model_catalog(serde_json::json!({"data": [{
-        "id": "claude-sonnet-4-6", "context_window": 200000,
+        "id": "claude-sonnet-4-6", "context_window": 200_000,
         "max_output_tokens": 64000, "vision_supported": false
     }]}));
     env.prime_model_catalog();

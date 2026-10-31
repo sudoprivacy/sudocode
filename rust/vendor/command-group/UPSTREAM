@@ -7,3 +7,7 @@ matching the synchronous backend without an unnecessary pre_exec callback.
 Local change: own Windows thread snapshot/handle lifetimes, propagate native
 enumeration failures and reject snapshots with no child thread. Preserve the
 original system error instead of reporting successful startup without resuming it.
+Local change: make builder lifetimes explicit, remove an unused private Unix
+trait duplicate and explicitly discard the completed async reaper control value.
+Local change: explicitly discard Windows async reaper control values while
+preserving error propagation and wait/try-wait behavior.

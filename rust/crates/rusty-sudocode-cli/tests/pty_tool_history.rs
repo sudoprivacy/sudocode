@@ -46,6 +46,98 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
     let path = root.join("fixture.jsonl");
     let dump = root.join("requests");
     fs::create_dir_all(&dump).unwrap();
+    let (healthy_prefix, source_results, created_file) = seed_legacy_tool_history(root, &path);
+    let target = "claude-opus-4-6";
+
+    // A second process must preserve the repair and all result content.
+    for turn in 0..2 {
+        let prompt = env.prompt(
+            "Calculate 2+2 and reply with 'The answer is N', replacing N with the result.",
+            "single_turn_text",
+        );
+        let mut cli = env.spawn_with_env(
+            &[
+                "--permission-mode",
+                "read-only",
+                "--resume",
+                path.to_str().unwrap(),
+            ],
+            &[("SUDOCODE_DUMP_REQUESTS", dump.to_str().unwrap())],
+        );
+        common::expect_input_line_cleared(&cli, env.timeout(), "resume ready");
+        if turn == 1 {
+            let command = format!("/model {target}");
+            cli.send(&command).expect("type model switch");
+            common::expect_input_line(&cli, &command, env.timeout(), "model command typed");
+            cli.send("\r").expect("submit model switch");
+            cli.expect("Model updated").expect("model switch accepted");
+            common::expect_input_line_cleared(&cli, env.timeout(), "input after switch");
+        }
+        let marker = common::turn_status_marker(&cli);
+        cli.send(&prompt).expect("type resumed prompt");
+        common::expect_input_line(&cli, "Calculate 2+2", env.timeout(), "prompt typed");
+        cli.send("\r").expect("submit prompt");
+        cli.expect("The answer is 4").expect("continued response");
+        common::expect_turn_complete_after(&cli, &marker, env.timeout(), "turn finished");
+        if turn == 1 {
+            cli.send("/undo").expect("type undo");
+            common::expect_input_line(&cli, "/undo", env.timeout(), "undo typed");
+            cli.send("\r").expect("submit undo");
+            cli.expect("Deleted")
+                .expect("historical write can be undone");
+            assert!(
+                !created_file.exists(),
+                "undo must preserve its source record"
+            );
+        }
+        cli.send("/exit").expect("type exit");
+        common::expect_input_line(&cli, "/exit", env.timeout(), "exit typed");
+        cli.send("\r").expect("submit exit");
+        assert_eq!(cli.expect_eof().expect("process exits"), 0);
+        let restored = Session::load_from_path(&path).unwrap();
+        assert_healthy_tool_history(&restored, &healthy_prefix);
+        for source in &source_results {
+            assert!(
+                restored
+                    .messages()
+                    .iter()
+                    .any(|message| message.blocks.contains(source)),
+                "model projection must preserve structured source records: {source:?}"
+            );
+        }
+        assert!(restored
+            .messages()
+            .iter()
+            .any(|message| message.role == MessageRole::Assistant
+                && message.blocks.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text } if text.contains('4'))
+                )));
+    }
+    assert_resumed_tool_requests(&dump, target);
+    let persisted = fs::read_to_string(&path).unwrap();
+    assert!(persisted.contains("ORPHAN-RESULT-KEPT"));
+    assert!(persisted.contains("DUPLICATE-RESULT-KEPT"));
+}
+
+fn assert_healthy_tool_history(restored: &Session, healthy_prefix: &[ConversationMessage]) {
+    let content = |messages: &[ConversationMessage]| {
+        messages
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message.history = None;
+                message
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        content(&restored.messages()[..healthy_prefix.len()]),
+        content(healthy_prefix),
+        "repair must not rewrite healthy history, even across a model switch"
+    );
+}
+
+fn healthy_tool_history(root: &std::path::Path) -> Session {
     let mut session = Session::new().with_workspace_root(root);
     session.push_user_text("Read fixture.txt").unwrap();
     let mut parallel = call("valid-user-result");
@@ -72,6 +164,18 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
             text: "Read complete.".into(),
         }]))
         .unwrap();
+    session
+}
+
+fn seed_legacy_tool_history(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> (
+    Vec<ConversationMessage>,
+    Vec<ContentBlock>,
+    std::path::PathBuf,
+) {
+    let session = healthy_tool_history(root);
     let healthy_prefix = session.messages().to_vec();
     let mut messages = session.messages().to_vec();
     messages.push(ConversationMessage::tool_result(
@@ -137,90 +241,14 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
             })
             .collect(),
     );
-    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let target = "claude-opus-4-6";
+    fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    (healthy_prefix, source_results, created_file)
+}
 
-    // A second process must preserve the repair and all result content.
-    for turn in 0..2 {
-        let prompt = env.prompt(
-            "Calculate 2+2 and reply with 'The answer is N', replacing N with the result.",
-            "single_turn_text",
-        );
-        let mut cli = env.spawn_with_env(
-            &[
-                "--permission-mode",
-                "read-only",
-                "--resume",
-                path.to_str().unwrap(),
-            ],
-            &[("SUDOCODE_DUMP_REQUESTS", dump.to_str().unwrap())],
-        );
-        common::expect_input_line_cleared(&cli, env.timeout(), "resume ready");
-        if turn == 1 {
-            let command = format!("/model {target}");
-            cli.send(&command).expect("type model switch");
-            common::expect_input_line(&cli, &command, env.timeout(), "model command typed");
-            cli.send("\r").expect("submit model switch");
-            cli.expect("Model updated").expect("model switch accepted");
-            common::expect_input_line_cleared(&cli, env.timeout(), "input after switch");
-        }
-        let marker = common::turn_status_marker(&cli);
-        cli.send(&prompt).expect("type resumed prompt");
-        common::expect_input_line(&cli, "Calculate 2+2", env.timeout(), "prompt typed");
-        cli.send("\r").expect("submit prompt");
-        cli.expect("The answer is 4").expect("continued response");
-        common::expect_turn_complete_after(&cli, &marker, env.timeout(), "turn finished");
-        if turn == 1 {
-            cli.send("/undo").expect("type undo");
-            common::expect_input_line(&cli, "/undo", env.timeout(), "undo typed");
-            cli.send("\r").expect("submit undo");
-            cli.expect("Deleted")
-                .expect("historical write can be undone");
-            assert!(
-                !created_file.exists(),
-                "undo must preserve its source record"
-            );
-        }
-        cli.send("/exit").expect("type exit");
-        common::expect_input_line(&cli, "/exit", env.timeout(), "exit typed");
-        cli.send("\r").expect("submit exit");
-        assert_eq!(cli.expect_eof().expect("process exits"), 0);
-        let restored = Session::load_from_path(&path).unwrap();
-        let content = |messages: &[ConversationMessage]| {
-            messages
-                .iter()
-                .cloned()
-                .map(|mut message| {
-                    message.history = None;
-                    message
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            content(&restored.messages()[..healthy_prefix.len()]),
-            content(&healthy_prefix),
-            "repair must not rewrite healthy history, even across a model switch"
-        );
-        for source in &source_results {
-            assert!(
-                restored
-                    .messages()
-                    .iter()
-                    .any(|message| message.blocks.contains(source)),
-                "model projection must preserve structured source records: {source:?}"
-            );
-        }
-        assert!(restored
-            .messages()
-            .iter()
-            .any(|message| message.role == MessageRole::Assistant
-                && message.blocks.iter().any(
-                    |block| matches!(block, ContentBlock::Text { text } if text.contains('4'))
-                )));
-    }
+fn assert_resumed_tool_requests(dump: &std::path::Path, target: &str) {
     let mut checked = 0;
     let mut switched_request = false;
-    for entry in fs::read_dir(&dump).unwrap() {
+    for entry in fs::read_dir(dump).unwrap() {
         let entry = entry.unwrap();
         if !entry.file_name().to_string_lossy().contains("messages") {
             continue;
@@ -246,7 +274,4 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
         switched_request,
         "the selected model received the continued history"
     );
-    let persisted = fs::read_to_string(&path).unwrap();
-    assert!(persisted.contains("ORPHAN-RESULT-KEPT"));
-    assert!(persisted.contains("DUPLICATE-RESULT-KEPT"));
 }

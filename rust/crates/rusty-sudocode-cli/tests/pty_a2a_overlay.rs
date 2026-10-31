@@ -67,7 +67,7 @@ fn exit_with_context(sess: &mut PtySession, context: &str) {
     let code = sess.expect_eof().unwrap_or_else(|error| {
         // The method item cannot satisfy render's higher-ranked Screen lifetime.
         #[allow(clippy::redundant_closure_for_method_calls)]
-        let screen = sess.render(|screen| screen.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
     assert_eq!(code, 0, "{context} should exit successfully");

@@ -88,9 +88,11 @@ def run(args, root):
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
     endpoint = f'127.0.0.1:{port}'
+    peer_prefix = '/agents'
+    proof_path = f'{peer_prefix}/lifecycle-proof'
     native_env = env | {'NEXUS_DATA_DIR': str(data), 'NEXUS_IDENTITY_DIR': str(identity),
         'NEXUS_ADVERTISE_ADDR': endpoint, 'NEXUS_CLUSTER_INIT': 'sharedzone',
-        'NEXUS_CLUSTER_INIT_MOUNTS': '/agents=sharedzone', 'RUST_LOG': 'info'}
+        'NEXUS_CLUSTER_INIT_MOUNTS': f'{peer_prefix}=sharedzone', 'RUST_LOG': 'info'}
     daemon_log = (root / 'bootstrap.log').open('wb')
     bootstrap = subprocess.Popen([str(args.daemon), '--bind-addr', endpoint],
         env=native_env, stdout=daemon_log, stderr=subprocess.STDOUT)
@@ -111,6 +113,7 @@ def run(args, root):
         result = subprocess.run(command, capture_output=True, timeout=5)
         if result.returncode:
             with (root / 'grpc-errors.log').open('ab') as output:
+                output.write(f'{method} {payload.get("path", payload.get("zone_id", ""))}:\n'.encode())
                 output.write(result.stderr)
             result.check_returncode()
         response = json.loads(result.stdout)
@@ -131,6 +134,15 @@ def run(args, root):
     def membership():
         return {zone: grpc('GetClusterInfo', {'zone_id': zone}, True)
                 for zone in ['root', 'sharedzone', '__control__']}
+
+    def bootstrap_ready():
+        members = membership()
+        # The registry answers before the initial VFS bootstrap finishes. Wait
+        # for the actual fixture mount within the existing startup deadline;
+        # the first durable Write below remains a single, asserted operation.
+        if grpc('Stat', {'path': peer_prefix}).get('found'):
+            return members
+        return None
 
     def cli(arguments, expected=True, environment=None):
         result = subprocess.run([str(args.scode), *arguments], env=environment or env,
@@ -156,10 +168,9 @@ def run(args, root):
 
     try:
         wait_until(lambda: data.joinpath('tls/node.pem').is_file())
-        before = wait_until(membership)
+        before = wait_until(bootstrap_ready)
         assert all(item['nodeId'] == before['root']['nodeId'] for item in before.values())
         marker = base64.b64encode('original durable Box body 中文\x00'.encode()).decode()
-        proof_path = '/agents/lifecycle-proof'
 
         def durable_body_is_readable():
             # Authenticated transport can precede the restored zone's Raft read

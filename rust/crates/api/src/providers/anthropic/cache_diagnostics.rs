@@ -1,7 +1,7 @@
 //! Opt-in diagnostic correlation, scoped to one client/session. It does not
 //! decide cache boundaries, TTL, thinking or request identity.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use runtime::{FsBackend, StdFsBackend};
@@ -23,7 +23,7 @@ struct State {
 
 impl CacheDiagnostics {
     #[must_use]
-    pub(super) fn for_session(directory: PathBuf) -> Self {
+    pub(super) fn for_session(directory: &Path) -> Self {
         Self {
             path: Some(directory.join("cache-diagnostics.json")),
             ..Self::default()

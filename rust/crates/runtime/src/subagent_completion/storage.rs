@@ -512,36 +512,7 @@ pub(super) fn open_context(
     cwd: &Path,
     create: bool,
 ) -> Result<ContextStorage, String> {
-    let mut binding = read_binding(fs, transcript)?;
-    check_shared_storage(fs, transcript)?;
-    if binding
-        .session_id
-        .as_ref()
-        .is_some_and(|id| id != &session.session_id)
-        || binding
-            .cwd
-            .as_ref()
-            .is_some_and(|directory| directory != cwd)
-    {
-        return Err("completion journal identity mismatch".into());
-    }
-    let was_bound = binding.storage_ref.is_some();
-    if !was_bound && !create {
-        return Err("completion journal missing".into());
-    }
-    if !was_bound {
-        binding.session_id = Some(session.session_id.clone());
-        binding.cwd = Some(cwd.to_path_buf());
-        binding.storage_ref = Some(checksum(
-            &serde_json::to_vec(&(1, &session.session_id, transcript))
-                .map_err(|error| error.to_string())?,
-        ));
-        fs.write_atomic(
-            &binding_path(transcript).to_string_lossy(),
-            &serde_json::to_vec(&binding).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-    }
+    bind_context(fs, transcript, session, cwd, create)?;
     let directory = context_dir(transcript);
     fs.create_dir_all(&directory.to_string_lossy())
         .map_err(|error| error.to_string())?;
@@ -634,4 +605,45 @@ pub(super) fn open_context(
         previous: None,
         owner,
     })
+}
+
+/// Bind the journal identity before choosing an ancestry-owned context.
+fn bind_context(
+    fs: &dyn FsBackend,
+    transcript: &Path,
+    session: &Session,
+    cwd: &Path,
+    create: bool,
+) -> Result<(), String> {
+    let mut binding = read_binding(fs, transcript)?;
+    check_shared_storage(fs, transcript)?;
+    if binding
+        .session_id
+        .as_ref()
+        .is_some_and(|id| id != &session.session_id)
+        || binding
+            .cwd
+            .as_ref()
+            .is_some_and(|directory| directory != cwd)
+    {
+        return Err("completion journal identity mismatch".into());
+    }
+    let was_bound = binding.storage_ref.is_some();
+    if !was_bound && !create {
+        return Err("completion journal missing".into());
+    }
+    if !was_bound {
+        binding.session_id = Some(session.session_id.clone());
+        binding.cwd = Some(cwd.to_path_buf());
+        binding.storage_ref = Some(checksum(
+            &serde_json::to_vec(&(1, &session.session_id, transcript))
+                .map_err(|error| error.to_string())?,
+        ));
+        fs.write_atomic(
+            &binding_path(transcript).to_string_lossy(),
+            &serde_json::to_vec(&binding).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }

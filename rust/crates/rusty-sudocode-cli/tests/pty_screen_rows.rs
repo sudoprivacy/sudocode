@@ -7,7 +7,7 @@ use pty_expect::PtySession;
 fn row_wait_rejects_echo_and_keeps_a_question_after_a_full_width_rule() {
     const WIDTH: u16 = 40;
     const HEADER: &str = "1/1  Physical question";
-    let script = r#"
+    let script = r"
 import sys
 width = int(sys.argv[1])
 sys.stdin.readline()
@@ -17,7 +17,7 @@ sys.stdin.readline()
 sys.stdout.write('\x1b[2J\x1b[H' + '-' * width + '1/1  Physical question\r\n> [1] First\r\n  [2] Second\r\nRowsReady\r\n')
 sys.stdout.flush()
 sys.stdin.readline()
-"#;
+";
     let width = WIDTH.to_string();
     let mut session =
         PtySession::spawn(&common::resolve_python(), &["-u", "-c", script, &width]).unwrap();
@@ -45,7 +45,7 @@ sys.stdin.readline()
     );
     let rule = "-".repeat(usize::from(WIDTH));
     assert!(rows.lines().any(|line| line == rule));
-    let logical = session.render(|screen| screen.contents());
+    let logical = session.render(common::screen_contents);
     assert!(logical.contains(&format!("{rule}{HEADER}")), "{logical}");
     assert!(
         !logical.lines().any(|line| line == HEADER),

@@ -8,10 +8,12 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+type DiscoveryCall = (String, BTreeMap<String, String>);
+
 #[derive(Clone)]
 struct Fixture {
     body: Arc<Mutex<Value>>,
-    calls: Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>,
+    calls: Arc<Mutex<Vec<DiscoveryCall>>>,
 }
 
 async fn models(
@@ -43,7 +45,7 @@ async fn discovery_refreshes_live_limits_and_isolates_endpoint_and_key() {
     let address = listener.local_addr().unwrap();
     let state = Fixture {
         body: Arc::new(Mutex::new(json!({"data":[{
-            "id":"claude-unseen-2040","max_input_tokens":1234567,"max_tokens":98765,
+            "id":"claude-unseen-2040","max_input_tokens":1_234_567,"max_tokens":98765,
             "capabilities":{"image_input":{"supported":false}}
         }],"has_more":true,"last_id":"claude-unseen-2040"}))),
         calls: Arc::new(Mutex::new(Vec::new())),
@@ -79,24 +81,69 @@ async fn discovery_refreshes_live_limits_and_isolates_endpoint_and_key() {
             ..source
         },
     );
-    assert!(first.model_ids().is_empty());
+    assert_eq!(first.model_ids(), [] as [std::string::String; 0]);
     first.refresh(true).await.unwrap();
     assert_eq!(
         same.model_ids(),
         vec!["claude-unseen-2040", "second-page-only"]
     );
-    assert!(other_endpoint.model_ids().is_empty());
-    assert!(second.model_ids().is_empty());
+    assert_eq!(other_endpoint.model_ids(), [] as [std::string::String; 0]);
+    assert_eq!(second.model_ids(), [] as [std::string::String; 0]);
     second.refresh(true).await.unwrap();
     assert_eq!(second.model_ids(), vec!["second-account-only"]);
     let calls = state.calls.lock().unwrap().clone();
     assert_eq!(calls[1].0, "first-key");
     assert_eq!(calls[1].1.get("limit").unwrap(), "2");
     assert_eq!(calls[1].1.get("after_id").unwrap(), "claude-unseen-2040");
+    assert_catalog_scopes(&first, &second).await;
+    *state.body.lock().unwrap() = json!({"data":[{"id":"partial"}],"has_more":true});
+    assert!(first.refresh(true).await.is_err());
+    assert_eq!(
+        same.model_ids(),
+        vec!["claude-unseen-2040", "second-page-only"]
+    );
+    // A model the gateway lists *without* token metadata. The limits must come
+    // from the bundled table when it curates the model, and from `default` when
+    // it does not -- never from a per-model copy of `default`, which is what
+    // made a fabricated window indistinguishable from a documented one.
+    // `claude-opus-5-5` is the live shape: sudorouter returns only its id and
+    // `supported_endpoint_types`.
+    *state.body.lock().unwrap() = json!({"data":[
+        {"id":"claude-opus-5-5","supported_endpoint_types":["anthropic"]},
+        {"id":"gateway-only-model","supported_endpoint_types":["openai"]}
+    ]});
+    first.refresh(true).await.unwrap();
+    assert_gateway_fallback_limits(&same).await;
+
+    *state.body.lock().unwrap() = json!({"data":[{"id":"claude-unseen-2040","context_window":2_000_000,"max_output_tokens":100_000}]});
+    first.refresh(true).await.unwrap();
+    assert_eq!(same.model_ids(), vec!["claude-unseen-2040"]);
+    same.scope(async {
+        assert_eq!(
+            runtime::model_capabilities::context_window_or_default("claude-unseen-2040"),
+            2_000_000
+        );
+    })
+    .await;
+    let disk = std::fs::read_dir(home.join("cache/model-catalogs"))
+        .unwrap()
+        .map(|file| std::fs::read_to_string(file.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(!disk.contains("first-key"));
+    assert!(!disk.contains(&address.to_string()));
+    *state.body.lock().unwrap() = json!({"data":[]});
+    first.refresh(true).await.unwrap();
+    assert_eq!(same.model_ids(), [] as [std::string::String; 0]);
+    assert_eq!(second.model_ids(), vec!["second-account-only"]);
+    server.abort();
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+async fn assert_catalog_scopes(first: &ModelCatalog, second: &ModelCatalog) {
     first
         .scope(async {
             let cap = runtime::model_capabilities::lookup("claude-unseen-2040").unwrap();
-            assert_eq!(cap.context_window, Some(1234567));
+            assert_eq!(cap.context_window, Some(1_234_567));
             assert_eq!(cap.max_output_tokens, Some(98765));
             assert_eq!(cap.vision_supported, Some(false));
         })
@@ -120,66 +167,30 @@ async fn discovery_refreshes_live_limits_and_isolates_endpoint_and_key() {
             );
         })
     );
-    *state.body.lock().unwrap() = json!({"data":[{"id":"partial"}],"has_more":true});
-    assert!(first.refresh(true).await.is_err());
-    assert_eq!(
-        same.model_ids(),
-        vec!["claude-unseen-2040", "second-page-only"]
-    );
-    // A model the gateway lists *without* token metadata. The limits must come
-    // from the bundled table when it curates the model, and from `default` when
-    // it does not -- never from a per-model copy of `default`, which is what
-    // made a fabricated window indistinguishable from a documented one.
-    // `claude-opus-5-5` is the live shape: sudorouter returns only its id and
-    // `supported_endpoint_types`.
-    *state.body.lock().unwrap() = json!({"data":[
-        {"id":"claude-opus-5-5","supported_endpoint_types":["anthropic"]},
-        {"id":"gateway-only-model","supported_endpoint_types":["openai"]}
-    ]});
-    first.refresh(true).await.unwrap();
-    same.scope(async {
-        let curated = runtime::model_capabilities::lookup("claude-opus-5-5")
-            .expect("a listed model must resolve");
-        assert_eq!(
-            curated.context_window,
-            Some(1_000_000),
-            "an undocumented but curated model takes the binary's number"
-        );
-        assert_eq!(curated.max_output_tokens, Some(128_000));
-        let unknown = runtime::model_capabilities::lookup("gateway-only-model")
-            .expect("a listed model must resolve");
-        assert!(
-            unknown.context_window.is_none(),
-            "a model nobody curates must carry no window of its own"
-        );
-        assert_eq!(
-            unknown.endpoint_types,
-            Some(vec!["openai".to_string()]),
-            "what the gateway did say must survive -- it picks the wire format"
-        );
-    })
-    .await;
+}
 
-    *state.body.lock().unwrap() = json!({"data":[{"id":"claude-unseen-2040","context_window":2000000,"max_output_tokens":100000}]});
-    first.refresh(true).await.unwrap();
-    assert_eq!(same.model_ids(), vec!["claude-unseen-2040"]);
-    same.scope(async {
-        assert_eq!(
-            runtime::model_capabilities::context_window_or_default("claude-unseen-2040"),
-            2000000
-        );
-    })
-    .await;
-    let disk = std::fs::read_dir(home.join("cache/model-catalogs"))
-        .unwrap()
-        .map(|file| std::fs::read_to_string(file.unwrap().path()).unwrap())
-        .collect::<String>();
-    assert!(!disk.contains("first-key"));
-    assert!(!disk.contains(&address.to_string()));
-    *state.body.lock().unwrap() = json!({"data":[]});
-    first.refresh(true).await.unwrap();
-    assert!(same.model_ids().is_empty());
-    assert_eq!(second.model_ids(), vec!["second-account-only"]);
-    server.abort();
-    std::fs::remove_dir_all(&home).unwrap();
+async fn assert_gateway_fallback_limits(catalog: &ModelCatalog) {
+    catalog
+        .scope(async {
+            let curated = runtime::model_capabilities::lookup("claude-opus-5-5")
+                .expect("a listed model must resolve");
+            assert_eq!(
+                curated.context_window,
+                Some(1_000_000),
+                "an undocumented but curated model takes the binary's number"
+            );
+            assert_eq!(curated.max_output_tokens, Some(128_000));
+            let unknown = runtime::model_capabilities::lookup("gateway-only-model")
+                .expect("a listed model must resolve");
+            assert!(
+                unknown.context_window.is_none(),
+                "a model nobody curates must carry no window of its own"
+            );
+            assert_eq!(
+                unknown.endpoint_types,
+                Some(vec!["openai".to_string()]),
+                "what the gateway did say must survive -- it picks the wire format"
+            );
+        })
+        .await;
 }

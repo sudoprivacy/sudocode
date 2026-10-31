@@ -176,11 +176,11 @@ impl ReceivedMessage<'_> {
 pub(crate) fn render_prompt(text: &str, width: usize, renderer: &TerminalRenderer) -> String {
     let mut output = String::new();
     for part in prompt_parts(text) {
-        let rendered = match part {
+        let formatted_text = match part {
             PromptPart::Human(text) => super::format::format_input_echo(text, width).0,
             PromptPart::Peer(message) => message.render(width, renderer),
         };
-        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
+        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &formatted_text);
     }
     output
 }

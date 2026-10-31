@@ -260,13 +260,12 @@ pub(crate) fn render_config_json(
 
     if let Some(section) = section {
         let section_rendered: Option<String> = match section {
-            "env" => runtime_config.get("env").map(|v| v.render()),
-            "hooks" => runtime_config.get("hooks").map(|v| v.render()),
-            "model" => runtime_config.get("model").map(|v| v.render()),
+            "env" => runtime_config.render_value("env"),
+            "hooks" => runtime_config.render_value("hooks"),
+            "model" => runtime_config.render_value("model"),
             "plugins" => runtime_config
-                .get("plugins")
-                .or_else(|| runtime_config.get("enabledPlugins"))
-                .map(|v| v.render()),
+                .render_value("plugins")
+                .or_else(|| runtime_config.render_value("enabledPlugins")),
             other => {
                 return Ok(serde_json::json!({
                     "kind": "config",
@@ -323,7 +322,7 @@ pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error
             } else {
                 preview
             };
-            lines.push(format!("  {}. {}", index + 1, file.path.display(),));
+            lines.push(format!("  {}. {}", index + 1, file.path.display()));
             lines.push(format!(
                 "     lines={} preview={}",
                 file.content.lines().count(),
@@ -371,8 +370,7 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
     if !in_git_repo {
         return Ok(format!(
             "Diff\n  Result           no git repository\n  Detail           {} is not inside a git project",
@@ -462,8 +460,7 @@ pub(crate) fn render_diff_json_for(
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
     if !in_git_repo {
         return Ok(serde_json::json!({
             "kind": "diff",

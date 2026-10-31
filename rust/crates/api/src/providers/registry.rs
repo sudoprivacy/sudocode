@@ -264,7 +264,7 @@ fn resolve_model_for_mode<'a>(
 
     // Direct alias lookup first.
     if let Some(entry) = config.models.get(&key) {
-        if auth_mode.map_or(true, |mode| entry.providers.contains_key(mode)) {
+        if auth_mode.is_none_or(|mode| entry.providers.contains_key(mode)) {
             return Some(entry);
         }
         fallback = Some(entry);
@@ -732,7 +732,7 @@ fn endpoint_type_to_api_format(endpoint_type: &str) -> ApiFormat {
 
 /// Adjust `base_url` for the chosen API format.
 ///
-/// Proxy base URLs follow OpenAI convention (ending with `/v1`).
+/// Proxy base URLs follow `OpenAI` convention (ending with `/v1`).
 /// OpenAI-format clients expect that prefix and append `/chat/completions`
 /// or `/responses` directly. All other formats (Anthropic, Gemini, future)
 /// construct their own versioned path (e.g. `/v1/messages`,
@@ -757,7 +757,7 @@ fn adjust_base_url_for_format(base_url: &str, api_format: ApiFormat) -> String {
 ///   `"anthropic-messages"`.
 /// - Proxy mode without `api`: consult model capabilities SSOT (same
 ///   source as `try_proxy_passthrough`), then use the Claude or Codex protocol
-///   for a cold catalog and OpenAI completions for other models.
+///   for a cold catalog and `OpenAI` completions for other models.
 /// - Non-proxy providers: inferred from the provider name.
 fn resolve_api_format(
     auth_mode: &str,
@@ -932,7 +932,6 @@ fn infer_provider_kind(provider_name: &str, api_format: ApiFormat) -> ProviderKi
     }
 }
 
-/// Expand `~` prefix to the user's home directory.
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1159,7 +1158,7 @@ mod tests {
             cache_ttl_1h: None,
             auth_modes,
             models,
-            web_search: Default::default(),
+            web_search: runtime::WebSearchConfig::default(),
             selected_account: None,
             auth_profile_conflicts: Vec::new(),
         }

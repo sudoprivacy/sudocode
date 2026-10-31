@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::{AnalyticsEvent, SudoclawLogSink, TelemetryEvent};
 use serde_json::{Map, Value};
 
-const REMINDER_INTERVAL: Duration = Duration::from_secs(60);
+const REMINDER_INTERVAL: Duration = Duration::from_mins(1);
 const RECOVERY_QUIET_PERIOD: Duration = Duration::from_secs(2);
 
 /// Presentation belongs to the service's host; aggregation and local logging
@@ -156,48 +156,45 @@ impl RetryDiagnostics {
             }
             state.active = true;
             state.last_failure = Some(now);
-            let suppressed = match state.failures.get_mut(scope) {
-                Some(failure) => {
-                    if failure.detail == error && failure.context == context {
-                        if now.duration_since(failure.last_log) < REMINDER_INTERVAL {
-                            failure.suppressed = failure.suppressed.saturating_add(1);
-                            None
-                        } else {
-                            let count = std::mem::take(&mut failure.suppressed);
-                            failure.last_log = now;
-                            Some(count)
-                        }
+            let suppressed = if let Some(failure) = state.failures.get_mut(scope) {
+                if failure.detail == error && failure.context == context {
+                    if now.duration_since(failure.last_log) < REMINDER_INTERVAL {
+                        failure.suppressed = failure.suppressed.saturating_add(1);
+                        None
                     } else {
-                        if failure.suppressed > 0 {
-                            let _ = self.record(
-                                "background_retry_repeats",
-                                scope,
-                                &failure.detail,
-                                failure.suppressed,
-                                &failure.context,
-                            );
-                        }
-                        *failure = Failure {
-                            detail: error.into(),
-                            context: context.clone(),
-                            last_log: now,
-                            suppressed: 0,
-                        };
-                        Some(0)
+                        let count = std::mem::take(&mut failure.suppressed);
+                        failure.last_log = now;
+                        Some(count)
                     }
-                }
-                None => {
-                    state.failures.insert(
-                        scope.into(),
-                        Failure {
-                            detail: error.into(),
-                            context: context.clone(),
-                            last_log: now,
-                            suppressed: 0,
-                        },
-                    );
+                } else {
+                    if failure.suppressed > 0 {
+                        let _ = self.record(
+                            "background_retry_repeats",
+                            scope,
+                            &failure.detail,
+                            failure.suppressed,
+                            &failure.context,
+                        );
+                    }
+                    *failure = Failure {
+                        detail: error.into(),
+                        context: context.clone(),
+                        last_log: now,
+                        suppressed: 0,
+                    };
                     Some(0)
                 }
+            } else {
+                state.failures.insert(
+                    scope.into(),
+                    Failure {
+                        detail: error.into(),
+                        context: context.clone(),
+                        last_log: now,
+                        suppressed: 0,
+                    },
+                );
+                Some(0)
             };
             if let Some(suppressed) = suppressed {
                 state.log_error = self
@@ -288,7 +285,7 @@ impl RetryDiagnostics {
     ) -> Result<(), String> {
         match self.log() {
             Ok(log) => log
-                .try_record(TelemetryEvent::Analytics(
+                .try_record(&TelemetryEvent::Analytics(
                     AnalyticsEvent::new("background_retry", action)
                         .with_property("component", self.component.into())
                         .with_property("subject", self.subject.as_str().into())

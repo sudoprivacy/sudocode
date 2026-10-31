@@ -34,25 +34,7 @@ fn exit(sess: &mut pty_expect::PtySession) {
 fn short_window_folds_todos_and_restores_the_entire_draft() {
     let env = TestEnv::new("chrome-budget-draft");
     let store = env.workspace_root().join("todos.json");
-    let todos: Vec<_> = (0..3)
-        .map(|i| {
-            serde_json::json!({
-                "content": format!("BudgetTask{i}"),
-                "activeForm": format!("WorkingBudgetTask{i}"),
-                "status": "pending",
-            })
-        })
-        .collect();
-    std::fs::write(&store, serde_json::to_vec(&todos).unwrap()).unwrap();
-    let mut session = Session::new().with_workspace_root(env.workspace_root());
-    session.push_user_text("Saved layout session").unwrap();
-    session
-        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
-            text: "BudgetHistorySentinel".into(),
-        }]))
-        .unwrap();
-    let saved = env.workspace_root().join("session.jsonl");
-    session.save_to_path(&saved).unwrap();
+    let saved = seed_budget_layout_session(&env, &store);
     let mut sess = env.spawn_with_env(
         &["--resume", saved.to_str().unwrap()],
         &[
@@ -382,4 +364,27 @@ fn too_narrow_input_preserves_draft_and_middle_cursor() {
     if env.is_mock() {
         assert_eq!(env.captured_message_count(), 0);
     }
+}
+
+fn seed_budget_layout_session(env: &TestEnv, store: &std::path::Path) -> std::path::PathBuf {
+    let todos: Vec<_> = (0..3)
+        .map(|i| {
+            serde_json::json!({
+                "content": format!("BudgetTask{i}"),
+                "activeForm": format!("WorkingBudgetTask{i}"),
+                "status": "pending",
+            })
+        })
+        .collect();
+    std::fs::write(store, serde_json::to_vec(&todos).unwrap()).unwrap();
+    let mut session = Session::new().with_workspace_root(env.workspace_root());
+    session.push_user_text("Saved layout session").unwrap();
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "BudgetHistorySentinel".into(),
+        }]))
+        .unwrap();
+    let saved = env.workspace_root().join("session.jsonl");
+    session.save_to_path(&saved).unwrap();
+    saved
 }

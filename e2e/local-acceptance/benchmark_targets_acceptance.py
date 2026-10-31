@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -22,6 +23,146 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def rendering_matrix(output, checks, command):
+    """Drive the unchanged paired evaluator through real native fixture processes."""
+    output.mkdir()
+    fixture = output / "fixture"
+    fixture.mkdir()
+    (fixture / "Cargo.toml").write_text('[package]\nname="render-matrix-fixture"\nversion="0.0.0"\nedition="2021"\n'
+        '[[bin]]\nname="release-marker"\npath="main.rs"\n[[test]]\nname="render-driver"\npath="driver.rs"\n')
+    (fixture / "main.rs").write_text('fn main() { println!("{}", std::env::current_exe().unwrap().file_stem().unwrap().to_str().unwrap()); }\n')
+    (fixture / "driver.rs").write_text(r'''#[test]
+#[ignore]
+fn render_performance_workload() {
+    use std::{env, fs, io::Write, path::Path, process::Command};
+    let root = env::var("SCODE_ACCEPTANCE_RENDER_FIXTURE").unwrap();
+    let root = Path::new(&root);
+    let binary = env::var("SCODE_TEST_BIN").unwrap();
+    let child = Command::new(&binary).output().unwrap();
+    assert!(child.status.success());
+    let side = String::from_utf8(child.stdout).unwrap();
+    let side = side.trim();
+    assert!(side == "base" || side == "candidate");
+    let case = env::var("SCODE_RENDER_CASE").unwrap();
+    let report = env::var("SCODE_RENDER_REPORT").unwrap();
+    let label = Path::new(&report).parent().unwrap().file_name().unwrap().to_str().unwrap();
+    let mut events = fs::OpenOptions::new().create(true).append(true).open(root.join("events.txt")).unwrap();
+    writeln!(events, "{case} {label} {side}").unwrap();
+    let mode = env::var("SCODE_ACCEPTANCE_RENDER_MODE").unwrap();
+    assert!(!(mode == "invalid" && case == "long"), "intentional native driver failure");
+    let selected = if mode == "metadata" && case == "long" { "metadata" }
+        else if mode == "regressed" && side == "candidate" && case == "long" { "regressed" } else { "base" };
+    let bytes = fs::read(root.join(format!("{case}-{selected}.json"))).unwrap();
+    fs::write(report, bytes).unwrap();
+}
+''')
+    command("cargo", "generate-lockfile", "--manifest-path", str(fixture / "Cargo.toml"))
+    command("cargo", "build", "--locked", "--manifest-path", str(fixture / "Cargo.toml"))
+    log = command("cargo", "test", "--locked", "--manifest-path", str(fixture / "Cargo.toml"),
+                  "--test", "render-driver", "--no-run", "--message-format=json-render-diagnostics")
+    records = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    drivers = [row["executable"] for row in records if row.get("reason") == "compiler-artifact"
+               and row.get("target", {}).get("name") == "render-driver" and row.get("executable")]
+    assert len(drivers) == 1
+    for side in ["base", "candidate"]:
+        shutil.copy2(fixture / "target/debug/release-marker", fixture / side)
+    terminal = SOURCE / "e2e/terminal-resize"
+    shared = load("paired_rendering_evaluator", terminal / "benchmark.py")
+    policy = json.loads((terminal / "performance-policy.json").read_text())
+    cases = policy["profiles"]["core"]
+    assert cases[:2] == ["short", "long"]
+    for case in cases:
+        spec = policy["cases"][case]
+        phases = ["stream", "history"] if spec["kind"] in {"foreground", "background"} else ["wait", "stream", "history"]
+        value = {"version": 1, "status": "complete", "case": case, "spec": spec, "preview": "0",
+                 "contracts": policy["contracts"], "turns": [{}] * spec["turns"],
+                 "metrics": {name: 1 for name in shared.expected_metrics(spec)},
+                 "input_samples_ms": {phase: [1] * (policy["sampling"]["input"] * spec["turns"]) for phase in phases},
+                 "action_samples_ms": {"resize": [1] * (policy["sampling"]["resize"] * spec["turns"]),
+                     "paste": [1] * spec["turns"], "cancel": [1] * (policy["sampling"]["cancel"] if "wait" in phases else 0)},
+                 "metadata": {"observer": "native-fixture-process"}}
+        value["metrics"]["rss_peak_mib"] = 10
+        (fixture / f"{case}-base.json").write_text(json.dumps(value))
+        value["metrics"]["rss_peak_mib"] = 20
+        (fixture / f"{case}-regressed.json").write_text(json.dumps(value))
+        value["metrics"]["rss_peak_mib"] = 10
+        value["metadata"] = {"observer": "different-native-fixture-process"}
+        (fixture / f"{case}-metadata.json").write_text(json.dumps(value))
+    arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
+                 "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
+    results = {}
+    for mode in ["pass", "regressed", "invalid", "metadata", "command"]:
+        events = fixture / "events.txt"
+        events.unlink(missing_ok=True)
+        destination = output / mode
+
+        def measured(*args):
+            if mode == "command":
+                return command(sys.executable, "-c", "raise SystemExit(23)")
+            return command(*args, extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture),
+                                        "SCODE_ACCEPTANCE_RENDER_MODE": mode})
+
+        failed = False
+        try:
+            checks.rendering_cases(terminal, arguments, destination, measured)
+        except RuntimeError:
+            failed = True
+        report = json.loads((destination / "report.json").read_text())
+        trace = events.read_text().splitlines() if events.exists() else []
+        expected_cases = cases if mode == "pass" else [] if mode == "command" else cases[:2]
+        assert {line.split()[0] for line in trace} == set(expected_cases), "An unadmitted scenario ran"
+        assert report["policy"] == policy and report["policy_sha256"] == shared.digest(terminal / "performance-policy.json")
+        assert all((destination / row["path"]).is_file() for row in report["samples"])
+        assert report["status"] == {"pass": "passed", "regressed": "failed"}.get(mode, "invalid")
+        assert failed == (mode != "pass"), "A failing matrix returned success"
+        complete = cases if mode == "pass" else [] if mode == "command" else ["short"]
+        assert report["completed_cases"] == complete and report["remaining_cases"] == [case for case in cases if case not in complete]
+        if mode in {"pass", "regressed"}:
+            # Replay the unmodified evaluator on exactly the combined observations.
+            # It must reach the same verdict/rows as each complete scenario did.
+            controls, comparisons = {case: [] for case in expected_cases}, {case: [] for case in expected_cases}
+            for case in expected_cases:
+                samples = [row for row in report["samples"] if row["data"]["case"] == case]
+                assert len(samples) == 26
+                for stage, count, collection in [("aa", 5, controls), ("ab", 7, comparisons)]:
+                    for number in range(count):
+                        pair = {row["side"]: row["data"] for row in samples if row["stage"] == stage and row["round"] == number}
+                        assert set(pair) == {"base", "candidate"}
+                        collection[case].append((pair["base"], pair["candidate"]))
+            rows, failures = shared.assess(controls, comparisons, policy, expected_cases)
+            assert report["metrics"] == rows and report["failures"] == failures
+            assert len(trace) == 26 * len(expected_cases)
+            if mode == "regressed":
+                assert any("paired increase" in failure for failure in failures), "Relative RSS regression was lost"
+        elif mode == "invalid":
+            assert len(trace) == 27, "Invalid second scenario did not stop immediately"
+        elif mode == "metadata":
+            assert len(trace) == 52 and "observer/platform changed" in report["failures"][0]
+        else:
+            assert not trace and "no completed scenario report" in report["failures"][0]
+        results[mode] = {"status": report["status"], "native_invocations": len(trace),
+                         "completed_cases": report["completed_cases"], "failures": report.get("failures", [])}
+    # Control: the prior whole-matrix schedule runs the very same trusted
+    # program, drivers and values, and reaches the same RSS failure after 156
+    # calls. This observes actual process admission, rather than a path layout.
+    events.unlink(missing_ok=True)
+    failed = False
+    try:
+        command(*arguments, "--output", str(output / "previous-schedule"),
+                "--policy", str(terminal / "performance-policy.json"), "--profile", "core",
+                extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture), "SCODE_ACCEPTANCE_RENDER_MODE": "regressed"})
+    except RuntimeError:
+        failed = True
+    previous = json.loads((output / "previous-schedule/report.json").read_text())
+    revised = json.loads((output / "regressed/report.json").read_text())
+    assert failed and previous["status"] == "failed" and len(events.read_text().splitlines()) == 156
+    assert [row for row in previous["metrics"] if row["case"] in cases[:2]] == revised["metrics"]
+    assert previous["failures"] == revised["failures"], "The schedule changed the decision for identical observations"
+    results["previous_schedule"] = {"status": previous["status"], "native_invocations": 156,
+                                    "same_observed_verdict_and_rows": True}
+    return results
 
 
 def run(output, profiles):
@@ -58,10 +199,15 @@ p.add_argument("--policy");p.add_argument("--profile");a=p.parse_args()
 assert subprocess.check_output([a.base]).decode().strip()=="baseline:normal"
 assert subprocess.check_output([a.candidate]).decode().strip()=="candidate:normal"
 case="rendering_driver_runs_release" if a.policy else "browser_terminal_links_and_interaction"
-if a.policy: assert a.profile=="core" and json.loads(Path(a.policy).read_text())=={"fixture":True}
+if a.policy: assert a.profile=="core" and json.loads(Path(a.policy).read_text())=={"fixture":True,"profiles":{"core":["short"]}}
 subprocess.run([a.driver,"--ignored","--exact",case],env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
 out=Path(a.output);out.mkdir()
 (out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
+if a.policy:
+    (out/"report.json").write_text(json.dumps({"policy":json.loads(Path(a.policy).read_text()),
+        "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest(),"status":"passed","samples":[],
+        **{name+"_sha256":hashlib.sha256(Path(getattr(a,name)).read_bytes()).hexdigest() for name in ["base","candidate","driver"]},
+        "harness_sha256":{"fixture":"browser-builder"}}))
 '''
     for label in ["baseline", "candidate", "trusted"]:
         checkout = inputs / label
@@ -83,7 +229,7 @@ out=Path(a.output);out.mkdir()
                 '"lockfileVersion":3,"packages":{"":{"name":"browser-builder-acceptance","version":"1.0.0"}}}\n',
             "e2e/terminal-resize/gui-benchmark.py": measurement,
             "e2e/terminal-resize/benchmark.py": measurement,
-            "e2e/terminal-resize/performance-policy.json": '{"fixture":true}\n',
+            "e2e/terminal-resize/performance-policy.json": '{"fixture":true,"profiles":{"core":["short"]}}\n',
             "scripts/benchmark_prompt_viewport.py": '''import argparse,hashlib,json,os
 from pathlib import Path
 import subprocess
@@ -147,7 +293,8 @@ out=Path(a.output);out.mkdir()
         with checks.exclusive_benchmark_state(locks):
             checks.benchmark_locked(name, inputs / "candidate", stage, "fixture-base", command, output / "unused-target")
         stage_digests += [hashlib.sha256((stage / "scode-candidate").read_bytes()).hexdigest(),
-                          json.loads((stage / "measurements/fixture.json").read_text())["candidate_sha256"]]
+                          json.loads((stage / ("measurements/short/fixture.json" if name == "rendering"
+                                              else "measurements/fixture.json")).read_text())["candidate_sha256"]]
     candidate_builds = [(index, row["command"]) for index, row in enumerate(commands)
                         if "build" in row["command"] and "--manifest-path" in row["command"]
                         and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml")]
@@ -160,8 +307,9 @@ out=Path(a.output);out.mkdir()
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})
     assert len(target_trees) == 4, target_trees
+    matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
-              "target_trees": target_trees, "cross_profile_candidate_build_reused": True,
+              "target_trees": target_trees, "cross_profile_candidate_build_reused": True, "rendering_matrix": matrix,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production browser build executor, Cargo and npm; distinct baseline/candidate and native integration drivers, reusable dev artifacts, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

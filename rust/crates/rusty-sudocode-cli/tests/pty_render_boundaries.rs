@@ -182,7 +182,7 @@ fn bash_progress_is_live_then_clears_without_entering_history() {
                     && line.contains("s)")
             })
         },
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         "live tool progress",
     );
     std::fs::write(env.workspace_root().join("release-progress"), "release").expect("release tool");
@@ -335,30 +335,7 @@ fn asynchronous_tool_result_does_not_close_a_streaming_code_fence() {
             "{screen}"
         );
     }
-    let colors = sess.render(|screen| {
-        let raw = screen.raw();
-        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
-        [
-            "let FENCE_FIRST = \"START\";",
-            "let FENCE_SECOND = \"END\";",
-        ]
-        .iter()
-        .map(|content| {
-            let row = rows.iter().rposition(|row| row.trim() == *content).unwrap();
-            let column = rows[row].find('"').unwrap() + 1;
-            let column = rows[row][..column].chars().count();
-            format!(
-                "{:?}",
-                raw.cell(row as u16, column as u16).unwrap().fgcolor()
-            )
-        })
-        .collect::<Vec<_>>()
-    });
-    assert_ne!(colors[0], "Default", "code must be highlighted");
-    assert_eq!(
-        colors[0], colors[1],
-        "code fence lost its parser context: {screen}"
-    );
+    assert_interleaved_code_colors(&sess, &screen);
     finish(&mut sess);
 }
 
@@ -382,4 +359,37 @@ impl Drop for ReleaseFiles {
             Duration::from_millis(50),
         );
     }
+}
+
+#[cfg(unix)]
+fn assert_interleaved_code_colors(sess: &pty_expect::PtySession, screen: &str) {
+    let colors = sess.render(|screen| {
+        let raw = screen.raw();
+        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+        [
+            "let FENCE_FIRST = \"START\";",
+            "let FENCE_SECOND = \"END\";",
+        ]
+        .iter()
+        .map(|content| {
+            let row = rows.iter().rposition(|row| row.trim() == *content).unwrap();
+            let column = rows[row].find('"').unwrap() + 1;
+            let column = rows[row][..column].chars().count();
+            format!(
+                "{:?}",
+                raw.cell(
+                    u16::try_from(row).expect("terminal row fits u16"),
+                    u16::try_from(column).expect("terminal column fits u16")
+                )
+                .unwrap()
+                .fgcolor()
+            )
+        })
+        .collect::<Vec<_>>()
+    });
+    assert_ne!(colors[0], "Default", "code must be highlighted");
+    assert_eq!(
+        colors[0], colors[1],
+        "code fence lost its parser context: {screen}"
+    );
 }

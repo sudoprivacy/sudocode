@@ -34,23 +34,26 @@ impl Host {
             session: String::new(),
             id: 0,
         };
-        let init = host.request("initialize", json!({"protocolVersion":1}));
+        let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
         let created = host.request(
             "session/new",
-            json!({"cwd":env.workspace_root(),"mcpServers":[]}),
+            &json!({"cwd":env.workspace_root(),"mcpServers":[]}),
         );
-        host.session = created["sessionId"].as_str().unwrap().to_owned();
+        created["sessionId"]
+            .as_str()
+            .unwrap()
+            .clone_into(&mut host.session);
         host
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    fn request(&mut self, method: &str, params: &Value) -> Value {
         let response = self.response(method, params);
         assert!(response.get("error").is_none(), "{response}");
         response["result"].clone()
     }
 
-    fn response(&mut self, method: &str, params: Value) -> Value {
+    fn response(&mut self, method: &str, params: &Value) -> Value {
         self.id += 1;
         let newline = if cfg!(windows) { "\r" } else { "\n" };
         self.terminal
@@ -68,7 +71,7 @@ impl Host {
             .unwrap_or_else(|error| {
                 panic!(
                     "ACP reply: {error}; {}",
-                    self.terminal.render(|screen| screen.contents())
+                    self.terminal.render(common::screen_contents)
                 )
             });
         let response: Value = response
@@ -85,7 +88,7 @@ impl Host {
 
     fn input(&mut self, mut action: Value) -> Value {
         action["sessionId"] = json!(self.session);
-        self.request(METHOD, action)
+        self.request(METHOD, &action)
     }
 
     fn submit(&mut self, client: &str, text: &str, delivery: &str) -> Value {
@@ -112,7 +115,7 @@ impl Host {
     }
 
     fn close(&mut self) {
-        self.request("session/close", json!({"sessionId":self.session}));
+        self.request("session/close", &json!({"sessionId":self.session}));
     }
 }
 
@@ -133,7 +136,7 @@ fn working_with_mode(env: &TestEnv, background: bool) -> (Host, Release) {
     fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished\n").unwrap();
     let mut host = Host::new(env);
     let input =
-        json!({"command":"sh input-work.sh","timeout":180000,"run_in_background":background});
+        json!({"command":"sh input-work.sh","timeout":180_000,"run_in_background":background});
     let prompt = if env.is_mock() {
         format!(
             "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
@@ -166,7 +169,10 @@ fn host_flush_preserves_the_running_tool_and_all_recalled_attachments() {
     assert_eq!(recalled["recalled"].as_array().unwrap().len(), 2);
     assert_eq!(recalled["recalled"][0]["clientId"], "first");
     assert_eq!(recalled["recalled"][1]["content"][1]["data"], PNG);
-    assert!(host.snapshot()["pending"].as_array().unwrap().is_empty());
+    assert_eq!(
+        host.snapshot()["pending"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     for item in recalled["recalled"].as_array().unwrap() {
         host.input(json!({"action":"submit","clientId":item["clientId"],"content":item["content"],"delivery":"queue"}));
     }
@@ -279,7 +285,7 @@ fn native_turn_rejects_destructive_lifecycle_changes_without_blocking_cancel() {
             json!({"sessionId":host.session,"prompt":[{"type":"text","text":"/clear"}]}),
         ),
     ] {
-        let response = host.response(method, params);
+        let response = host.response(method, &params);
         assert!(
             response["error"]["data"]
                 .as_str()

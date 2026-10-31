@@ -72,11 +72,21 @@ fn write_fixture(root: &Path) -> (String, String) {
         .to_string_lossy()
         .into_owned();
     let run_id_json = serde_json::to_string(&run_id).expect("run ID JSON");
-    // Readiness must become visible only after the complete marker is readable.
+    // Existence admits the reader, so publish only a complete PID/run ID record.
     fs::write(
         root.join("descendant.cjs"),
         format!(
-            "const fs=require('fs'); fs.writeFileSync('started.json.tmp', JSON.stringify({{pid:process.pid,run_id:{run_id_json}}})); fs.renameSync('started.json.tmp','started.json'); setInterval(()=>{{}},1000);"
+            r"const fs = require('fs');
+const started = 'started.json';
+const staged = started + '.tmp';
+try {{
+  fs.writeFileSync(staged, JSON.stringify({{pid:process.pid,run_id:{run_id_json}}}));
+  fs.renameSync(staged, started);
+}} catch (error) {{
+  try {{ fs.unlinkSync(staged); }} catch {{}}
+  throw error;
+}}
+setInterval(() => {{}}, 1000);"
         ),
     )
     .expect("write descendant");

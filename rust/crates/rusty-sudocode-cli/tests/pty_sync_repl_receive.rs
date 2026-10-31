@@ -44,7 +44,7 @@ fn send_from(pair_root: &Path, peer: &str, body: &str) {
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }

@@ -89,7 +89,7 @@ impl NexusTransport {
             fs: Arc::clone(&self.fs),
             path: reply,
             cursor: 0,
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Instant::now() + Duration::from_mins(1),
         };
         let (head, next) = read_record(reader)
             .await
@@ -115,10 +115,10 @@ impl NexusTransport {
                 }
             }
         }
-        reader.deadline = Instant::now() + Duration::from_secs(300);
+        reader.deadline = Instant::now() + Duration::from_mins(5);
         let stream = futures_util::stream::try_unfold(reader, |reader| async move {
             let (record, mut reader) = read_record(reader).await?;
-            reader.deadline = Instant::now() + Duration::from_secs(300);
+            reader.deadline = Instant::now() + Duration::from_mins(5);
             if record.first() == Some(&0) {
                 return Ok(Some((record[1..].to_vec(), reader)));
             }

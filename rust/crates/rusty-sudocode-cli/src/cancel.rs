@@ -25,10 +25,13 @@ static LAST_CTRLC_CANCEL_MS: AtomicU64 = AtomicU64::new(0);
 /// sentinel in [`LAST_CTRLC_CANCEL_MS`].
 pub fn process_uptime_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let elapsed = START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_millis() as u64;
+    let elapsed = u64::try_from(
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
     elapsed.max(1)
 }
 
@@ -47,5 +50,5 @@ pub fn is_double_ctrlc() -> bool {
         return false;
     }
     let now = process_uptime_ms();
-    now.saturating_sub(prev) <= DOUBLE_CTRLC_WINDOW.as_millis() as u64
+    Duration::from_millis(now.saturating_sub(prev)) <= DOUBLE_CTRLC_WINDOW
 }

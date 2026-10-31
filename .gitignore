@@ -9,6 +9,11 @@ archive/
 .nexus/sudocode/settings.local.json
 .nexus/sudocode/settings.json
 .nexus/sudocode/sessions/
+# Plugin installations and their registry are generated runtime data. Bundled
+# plugin sources remain tracked under rust/crates/plugins/bundled/.
+**/.nexus/sudocode/plugins/installed/
+**/.nexus/sudocode/plugins/installed.json
+**/.nexus/sudocode/plugins/installed.json.lock
 .scode/sessions/
 .sudocodehip/
 status-help.txt

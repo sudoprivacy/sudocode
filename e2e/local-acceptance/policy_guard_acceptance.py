@@ -53,6 +53,18 @@ def main():
         for path in directory.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     }
+    # Windows git archive can apply core.autocrlf to the Docker input snapshot.
+    # Reconstruct only exact pinned policy bytes for this private Git fixture;
+    # arbitrary changed content must still fail the production SHA256 check.
+    for path, expected in pins.items():
+        canonical = contents[path].replace(b"\r\n", b"\n")
+        if hashlib.sha256(canonical).hexdigest() != expected:
+            raise RuntimeError(f"Guard fixture source differs from its protected byte pin: {path}")
+        contents[path] = canonical
+    # The release recipe fingerprint also binds this image input. Staging still
+    # verifies its unchanged composite pin before any native guard executes.
+    image = ".github/local-acceptance/Dockerfile"
+    contents[image] = contents[image].replace(b"\r\n", b"\n")
     toolchain = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
                               cwd=SOURCE, text=True, capture_output=True).stdout.strip()
     candidate = output / "old-candidate"
@@ -70,6 +82,7 @@ def main():
     git("init", "--initial-branch=main")
     git("config", "user.name", "Policy guard fixture")
     git("config", "user.email", "policy-guard@example.invalid")
+    git("config", "core.autocrlf", "false")
     git("config", "localAcceptance.signer", "no-fixture-signing")
     git("config", "localAcceptance.key", str(output / "no-private-key"))
     if toolchain:

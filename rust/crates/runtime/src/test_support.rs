@@ -32,9 +32,9 @@ pub fn temp_dir_path(prefix: &str) -> PathBuf {
     ))
 }
 
-/// An in-memory [`ObjectStore`] so DT_REG **content** round-trips under test.
+/// An in-memory [`ObjectStore`] so `DT_REG` **content** round-trips under test.
 ///
-/// A mount with no backend carries metadata only: a DT_REG write "succeeds"
+/// A mount with no backend carries metadata only: a `DT_REG` write "succeeds"
 /// and the read comes back not-found. Anything that keeps bytes in a regular
 /// entry needs a real content backend behind its mount — a reader register
 /// most of all, since without one every read position is zero and every
@@ -45,7 +45,7 @@ pub struct MemObjectStore {
 }
 
 impl ObjectStore for MemObjectStore {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "memtest"
     }
 

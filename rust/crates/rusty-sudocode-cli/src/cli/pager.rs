@@ -181,7 +181,7 @@ mod tests {
     fn select_pager_single_command_has_no_args() {
         let (program, args) = select_pager(env(&[("PAGER", "more")])).expect("single command");
         assert_eq!(program, "more");
-        assert!(args.is_empty());
+        assert_eq!(args, [] as [std::string::String; 0]);
     }
 
     #[test]

@@ -161,7 +161,10 @@ fn session_delete_can_cancel_then_confirm_without_force() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
         .map(|path| (path.clone(), std::fs::read(path).unwrap()))
         .collect();
-    assert!(!current_bodies.is_empty());
+    assert_ne!(
+        current_bodies,
+        [] as [(std::path::PathBuf, std::vec::Vec<u8>); 0]
+    );
 
     for cancel in ["\x1b", "\r"] {
         child.send(&format!("/session delete {target}\r")).unwrap();

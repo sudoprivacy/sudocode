@@ -16,6 +16,7 @@ pub enum FieldType {
 
 impl FieldType {
     /// Human-readable label for error messages.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::String => "a string",
@@ -27,6 +28,7 @@ impl FieldType {
     }
 
     /// Check whether a JSON value conforms to this type.
+    #[must_use]
     pub fn matches(self, value: &crate::json::JsonValue) -> bool {
         match self {
             Self::String => value.as_str().is_some(),
@@ -449,11 +451,13 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
 // ── lookup helpers ──────────────────────────────────────────────────
 
 /// Find a field schema by key in a flat schema slice.
+#[must_use]
 pub fn find_field<'a>(schema: &'a [FieldSchema], key: &str) -> Option<&'a FieldSchema> {
     schema.iter().find(|f| f.key == key)
 }
 
 /// Collect all non-deprecated key names from a schema slice.
+#[must_use]
 pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
     schema
         .iter()
@@ -463,6 +467,7 @@ pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
 }
 
 /// Collect deprecated field entries from a schema slice.
+#[must_use]
 pub fn deprecated_fields(schema: &[FieldSchema]) -> Vec<&FieldSchema> {
     schema.iter().filter(|f| f.is_deprecated).collect()
 }
@@ -472,19 +477,20 @@ pub fn deprecated_fields(schema: &[FieldSchema]) -> Vec<&FieldSchema> {
 pub enum ConfigInputKind {
     /// Toggle immediately, no UI needed.
     BoolToggle,
-    /// Show DialPad with the given static options.
+    /// Show `DialPad` with the given static options.
     Enum(Vec<String>),
-    /// Show FuzzySelect — options fetched dynamically at runtime.
+    /// Show `FuzzySelect` — options fetched dynamically at runtime.
     DynamicList,
-    /// Show TextInput.
+    /// Show `TextInput`.
     Text,
-    /// Show TextInput for number entry.
+    /// Show `TextInput` for number entry.
     NumberInput,
     /// Open in $EDITOR (complex object/array).
     Editor,
 }
 
 /// Resolve the appropriate input kind for a field schema.
+#[must_use]
 pub fn resolve_input_kind(schema: &FieldSchema) -> ConfigInputKind {
     if schema.field_type == FieldType::Bool {
         return ConfigInputKind::BoolToggle;

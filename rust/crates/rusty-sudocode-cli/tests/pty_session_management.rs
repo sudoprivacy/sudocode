@@ -45,19 +45,20 @@ fn write_fixture_session(dir: &Path, messages: &[(&str, &str, &str)]) -> std::pa
     path
 }
 
-/// Write a fixture session with an edit_file tool result so /undo
+/// Write a fixture session with an `edit_file` tool result so /undo
 /// has something to revert.
 fn write_undo_fixture_session(dir: &Path, file_path: &str) -> std::path::PathBuf {
+    // Build each line as a serde_json::Value to avoid escaping hell.
+    use serde_json::json;
+
     let path = dir.join("undo-session.jsonl");
     let ws = dir.display().to_string();
     let fp = file_path.to_string();
-    // Build each line as a serde_json::Value to avoid escaping hell.
-    use serde_json::json;
     let meta = json!({
         "type": "session_meta", "version": 1,
         "session_id": "undo-session",
-        "created_at_ms": 1719000000000_u64,
-        "updated_at_ms": 1719000000000_u64,
+        "created_at_ms": 1_719_000_000_000_u64,
+        "updated_at_ms": 1_719_000_000_000_u64,
         "workspace_root": ws,
     });
     let user_msg = json!({
@@ -91,10 +92,7 @@ fn write_undo_fixture_session(dir: &Path, file_path: &str) -> std::path::PathBuf
         "type": "message",
         "message": { "role": "assistant", "blocks": [{ "type": "text", "text": "Done." }] }
     });
-    let content = format!(
-        "{}\n{}\n{}\n{}\n{}\n",
-        meta, user_msg, assistant_tool, tool_result, done
-    );
+    let content = format!("{meta}\n{user_msg}\n{assistant_tool}\n{tool_result}\n{done}\n");
     fs::write(&path, &content).expect("should write undo fixture session");
     path
 }
@@ -130,20 +128,20 @@ fn session_auto_save_creates_jsonl() {
     // Descend workspace_hash dir → per-session dir → transcript.jsonl.
     let jsonl_files: Vec<_> = fs::read_dir(&sessions_dir)
         .into_iter()
-        .flat_map(|rd| rd.into_iter())
-        .filter_map(|e| e.ok())
+        .flat_map(std::iter::IntoIterator::into_iter)
+        .filter_map(std::result::Result::ok)
         .flat_map(|hash_dir| {
             fs::read_dir(hash_dir.path())
                 .into_iter()
-                .flat_map(|rd| rd.into_iter())
+                .flat_map(std::iter::IntoIterator::into_iter)
         })
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .flat_map(|session_dir| {
             fs::read_dir(session_dir.path())
                 .into_iter()
-                .flat_map(|rd| rd.into_iter())
+                .flat_map(std::iter::IntoIterator::into_iter)
         })
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
         .collect();
     assert!(
@@ -158,33 +156,7 @@ fn concurrent_processes_save_uuid_sessions_without_replacing_each_other() {
     let env = common::TestEnv::new("session-process-ids");
     // Cold startup must publish one complete plugin snapshot before another
     // process discovers it. Multiple payload files expose partial copies.
-    let bundled_root = env.workspace_root().join("bundled");
-    let plugin_root = bundled_root.join("session-fixture");
-    let manifest_root = plugin_root.join(".sudocode-plugin");
-    fs::create_dir_all(&manifest_root).unwrap();
-    let manifest = serde_json::json!({
-        "name": "session-fixture",
-        "version": "1.0.0",
-        "description": "Concurrent startup fixture",
-        "defaultEnabled": false,
-    });
-    fs::write(
-        manifest_root.join("plugin.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    let payload = vec![b'x'; 16 * 1024];
-    for index in 0..128 {
-        fs::write(plugin_root.join(format!("payload-{index}")), &payload).unwrap();
-    }
-    fs::write(
-        env.config_home().join("settings.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "plugins": {"bundledRoot": bundled_root},
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let (manifest, payload) = seed_concurrent_plugin(&env);
     let prompt = env.prompt("Reply with exactly 4.", "single_turn_text");
     let mut processes: Vec<_> = (0..4)
         .map(|_| env.spawn(&["--permission-mode", "read-only", &prompt]))
@@ -326,13 +298,13 @@ fn resume_and_export_preserves_context() {
 // 3. /undo restores file on disk
 // ──────────────────────────────────────────────────────────────────────
 
-/// Human resumes a session that contains an edit_file result,
+/// Human resumes a session that contains an `edit_file` result,
 /// runs /undo, and verifies the file is restored on disk.
 ///
 /// Steps:
 /// 1. Create a file with "alpha parity line\nbeta line\n".
-/// 2. Modify it to simulate what edit_file did (alpha → omega).
-/// 3. Write a session JSONL with the edit_file tool result (with pre-image).
+/// 2. Modify it to simulate what `edit_file` did (alpha → omega).
+/// 3. Write a session JSONL with the `edit_file` tool result (with pre-image).
 /// 4. Spawn scode --resume <path> /undo
 /// 5. Verify file on disk is restored to original content.
 #[test]
@@ -390,7 +362,7 @@ fn undo_restores_file_on_disk() {
 /// Steps:
 /// 1. Write a session with 10+ messages.
 /// 2. Spawn scode --resume <path> /compact --output-format json
-/// 3. Verify JSON output contains removed_messages > 0.
+/// 3. Verify JSON output contains `removed_messages` > 0.
 #[test]
 fn compact_reduces_messages() {
     let workspace = HarnessWorkspace::new("compact");
@@ -450,7 +422,7 @@ fn compact_reduces_messages() {
         .unwrap_or_else(|error| {
             panic!(
                 "compact result: {error}\nPTY screen:\n{}",
-                sess.render(|s| s.contents())
+                sess.render(common::screen_contents)
             )
         });
 
@@ -555,4 +527,35 @@ fn resume_latest_restores_most_recent() {
     // the workspace where sessions were saved. The test validates the
     // mechanism works, not that it finds our fixture in all environments.
     let _ = exit;
+}
+
+fn seed_concurrent_plugin(env: &common::TestEnv) -> (serde_json::Value, Vec<u8>) {
+    let bundled_root = env.workspace_root().join("bundled");
+    let plugin_root = bundled_root.join("session-fixture");
+    let manifest_root = plugin_root.join(".sudocode-plugin");
+    fs::create_dir_all(&manifest_root).unwrap();
+    let manifest = serde_json::json!({
+        "name": "session-fixture",
+        "version": "1.0.0",
+        "description": "Concurrent startup fixture",
+        "defaultEnabled": false,
+    });
+    fs::write(
+        manifest_root.join("plugin.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let payload = vec![b'x'; 16 * 1024];
+    for index in 0..128 {
+        fs::write(plugin_root.join(format!("payload-{index}")), &payload).unwrap();
+    }
+    fs::write(
+        env.config_home().join("settings.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "plugins": {"bundledRoot": bundled_root},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (manifest, payload)
 }

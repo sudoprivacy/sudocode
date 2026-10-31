@@ -44,6 +44,12 @@ struct CapturedRequest {
 
 struct Capture {
     url: String,
+    shared: Arc<CaptureState>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+struct CaptureState {
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
     retry_next: Arc<AtomicBool>,
     pressure_next: Arc<AtomicBool>,
@@ -51,8 +57,13 @@ struct Capture {
     diagnostic_shape: Arc<AtomicUsize>,
     rejections: Arc<Mutex<VecDeque<String>>>,
     external_append: Arc<Mutex<Option<(std::path::PathBuf, String)>>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl std::ops::Deref for Capture {
+    type Target = CaptureState;
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
 }
 
 impl Capture {
@@ -64,26 +75,25 @@ impl Capture {
         let retry_next = Arc::new(AtomicBool::new(false));
         let pressure_next = Arc::new(AtomicBool::new(false));
         let thinking_blocks = Arc::new(AtomicBool::new(false));
-        let thinking = Arc::clone(&thinking_blocks);
         let diagnostic_shape = Arc::new(AtomicUsize::new(0));
-        let shape = Arc::clone(&diagnostic_shape);
         let rejections = Arc::new(Mutex::new(VecDeque::new()));
-        let failures = Arc::clone(&rejections);
         let external_append = Arc::new(Mutex::new(None));
-        let append = Arc::clone(&external_append);
         let stop = Arc::new(AtomicBool::new(false));
-        let (captured, retry, pressure, stopped) = (
-            Arc::clone(&requests),
-            Arc::clone(&retry_next),
-            Arc::clone(&pressure_next),
-            Arc::clone(&stop),
-        );
+        let shared = Arc::new(CaptureState {
+            requests,
+            retry_next,
+            pressure_next,
+            thinking_blocks,
+            diagnostic_shape,
+            rejections,
+            external_append,
+        });
+        let serving = Arc::clone(&shared);
+        let stopped = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((socket, _)) => serve(
-                        socket, &captured, &retry, &pressure, &thinking, &shape, &failures, &append,
-                    ),
+                    Ok((socket, _)) => serving.serve(socket),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -93,13 +103,7 @@ impl Capture {
         });
         Self {
             url,
-            requests,
-            retry_next,
-            pressure_next,
-            thinking_blocks,
-            diagnostic_shape,
-            rejections,
-            external_append,
+            shared,
             stop,
             thread: Some(worker),
         }
@@ -152,204 +156,198 @@ fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>, Vec<String>)> {
     Some((first, bytes, beta))
 }
 
-fn serve(
-    mut socket: TcpStream,
-    captured: &Mutex<Vec<CapturedRequest>>,
-    retry: &AtomicBool,
-    pressure: &AtomicBool,
-    thinking: &AtomicBool,
-    diagnostic_shape: &AtomicUsize,
-    rejections: &Mutex<VecDeque<String>>,
-    external_append: &Mutex<Option<(std::path::PathBuf, String)>>,
-) {
-    socket.set_nonblocking(false).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let Some((first, bytes, beta)) = read_request(&socket) else {
-        return;
-    };
-    if !first.starts_with("POST ") || first.contains("count_tokens") {
-        let body = if first.contains("count_tokens") {
-            "{\"input_tokens\":2000}"
-        } else {
-            "{\"data\":[]}"
+impl CaptureState {
+    fn serve(&self, mut socket: TcpStream) {
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let Some((first, bytes, beta)) = read_request(&socket) else {
+            return;
         };
-        respond(&mut socket, "200 OK", "application/json", body);
-        return;
-    }
-    let request: Value = serde_json::from_slice(&bytes).unwrap();
-    let binding = beta
-        .iter()
-        .any(|header| header.contains("thinking-binding-controls-2026-08-01"));
-    let number = {
-        let mut all = captured.lock().unwrap();
-        all.push(CapturedRequest {
-            body: request.clone(),
-            beta,
-        });
-        all.len()
-    };
-    if retry.swap(false, Ordering::Relaxed) {
-        respond(
-            &mut socket,
-            "503 Service Unavailable",
-            "application/json",
-            r#"{"type":"error","error":{"type":"overloaded_error","message":"retry fixture"}}"#,
-        );
-        return;
-    }
-    if let Some(message) = rejections.lock().unwrap().pop_front() {
-        if let Some((path, record)) = external_append.lock().unwrap().take() {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(path)
-                .unwrap()
-                .write_all(record.as_bytes())
-                .unwrap();
+        if !first.starts_with("POST ") || first.contains("count_tokens") {
+            let body = if first.contains("count_tokens") {
+                "{\"input_tokens\":2000}"
+            } else {
+                "{\"data\":[]}"
+            };
+            respond(&mut socket, "200 OK", "application/json", body);
+            return;
         }
-        respond(
-            &mut socket,
-            "400 Bad Request",
-            "application/json",
-            &json!({
-                "type":"error", "error":{"type":"invalid_request_error", "message":message}
-            })
-            .to_string(),
-        );
-        return;
+        let request: Value = serde_json::from_slice(&bytes).unwrap();
+        let binding = beta
+            .iter()
+            .any(|header| header.contains("thinking-binding-controls-2026-08-01"));
+        let number = {
+            let mut all = self.requests.lock().unwrap();
+            all.push(CapturedRequest {
+                body: request.clone(),
+                beta,
+            });
+            all.len()
+        };
+        if self.retry_next.swap(false, Ordering::Relaxed) {
+            respond(
+                &mut socket,
+                "503 Service Unavailable",
+                "application/json",
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"retry fixture"}}"#,
+            );
+            return;
+        }
+        if let Some(message) = self.rejections.lock().unwrap().pop_front() {
+            if let Some((path, record)) = self.external_append.lock().unwrap().take() {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .unwrap()
+                    .write_all(record.as_bytes())
+                    .unwrap();
+            }
+            respond(
+                &mut socket,
+                "400 Bad Request",
+                "application/json",
+                &json!({
+                    "type":"error", "error":{"type":"invalid_request_error", "message":message}
+                })
+                .to_string(),
+            );
+            return;
+        }
+        self.write_inference_response(&mut socket, &request, number, binding);
     }
-    let content = response_content(&request, number);
-    let usage = json!({"input_tokens": if pressure.swap(false, Ordering::Relaxed) { 990_000 } else { 2_000 },"output_tokens":100});
-    let tool_use = content["type"] == "tool_use";
-    let stop_reason = if tool_use { "tool_use" } else { "end_turn" };
-    let shape = diagnostic_shape.load(Ordering::Relaxed);
-    let diagnostics = json!({"marker":"缓存诊断 → café", "comparison":"fixture-only"});
-    if shape == DIAGNOSTIC_JSON {
-        let mut body = json!({"type":"message", "id":format!("reply_{number}"),
+    fn write_inference_response(
+        &self,
+        socket: &mut TcpStream,
+        request: &Value,
+        number: usize,
+        binding: bool,
+    ) {
+        let content = response_content(request, number);
+        let usage = json!({"input_tokens": if self.pressure_next.swap(false, Ordering::Relaxed) { 990_000 } else { 2_000 },"output_tokens":100});
+        let tool_use = content["type"] == "tool_use";
+        let stop_reason = if tool_use { "tool_use" } else { "end_turn" };
+        let shape = self.diagnostic_shape.load(Ordering::Relaxed);
+        let diagnostics = json!({"marker":"缓存诊断 → café", "comparison":"fixture-only"});
+        if shape == DIAGNOSTIC_JSON {
+            let mut body = json!({"type":"message", "id":format!("reply_{number}"),
             "role":"assistant", "model":request["model"], "content":[content],
             "stop_reason":stop_reason, "usage":usage, "diagnostics":diagnostics});
-        if binding {
-            body["input_transformations"] = json!([]);
+            if binding {
+                body["input_transformations"] = json!([]);
+            }
+            respond_fragmented(
+                socket,
+                "application/json",
+                &serde_json::to_string_pretty(&body).unwrap(),
+            );
+            return;
         }
-        respond_fragmented(
-            &mut socket,
-            "application/json",
-            &serde_json::to_string_pretty(&body).unwrap(),
-        );
-        return;
-    }
-    let start = if tool_use {
-        json!({"type":"tool_use","id":content["id"],"name":content["name"],"input":{}})
-    } else {
-        json!({"type":"text","text":""})
-    };
-    let delta = if tool_use {
-        // Live providers emit whitespace inside tool arguments. Their durable
-        // object representation must not look like an external history edit.
-        json!({"type":"input_json_delta","partial_json":serde_json::to_string_pretty(&content["input"]).unwrap()})
-    } else {
-        json!({"type":"text_delta","text":content["text"]})
-    };
-    let block_index = if thinking.load(Ordering::Relaxed) {
-        thinking_fixture(number).len()
-    } else {
-        0
-    };
-    let mut events = vec![
-        (
-            "message_start",
-            json!({"type":"message_start","message":{"id":format!("reply_{number}"),"type":"message","role":"assistant","content":[],"model":request["model"],"stop_reason":null,"usage":usage}}),
-        ),
-        (
-            "content_block_start",
-            json!({"type":"content_block_start","index":block_index,"content_block":start}),
-        ),
-        (
-            "content_block_delta",
-            json!({"type":"content_block_delta","index":block_index,"delta":delta}),
-        ),
-        (
-            "content_block_stop",
-            json!({"type":"content_block_stop","index":block_index}),
-        ),
-        (
-            "message_delta",
-            json!({"type":"message_delta","delta":{"stop_reason":stop_reason},"usage":usage}),
-        ),
-        ("message_stop", json!({"type":"message_stop"})),
-    ];
-    if shape == RESTARTED_MESSAGE {
-        events.insert(
+        let start = if tool_use {
+            json!({"type":"tool_use","id":content["id"],"name":content["name"],"input":{}})
+        } else {
+            json!({"type":"text","text":""})
+        };
+        let delta = if tool_use {
+            // Live providers emit whitespace inside tool arguments. Their durable
+            // object representation must not look like an external history edit.
+            json!({"type":"input_json_delta","partial_json":serde_json::to_string_pretty(&content["input"]).unwrap()})
+        } else {
+            json!({"type":"text_delta","text":content["text"]})
+        };
+        let block_index = if self.thinking_blocks.load(Ordering::Relaxed) {
+            thinking_fixture(number).len()
+        } else {
+            0
+        };
+        let mut events = vec![
+            (
+                "message_start",
+                json!({"type":"message_start","message":{"id":format!("reply_{number}"),"type":"message","role":"assistant","content":[],"model":request["model"],"stop_reason":null,"usage":usage}}),
+            ),
+            (
+                "content_block_start",
+                json!({"type":"content_block_start","index":block_index,"content_block":start}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type":"content_block_delta","index":block_index,"delta":delta}),
+            ),
+            (
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":block_index}),
+            ),
+            (
+                "message_delta",
+                json!({"type":"message_delta","delta":{"stop_reason":stop_reason},"usage":usage}),
+            ),
+            ("message_stop", json!({"type":"message_stop"})),
+        ];
+        if shape == RESTARTED_MESSAGE {
+            events.insert(
             0,
             (
                 "message_start",
                 json!({"type":"message_start","message":{
                     "id":"abandoned-attempt", "type":"message", "role":"assistant", "content":[],
                     "model":request["model"], "usage":{"input_tokens":2,
-                    "cache_creation_input_tokens":5235,"cache_read_input_tokens":124730}
+                    "cache_creation_input_tokens":5235,"cache_read_input_tokens":124_730}
                 }}),
             ),
         );
-    }
-    if shape == INTERRUPTED_MESSAGE {
-        events.truncate(1);
-        diagnostic_shape.store(0, Ordering::Relaxed);
-    }
-    if binding {
-        events[0].1["message"]["input_transformations"] = json!([]);
-        if number == 4 {
-            events[4].1["input_transformations"] = json!([{
-                "type":"thinking_dropped", "reason":"model_binding_mismatch",
-                "path":"messages.1.content.0", "signature":"never-log-provider-blocks"
-            }]);
+        }
+        if shape == INTERRUPTED_MESSAGE {
+            events.truncate(1);
+            self.diagnostic_shape.store(0, Ordering::Relaxed);
+        }
+        if binding {
+            events[0].1["message"]["input_transformations"] = json!([]);
+            if number == 4 {
+                events[4].1["input_transformations"] = json!([{
+                    "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                    "path":"messages.1.content.0", "signature":"never-log-provider-blocks"
+                }]);
+            }
+        }
+        if shape == DIAGNOSTIC_SSE {
+            events[0].1["message"]["diagnostics"] = diagnostics;
+        }
+        if block_index > 0 {
+            events.splice(1..1, thinking_stream_events(number));
+        }
+        let body = encode_capture_events(events, shape);
+        if shape == DIAGNOSTIC_SSE {
+            respond_fragmented(socket, "text/event-stream", &body);
+        } else {
+            respond(socket, "200 OK", "text/event-stream", &body);
         }
     }
-    if shape == DIAGNOSTIC_SSE {
-        events[0].1["message"]["diagnostics"] = diagnostics;
-    }
-    if block_index > 0 {
-        let mut prefix = Vec::new();
-        for (index, block) in thinking_fixture(number).into_iter().enumerate() {
-            if block["type"] == "thinking" {
-                prefix.push(("content_block_start", json!({"type":"content_block_start","index":index,"content_block":{"type":"thinking","thinking":""}})));
-                prefix.push(("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":block["thinking"]}})));
-                // Signatures can span deltas, even with no readable text.
-                let signature = block["signature"].as_str().unwrap();
-                for chunk in [&signature[..4], &signature[4..]] {
-                    prefix.push(("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":chunk}})));
-                }
-            } else {
-                prefix.push((
-                    "content_block_start",
-                    json!({"type":"content_block_start","index":index,"content_block":block}),
-                ));
+}
+
+fn thinking_stream_events(number: usize) -> Vec<(&'static str, Value)> {
+    let mut prefix = Vec::new();
+    for (index, block) in thinking_fixture(number).into_iter().enumerate() {
+        if block["type"] == "thinking" {
+            prefix.push(("content_block_start", json!({"type":"content_block_start","index":index,"content_block":{"type":"thinking","thinking":""}})));
+            prefix.push(("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":block["thinking"]}})));
+            // Signatures can span deltas, even with no readable text.
+            let signature = block["signature"].as_str().unwrap();
+            for chunk in [&signature[..4], &signature[4..]] {
+                prefix.push(("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":chunk}})));
             }
+        } else {
             prefix.push((
-                "content_block_stop",
-                json!({"type":"content_block_stop","index":index}),
+                "content_block_start",
+                json!({"type":"content_block_start","index":index,"content_block":block}),
             ));
         }
-        events.splice(1..1, prefix);
+        prefix.push((
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":index}),
+        ));
     }
-    let mut body = format!(": {RESPONSE_LOG_ONLY}\n\n");
-    for (event, data) in events {
-        if shape == DIAGNOSTIC_SSE {
-            // Legal multi-line SSE data, JSON whitespace and CRLF framing.
-            write!(body, "event: {event}\r\n").unwrap();
-            for line in serde_json::to_string_pretty(&data).unwrap().lines() {
-                write!(body, "data: {line}\r\n").unwrap();
-            }
-            body.push_str("\r\n");
-        } else {
-            write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
-        }
-    }
-    if shape == DIAGNOSTIC_SSE {
-        respond_fragmented(&mut socket, "text/event-stream", &body);
-    } else {
-        respond(&mut socket, "200 OK", "text/event-stream", &body);
-    }
+    prefix
 }
 
 fn respond_fragmented(socket: &mut TcpStream, mime: &str, body: &str) {
@@ -685,35 +683,13 @@ fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
             archived_bytes.starts_with(&before_bytes),
             "archive retains the original durable bytes and appended prompt"
         );
-        let archived = Session::load_from_path(&archives[0]).unwrap();
+        let saved_archive = Session::load_from_path(&archives[0]).unwrap();
         assert_eq!(
-            &archived.messages()[..before.messages().len()],
+            &saved_archive.messages()[..before.messages().len()],
             before.messages()
         );
         let repaired = Session::load_from_path(&path).unwrap();
-        for (old, new) in before.messages().iter().zip(repaired.messages()) {
-            let mut expected = old.clone();
-            if expected.role == runtime::MessageRole::Assistant {
-                expected.blocks.retain(|block| {
-                    !matches!(
-                        block,
-                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-                    )
-                });
-            }
-            if expected.blocks != old.blocks {
-                assert_ne!(
-                    old.history.as_ref().map(|identity| &identity.id),
-                    new.history.as_ref().map(|identity| &identity.id),
-                    "changed signed content must have a new immutable identity"
-                );
-            }
-            expected.history.clone_from(&new.history);
-            assert_eq!(
-                &expected, new,
-                "text, tool records and usage stay unchanged"
-            );
-        }
+        assert_repaired_signed_history(&before, &repaired);
         turn(
             &mut cli,
             "Keep the new signed response on the next request.",
@@ -727,45 +703,7 @@ fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
         assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
         assert_eq!(repair_archives(&path).len(), 1);
         exit(&mut cli);
-        let log = std::fs::read_to_string(env.workspace_root().join("cache-prefix-requests.jsonl"))
-            .unwrap();
-        let events: Vec<Value> = log
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| e["event"] == "thinking_history_repaired")
-                .count(),
-            1
-        );
-        let acks: Vec<_> = events
-            .iter()
-            .filter(|e| e["event"] == "thinking_input_transformations")
-            .collect();
-        assert!(
-            (5..=6).contains(&acks.len()),
-            "mode={mode}, acknowledgments={}, attributes={:?}, PTY:\n{}",
-            acks.len(),
-            acks.iter()
-                .map(|event| &event["attributes"])
-                .collect::<Vec<_>>(),
-            cli.render(|screen| screen.contents())
-        );
-        let final_updates: Vec<_> = acks
-            .iter()
-            .filter(|e| e["attributes"]["count"] == 1)
-            .collect();
-        assert_eq!(final_updates.len(), 1);
-        assert_eq!(
-            final_updates[0]["attributes"]["transformations"],
-            json!([{
-                "type":"thinking_dropped", "reason":"model_binding_mismatch",
-                "path":"messages.1.content.0"
-            }])
-        );
-        assert!(!log.contains("never-log-provider-blocks"));
+        assert_thinking_repair_observations(&env, &cli, mode);
     }
 }
 
@@ -790,7 +728,14 @@ fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
         let mut cli = spawn(&env, &path);
         cli.send("Continue despite the deliberately rejected request.\r")
             .unwrap();
-        cli.expect("recovery-test-rejection").unwrap();
+        // ConPTY may split a visible phrase across cursor updates or wraps.
+        // Assert the rendered UI, preserving the original per-platform budget.
+        common::expect_screen(
+            &cli,
+            |screen| common::screen_contains(screen, "recovery-test-rejection"),
+            common::DEFAULT_TIMEOUT,
+            "the rejected request must display its actual error",
+        );
         common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
         assert_eq!(capture.bodies().len(), attempts);
         assert_eq!(repair_archives(&path).len(), archives);
@@ -817,10 +762,15 @@ fn thinking_repair_preserves_a_concurrent_transcript_append() {
     let mut cli = spawn(&env, &path);
     cli.send("Continue while another writer appends history.\r")
         .unwrap();
-    cli.expect("Thinking repair preserved history").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| common::screen_contains(screen, "Thinking repair preserved history"),
+        common::DEFAULT_TIMEOUT,
+        "the concurrent history conflict must display its preservation notice",
+    );
     common::expect_input_line_cleared(&cli, WAIT, "concurrent edit preserved");
     assert_eq!(capture.bodies().len(), 1);
-    assert!(repair_archives(&path).is_empty());
+    assert_eq!(repair_archives(&path), [] as [std::path::PathBuf; 0]);
     assert!(std::fs::read_to_string(&path)
         .unwrap()
         .contains("EXTERNAL_APPEND_MUST_SURVIVE"));
@@ -850,7 +800,7 @@ fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
         let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
         cli.expect(error).unwrap();
         assert_ne!(cli.expect_eof().unwrap(), 0);
-        assert!(capture.bodies().is_empty());
+        assert_eq!(capture.bodies(), [] as [serde_json::Value; 0]);
     }
     config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":[]});
     std::fs::write(config_path, config.to_string()).unwrap();
@@ -858,7 +808,10 @@ fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
     turn(&mut cli, "Continue after correcting the beta list.");
     exit(&mut cli);
     assert_eq!(capture.bodies().len(), 1);
-    assert!(capture.requests.lock().unwrap()[0].beta.is_empty());
+    assert_eq!(
+        capture.requests.lock().unwrap()[0].beta,
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -897,20 +850,7 @@ fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
         let mut cli = start();
         turn(&mut cli, "Continue with adaptive thinking.");
         let baseline = capture.bodies()[0].clone();
-        assert_eq!(baseline["model"], model);
-        assert_eq!(
-            baseline["thinking"],
-            json!({"type":"adaptive","display":"summarized"})
-        );
-        assert_eq!(
-            baseline["output_config"]["effort"],
-            if model.contains("4-8") {
-                "xhigh"
-            } else {
-                "max"
-            }
-        );
-        assert!(baseline.get("reasoning_effort").is_none());
+        assert_adaptive_baseline(&baseline, model);
         turn(&mut cli, "Continue the next step.");
         assert_thinking_replayed(&capture.bodies()[1], 1);
         let response_dir = Session::response_captures_dir_for(
@@ -918,34 +858,7 @@ fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
             &Session::load_from_path(&path).unwrap().session_id,
         )
         .unwrap();
-        common::expect_screen(
-            &cli,
-            |_| {
-                let bodies = response_body_paths(&response_dir);
-                bodies.len() == 2
-                    && bodies.iter().all(|path| {
-                        std::fs::read(path.with_extension("").with_extension("json"))
-                            .ok()
-                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                            .is_some_and(|metadata| metadata["gzip_complete"] == true)
-                    })
-            },
-            WAIT,
-            "two background response logs finalized",
-        );
-        let before_compact: Vec<_> = response_body_paths(&response_dir)
-            .into_iter()
-            .map(|path| {
-                let bytes = std::fs::read(&path).unwrap();
-                let mut body = String::new();
-                flate2::read::GzDecoder::new(bytes.as_slice())
-                    .read_to_string(&mut body)
-                    .unwrap();
-                assert!(body.contains(RESPONSE_LOG_ONLY));
-                (path, bytes)
-            })
-            .collect();
-        assert_eq!(before_compact.len(), 2);
+        let before_compact = await_original_response_archives(&cli, &response_dir);
         assert!(!common::screen_tail(&cli, 12000).contains(RESPONSE_LOG_ONLY));
         cli.send("/compact\r").unwrap();
         cli.expect("Messages removed").unwrap_or_else(|error| {
@@ -1121,7 +1034,7 @@ fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss(
         let env = TestEnv::new_mock("tool-input-history");
         let capture = Capture::new();
         let path = fixture(&env, &capture);
-        let input = json!({"fraction":0.375,"exponent":1.25e-7,"large":18446744073709551615u64,"nested":{"label":"缓存 → café 😀","list":[true,null,0.0625]}});
+        let input = json!({"fraction":0.375,"exponent":1.25e-7,"large":18_446_744_073_709_551_615_u64,"nested":{"label":"缓存 → café 😀","list":[true,null,0.0625]}});
         let raw_input = input.to_string().replace('😀', r"\ud83d\ude00");
         let mut session = Session::load_from_path(&path).unwrap();
         session
@@ -1148,50 +1061,7 @@ fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss(
         session.save_to_path(&path).unwrap();
         drop(session);
         if legacy || changed_input {
-            let raw = std::fs::read_to_string(&path).unwrap();
-            let mut changed_message = None;
-            let mut rewritten: Vec<String> = raw
-                .lines()
-                .map(|line| {
-                    let mut row: Value = serde_json::from_str(line).unwrap();
-                    let mut is_changed = false;
-                    if let Some(blocks) = row["message"]["blocks"].as_array_mut() {
-                        for block in blocks {
-                            if block["id"] == "history-input" {
-                                block["input"] = if changed_input {
-                                    is_changed = true;
-                                    let mut changed = input.clone();
-                                    changed["fraction"] = json!(0.75);
-                                    changed
-                                } else {
-                                    json!(raw_input)
-                                };
-                            }
-                        }
-                    }
-                    if is_changed {
-                        changed_message = Some(row["message"].clone());
-                        line.to_owned()
-                    } else {
-                        row.to_string()
-                    }
-                })
-                .collect();
-            if changed_input {
-                let mut checkpoint = rewritten
-                    .iter()
-                    .rev()
-                    .find_map(|line| {
-                        let row: Value = serde_json::from_str(line).unwrap();
-                        (row["type"] == "history_checkpoint").then_some(row)
-                    })
-                    .unwrap();
-                checkpoint["parent_id"] = checkpoint["id"].clone();
-                checkpoint["id"] = json!("changed-input-checkpoint");
-                checkpoint["messages"] = json!([changed_message.expect("stored tool message")]);
-                rewritten.push(checkpoint.to_string());
-            }
-            std::fs::write(&path, rewritten.join("\n") + "\n").unwrap();
+            rewrite_sensor_input_fixture(&path, &input, &raw_input, changed_input);
         }
         if changed_input {
             let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
@@ -1199,7 +1069,7 @@ fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss(
             cli.expect("checkpoint changes an existing message")
                 .unwrap();
             cli.expect_eof().unwrap();
-            assert!(capture.bodies().is_empty());
+            assert_eq!(capture.bodies(), [] as [serde_json::Value; 0]);
             continue;
         }
         let mut cli = spawn(&env, &path);
@@ -1250,7 +1120,7 @@ fn model_picker_selects_effort_and_cancel_keeps_the_original_choice() {
         cli.expect("Select effort").unwrap_or_else(|error| {
             panic!(
                 "effort picker: {error}\n{}",
-                cli.render(|screen| screen.contents())
+                cli.render(common::screen_contents)
             )
         });
         cli.send("\x1b").unwrap();
@@ -1594,7 +1464,12 @@ fn peer_description_survives_failed_checkpoint_and_pruning_without_a_model_call(
         .push_back("invalid max_tokens recovery-test-rejection".into());
     let mut cli = spawn(&env, &path);
     cli.send("/compact\r").unwrap();
-    cli.expect("recovery-test-rejection").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| common::screen_contains(screen, "recovery-test-rejection"),
+        common::DEFAULT_TIMEOUT,
+        "the failed checkpoint must display its actual error",
+    );
     common::expect_input_line_cleared(&cli, WAIT, "failed checkpoint preserves description");
     exit(&mut cli);
     assert_eq!(previous.as_bytes(), std::fs::read(&metadata).unwrap());
@@ -1853,24 +1728,7 @@ fn cache_diagnostics_survive_resume_without_crossing_session_boundaries() {
             .collect();
         ids.sort();
         assert_eq!(ids, ["reply_4", "reply_6"]);
-        let diagnoses: Vec<_> = std::fs::read_dir(dump)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .ends_with("-cache-diagnosis.json")
-            })
-            .map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap())
-            .collect();
-        assert_eq!(diagnoses.len(), 4);
-        for diagnosis in diagnoses {
-            assert_eq!(
-                diagnosis["diagnostics"]["marker"], "缓存诊断 → café",
-                "UTF-8 must survive arbitrary HTTP chunks"
-            );
-        }
+        assert_cache_diagnosis_dumps(dump);
     }
 }
 
@@ -1925,27 +1783,7 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
 
     // Synthetic history, not a measurement of the fake server's cache. It is
     // written before the boundary, so the next decision cannot see the future.
-    let mut history = String::new();
-    for index in 0..10u64 {
-        let mut row = template.clone();
-        row["gateway_request_id"] = json!(format!("fixture-{index}"));
-        row["provider_request_id"] = Value::Null;
-        let at = start - (11 - index) * 600_000;
-        row["observation"]["request_started_ms"] = json!(at);
-        row["observation"]["response_started_ms"] = json!(at + 1);
-        row["observation"]["response_completed_ms"] = json!(at + 2);
-        row["observation"]["client_prefix_compatible"] = json!(true);
-        row["cache_creation_input_tokens"] = json!(100_000);
-        row["cache_read_input_tokens"] = json!(0);
-        writeln!(history, "{row}").unwrap();
-        if index == 4 {
-            writeln!(history, "{{\"model\":\"claude-opus-5-5\"}}").unwrap();
-        }
-    }
-    for row in rows {
-        writeln!(history, "{row}").unwrap();
-    }
-    std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+    seed_malformed_ttl_history(&directory, &rows, start);
     turn(
         &mut cli,
         "History alone must not re-decide inside this context.",
@@ -2060,60 +1898,7 @@ fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
         }
         exit(&mut cli);
         let rows = cache_rows(&directory);
-        let o = &rows.last().unwrap()["observation"];
-        match mode {
-            "off" => {
-                assert!(o.is_null());
-                assert!(!directory.join("ttl-advice.json").exists());
-            }
-            "retry" => assert!(o["attempts"].as_u64().unwrap() >= 2),
-            "interrupted" => {
-                assert!(
-                    rows.iter().any(|r| r["observation"]["completed"] == false
-                        && r["input_tokens"].as_u64().unwrap_or(0) > 0),
-                    "interrupted observed usage must survive separately from the retry"
-                );
-                assert_eq!(o["completed"], true);
-                assert_eq!(
-                    o["attempts"], 1,
-                    "empty-response fallback opens a distinct HTTP request scope"
-                );
-                assert_eq!(capture.bodies().len(), 2);
-                let partial = &rows.first().unwrap()["observation"];
-                assert!(
-                    partial["response_completed_ms"].as_u64().unwrap()
-                        <= o["request_started_ms"].as_u64().unwrap(),
-                    "consumed partial usage must be recorded before the fallback"
-                );
-                assert!(
-                    o["client_prefix_compatible"].is_null(),
-                    "an incomplete response must not advance the successful prefix state"
-                );
-            }
-            "restarted" => {
-                assert_eq!(
-                    o["message_starts"], 1,
-                    "reject the second start before it changes usage"
-                );
-                assert_eq!(o["completed"], false);
-                assert_eq!(rows.last().unwrap()["cache_creation_input_tokens"], 5235);
-                assert_eq!(rows.last().unwrap()["cache_read_input_tokens"], 124730);
-                let diagnostics: Value = serde_json::from_str(
-                    &std::fs::read_to_string(directory.join("cache-diagnostics.json")).unwrap(),
-                )
-                .unwrap();
-                assert_eq!(
-                    diagnostics["message_id"], "abandoned-attempt",
-                    "the rejected start must not replace the accepted diagnostic identity"
-                );
-                assert_eq!(
-                    capture.bodies().len(),
-                    1,
-                    "never replay an invalid upstream restart"
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_ttl_attempt_observations(&rows, &directory, &capture, mode);
     }
 }
 
@@ -3097,4 +2882,301 @@ fn global_memory_writes_respect_read_only_and_explicit_deny() {
             .iter()
             .any(|body| body["messages"].to_string().contains("tool_result")));
     }
+}
+
+fn encode_capture_events(events: Vec<(&'static str, Value)>, shape: usize) -> String {
+    let mut body = format!(": {RESPONSE_LOG_ONLY}\n\n");
+    for (event, data) in events {
+        if shape == DIAGNOSTIC_SSE {
+            // Legal multi-line SSE data, JSON whitespace and CRLF framing.
+            write!(body, "event: {event}\r\n").unwrap();
+            for line in serde_json::to_string_pretty(&data).unwrap().lines() {
+                write!(body, "data: {line}\r\n").unwrap();
+            }
+            body.push_str("\r\n");
+        } else {
+            mock_anthropic_service::append_sse(&mut body, event, data);
+        }
+    }
+    body
+}
+
+fn assert_repaired_signed_history(before: &Session, repaired: &Session) {
+    for (old, new) in before.messages().iter().zip(repaired.messages()) {
+        let mut expected = old.clone();
+        if expected.role == runtime::MessageRole::Assistant {
+            expected.blocks.retain(|block| {
+                !matches!(
+                    block,
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                )
+            });
+        }
+        if expected.blocks != old.blocks {
+            assert_ne!(
+                old.history.as_ref().map(|identity| &identity.id),
+                new.history.as_ref().map(|identity| &identity.id),
+                "changed signed content must have a new immutable identity"
+            );
+        }
+        expected.history.clone_from(&new.history);
+        assert_eq!(
+            &expected, new,
+            "text, tool records and usage stay unchanged"
+        );
+    }
+}
+
+fn assert_thinking_repair_observations(env: &TestEnv, cli: &PtySession, mode: &str) {
+    let log =
+        std::fs::read_to_string(env.workspace_root().join("cache-prefix-requests.jsonl")).unwrap();
+    let events: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "thinking_history_repaired")
+            .count(),
+        1
+    );
+    let acks: Vec<_> = events
+        .iter()
+        .filter(|e| e["event"] == "thinking_input_transformations")
+        .collect();
+    assert!(
+        (5..=6).contains(&acks.len()),
+        "mode={mode}, acknowledgments={}, attributes={:?}, PTY:\n{}",
+        acks.len(),
+        acks.iter()
+            .map(|event| &event["attributes"])
+            .collect::<Vec<_>>(),
+        cli.render(common::screen_contents)
+    );
+    let final_updates: Vec<_> = acks
+        .iter()
+        .filter(|e| e["attributes"]["count"] == 1)
+        .collect();
+    assert_eq!(final_updates.len(), 1);
+    assert_eq!(
+        final_updates[0]["attributes"]["transformations"],
+        json!([{
+            "type":"thinking_dropped", "reason":"model_binding_mismatch",
+            "path":"messages.1.content.0"
+        }])
+    );
+    assert!(!log.contains("never-log-provider-blocks"));
+}
+
+fn await_original_response_archives(
+    cli: &PtySession,
+    response_dir: &std::path::Path,
+) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    common::expect_screen(
+        cli,
+        |_| {
+            let bodies = response_body_paths(response_dir);
+            bodies.len() == 2
+                && bodies.iter().all(|path| {
+                    std::fs::read(path.with_extension("").with_extension("json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                        .is_some_and(|metadata| metadata["gzip_complete"] == true)
+                })
+        },
+        WAIT,
+        "two background response logs finalized",
+    );
+    let before_compact: Vec<_> = response_body_paths(response_dir)
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut body = String::new();
+            flate2::read::GzDecoder::new(bytes.as_slice())
+                .read_to_string(&mut body)
+                .unwrap();
+            assert!(body.contains(RESPONSE_LOG_ONLY));
+            (path, bytes)
+        })
+        .collect();
+    assert_eq!(before_compact.len(), 2);
+    before_compact
+}
+
+fn rewrite_sensor_input_fixture(
+    path: &std::path::Path,
+    input: &Value,
+    raw_input: &str,
+    changed_input: bool,
+) {
+    let raw = std::fs::read_to_string(path).unwrap();
+    let mut changed_message = None;
+    let mut rewritten: Vec<String> = raw
+        .lines()
+        .map(|line| {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            let mut is_changed = false;
+            if let Some(blocks) = row["message"]["blocks"].as_array_mut() {
+                for block in blocks {
+                    if block["id"] == "history-input" {
+                        block["input"] = if changed_input {
+                            is_changed = true;
+                            let mut changed = input.clone();
+                            changed["fraction"] = json!(0.75);
+                            changed
+                        } else {
+                            json!(raw_input)
+                        };
+                    }
+                }
+            }
+            if is_changed {
+                changed_message = Some(row["message"].clone());
+                line.to_owned()
+            } else {
+                row.to_string()
+            }
+        })
+        .collect();
+    if changed_input {
+        let mut checkpoint = rewritten
+            .iter()
+            .rev()
+            .find_map(|line| {
+                let row: Value = serde_json::from_str(line).unwrap();
+                (row["type"] == "history_checkpoint").then_some(row)
+            })
+            .unwrap();
+        checkpoint["parent_id"] = checkpoint["id"].clone();
+        checkpoint["id"] = json!("changed-input-checkpoint");
+        checkpoint["messages"] = json!([changed_message.expect("stored tool message")]);
+        rewritten.push(checkpoint.to_string());
+    }
+    std::fs::write(path, rewritten.join("\n") + "\n").unwrap();
+}
+
+fn assert_cache_diagnosis_dumps(dump: &str) {
+    let diagnoses: Vec<_> = std::fs::read_dir(dump)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-cache-diagnosis.json")
+        })
+        .map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap())
+        .collect();
+    assert_eq!(diagnoses.len(), 4);
+    for diagnosis in diagnoses {
+        assert_eq!(
+            diagnosis["diagnostics"]["marker"], "缓存诊断 → café",
+            "UTF-8 must survive arbitrary HTTP chunks"
+        );
+    }
+}
+
+fn seed_malformed_ttl_history(directory: &std::path::Path, rows: &[Value], start: u64) {
+    let template = rows.last().unwrap();
+    let mut history = String::new();
+    for index in 0..10u64 {
+        let mut row = template.clone();
+        row["gateway_request_id"] = json!(format!("fixture-{index}"));
+        row["provider_request_id"] = Value::Null;
+        let at = start - (11 - index) * 600_000;
+        row["observation"]["request_started_ms"] = json!(at);
+        row["observation"]["response_started_ms"] = json!(at + 1);
+        row["observation"]["response_completed_ms"] = json!(at + 2);
+        row["observation"]["client_prefix_compatible"] = json!(true);
+        row["cache_creation_input_tokens"] = json!(100_000);
+        row["cache_read_input_tokens"] = json!(0);
+        writeln!(history, "{row}").unwrap();
+        if index == 4 {
+            writeln!(history, "{{\"model\":\"claude-opus-5-5\"}}").unwrap();
+        }
+    }
+    for row in rows {
+        writeln!(history, "{row}").unwrap();
+    }
+    std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+}
+
+fn assert_ttl_attempt_observations(
+    rows: &[Value],
+    directory: &std::path::Path,
+    capture: &Capture,
+    mode: &str,
+) {
+    let o = &rows.last().unwrap()["observation"];
+    match mode {
+        "off" => {
+            assert!(o.is_null());
+            assert!(!directory.join("ttl-advice.json").exists());
+        }
+        "retry" => assert!(o["attempts"].as_u64().unwrap() >= 2),
+        "interrupted" => {
+            assert!(
+                rows.iter().any(|r| r["observation"]["completed"] == false
+                    && r["input_tokens"].as_u64().unwrap_or(0) > 0),
+                "interrupted observed usage must survive separately from the retry"
+            );
+            assert_eq!(o["completed"], true);
+            assert_eq!(
+                o["attempts"], 1,
+                "empty-response fallback opens a distinct HTTP request scope"
+            );
+            assert_eq!(capture.bodies().len(), 2);
+            let partial = &rows.first().unwrap()["observation"];
+            assert!(
+                partial["response_completed_ms"].as_u64().unwrap()
+                    <= o["request_started_ms"].as_u64().unwrap(),
+                "consumed partial usage must be recorded before the fallback"
+            );
+            assert!(
+                o["client_prefix_compatible"].is_null(),
+                "an incomplete response must not advance the successful prefix state"
+            );
+        }
+        "restarted" => {
+            assert_eq!(
+                o["message_starts"], 1,
+                "reject the second start before it changes usage"
+            );
+            assert_eq!(o["completed"], false);
+            assert_eq!(rows.last().unwrap()["cache_creation_input_tokens"], 5235);
+            assert_eq!(rows.last().unwrap()["cache_read_input_tokens"], 124_730);
+            let diagnostics: Value = serde_json::from_str(
+                &std::fs::read_to_string(directory.join("cache-diagnostics.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                diagnostics["message_id"], "abandoned-attempt",
+                "the rejected start must not replace the accepted diagnostic identity"
+            );
+            assert_eq!(
+                capture.bodies().len(),
+                1,
+                "never replay an invalid upstream restart"
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn assert_adaptive_baseline(baseline: &Value, model: &str) {
+    assert_eq!(baseline["model"], model);
+    assert_eq!(
+        baseline["thinking"],
+        json!({"type":"adaptive","display":"summarized"})
+    );
+    assert_eq!(
+        baseline["output_config"]["effort"],
+        if model.contains("4-8") {
+            "xhigh"
+        } else {
+            "max"
+        }
+    );
+    assert!(baseline.get("reasoning_effort").is_none());
 }

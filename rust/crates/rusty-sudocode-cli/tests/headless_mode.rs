@@ -66,9 +66,9 @@ impl Fixture {
     fn run(&self, args: &[&str], input: Option<&[u8]>) -> Output {
         let mut cmd = self.command();
         cmd.args(args);
-        self.run_command(cmd, input)
+        Self::run_command(cmd, input)
     }
-    fn run_command(&self, mut cmd: Command, input: Option<&[u8]>) -> Output {
+    fn run_command(mut cmd: Command, input: Option<&[u8]>) -> Output {
         if input.is_some() {
             cmd.stdin(Stdio::piped());
         }
@@ -116,13 +116,16 @@ fn node_model_route_fails_at_the_node_without_http_fallback() {
         "sonnet",
         "--output-format=json",
     ]);
-    let out = f.run_command(cmd, None);
+    let out = Fixture::run_command(cmd, None);
     assert!(!out.status.success());
     let result = json_output(&out);
     let error = result["error"].as_str().unwrap();
     assert!(error.contains("Nexus model write"), "{result}");
     assert!(error.to_lowercase().contains("unavailable"), "{result}");
-    assert!(f.runtime.block_on(f.server.captured_requests()).is_empty());
+    assert_eq!(
+        f.runtime.block_on(f.server.captured_requests()),
+        [] as [mock_anthropic_service::CapturedRequest; 0]
+    );
 
     // A node used only for peers does not change an explicitly direct model.
     fs::write(config, original).unwrap();
@@ -136,7 +139,7 @@ fn node_model_route_fails_at_the_node_without_http_fallback() {
         "read-only",
         "--output-format=json",
     ]);
-    let out = f.run_command(cmd, None);
+    let out = Fixture::run_command(cmd, None);
     assert!(
         out.status.success(),
         "{}",
@@ -146,7 +149,10 @@ fn node_model_route_fails_at_the_node_without_http_fallback() {
         json_output(&out)["result"],
         "read_file roundtrip complete: alpha parity line"
     );
-    assert!(!f.runtime.block_on(f.server.captured_requests()).is_empty());
+    assert_ne!(
+        f.runtime.block_on(f.server.captured_requests()),
+        [] as [mock_anthropic_service::CapturedRequest; 0]
+    );
 }
 
 fn json_output(out: &Output) -> Value {
@@ -309,7 +315,10 @@ fn permissions_never_prompt_and_questions_require_input() {
             None,
         );
         let value = json_output(&out);
-        assert!(!value["permission_denials"].as_array().unwrap().is_empty());
+        assert_ne!(
+            value["permission_denials"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
         assert!(!String::from_utf8_lossy(&out.stdout).contains("Approve this tool call?"));
     }
     let out = f.run(
@@ -351,7 +360,10 @@ fn input_pipe_without_task_has_a_deadline() {
         .as_str()
         .unwrap()
         .contains("no stdin data received"));
-    assert!(f.runtime.block_on(f.server.captured_requests()).is_empty());
+    assert_eq!(
+        f.runtime.block_on(f.server.captured_requests()),
+        [] as [mock_anthropic_service::CapturedRequest; 0]
+    );
 }
 
 #[test]
@@ -544,7 +556,10 @@ fn oversized_input_is_rejected_before_the_provider_is_called() {
         .as_str()
         .unwrap()
         .contains("16 MiB"));
-    assert!(f.runtime.block_on(f.server.captured_requests()).is_empty());
+    assert_eq!(
+        f.runtime.block_on(f.server.captured_requests()),
+        [] as [mock_anthropic_service::CapturedRequest; 0]
+    );
 }
 
 #[test]
@@ -657,5 +672,8 @@ fn input_that_starts_but_never_closes_is_rejected() {
         .as_str()
         .unwrap()
         .contains("EOF within 30s"));
-    assert!(f.runtime.block_on(f.server.captured_requests()).is_empty());
+    assert_eq!(
+        f.runtime.block_on(f.server.captured_requests()),
+        [] as [mock_anthropic_service::CapturedRequest; 0]
+    );
 }

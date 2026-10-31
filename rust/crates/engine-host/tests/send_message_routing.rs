@@ -58,7 +58,7 @@ impl FsBackend for RecordingBackend {
     /// Left to the trait's no-op default, this mock would report an empty chat list
     /// while all three real backends planted an index — a mock more permissive than the
     /// thing it stands for, and the assertions below would be measuring the mock. The
-    /// chat-list index IS a link now (nexi-lab/nexus-vfs#362: a DT_LINK on the VFS, a
+    /// chat-list index IS a link now (nexi-lab/nexus-vfs#362: a `DT_LINK` on the VFS, a
     /// pointer file on a host FS), so it is recorded where the entry used to be
     /// recorded when a plain write made it — beside the stream a send provisions,
     /// because both answer "what did this send create?".
@@ -378,7 +378,7 @@ fn the_envelope_carries_its_summary_over_nexus() {
 /// Pinned on the FRAMED path specifically, because that is where it was missing:
 /// the JSONL branch has always stamped inside `append_envelope_to_path`, while
 /// the stream branch serialises the envelope as-is, so every message that ever
-/// crossed a DT_STREAM arrived with `timestamp` absent. A `StdFsBackend` pair
+/// crossed a `DT_STREAM` arrived with `timestamp` absent. A `StdFsBackend` pair
 /// root cannot show this — its `is_append_stream` is a hardcoded `false`, so it
 /// only ever exercises the branch that already worked.
 ///

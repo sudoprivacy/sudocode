@@ -326,16 +326,7 @@ fn question_focus_surface_moves_without_recoloring_ordinary_text() {
             );
             sess.resize(40, 600).unwrap();
             settle_chrome(&sess);
-            let mut options = vec![
-                "FirstSurfaceChoice".to_string(),
-                "SecondSurfaceChoice".to_string(),
-            ];
-            options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
-            let input = serde_json::json!({
-                "title": "SurfaceQuestionTitle",
-                "question": "Choose a readable surface",
-                "options": options,
-            });
+            let input = surface_question_input(option_count);
             let calls = serde_json::json!([{
                 "id": "surface_question", "name": "AskUserQuestion", "input": input,
             }]);
@@ -931,4 +922,17 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             exit(&mut sess);
         }
     }
+}
+
+fn surface_question_input(option_count: usize) -> serde_json::Value {
+    let mut options = vec![
+        "FirstSurfaceChoice".to_string(),
+        "SecondSurfaceChoice".to_string(),
+    ];
+    options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
+    serde_json::json!({
+        "title": "SurfaceQuestionTitle",
+        "question": "Choose a readable surface",
+        "options": options,
+    })
 }

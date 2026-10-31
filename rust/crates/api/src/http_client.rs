@@ -12,7 +12,7 @@ const POOL_IDLE_TIMEOUT_ENV: &str = "SUDOCODE_API_POOL_IDLE_TIMEOUT";
 const TCP_KEEPALIVE_ENV: &str = "SUDOCODE_API_TCP_KEEPALIVE";
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_mins(5);
 /// How long we may keep an unused connection before discarding it.
 ///
 /// This has to stay below the shortest idle timeout anywhere on the path, and

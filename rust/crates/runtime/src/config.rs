@@ -503,8 +503,7 @@ impl ConfigFileLock {
     fn is_stale(path: &Path) -> bool {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
-            .map(|modified| modified.elapsed().unwrap_or_default() > Self::STALE_AFTER)
-            .unwrap_or(false)
+            .is_ok_and(|modified| modified.elapsed().unwrap_or_default() > Self::STALE_AFTER)
     }
 }
 
@@ -674,9 +673,8 @@ impl ConfigLoader {
         // ACP suite. A repair that runs unattended must not move the ground
         // under the program it is repairing.
         let (global_profile, project_profile) = self.auth_profile_paths();
-        let selected = self
-            .read_auth_profile(&project_profile)
-            .or_else(|| self.read_auth_profile(&global_profile));
+        let selected = Self::read_auth_profile(&project_profile)
+            .or_else(|| Self::read_auth_profile(&global_profile));
         let wrote_auth_profile = match (selected, pinned_accounts.first()) {
             (None, Some(account)) => {
                 self.set_auth_profile(account, ConfigScope::Global)?;
@@ -735,6 +733,8 @@ impl ConfigLoader {
         account: &str,
         scope: ConfigScope,
     ) -> Result<PathBuf, ConfigError> {
+        use crate::fs_backend::FsBackend as _;
+
         let account = account.trim();
         if account.is_empty() {
             return Err(ConfigError::Parse(
@@ -749,8 +749,6 @@ impl ConfigLoader {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
         }
-
-        use crate::fs_backend::FsBackend as _;
 
         let _guard = ConfigFileLock::acquire(&path)?;
         // Round-trip the file as generic JSON so every key we do not own is
@@ -795,6 +793,8 @@ impl ConfigLoader {
     /// write it down, and every later boot reads the same name instead of
     /// re-deriving one that can drift with the path spelling.
     pub fn set_agent_name(&self, name: &str) -> Result<PathBuf, ConfigError> {
+        use crate::fs_backend::FsBackend as _;
+
         let name = name.trim();
         if name.is_empty() {
             return Err(ConfigError::Parse(
@@ -805,8 +805,6 @@ impl ConfigLoader {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
         }
-
-        use crate::fs_backend::FsBackend as _;
 
         let _guard = ConfigFileLock::acquire(&path)?;
         let mut object = match std::fs::read_to_string(&path) {
@@ -918,7 +916,7 @@ impl ConfigLoader {
     /// Deliberately narrower than a config load: callers that only need the
     /// selection should not pay for — or trigger the side effects of — the whole
     /// pipeline.
-    fn read_auth_profile(&self, path: &Path) -> Option<String> {
+    fn read_auth_profile(path: &Path) -> Option<String> {
         read_optional_json_object_with(&crate::fs_backend::StdFsBackend, path)
             .ok()
             .flatten()
@@ -1073,7 +1071,7 @@ impl ConfigLoader {
     /// Layered: the global `<config_home>/sudocode.json` is the required base
     /// and the single source of truth for account/model definitions. An
     /// optional project `<cwd>/.nexus/sudocode/sudocode.json` deep-merges on top
-    /// so per-project overrides (e.g. models, web_search) resolve consistently
+    /// so per-project overrides (e.g. models, `web_search`) resolve consistently
     /// with the rest of the layered config. Auth credentials stay defined once
     /// globally and are referenced per-project via `auth_profile` (see slice 2),
     /// never copied — enforcing a single source of truth.
@@ -1169,6 +1167,12 @@ impl RuntimeConfig {
         self.merged.get(key)
     }
 
+    /// Render one merged configuration value without exposing its JSON implementation.
+    #[must_use]
+    pub fn render_value(&self, key: &str) -> Option<String> {
+        self.get(key).map(JsonValue::render)
+    }
+
     #[must_use]
     pub fn as_json(&self) -> JsonValue {
         JsonValue::Object(self.merged.clone())
@@ -1181,6 +1185,7 @@ impl RuntimeConfig {
 
     /// The parsed `experimental` settings section (flag key -> enabled).
     /// Feed this to `crate::experiments::init_config_flags` at startup.
+    #[must_use]
     pub fn experiments(&self) -> &BTreeMap<String, bool> {
         &self.feature_config.experiments
     }
@@ -2118,7 +2123,7 @@ fn parse_sudocode_json_str_with_label(
 
 /// Parse a `SudoCodeConfig` from an already-parsed (and possibly layer-merged)
 /// JSON object. Shared by single-file parsing and the layered loader so that
-/// auth / models / web_search resolve from the same merged view as the rest of
+/// auth / models / `web_search` resolve from the same merged view as the rest of
 /// the config (one deterministic resolution, single source of truth per key).
 fn parse_sudocode_from_object(
     root_obj: &BTreeMap<String, JsonValue>,
@@ -2759,7 +2764,7 @@ mod tests {
             .load_sudocode_config()
             .expect("config should load");
         assert_eq!(config.selected_account.as_deref(), Some("global-acct"));
-        assert!(config.auth_profile_conflicts.is_empty());
+        assert_eq!(config.auth_profile_conflicts, [] as [std::path::PathBuf; 0]);
 
         // Project owner present → narrower scope wins.
         let local = cwd
@@ -2771,7 +2776,7 @@ mod tests {
             .load_sudocode_config()
             .expect("config should load");
         assert_eq!(config.selected_account.as_deref(), Some("project-acct"));
-        assert!(config.auth_profile_conflicts.is_empty());
+        assert_eq!(config.auth_profile_conflicts, [] as [std::path::PathBuf; 0]);
 
         // A non-owning layer file sets it → recorded as a conflict, and loading
         // still succeeds so `doctor` can run and say which line to delete.
@@ -2876,9 +2881,7 @@ mod tests {
         let loader = ConfigLoader::new(&cwd, &home);
         let before = loader.load_sudocode_config().expect("load");
         assert!(before.selected_account.is_none());
-        assert!(!before.models["claude-opus"].providers["proxy"]
-            .provider
-            .is_empty());
+        assert_ne!(before.models["claude-opus"].providers["proxy"].provider, "");
 
         let report = loader
             .migrate_legacy_config_shape(super::MigrationScope::Full)
@@ -3191,7 +3194,7 @@ mod tests {
         // then
         let chain = loaded.provider_fallbacks();
         assert_eq!(chain.primary(), None);
-        assert!(chain.fallbacks().is_empty());
+        assert_eq!(chain.fallbacks(), [] as [String; 0]);
         assert!(chain.is_empty());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

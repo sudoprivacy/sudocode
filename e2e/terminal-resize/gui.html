@@ -1,7 +1,12 @@
 <!doctype html>
 <meta charset="utf-8">
 <link rel="stylesheet" href="/xterm.css">
-<style>body { margin: 0; background: #111; } #terminal { padding: 8px; }</style>
+<style>
+  body { margin: 0; background: #111; }
+  #terminal { padding: 8px; }
+  /* Match disabled-animation captures without preparing page styles per PNG. */
+  .xterm-scrollbar { transition: none !important; }
+</style>
 <div id="terminal"></div>
 <script src="/xterm.js"></script>
 <script src="/unicode.js"></script>
@@ -29,6 +34,10 @@
     return Array.from({ length: buffer.length - start }, (_, i) => buffer.getLine(start + i).translateToString(true));
   };
   const viewport = () => lines(terminal.buffer.active.baseY).join('\n');
+  const pixelBounds = () => {
+    const rect = document.querySelector('.xterm-screen').getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  };
   // Observe capture at the window before xterm consumes the textarea event.
   window.addEventListener('keydown', event => {
     const at = performance.now();
@@ -71,7 +80,7 @@
     terminal, activated, hovered, activationEvents, keyboard,
     get parsed() { return parsed; }, get rendered() { return rendered; },
     get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
-    lines, viewport,
+    lines, viewport, pixelBounds,
     armInput(draft) { input = { draft }; inputReady = new Promise(resolve => { finishInput = resolve; }); },
     async waitForInput() {
       let timer;
@@ -102,7 +111,7 @@
       return { row: index, start, end };
     },
     point(position, edge = 'start') {
-      const rect = document.querySelector('.xterm-screen').getBoundingClientRect();
+      const rect = pixelBounds();
       const row = position.row - terminal.buffer.active.viewportY;
       if (row < 0 || row >= terminal.rows || !Number.isFinite(position[edge])) {
         throw new Error(`Target outside viewport: ${JSON.stringify(position)}, top ${terminal.buffer.active.viewportY}`);

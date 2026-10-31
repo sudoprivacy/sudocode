@@ -137,7 +137,7 @@ fn status_until(session: &mut PtySession, what: &str, done: impl Fn(&Status) -> 
             "{what}: last status health={:?} footer={:?}\n{}",
             status.health,
             status.footer,
-            session.render(|screen| screen.contents())
+            session.render(common::screen_contents)
         );
         std::thread::sleep(Duration::from_millis(250));
     }

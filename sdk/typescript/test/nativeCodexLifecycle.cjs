@@ -300,6 +300,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
     }
     {
+      let observer;
       for(const label of ['first','second']){
         await spawnTui(label,label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
         if(label==='first'&&managedPackageRoot&&operatorContext&&!seededResume&&!receipt.legacyImport){
@@ -310,10 +311,15 @@ const spawnTui = async (label,args=[],env=childEnv) => {
               .map(line=>JSON.parse(line)).find(row=>row.phase==='listening');
             return !!receipt.firstOwnerBeforeSecondFrontend;
           },10000,'first frontend elects its shared owner before the second starts');
+          observer=await connect('observer',receipt.observerNotifications);
+          const snapshot=await request(observer,'existing first root before second frontend','thread/loaded/list',{});
+          assert.equal(snapshot.nextCursor,null);
+          assert.equal(snapshot.data.length,1,'only the first native root exists before the second frontend');
+          receipt.inventoryBeforeSecondFrontend=snapshot.data;
         }
       }
       await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'isolated native listener');
-      const observer=await connect('observer',receipt.observerNotifications);
+      observer??=await connect('observer',receipt.observerNotifications);
       if(managedPackageRoot){
         receipt.nativeManagedVersion=JSON.parse(execFileSync(configured.codexArgv[0],
           ['app-server','daemon','version'],{encoding:'utf8',env:childEnv,timeout:10000}));
@@ -355,7 +361,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       assert.notEqual(...receipt.created.map(thread=>thread.id));
       receipt.inventory=inventory.data;
       receipt.startedSeenByObserver=receipt.observerNotifications.filter(n=>n.method==='thread/started').map(n=>n.threadId);
-      assert(receipt.created.every(thread=>receipt.startedSeenByObserver.includes(thread.id)));
+      assert(receipt.created.every(thread=>receipt.startedSeenByObserver.includes(thread.id)
+        || receipt.inventoryBeforeSecondFrontend?.includes(thread.id)),
+        'every root is either present in the initial one-root inventory or observed starting after attachment');
       assert.equal(receipt.modelRequests.length,startupModelRequests);
       receipt.modelRequestsBeforeSeed=startupModelRequests;
       if(receipt.legacyImport){

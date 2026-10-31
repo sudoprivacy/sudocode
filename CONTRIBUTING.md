@@ -259,6 +259,22 @@ may stay behind main. Preflight stages the exact hash-pinned checker from its
 protected policy, so an older author branch does not need a source update to
 receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays required
 in CI preflight; editing it alone skips unrelated native product builds.
+Development-only Cargo manifest/lock changes do not select normal release,
+service, co-host or daemon builds. The shared selector reads committed Git/TOML:
+resolver 2 and workspace settings must stay unchanged, manifest edits must be
+limited to dev dependencies, and existing lock packages/normal edges must stay
+unchanged. New versions of an existing package name, deleted lock nodes and
+unknown/malformed metadata keep the ordinary scope. Native workspace/lint,
+provider, resize and statistical performance scopes stay unchanged. Other
+source or assertion changes still select their checks. Required output prints
+`BUILD_INPUT_SCOPE` and CI's `normal_product_ignored` paths. Python without the
+standard TOML reader conservatively keeps all checks.
+An earlier broader signed full receipt or checkpoint can retain unchanged
+completed profiles for the same source/base/host. Its signed plan must still
+match a canonical host assignment for known profiles. The current protected
+selection drives required checks and CI hosts; new checks cannot inherit a pass.
+Legacy receipts without plans retain known completed checks. Failed/unrun
+required profiles still run, and old failures and first timing remain recorded.
 Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
 Hosted complementary builds use the available compiler CPUs. That hosted-only

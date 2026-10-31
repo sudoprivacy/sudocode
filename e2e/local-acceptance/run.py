@@ -351,6 +351,8 @@ def enforcement_acceptance():
         scope_acceptance(directory)
         performance_scope_acceptance(directory)
         plan_acceptance(directory)
+        print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
+                      "--output", directory / "dependency-scope", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"

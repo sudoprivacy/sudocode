@@ -1,11 +1,9 @@
 import { appendFileSync, readFileSync } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
 import { connectScode, type ScodeAcpConfig, type ScodeConnection } from './scodeAcp';
-import { listScodeAgents, sendScodeMessage, scodeNativeA2aAudit, supportsScodeDirectA2a, ScodeA2aError, type ScodeA2aResult } from './scodeA2a';
+import { registerScodeMcpTools } from './mcpTools';
 import { registerCommandShutdown } from './lifecycle';
 import { connectCodexCallback, type CodexCallback, type CodexCallbackConfig } from './codexCallback';
 
@@ -22,11 +20,6 @@ function readConfig(file: string): ScodeMcpConfig {
     throw new Error('MCP config requires version:1, an existing acpSessionId and an absolute auditLog');
   }
   return config;
-}
-
-function digest(value: unknown): { sha256: string; bytes: number } {
-  const bytes = Buffer.from(JSON.stringify(value));
-  return { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
 }
 
 /** One MCP stdio server owns one existing native session and its full CLI. */
@@ -76,10 +69,7 @@ export async function runScodeMcp(file: string, lifecycle: {
     });
     const connection = scode;
     let promptActive = false;
-    server.registerTool('scode_prompt', {
-      description: 'Give a task to the owned full scode session. This may use its model. Use scode_send for explicit messages.',
-      inputSchema: { text: z.string().min(1) },
-    }, async ({ text }) => {
+    registerScodeMcpTools(server, () => ({connection,auditLog:config.auditLog}), async (_, text) => {
       if (promptActive) return { isError: true, content: [{ type: 'text' as const, text: 'busy: a foreground prompt is already running' }] };
       promptActive = true;
       observed = { updates: [], bytes: 0, truncated: false };
@@ -97,55 +87,6 @@ export async function runScodeMcp(file: string, lifecycle: {
           text: `${String(error)}; inspect actual tool receipts before retrying a task with side effects` }] };
       } finally { promptActive = false; observed = undefined; }
     });
-    const external = async (method: string, input: unknown, requestId: string | number,
-      action: () => Promise<ScodeA2aResult>) => {
-      const id = randomUUID();
-      const base = { id, requestId, method, sessionId: connection.sessionId, pid: connection.pid };
-      try {
-        audit({ ...base, phase: 'requested', input: digest(input) });
-      } catch (error) {
-        return { isError: true, content: [{ type: 'text' as const,
-          text: JSON.stringify({ outcome: 'not_submitted', error: `Cannot record external command: ${String(error)}` }) }] };
-      }
-      try {
-        const result = await action();
-        try { audit({ ...base, phase: 'returned', isError: result.isError, output: digest(result),
-          nativeAudit: scodeNativeA2aAudit(result) }); }
-        catch (error) {
-          // An audit failure after execution must never replace the real result
-          // with a definite failure which might invite an automatic resend.
-          process.stderr.write(`External command ${id} result audit failed: ${String(error)}\n`);
-        }
-        // ACP returns the native tool string. Only the MCP boundary wraps it
-        // in a text block; never JSON-stringify or rewrite the tool output.
-        return { content: [{ type: 'text' as const, text: result.content }], isError: result.isError,
-          ...(result._meta === undefined ? {} : { _meta: result._meta as Record<string, unknown> }) };
-      } catch (error) {
-        const report = { outcome: error instanceof ScodeA2aError ? error.outcome : 'unknown',
-          error: String(error), rpcError: error instanceof ScodeA2aError ? error.rpcError : undefined,
-          automaticRetry: false };
-        try { audit({ ...base, phase: 'error', ...report }); }
-        catch (auditError) { process.stderr.write(`External command ${id} error audit failed: ${String(auditError)}\n`); }
-        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(report) }] };
-      }
-    };
-    server.registerTool('scode_send', {
-      description: 'Send exact plain text through the owned scode without model inference. Uses native send policy/hooks. No automatic retry; a transport error after submission is Unknown.',
-      inputSchema: z.object({ to: z.string().min(1), message: z.string(), summary: z.string().min(1) }).strict(),
-    }, (input, extra) => external('send', input, extra.requestId, () => sendScodeMessage(connection, input)));
-    server.registerTool('scode_agent_list', {
-      description: 'Read the owned scode agent directory without model inference. Visibility does not prove a peer is online.',
-      inputSchema: z.object({ activeOnly: z.boolean().optional() }).strict(),
-    }, (input, extra) => external('agent_list', input, extra.requestId, () => listScodeAgents(connection, input)));
-    server.registerTool('scode_status', {
-      description: 'Report this bridge\'s owned PID, native session and direct A2A capability. Does not claim Nexus connectivity.',
-      inputSchema: {},
-    }, async () => ({ content: [{ type: 'text' as const, text: JSON.stringify({
-      pid: connection.pid, acpSessionId: connection.sessionId,
-      closed: connection.closed,
-      directA2a: supportsScodeDirectA2a(connection) ? { version: 1 } : null,
-      notifications: 'connection-lifetime',
-    }) }] }));
     server.server.onclose = onEof;
     await server.connect(new StdioServerTransport());
     transportReady = true;

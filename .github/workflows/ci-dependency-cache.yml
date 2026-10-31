@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - 'rust/**'
-      - '.github/workflows/**'
+      # Other workflow edits change neither Cargo inputs nor this cache's
+      # environment. Rust pushes still warm a new toolchain/image key.
+      - '.github/workflows/ci-dependency-cache.yml'
   workflow_call:
     inputs:
       linux_only:
@@ -39,7 +41,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.linux_only && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest","macos-15","macos-15-intel"]') }}
+        # The three full workspace hosts have the most consumers. Separate
+        # macOS 15 pools pushed one publication set to 9.77 GB of a 10 GB quota.
+        # Those service-only hosts build normally on a miss instead of evicting
+        # dependencies shared by workspace, resize, Clippy and release jobs.
+        os: ${{ fromJSON(inputs.linux_only && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,14 +66,14 @@ jobs:
           shared-key: ci-dependencies
           env-vars: ImageOS
       - name: Compile workspace dependencies without running tests
-        if: steps.lookup.outputs.cache-hit != 'true' && !startsWith(matrix.os, 'macos-15')
-        run: cargo test --workspace --locked --features engine-acp/mailbox --no-run
-      - name: Compile service client dependencies on macOS 15
-        if: steps.lookup.outputs.cache-hit != 'true' && startsWith(matrix.os, 'macos-15')
-        # These service hosts have different SDKs from the latest workspace host.
-        run: cargo build --locked -p rusty-sudocode-cli --bin scode
+        if: steps.lookup.outputs.cache-hit != 'true'
+        # Library/bin test builds include dev dependencies, including those used
+        # only by integration tests. The cache discards workspace executables,
+        # so linking every integration journey here warms nothing additional.
+        # Full product acceptance still builds and runs those journeys.
+        run: cargo test --workspace --lib --bins --locked --features engine-acp/mailbox --no-run
 
       - name: Compile production release dependencies into the same cache
-        if: steps.lookup.outputs.cache-hit != 'true' && matrix.os != 'macos-15-intel'
+        if: steps.lookup.outputs.cache-hit != 'true'
         # Keep one Cargo registry/Git copy per host, rather than one per profile.
         run: cargo build --release --locked -p rusty-sudocode-cli --bin scode

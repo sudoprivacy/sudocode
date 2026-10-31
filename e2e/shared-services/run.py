@@ -52,10 +52,11 @@ def caller_with_existing_box(root):
 
 
 class Rpc:
-    def __init__(self, binary, root):
-        env = client_environment(root) | {'RUST_LOG': 'info',
+    def __init__(self, binary, root, arguments=('service', 'stdio'), environment=None):
+        env = (environment if environment is not None else client_environment(root)) | {'RUST_LOG': 'info',
             'NEXUS_IDENTITY_DIR': str(root / 'unrelated-identity')}
-        self.child = subprocess.Popen([str(binary), 'service', 'stdio'], env=env,
+        self.acp = arguments == ('acp',)
+        self.child = subprocess.Popen([str(binary), *arguments], env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding='utf-8',
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
@@ -87,8 +88,10 @@ class Rpc:
             self.sequence += 1
             future = Future()
             self.pending[self.sequence] = future
-            self.child.stdin.write(json.dumps({'id': self.sequence, 'method': method,
-                                               'params': params or {}}) + '\n')
+            request = {'id': self.sequence, 'method': method, 'params': params or {}}
+            if self.acp:
+                request['jsonrpc'] = '2.0'
+            self.child.stdin.write(json.dumps(request) + '\n')
             self.child.stdin.flush()
         return future
 

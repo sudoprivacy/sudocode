@@ -8,6 +8,7 @@ const { performance } = require('node:perf_hooks');
 const { resources: processResource } = require('./resources.cjs');
 const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
+const { launchBrowser } = require('./browser.cjs');
 const { WebSocketServer } = require('ws');
 const { launch } = require('./host.cjs');
 
@@ -59,10 +60,10 @@ async function run(config) {
     });
   });
   try {
-    browser = await chromium.launch({ headless: process.env.SCODE_GUI_HEADED !== '1' });
-    cdp = await browser.newBrowserCDPSession();
+    const observer = await launchBrowser(chromium, { headless: process.env.SCODE_GUI_HEADED !== '1' });
+    ({ browser, cdp } = observer);
     page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1 });
-    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling };
+    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling, observer: observer.environment };
     report.browser = await browser.version();
     report.xterm = require('@xterm/xterm/package.json').version;
     await page.goto(`http://127.0.0.1:${server.address().port}/?options=${encodeURIComponent(JSON.stringify({ cols: config.cols, rows: config.rows }))}`);
@@ -78,12 +79,34 @@ async function run(config) {
       && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
       && fixture.viewport().split('\n').some(row => /^\s*⏵⏵ danger-full-access(?:\s|$)/u.test(row))
       && performance.now() - fixture.lastData >= 300, config.cols);
-    const screen = page.locator('.xterm-screen');
+    const readback = await page.context().newCDPSession(page);
+    report.environment.pngReadback = { method: 'Page.captureScreenshot', optimizeForSpeed: true };
+    report.paint_observations = [];
     const painted = async () => {
-      await page.evaluate(() => fixture.frame());
-      // Capture the terminal pixels without locator.screenshot's extra
-      // actionability/stability wait, which is unrelated to terminal painting.
-      return page.screenshot({ clip: await screen.boundingBox(), animations: 'disabled' });
+      const started = performance.now();
+      const { clip, frameMs, boundsMs } = await page.evaluate(async () => {
+        const began = performance.now();
+        await document.fonts.ready;
+        await fixture.frame();
+        const framed = performance.now();
+        if (document.getAnimations().some(animation => animation.playState === 'running')) {
+          throw new Error('Terminal painting measurements require non-animated CSS');
+        }
+        const clip = fixture.pixelBounds();
+        return { clip, frameMs: framed - began, boundsMs: performance.now() - framed };
+      });
+      assert(clip.width > 0 && clip.height > 0, 'missing terminal pixel bounds');
+      const ready = performance.now();
+      // Read the completed PNG directly. Generic page screenshots prepare
+      // animation/caret state and repeat layout work before capturing pixels.
+      const { data } = await readback.send('Page.captureScreenshot', {
+        format: 'png', clip: { ...clip, scale: 1 },
+        captureBeyondViewport: false, optimizeForSpeed: true,
+      });
+      report.paint_observations.push({ frame_ms: frameMs, bounds_ms: boundsMs,
+        ready_rpc_ms: ready - started, readback_ms: performance.now() - ready,
+        total_ms: performance.now() - started });
+      return Buffer.from(data, 'base64');
     };
     const progress = label => fs.writeFileSync(path.join(config.logRoot, 'progress.txt'), label);
     const resources = async label => {
@@ -188,6 +211,31 @@ async function run(config) {
     const selection = await drag(sampling.drag_steps);
     report.samples.drag_frame_ms = selection.samples;
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
+    const streamWindows = inputDelaysMs.length * (sampling.parsed_bursts + sampling.painted_bursts) + 2;
+    const streamDirectory = path.dirname(config.streamWindowPlan);
+    fs.mkdirSync(streamDirectory, { recursive: true });
+    fs.writeFileSync(config.streamWindowPlan, JSON.stringify({ windows: streamWindows }));
+    report.stream_windows = [];
+    let streamWindow = 0, sentChunks = 0;
+    function releaseStreamWindow() {
+      assert(streamWindow < streamWindows, 'more input windows than planned');
+      const index = streamWindow++;
+      fs.writeFileSync(path.join(streamDirectory, `permit-${index}`), 'release');
+      return { index, released_at: performance.now(), wire_before: wireBytes };
+    }
+    async function finishStreamWindow(window) {
+      const sent = path.join(streamDirectory, `sent-${window.index}`);
+      const deadline = performance.now() + 30000;
+      while (!fs.existsSync(sent)) {
+        assert.equal(exitCode, undefined);
+        assert(performance.now() < deadline, 'stream window did not send its deltas');
+        await sleep(10);
+      }
+      const chunks = Number(fs.readFileSync(sent, 'utf8'));
+      assert(Number.isSafeInteger(chunks) && chunks > sentChunks, 'stream window contained no deltas');
+      sentChunks = chunks;
+      report.stream_windows.push({ ...window, finished_at: performance.now(), chunks, wire_after: wireBytes });
+    }
     async function keys(phase) {
       progress(`typing:${phase}`);
       await page.bringToFront();
@@ -209,6 +257,7 @@ async function run(config) {
             const delay = inputDelaysMs[(key + burst) % inputDelaysMs.length];
             draft += 'x';
             await page.evaluate(draft => fixture.armInput(draft), draft);
+            const stream = phase === 'stream' ? releaseStreamWindow() : null;
             if (delay) await sleep(delay);
             const began = performance.now();
             await page.keyboard.type('x');
@@ -223,6 +272,9 @@ async function run(config) {
             } else {
               parseSamples.push(events.parsed - events.keydown);
             }
+            // Outside the input timer: require real network progress before
+            // another key, without racing screenshots against a finite EOF.
+            if (stream) await finishStreamWindow(stream);
           }
           await page.keyboard.press('Control+u');
           await wait(() => fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
@@ -243,12 +295,17 @@ async function run(config) {
     await keys('wait');
     fs.writeFileSync(path.join(config.root, 'stream-release'), 'release');
     const duringStream = await drag(1);
-    await sleep(150);
+    const headingsBefore = await page.evaluate(() => fixture.lines().join('\n').split('LinkHeading').length);
+    const selectionWindow = releaseStreamWindow();
+    await finishStreamWindow(selectionWindow);
+    await page.waitForFunction(count => fixture.lines().join('\n').split('LinkHeading').length > count, headingsBefore);
     assert.equal(await page.evaluate(() => fixture.terminal.getSelection()), duringStream.selected, 'streaming changed the selected history');
     report.streaming_selection_preserved = true;
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
     await keys('stream');
     assert(!fs.existsSync(path.join(config.root, 'prose-ready')), 'stream completed before typing samples');
+    await finishStreamWindow(releaseStreamWindow());
+    assert.equal(streamWindow, streamWindows, 'stream/input window plan was not exhausted');
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await wait(() => fixture.viewport().includes('ctx ') && fixture.lines().join('\n').split('LinkBodyEND.').length >= 3);
     await resources('stream');

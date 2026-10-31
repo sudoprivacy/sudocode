@@ -9,6 +9,7 @@ import subprocess
 import sys
 import termios
 import time
+from nativeTuiPrompt import update_prompt_visible
 
 master, slave = pty.openpty()
 os.set_blocking(master, False)
@@ -59,6 +60,9 @@ try:
                     os.write(master, b'\x1b[?0u')
                 except BlockingIOError:
                     pass
+        if update_prompt_visible(tail):
+            trace('unsafe_update_prompt')
+            break
         if sys.stdin in ready:
             line = sys.stdin.readline()
             if not line or json.loads(line).get('action') == 'close':

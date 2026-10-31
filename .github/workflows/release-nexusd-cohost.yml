@@ -21,22 +21,6 @@ on:
   push:
     tags:
       - 'nexusd-cohost-v*'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
-    paths:
-      - .github/workflows/release-nexusd-cohost.yml
-      - .github/scripts/setup_protoc.py
-      - .github/actions/setup-protoc/**
-      - rust/Cargo.toml
-      - rust/Cargo.lock
-      - rust/vendor/**
-      - rust/crates/nexusd-cohost/**
-      - rust/crates/engine-acp/**
-      - rust/crates/engine-host/**
-      - rust/crates/runtime/**
-      - rust/crates/api/**
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -52,8 +36,6 @@ env:
 
 jobs:
   build:
-    # Not on draft PRs; see the heavy-job note in rust-ci.yml.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -115,8 +97,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Install the shared protobuf compiler
-        uses: ./.github/actions/setup-protoc
+      - uses: ./.github/actions/setup-protoc
 
       - uses: dtolnay/rust-toolchain@stable
 

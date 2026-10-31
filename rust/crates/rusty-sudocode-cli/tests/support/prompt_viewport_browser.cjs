@@ -9,6 +9,7 @@ const shared = path.resolve(__dirname, '../../../../../e2e/terminal-resize');
 const moduleRoot = process.env.SCODE_VIEWPORT_BROWSER_MODULES || path.join(shared, 'node_modules');
 const modulePath = name => path.join(moduleRoot, name);
 const { chromium } = require(modulePath('playwright'));
+const { launchBrowser } = require(path.join(shared, 'browser.cjs'));
 const { WebSocketServer } = require(modulePath('ws'));
 const { launch } = require(path.join(shared, 'host.cjs'));
 const sampling = require(path.join(shared, 'performance-policy.json')).sampling;
@@ -48,8 +49,10 @@ websocket.on('connection', socket => {
   fs.mkdirSync(config.logRoot, { recursive: true });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    browser = await chromium.launch({ headless: true, executablePath: process.env.SCODE_VIEWPORT_CHROME || undefined });
-    const cdp = await browser.newBrowserCDPSession();
+    const observer = await launchBrowser(chromium, { headless: true, executablePath: process.env.SCODE_VIEWPORT_CHROME || undefined });
+    browser = observer.browser;
+    const cdp = observer.cdp;
+    report.observer = observer.environment;
     report.browser = await browser.version();
     const cpu = new Map();
     let peak = 0;

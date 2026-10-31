@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -692,6 +693,63 @@ async fn stream_gated_concurrency(
     Ok(())
 }
 
+/// Optional backpressure for a finite stream whose consumer measures each input.
+/// Every window contains real deltas; the consumer cannot merely hold the EOF.
+struct ProseWindows {
+    directory: PathBuf,
+    count: usize,
+    chunks: usize,
+}
+
+impl ProseWindows {
+    fn from_control(control: &Value, chunks: usize) -> io::Result<Option<Self>> {
+        let Some(path) = control["window_plan"].as_str() else {
+            return Ok(None);
+        };
+        let path = Path::new(path);
+        let plan: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let count = plan["windows"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok());
+        let count = count
+            .filter(|&n| (2..=chunks).contains(&n))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream windows must each contain deltas",
+                )
+            })?;
+        Ok(Some(Self {
+            directory: path.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
+            count,
+            chunks,
+        }))
+    }
+
+    fn window(&self, chunk: usize) -> usize {
+        chunk * self.count / self.chunks
+    }
+
+    async fn before_chunk(&self, chunk: usize) -> io::Result<()> {
+        let window = self.window(chunk);
+        if chunk == 0 || window != self.window(chunk - 1) {
+            wait_for_fixture_release(self.directory.join(format!("permit-{window}"))).await?;
+        }
+        Ok(())
+    }
+
+    fn after_chunk(&self, chunk: usize) -> io::Result<()> {
+        let window = self.window(chunk);
+        if chunk + 1 == self.chunks || window != self.window(chunk + 1) {
+            let sent = self.directory.join(format!("sent-{window}"));
+            let stage = sent.with_extension("stage");
+            std::fs::write(&stage, (chunk + 1).to_string())?;
+            std::fs::rename(stage, sent)?;
+        }
+        Ok(())
+    }
+}
+
 async fn stream_prose_preview_response(
     socket: &mut tokio::net::TcpStream,
     request: &MessageRequest,
@@ -701,6 +759,8 @@ async fn stream_prose_preview_response(
     let chunk_chars =
         usize::try_from(control["chunk_chars"].as_u64().unwrap_or(12).clamp(1, 1024)).unwrap_or(12);
     let delay = Duration::from_millis(control["delay_ms"].as_u64().unwrap_or(20));
+    let chars: Vec<_> = document.chars().collect();
+    let windows = ProseWindows::from_control(&control, chars.len().div_ceil(chunk_chars))?;
     socket.write_all(SSE_RESPONSE_HEADERS).await?;
     let template = final_text_sse("");
     let (prefix, rest) = template.split_once("event: content_block_delta").unwrap();
@@ -712,8 +772,10 @@ async fn stream_prose_preview_response(
     if let Some(release) = control["start_release"].as_str() {
         wait_for_fixture_release(release).await?;
     }
-    let chars: Vec<_> = document.chars().collect();
-    for chunk in chars.chunks(chunk_chars) {
+    for (index, chunk) in chars.chunks(chunk_chars).enumerate() {
+        if let Some(windows) = &windows {
+            windows.before_chunk(index).await?;
+        }
         let mut delta = String::new();
         append_sse(
             &mut delta,
@@ -725,6 +787,9 @@ async fn stream_prose_preview_response(
         );
         socket.write_all(delta.as_bytes()).await?;
         tokio::time::sleep(delay).await;
+        if let Some(windows) = &windows {
+            windows.after_chunk(index)?;
+        }
     }
     if let Some(ready) = control["ready"].as_str() {
         std::fs::write(ready, "all deltas sent")?;
@@ -973,12 +1038,13 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
 }
 
 /// Optional file-backed controls keep response text out of the echoed prompt.
-async fn wait_for_fixture_release(path: &str) -> io::Result<()> {
+async fn wait_for_fixture_release(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while !std::path::Path::new(path).exists() && tokio::time::Instant::now() < deadline {
+    while !path.exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    if std::path::Path::new(path).exists() {
+    if path.exists() {
         Ok(())
     } else {
         Err(io::Error::new(

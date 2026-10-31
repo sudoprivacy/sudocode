@@ -155,13 +155,10 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// Existing installations retain their current behavior until explicit setup.
-/// Interactive resume honors that choice without offering first-run onboarding.
-/// Protocol/headless callers never read a prompt or provision background services.
-pub(crate) fn startup_prompt(allow_onboarding: bool) -> Result<()> {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Ok(());
-    }
+/// Honor an existing runtime choice without reading input or writing protocol
+/// output. CLI and ACP share the same service owner and preparation policy.
+/// A missing preference never grants permission to provision services.
+pub(crate) fn prepare_selected_runtime() -> Result<bool> {
     if let Some(preference) = preference()? {
         if preference.mode == RuntimeMode::Shared {
             let configured = runtime::nexus_mailbox::node_record_present();
@@ -182,7 +179,19 @@ pub(crate) fn startup_prompt(allow_onboarding: bool) -> Result<()> {
                 .failed("automatic_shared_setup", &error.to_string());
             }
         }
-    } else if allow_onboarding && !runtime::config::default_config_home().exists() {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Existing installations retain their current behavior until explicit setup.
+/// Interactive new and resumed sessions share the same first-run choice.
+/// Only an interactive fresh configuration offers the runtime-choice picker.
+pub(crate) fn startup_prompt() -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    if !prepare_selected_runtime()? && !runtime::config::default_config_home().exists() {
         run(None, None, false, CliOutputFormat::Text)?;
     }
     Ok(())

@@ -1,0 +1,37 @@
+name: Publish local acceptance
+
+on:
+  workflow_run:
+    workflows: [Local and cross-platform acceptance]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  publish:
+    name: Publish verified local and cross-platform acceptance
+    if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group'
+    # Keep this read-only verification/publication off the busy Linux pool.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    steps:
+      # Privileged publication uses default-branch code, never candidate code.
+      # The candidate's workflow cannot approve its own changed gate/runner.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Independently verify the head, signature, policy and completed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/local-acceptance/publish.py

@@ -278,6 +278,13 @@ browser uses the original normal release without another normal candidate build.
 Actual Docker acceptance checks frozen images, the invocation boundary and five
 tampered release identities/bytes. This removes duplicate compilation without
 reducing measurement coverage; production elapsed savings remain unmeasured.
+The host and container entrypoint now share the canonical
+<code>container/&lt;profile&gt;</code> output layout. Docker regression uses the
+real entrypoint, dispatcher and native child command before retaining the
+binary for browser reuse; its workload replaces product measurements. This
+fixes a host file lookup that could fail after all six real rendering scenarios
+passed. Previous failed records remain failed; raw output is not promoted into
+signed acceptance.
 Both Docker recipes require new evidence; native recipes stay unchanged.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
 (2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven

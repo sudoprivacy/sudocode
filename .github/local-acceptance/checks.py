@@ -329,7 +329,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "721552f607973e95051a77e11d803038be6f860c6516283afa975a9af4b2a3e7"
+    expected = "77b661190c1a160595f9bb0e440096d626848b0559ce11ddc42a27c6574b12f2"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
@@ -394,6 +394,11 @@ def snapshot(root, ref, destination):
 
 def container_storage():
     return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
+
+
+def container_profile_output(evidence, name):
+    """Map the mounted evidence root to the container entrypoint's profile output."""
+    return evidence / "container" / name
 
 
 def container(name, root, output, base, command, execute, policy_ref, candidate_ref):
@@ -475,8 +480,9 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
     if name == "rendering":
-        binary = output / "scode-candidate"
-        report = json.loads((output / "container/rendering/measurements/report.json").read_text())
+        profile_output = container_profile_output(output, name)
+        binary = profile_output / "scode-candidate"
+        report = json.loads((profile_output / "measurements/report.json").read_text())
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
             raise RuntimeError("Rendering candidate binary does not match its completed measurements")
@@ -799,7 +805,7 @@ def main():
     parser.add_argument("--container-check", choices=["rendering", "browser"])
     parser.add_argument("--native-checks", nargs="*")
     parser.add_argument("--base", required=True)
-    parser.add_argument("--output", type=Path, default=Path("/evidence/container"))
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     runner = Path(__file__).resolve().parents[2]
     root = Path("/inputs/candidate") if args.container_check else runner
@@ -808,8 +814,9 @@ def main():
     spec.loader.exec_module(helper)
     names = [args.container_check] if args.container_check else args.native_checks
     for name in names:
-        results = run(name, root, args.output / name, args.base, helper.run_command)
-        (args.output / name / "commands.json").write_text(json.dumps(results, indent=2))
+        output = args.output / name if args.output is not None else container_profile_output(Path("/evidence"), name)
+        results = run(name, root, output, args.base, helper.run_command)
+        (output / "commands.json").write_text(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

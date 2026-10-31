@@ -218,6 +218,11 @@ and viewport observers still run. Real Cargo acceptance compiles another source
 into the shared cache between profiles and verifies the original normal release
 is preserved without another normal candidate build. Actual Docker acceptance
 exercises the frozen image, invocation boundary and five tampered identities/bytes.
+The host and container entrypoint share the canonical `container/<profile>`
+output layout. The Docker fixture calls the actual entrypoint and dispatcher,
+then retains the resulting native binary for browser reuse; a fixture workload
+replaces statistical product measurements. Missing or mismatched output fails
+without promoting old raw results into a signed profile.
 This removes a duplicate build even when another workline churns the cache. It
 does not shorten a successful measurement matrix or prove production speedup.
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux

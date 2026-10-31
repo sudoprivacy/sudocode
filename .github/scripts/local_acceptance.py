@@ -732,9 +732,14 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
-    # SDK discovery captures the parent's environment, including NO_COLOR.
-    # Clear that inherited preference after setup; explicit fixture values
-    # below still select NoColor, including when the SDK environment is cached.
+    # SDK discovery also captures hook-exported repository selectors. Fixtures
+    # run Git in their own repositories, so clear inherited selectors after
+    # setup and before applying explicit per-command settings.
+    local_git = set(value("rev-parse", "--local-env-vars").splitlines())
+    environment = {key: setting for key, setting in environment.items() if key not in local_git
+                   and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    # Explicit fixture values below still select NoColor, including when the
+    # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
     environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})

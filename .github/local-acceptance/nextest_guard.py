@@ -29,6 +29,67 @@ def load(name, path):
     return module
 
 
+def git_environment_acceptance(helper, output):
+    """Keep real fixture Git writes out of the repository that invoked the hook."""
+    names = subprocess.check_output(["git", "rev-parse", "--local-env-vars"],
+                                    cwd=helper.ROOT, text=True).splitlines()
+    clean = {key: value for key, value in os.environ.items() if key not in names
+             and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    caller, foreign = output / "git-caller", output / "git-foreign"
+    caller.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=caller, env=clean,
+                                       stderr=subprocess.STDOUT, text=True).strip()
+
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Caller fixture")
+    git("config", "user.email", "caller@example.invalid")
+    (caller / "sentinel.txt").write_text("Preserve the hook caller.\n")
+    git("add", ".")
+    git("commit", "-m", "Preserve caller")
+    before = {name: (caller / ".git" / name).read_bytes() for name in ("HEAD", "index", "config")}
+    head = git("rev-parse", "HEAD")
+    child = output / "git-child.py"
+    child.write_text('''import json,os,subprocess,sys
+from pathlib import Path
+mode,root,names=sys.argv[1],Path(sys.argv[2]),json.loads(sys.argv[3])
+assert os.environ["GIT_TERMINAL_PROMPT"] == "0"
+if mode == "fresh":
+    assert not any(key in os.environ for key in names), "Hook repository selectors leaked into the child"
+    assert not any(key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for key in os.environ)
+    root.mkdir()
+    for args in [["init","--initial-branch=main"],["config","user.name","Foreign fixture"],
+                 ["config","user.email","foreign@example.invalid"]]:
+        subprocess.run(["git",*args],cwd=root,check=True)
+    (root/"foreign.txt").write_text("Only the fixture repository receives this commit.\\n")
+    subprocess.run(["git","add","."],cwd=root,check=True)
+    subprocess.run(["git","commit","-m","Foreign commit"],cwd=root,check=True)
+else:
+    actual=subprocess.check_output(["git","rev-parse","--show-toplevel"],cwd=root,text=True).strip()
+    assert Path(actual).resolve() == root.resolve()
+    assert subprocess.check_output(["git","config","user.name"],cwd=root,text=True).strip() == "Explicit child"
+''')
+    inherited = {"GIT_DIR": str(caller / ".git"), "GIT_COMMON_DIR": str(caller / ".git"),
+                 "GIT_WORK_TREE": str(caller), "GIT_INDEX_FILE": str(caller / ".git/index"),
+                 "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                 "GIT_CONFIG_VALUE_0": "Inherited caller", "GIT_TERMINAL_PROMPT": "0"}
+    with patch.dict(os.environ, inherited):
+        fresh = helper.run_command([sys.executable, str(child), "fresh", str(foreign), json.dumps(names)],
+                                   caller, output / "git-isolation.log")
+        explicit = helper.run_command(
+            [sys.executable, str(child), "explicit", str(foreign), json.dumps(names)],
+            foreign, output / "git-explicit.log",
+            {"GIT_DIR": str(foreign / ".git"), "GIT_CONFIG_COUNT": "1",
+             "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Explicit child"})
+    assert all((caller / ".git" / name).read_bytes() == data for name, data in before.items())
+    assert git("rev-parse", "HEAD") == head
+    assert not git("status", "--porcelain")
+    print("PASS: real Git fixture writes preserve caller HEAD, index, config and source; explicit child settings remain usable")
+    return {"scenario": "hook Git environment isolation", "status": "pass",
+            "commands": [fresh, explicit]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
@@ -89,7 +150,7 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
     arguments = [str(executable), "nextest", "run", *options,
                  "--manifest-path", str(fixture / "Cargo.toml"), "--locked"]
     environment = {"CARGO_TARGET_DIR": str(output / "target")}
-    checks = []
+    checks = [git_environment_acceptance(helper, output)]
 
     def execute(command, log):
         # Real Cargo/native processes run while the unsafe name-to-argv fallback

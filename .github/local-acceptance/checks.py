@@ -256,10 +256,16 @@ def run(name, root, output, base, execute):
             arguments = ["--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
+            print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
+            cargo("clippy", *arguments, "--", "-D", "warnings")
             native_tests(*arguments)
         else:
             command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
+            print("Workspace lint with warnings denied runs before long builds and PTY execution. "
+                  "The integrated queue additionally checks all targets/features.", flush=True)
+            cargo("clippy", "--workspace", "--all-targets", "--locked", "--features", "engine-acp/mailbox",
+                  "--", "-D", "warnings")
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
@@ -271,7 +277,6 @@ def run(name, root, output, base, execute):
             native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
-            cargo("clippy", "--workspace", "--locked")
     elif name == "native-examples":
         print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
               "This profile never runs example entry points.", flush=True)
@@ -372,6 +377,12 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
+        ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
+        "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
+        ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
+        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
+        "e2e/local-acceptance/native_lint_acceptance.py": "94229d3b06f0944ad23f31e73e9355d7b5ba48d1dc8258aa07fc8c23172ca593",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
@@ -379,10 +390,10 @@ def native_guard_files():
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
-        ".github/local-acceptance/native_guard.py": "1f7fb546bf9bc846e2a03e5f724f9830e7f0e2865bf37fd1af11206bb1c2118f",
+        ".github/local-acceptance/native_guard.py": "8214da300cdfb0f2ccc5d6ccc7de8459948e2b09a02cf0bd0161eeda58a0a96e",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "26f5044afdc527caa984399af4ef5724b7cb2b49156bbc6a95c3d23239c6ff4b",
-        "e2e/local-acceptance/run.py": "c79b8eec26681f24721bdf444e7a6d1edd52389157189883d1e807aefe138077",
+        "e2e/local-acceptance/run.py": "a133dfc4ab0b1a301840b3db20e4c7d5b0e40a95f4644dfef291b5b5fcbedf31",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
@@ -456,7 +467,7 @@ def contract_container(root, output, command):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "7ac3c2e7507240482a89938560d1fc7786575b72866b54280e4a11feca85fa9b",
+        "Dockerfile.guard": "6e43e2b96e7da5bc4515fce3579a91e3ceab7da0a29894dd52d52f8694b8bad7",
         "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
@@ -767,8 +778,8 @@ def rendering_cases(terminal, arguments, output, command):
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     for case in cases:
-        # Only partition the selected scenarios. Workloads, sample counts,
-        # A/A calibration, alternating A/B pairs and every budget stay intact.
+        # Partition the declared scenarios without changing their workloads,
+        # paired round policy, interaction samples or budgets.
         selected = dict(policy, profiles={**policy["profiles"], "core": [case]})
         selected_path = output / f"{case}-policy.json"
         selected_path.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
@@ -776,6 +787,7 @@ def rendering_cases(terminal, arguments, output, command):
         report["active_case"] = case
         save()
         print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
+              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; two warm-ups. "
               f"Complete paired result: {output / case / 'report.json'}. "
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
@@ -822,8 +834,8 @@ def rendering_cases(terminal, arguments, output, command):
 
 
 def benchmark_locked(name, root, output, base, command, target):
-    # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
-    # budget and sample assertions. Changing execution host changes none of them.
+    # Run the declared workload and paired sampling policy. Moving execution
+    # hosts does not change budgets or per-run interaction assertions.
     inputs = root.parent
     work, targets = benchmark_storage(name)
     # Both profiles compile the same candidate. Keep its canonical source path

@@ -220,7 +220,8 @@ performance comparisons. This deliberately reduces performance coverage for
 indirect effects from API, runtime, tools, ACP and service implementations; it
 does not establish that those effects are impossible. A change known to affect
 the performance workloads must include the corresponding measurement scenario.
-Selected measurements keep their existing baselines, rounds, assertions and budgets.
+Selected measurements keep their baselines, per-run assertions and budgets.
+Paired rounds are listed below.
 Rendering and browser use the same canonical candidate checkout and Cargo
 outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries
@@ -261,20 +262,44 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
-Rendering completes and judges one scenario at a time. Each scenario keeps its
-two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
-counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases
-the lease; later scenarios remain unrun. A successful core matrix still runs all
-156 samples. Scenario ordering and the placement of warm-ups change, so future
-noise and latency still need observation. The mandatory command prints the active
-scenario and its evidence path. `measurements/report.json` combines the original
+Rendering completes and judges one scenario at a time. All six scenarios keep
+two warm-ups, per-run interaction counts and budgets. The short scenario keeps
+five A/A and seven alternating A/B pairs, preserving the full check that caught
+a real RSS regression. Other core scenarios use three A/A and three A/B pairs;
+the core matrix runs 96 native samples instead of 156. Browser comparison uses
+three A/A and three A/B pairs plus two warm-ups: 14 runs instead of 26.
+Headless and painted viewport comparisons inherit the same 3/3 rounds: each also
+runs 14 instead of 26 samples. Repeated comparisons total 138 instead of 234
+(41.0% fewer); the separate 60-sample painted interaction check remains.
+Per-run parsed/painted interactions and budgets stay intact.
+This reduces repeat coverage and precision: intermittent regressions and
+environmental noise have fewer chances to appear. A preserved actual viewport
+A/A calibration refuses CPU noise with five pairs but not its first three;
+that original record remains noisy. Equivalent statistical sensitivity and a
+41% whole-lifecycle speedup are not established.
+The repeated-turn stress scenario retains five A/A and seven A/B pairs.
+A failed/noisy/invalid scenario stops the matrix and releases the lease; later
+scenarios remain unrun. The mandatory command prints the declared pair counts,
+active scenario and evidence path. `measurements/report.json` combines the original
 case reports, with original policy and binary/observer hashes, completed scenarios
 and remaining work. Real Cargo/native-process infrastructure acceptance exercises
 full success, relative RSS regression, broken drivers and changed observers with
 the unchanged paired evaluator; it does not claim product performance coverage.
-The changed rendering recipe requires new evidence. Eight other profile recipes
-are byte-for-byte unchanged; the unchanged browser command list has an exact
-approved hash pair so existing signed browser evidence remains reusable.
+Both changed performance recipes require new execution; earlier full-matrix
+results cannot authorize the reduced sampling policy. Native profile recipes
+remain unchanged. Actual native fixture processes verify the 96/14 schedules,
+alternating sides, the full short check and rejection of relative RSS/browser
+regressions and policies below their minimum rounds. These fixtures add no
+product performance coverage credit.
+
+Default SSE response archives reuse at most one finished deflate state across
+captures. Active captures retain separate states; a finished state releases its
+file, session budget and attachment lease before reuse. Compression level, gzip
+bytes, CRC, per-session limits and context separation stay unchanged. Real PTY
+acceptance checks six consecutive distinct responses and earlier-file integrity.
+The conditional PR codec check also writes 42 actual files, including six
+concurrent captures, independently decodes them and compares quota failure
+prefixes with the previous flate2 encoder. It adds no live-provider coverage.
 These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 preflight checks actual conflicts against its supplied base and fetched
@@ -312,6 +337,10 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+Lint now denies warnings before long native builds and PTY execution. Selected
+CLI-only changes lint those targets; a full workspace change lints all targets
+with the native mailbox feature graph. The queue additionally checks all features.
+This moves ordinary source/test lint failures earlier without another full test run.
 The full native workspace opts into eight declarative integration wrappers for
 128 CLI targets, selecting 91 instead of 211 integration targets. The selector
 contract was qualified before this Rust activation so installed verifiers agree
@@ -589,6 +618,15 @@ authorized temporary admin route was specific to that migration; it is not a
 general approval route for later contract changes.
 
 Rust caches keep the existing 10 GB quota and three shared main publishers.
+The publisher and complementary native jobs derive their cache paths from
+`.github/local-acceptance/cache_layout.py`. Sources stay in `candidate/rust`,
+while native Cargo outputs use the publisher's `rust/target` path. Identical keys
+with different paths have different cache versions and cannot share an entry.
+`CARGO_TARGET_DIR` is bound after restore so it does not change the publisher's
+environment hash. Required output prints `CI_CACHE_LAYOUT` and `CI_CACHE_BINDING`.
+Real Cargo/native-process acceptance checks both layouts, dependency reuse,
+fresh candidate execution and refusal of a conflicting target. It adds no product
+journey coverage; real hosted restores establish remote cache hits and timings.
 Queue maintenance retains current runs and cancels obsolete merge groups only
 when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

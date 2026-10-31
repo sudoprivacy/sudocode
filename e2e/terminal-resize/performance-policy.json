@@ -1,7 +1,11 @@
 {
   "version": 1,
   "baseline_commit": "82a99dd262c746a1872ccfaf0ea46d7fe4bd6754",
-  "rounds": { "calibration": 5, "comparison": 7 },
+  "rounds": { "calibration": 3, "comparison": 3 },
+  "case_rounds": {
+    "short": { "calibration": 5, "comparison": 7 },
+    "repeated": { "calibration": 5, "comparison": 7 }
+  },
   "sampling": { "input": 60, "resize": 40, "cancel": 20 },
   "profiles": {
     "core": ["short", "long", "cap", "markdown", "foreground", "background"],

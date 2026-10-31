@@ -407,16 +407,16 @@ preserves that evidence. Legacy receipts require the exact attested executor to
 be recoverable from their immutable signed source or base; their signatures stay unchanged.
 The versioned semantic AST encoding ignores empty optional fields so author and
 CI Python versions compute the same execution fingerprint.
-Provider tests on main run only for changed provider inputs, and real-daemon
-queue tests run only for changed daemon inputs. Documentation/CI-only changes
-skip those unchanged expensive journeys. The explicit provider dispatch stays
-available for gateway diagnosis.
+Provider tests require explicit local execution or manual provider dispatch;
+PR, queue and main events never authorize paid calls. Real-daemon queue tests
+still run for changed daemon inputs without a model credential. Documentation/CI-only
+changes skip those unchanged daemon journeys.
 The acceptance policy and signer registry are CI authorization metadata; changing
 them selects their acceptance checks without selecting unchanged provider calls.
-Other `spec/` inputs retain provider coverage. Source renames/deletions and explicit
-provider dispatch retain their existing selection rules.
-CLI integration-test-only edits retain native PTYs and the existing provider
-checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
+Paid provider checks follow the explicit on-demand policy below; changing
+authorization metadata does not authorize provider calls.
+CLI integration-test-only edits retain native PTYs, but skip the daemon suite
+whose binaries and shell inputs are unchanged.
 CLI manifests, production source and daemon harness edits still select it.
 When a change contains only standalone CLI integration-test modules (optionally
 with root README or Markdown documentation edits), workspace acceptance runs
@@ -480,7 +480,8 @@ records the actual compiler priorities. It runs once on a PR only when the lint
 workflow, fixture or scope selector changes; queue/main reuse its result.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
-Real provider/API assertions on main are unchanged; mock transport results do not
+Real provider/API assertions remain available through explicit acceptance;
+mock transport results do not
 establish live cache hits. Cache-prefix, compaction and all existing workspace
 cases remain, including standalone vendored Mermaid and benchmark type checks.
 
@@ -801,7 +802,7 @@ comment.
 suite (not behind `#[ignore]`). Tests that need network or a live
 API gate behind `#[ignore]` or a dedicated `--test` integration
 target (see `rusty-sudocode-cli/tests/acp_live_smoke.rs` for the
-live-API smoke pattern, which CI runs on `main` and by manual dispatch).
+live-API smoke pattern, run explicitly with local credentials or manual dispatch).
 
 ### Targeted commands
 
@@ -829,14 +830,54 @@ keyboard input, rendering, resize, cancellation, descendant process cleanup and
 recovery in the next turn. The process checks inspect actual child PIDs and fresh
 files. They do not require paid credentials.
 
-Funded acceptance runs ACP and co-host model journeys, plus every live PTY
-journey in the `live-model-pty` job on Linux and Windows. It runs on main pushes
-and manual dispatch. Before merging a change to those paths, run it on the PR
-branch:
+Paid model acceptance is **on demand**, normally on the developer's machine.
+Ordinary PR, queue and main workflows never authorize paid provider calls.
+The real-daemon queue gate uses a local model fixture and needs no API key;
+it remains required. Model compatibility has no scheduled catalog fan-out.
+
+The shared command registry is
+`.github/scripts/live_model_acceptance.py`. Without `--execute` it only prints
+the selected commands. Local PTYs use the developer's existing model configuration;
+ACP suites additionally require `PROXY_AUTH_TOKEN`, and the mailbox suite requires
+`ANTHROPIC_API_KEY`. Do not place credentials on a command line or commit them.
+
+```bash
+# Preview; no model calls
+python .github/scripts/live_model_acceptance.py --suite smoke
+
+# Explicitly use the local configured model/key; retains logs and result.json
+python .github/scripts/live_model_acceptance.py --suite smoke --execute
+```
+
+Run relevant suites when changing provider protocols, credentials, model routing,
+tool-result compatibility or model-dependent behavior, and accept the actual
+release candidate before publication. Record the tested commit, commands,
+result and remaining provider/platform limits. A local run does not prove
+untested provider channels or platforms. This is an explicit release acceptance
+step, not a new automatic paid job on every tag. The default smoke suite covers
+actual file contents through resumed and headless CLI turns. The fuller `pty`,
+`acp`, `native-acp`, `mailbox`, `offline-nexus`, `subagent` and `compat` suites
+retain their existing assertions. `--tests` selects registered test targets;
+unknown targets are rejected. The full PTY suite requires its separately
+configured Azure profile and `SCODE_AZURE_MODEL`.
+
+When cloud execution is specifically needed, a maintainer can explicitly run
+the existing company-funded ACP/cohost and Linux/Windows PTY workflow on a
+chosen branch. Normal manual cache/preflight runs do not authorize it:
 
 ```bash
 gh workflow run rust-ci.yml --ref <branch> -f live_only=true
 ```
+
+There is no scheduled paid PTY/model compatibility run. Select one local or
+manual execution for the required candidate coverage rather than repeating it
+before and after every merge. A deterministic native pass is not evidence of
+real provider compatibility, and an unexecuted live suite is not a live pass.
+The runner records one attempt per command, a bounded suite duration and failures
+without retrying to green. Quota/authentication/rate-limit/service failures
+remain failed with their category; they are not reported as product regressions
+or silently converted into success. Finite company key quotas remain external
+spend limits; the runner does not replenish them or claim to reserve money.
 
 Provider preflight and traces identify quota, authentication, rate-limit and
 service failures separately. A failed preflight keeps the job failed and retains

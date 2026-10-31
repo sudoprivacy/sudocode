@@ -116,7 +116,8 @@ def scope_acceptance(directory):
                     'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
             selected = json.loads(command(sys.executable, "-c", code,
                 SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
-            assert {"native-workspace", "native-resize", "rendering", "browser", "native-release"}.issubset(selected)
+            assert {"native-workspace", "native-resize", "browser", "native-release"}.issubset(selected)
+            assert "rendering" not in selected, "The rendering matrix runs on main, not per PR"
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:

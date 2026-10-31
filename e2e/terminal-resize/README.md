@@ -164,8 +164,16 @@ counted multiple times), and peaks are phase samples. The Node observer is
 outside that resource scope. Raw per-process samples make that distinction
 inspectable; these values must not be compared to scode's standalone RSS budget.
 
-`gui-benchmark.py` uses the core gate's paired evaluator: five A/A calibration
-pairs followed by seven alternating A/B pairs. `gui-policy.json` owns the
+`gui-benchmark.py` uses the core gate's paired evaluator: three A/A calibration
+pairs followed by three alternating A/B pairs and two warm-ups (14 runs).
+Each run keeps its existing gestures, observation counts and budgets. Fewer
+repetitions reduce precision and the chance of exposing intermittent regressions;
+equivalent statistical sensitivity is not established. The core six-scenario
+rendering matrix uses 96 runs: short retains five A/A and seven A/B pairs, while
+the other five scenarios use three A/A and three A/B pairs, with two warm-ups
+per scenario. The repeated-turn stress scenario also retains five/seven pairs.
+The short check that caught a real RSS regression and the separate viewport
+checks retain their original sampling. `gui-policy.json` owns the
 additional browser budgets; the original `performance-policy.json` budgets and
 fixed baseline are unchanged. Both binaries receive identical gestures and
 workloads; only candidate hyperlink assertions differ. The browser workflow

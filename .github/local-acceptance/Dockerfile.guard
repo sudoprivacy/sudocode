@@ -4,6 +4,10 @@ RUN nice -n 10 apt-get update \
  && nice -n 10 apt-get install -y --no-install-recommends python3-psutil \
  && rm -rf /var/lib/apt/lists/*
 
+RUN nice -n 10 rustup component add rustfmt clippy \
+ && cargo fmt --version \
+ && cargo clippy --version
+
 ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 COPY guard.py /opt/acceptance-guard.py
 ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

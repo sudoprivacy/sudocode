@@ -8,6 +8,7 @@ on:
       # Other workflow edits change neither Cargo inputs nor this cache's
       # environment. Rust pushes still warm a new toolchain/image key.
       - '.github/workflows/ci-dependency-cache.yml'
+      - '.github/local-acceptance/cache_layout.py'
   workflow_call:
     inputs:
       linux_only:
@@ -49,11 +50,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve the shared native cache paths
+        id: cache_layout
+        run: python ../.github/local-acceptance/cache_layout.py --source rust --github-output
       - name: Check the dependency key without downloading a hit
         id: lookup
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust -> target
+          workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
           lookup-only: true
@@ -62,7 +66,7 @@ jobs:
         if: steps.lookup.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust -> target
+          workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
       - name: Compile workspace dependencies without running tests

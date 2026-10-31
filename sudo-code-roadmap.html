@@ -300,9 +300,8 @@ passed. Previous failed records remain failed; raw output is not promoted into
 signed acceptance.
 Both Docker recipes require new evidence; native recipes stay unchanged.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
-(2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
-alternating A/B pairs and all interaction counts and budgets. The successful
-six-scenario matrix still runs 156 samples. A failed, noisy or invalid scenario
+(2026-10-31).</strong> Each scenario retains two warm-ups, all per-run
+interaction counts and budgets. A failed, noisy or invalid scenario
 stops later scenarios, preserving their unrun status and releasing the shared
 lease. Warm-ups and measurements now group by scenario; this changes scheduling,
 and future noise still needs observation. The required interface prints the active
@@ -314,7 +313,40 @@ one complete real failed run preserved its verdict and metric rows: the first
 scenario accounted for 360.46 of 1,989.19 recorded driver seconds. That projects
 81.9% less sample work before this failure; it is not a measured new production
 latency result and excludes compilation and lease waiting. Passing-run cost is
-not reduced by this change.</p>
+not reduced by that scheduling change.</p>
+<p><strong>Shared native cache paths and earlier lint (2026-10-31).</strong>
+The cache publisher and native consumers derive paths from one helper. Native
+sources remain in <code>candidate/rust</code>; compiled outputs use the publisher's
+<code>rust/target</code> path. Previously, Linux and macOS requested an existing
+main key but reported no cache because their path-derived cache versions differed.
+Cargo's target is bound after restore to preserve the publisher's environment
+hash. Required output prints the source and target. Real Cargo/native-process
+acceptance checks dependency reuse, candidate execution and conflicting-target
+refusal; hosted CI establishes actual remote restores and timings. These are
+executor checks, with no product journey credit. Lint now denies warnings before
+long builds/tests. Full workspace changes lint all targets with the native mailbox
+feature graph; targeted changes lint their targets. The queue additionally checks
+all features.</p>
+<p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
+scenarios remain. Short retains five A/A and seven alternating A/B pairs,
+preserving the full check that caught a real RSS regression. Long, cap, markdown,
+foreground and background use three A/A and three A/B pairs. With two warm-ups
+per scenario this is 96 native samples instead of 156. Browser comparison uses
+three A/A and three A/B pairs plus two warm-ups: 14 instead of 26 runs. Per-run
+interaction counts, workloads, budgets and the relative evaluator stay unchanged.
+Headless and painted viewport comparisons also inherit 3/3 rounds: each runs 14
+instead of 26 samples. The separate 60-sample painted interaction check remains.
+The repeated-turn stress scenario retains five A/A and seven A/B pairs.
+Across these repeated comparisons this removes 96 of 234 runs (41.0%);
+it does not imply a 41% reduction in total CI or local elapsed time.
+<strong>Coverage reduction:</strong> fewer repetitions reduce precision and the
+chance of exposing intermittent regressions or environmental noise. A preserved
+actual viewport A/A calibration refuses CPU noise with five pairs but not its
+first three; the original record remains noisy. Equivalent statistical sensitivity
+is not established. Required output prints pair counts; both changed recipes
+need fresh execution. Real native infrastructure canaries verify counts,
+alternating sides, regression refusals and minimum-round refusals without claiming
+product performance coverage. Actual production latency savings remain unmeasured.</p>
 <p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
 Source-only changes in API, runtime, tools, ACP and services no longer select
 these two Docker profiles. Their selected native functional checks, including
@@ -671,6 +703,29 @@ script remains available for diagnosis and earns no additional coverage credit.<
       identity. Grouping fixtures use small native programs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
+    </tr>
+    <tr>
+      <td>Paired rendering/browser/viewport measurements</td>
+      <td>Six rendering scenarios remain: 96 runs. Browser, headless viewport
+      and painted viewport comparisons each run 14 samples; total 138 instead
+      of 234. Short retains its full 5/7 paired rounds; the other comparisons
+      use 3/3. Lower repeat coverage can miss intermittent regressions and
+      environmental noise. Budgets and per-run interactions stay intact;
+      the separate 60-sample painted interaction check remains.</td>
+      <td>No additional journey credit from repeated measurements.</td>
+      <td><code>benchmark.py</code> / <code>gui-benchmark.py</code> /
+      <code>benchmark_prompt_viewport.py</code></td>
+    </tr>
+    <tr>
+      <td>SSE archive compressor reuse</td>
+      <td>Real PTY checks six distinct responses and earlier-file integrity.
+      A conditional PR check writes 42 real files, with six concurrent captures,
+      independently decodes them and compares exact gzip bytes and quota failure
+      prefixes. At most one finished compression state is retained, after
+      releasing its file, session budget and attachment lease.</td>
+      <td>PTY assertions cover archive persistence; native codec checks add no
+      provider or user journey coverage.</td>
+      <td><code>pty_model_stream_close</code> / <code>e2e/response-gzip/</code></td>
     </tr>
     <tr>
       <td>Compile-only examples</td>

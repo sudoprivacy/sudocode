@@ -108,9 +108,13 @@ Darwin can cancel an in-flight global stderr write with `BrokenPipe`, even
 while both pipe ends remain open. The retry reporter handles that error without
 panicking; this capture does not promise lossless writes from arbitrary
 third-party code which panics on stderr failure.
-The forwarder parks only when idle. Windows' existing pipe reader unparks it
-when a chunk arrives, so bounded batches do not impose a sleep between pending
-chunks. The iocraft owner retains its existing tick; neither path adds a reader.
+The forwarder waits only when idle. Unix polls the captured pipe and a
+nonblocking notification socket together, without holding the redirect mutex.
+Captured bytes, peer notices and shutdown wake that same worker; draining a
+small pipe does not incur an 80 ms sleep each time its writer reschedules.
+Windows' existing pipe reader unparks it when a chunk arrives, so bounded
+batches do not impose a sleep between pending chunks. The iocraft owner retains
+its existing tick; neither path adds a reader.
 The completion reporter is boxed behind its lazy cell: healthy completion
 states reserve only the cell/pointer, rather than the reporter's map and strings.
 This reduces inline layout; it does not establish the rendering workload's
@@ -197,6 +201,11 @@ must record one real `BrokenPipe` notice failure, retain both original operation
 errors and their scope recoveries, and continue to observe a second operation.
 All cases retain the original deadlines and release the gate before reporting
 assertions. Raw IO results and handoff stages survive a child timeout.
+Linux additionally requests a 4 KiB real pipe, records its actual capacity
+(the kernel may round up to its page size), and requires the same 8 MiB write
+to finish within the original five seconds. Every case also sends
+a peer notice after the worker becomes idle and requires its delivery before
+shutdown; the process deadline bounds joining the worker.
 These isolate pipe/lock ordering with
 a controlled printer; they do not replace the native-editor PTY assertions.
 Exact-head CI and platform results are reported in the PR;

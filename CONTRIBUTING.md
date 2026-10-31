@@ -206,6 +206,22 @@ outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries
 stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
 cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
+Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
+copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories
+under the same lease, preserving canonical `/state` paths, modes and mtimes.
+The host cache stays mounted read-only at `/legacy-state`; it is not deleted.
+Completed migration is not repeated; interruption leaves no completion receipt.
+The required command prints migration start/completion and includes that one-time
+copy in local elapsed time. Logs and measurement evidence remain in the host
+output directory. Keep both the data volume and the separate shared lease volume
+when managing Docker storage. Removing the data volume requires migration again;
+removing the preserved host cache as well causes a cold dependency/product build.
+Real Cargo acceptance checks warm artifact identity, changed-source rebuild,
+partial-copy recovery, and refusal of escaped roots or invalid completion records.
+The production Docker launcher is also exercised with private labelled volumes.
+This changes storage placement, not selected workloads, samples or budgets. Both
+Docker execution recipes require new evidence; native profile recipes stay unchanged.
 Rendering completes and judges one scenario at a time. Each scenario keeps its
 two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
 counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases

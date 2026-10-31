@@ -57,7 +57,7 @@ def run(output, base_image):
     git("init", "--initial-branch=main")
     git("config", "user.name", "Container input fixture")
     git("config", "user.email", "container-inputs@example.invalid")
-    probe = '''import json
+    probe = '''import hashlib,importlib.util,json,shutil,subprocess,sys
 from pathlib import Path
 expected=json.loads(Path('/evidence/expected.json').read_text())
 image=Path('/fixture-policy').read_text()
@@ -68,7 +68,20 @@ assert actual==expected['sources'],f'Git snapshot mismatch: {actual} != {expecte
 assert not any((Path('/inputs')/label/'private-untracked.txt').exists() for label in actual)
 package=json.loads(Path('/context/package.json').read_text())
 assert package['fixturePolicy']==expected['policy'],'image context used another policy'
-Path('/evidence/observed.json').write_text(json.dumps({'sources':actual,'image_policy':image}))
+spec=importlib.util.spec_from_file_location('actual_profiles','/inputs/runner/.github/local-acceptance/checks.py')
+checks=importlib.util.module_from_spec(spec);spec.loader.exec_module(checks)
+reused=checks.verified_candidate_release(Path('/inputs'))
+assert bool(reused)==expected.get('reuse',False),'unexpected release reuse decision'
+binary=Path('/evidence/scode-candidate')
+shutil.copy2(sys.executable,binary)
+if reused:
+    assert reused.read_bytes()==binary.read_bytes(),'another candidate release was reused'
+    observed=subprocess.check_output([str(reused),'-c','print("REUSED_NATIVE_BINARY_EXECUTED")'],text=True).strip()
+    assert observed=='REUSED_NATIVE_BINARY_EXECUTED','retained Linux executable cannot run after host staging'
+report=Path('/evidence/container/rendering/measurements/report.json')
+report.parent.mkdir(parents=True)
+report.write_text(json.dumps({'status':'passed','candidate_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}))
+Path('/evidence/observed.json').write_text(json.dumps({'sources':actual,'image_policy':image,'reused':bool(reused)}))
 print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
 '''
 
@@ -104,12 +117,21 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", lease])
     execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", cache])
 
-    def launch(name, policy_ref, expected, *, swap_image=None):
-        evidence = output / name
-        evidence.mkdir()
+    def launch(name, policy_ref, expected, *, swap_image=None, profile="rendering", corrupt=None, parent=output):
+        evidence = parent / name
+        evidence.mkdir(parents=True)
         (evidence / "expected.json").write_text(json.dumps(expected))
 
         def execute_profile(arguments, cwd, log, environment=None):
+            if list(arguments[:2]) == ["docker", "run"] and corrupt:
+                reused = evidence / "inputs/candidate-release"
+                if corrupt == "bytes":
+                    (reused / "scode").write_bytes(b"different candidate bytes")
+                else:
+                    receipt = reused / "identity.json"
+                    value = json.loads(receipt.read_text())
+                    value[corrupt] = "wrong-" + value[corrupt]
+                    receipt.write_text(json.dumps(value))
             execute(arguments, cwd=cwd, extra=environment, log=log)
             if list(arguments[:2]) == ["docker", "build"]:
                 tag = arguments[arguments.index("--tag") + 1]
@@ -125,12 +147,14 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             return json.loads(log.with_suffix(".command.json").read_text())
 
         checks.run.execution_refs = (policy_ref, candidate)
-        checks.run("rendering", root, evidence, protected, execute_profile)
+        checks.run(profile, root, evidence, protected, execute_profile)
         provenance = json.loads((evidence / "container-provenance.json").read_text())
         observed = json.loads((evidence / "observed.json").read_text())
         assert observed["sources"] == expected["sources"]
+        assert observed["reused"] == expected.get("reuse", False)
         assert provenance["candidate"] == candidate and provenance["policy"] == policy_ref
-        assert provenance["baseline"] == (baseline if policy_ref == protected else protected)
+        assert provenance["baseline"] == (protected if profile == "browser" else
+                                           baseline if policy_ref == protected else protected)
         actual_run = next(row["command"] for row in commands[::-1]
                           if docker_operation(row, "run"))
         assert provenance["image_id"] in actual_run and provenance["image_tag"] not in actual_run
@@ -149,6 +173,31 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         tag_id = execute(["docker", "image", "inspect", "--format", "{{.Id}}", second["image_tag"]]).read_text().strip()
         assert tag_id == first["image_id"] != second["image_id"], "Fixture did not actually replace the tag"
         print("PASS: actual Git ref moves and Docker retag preserve frozen input/image selection", flush=True)
+        expected = {"policy": "main-policy", "reuse": True, "sources": {
+            "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "main-policy"}}
+        # Replace the original rendering tag too. Same-invocation browser reuse
+        # must launch the retained immutable image ID, never the mutable tag.
+        execute(["docker", "tag", second["image_id"], first["image_tag"]])
+        before = sum(docker_operation(row, "build") for row in commands)
+        reused = launch("same-invocation-browser", protected, expected, profile="browser")
+        assert reused["image_id"] == first["image_id"]
+        assert sum(docker_operation(row, "build") for row in commands) == before
+        for corrupt in ["bytes", "candidate", "policy", "image_id", "context_sha256"]:
+            try:
+                launch("negative-reuse-" + corrupt, protected, expected, profile="browser", corrupt=corrupt)
+            except RuntimeError:
+                errors = [Path(row["log"]).read_text(errors="replace") for row in commands
+                          if docker_operation(row, "run")]
+                assert ("release bytes changed" in errors[-1] if corrupt == "bytes"
+                        else "different source, policy or image" in errors[-1]), errors[-1]
+            else:
+                raise AssertionError(f"Tampered reuse {corrupt} was accepted")
+        # A different invocation's output root cannot inherit this memory entry,
+        # even for the exact same Git inputs. Browser-only execution stays valid.
+        launch("fresh-browser", protected, {**expected, "reuse": False}, profile="browser",
+               parent=output / "another-invocation")
+        assert sum(docker_operation(row, "build") for row in commands) == before + 1
+        print("PASS: exact invocation reuses a frozen image/release; changed identity/bytes rejected; fresh invocation builds normally", flush=True)
         print("Expected negative case: the following wrong-policy container must be rejected", flush=True)
         try:
             launch("negative-wrong-policy", protected, {"policy": "candidate-policy", "sources": {
@@ -160,8 +209,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: wrong-policy container rejected by the real input probe", flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
-        result = {"status": "PASS", "cases": 3,
-            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected and candidate policies select their own image/driver/baseline. Actual HEAD/origin/main movement and a real tag replacement cannot change captured inputs. Wrong-policy container is rejected. Infrastructure only; no product benchmark coverage."}
+        result = {"status": "PASS", "cases": 10,
+            "same_invocation_image_and_binary_reused": True, "fresh_invocation_does_not_reuse": True,
+            "changed_identity_and_bytes_refused": True,
+            "scope": "Real production container launcher, Git commits/archives and Docker builds/runs. Protected/candidate policies and actual ref/tag moves retain frozen inputs. Same-invocation browser reuses the exact image and executes a retained native Linux binary after host staging; another invocation builds normally. Five corrupted release identities/bytes and a wrong-policy image are rejected inside real containers. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
     finally:
         (output / "commands.json").write_text(json.dumps(commands, indent=2))
         # All tags and IDs below were produced by this UUID-labelled fixture.

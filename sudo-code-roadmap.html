@@ -265,6 +265,20 @@ mtime, then rebuilt changed source; this is infrastructure evidence, not a
 production end-to-end speed claim. Windows bind timestamps rounded Cargo dep-info
 to whole seconds in the initial fast fixture, making that legacy graph already
 stale before migration; no timestamps or assertions were changed to hide it.</p>
+<p><strong>Retain one measured normal release across performance profiles
+(2026-10-31).</strong> In the same acceptance process, browser reuses rendering's
+immutable image ID and saved candidate release when the candidate, protected
+policy and Docker context match. An in-memory entry authorizes reuse; prior
+output directories and mutable image tags cannot. Read-only staged inputs bind
+the source, policy, image and binary SHA256. Fresh processes or changed inputs
+build normally; corrupted retained files fail. Baselines, dev-feature drivers,
+GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
+workline's source into the shared cache between profiles, then verifies that
+browser uses the original normal release without another normal candidate build.
+Actual Docker acceptance checks frozen images, the invocation boundary and five
+tampered release identities/bytes. This removes duplicate compilation without
+reducing measurement coverage; production elapsed savings remain unmeasured.
+Both Docker recipes require new evidence; native recipes stay unchanged.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
 (2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
 alternating A/B pairs and all interaction counts and budgets. The successful

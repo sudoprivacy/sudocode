@@ -10,7 +10,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -369,6 +368,25 @@ out=Path(a.output);out.mkdir()
     (inputs / "trusted/rust/src/main.rs").write_text('fn main() {}\n', encoding="utf-8")
     stage_digests = []
     for name in ["rendering", "browser"]:
+        if name == "browser":
+            # Preserve the measured normal binary from this invocation, then
+            # actually compile another workline's source at the shared canonical
+            # path before browser acceptance restores its own exact sources.
+            identity = {"candidate": "fixture-candidate-A", "policy": "fixture-protected",
+                        "image_id": "sha256:" + "1" * 64, "context_sha256": "2" * 64}
+            (inputs / "identity.json").write_text(json.dumps(identity))
+            retained = inputs / "candidate-release"
+            retained.mkdir()
+            shutil.copy2(output / "subsequent-rendering/scode-candidate", retained / "scode")
+            (retained / "identity.json").write_text(json.dumps({
+                **identity, "version": 1, "sha256": digest,
+            }))
+            cached = output / "state/rendering/candidate/rust"
+            (cached / "src/main.rs").write_text('fn main() { println!("other-workline"); }\n')
+            command("cargo", "build", "--locked", "--release", "--manifest-path", str(cached / "Cargo.toml"),
+                    "--target-dir", str(output / "state/target/rendering/candidate"), "-p", "rusty-sudocode-cli", "--bin", "scode")
+            assert subprocess.check_output([str(candidate_target / "release/scode")]).decode().strip() == "other-workline"
+        before = len(commands)
         stage = output / ("subsequent-" + name)
         stage.mkdir()
         with checks.exclusive_benchmark_state(locks):
@@ -376,6 +394,12 @@ out=Path(a.output);out.mkdir()
         stage_digests += [hashlib.sha256((stage / "scode-candidate").read_bytes()).hexdigest(),
                           json.loads((stage / ("measurements/short/fixture.json" if name == "rendering"
                                               else "measurements/fixture.json")).read_text())["candidate_sha256"]]
+        if name == "browser":
+            extra_builds = [row for row in commands[before:] if "build" in row["command"]
+                            and "--manifest-path" in row["command"]
+                            and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml")]
+            assert not extra_builds, "Browser rebuilt the already measured normal release"
+            assert len(commands) - before == 8, "A required browser driver/observer was omitted"
     candidate_builds = [(index, row["command"]) for index, row in enumerate(commands)
                         if "build" in row["command"] and "--manifest-path" in row["command"]
                         and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml")]
@@ -383,11 +407,7 @@ out=Path(a.output);out.mkdir()
     assert len({args[args.index("--manifest-path") + 1] for _, args in candidate_builds}) == 1, "Candidate source path must stay canonical across profiles"
     assert len({args[args.index("--target-dir") + 1] for _, args in candidate_builds}) == 1, "Candidate outputs must stay with the same source path"
     assert all(value == digest for value in stage_digests), "Production candidate changed between profiles"
-    final_build_log = (output / "commands" / f"{candidate_builds[-1][0]:03d}.log").read_text(encoding="utf-8")
-    # This production build does not request JSON; decode its status output
-    # before checking it, including the CI runner's CARGO_TERM_COLOR=always.
-    final_build_log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", final_build_log)
-    assert "Compiling " not in final_build_log, "Browser redundantly compiled the candidate after rendering"
+    assert subprocess.check_output([str(candidate_target / "release/scode")]).decode().strip() == "candidate:dev"
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})
     assert len(target_trees) == 4, target_trees
@@ -395,6 +415,7 @@ out=Path(a.output);out.mkdir()
     matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
               "target_trees": target_trees, "cross_profile_candidate_build_reused": True,
+              "interleaved_other_candidate_does_not_rebuild_normal_release": True,
               "rendering_matrix": matrix, "cache_migration": migration,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production browser build executor, Cargo and npm; distinct baseline/candidate and native integration drivers, reusable dev artifacts, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}

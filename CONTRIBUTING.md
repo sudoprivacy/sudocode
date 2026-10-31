@@ -206,6 +206,20 @@ outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries
 stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
 cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+When rendering and browser run in the same acceptance process for the same
+candidate, protected policy and Docker context, browser reuses rendering's exact
+immutable image and saved normal release. The retained image ID and binary hash
+live in that process only; previous output directories and mutable image tags
+cannot authorize reuse. The release enters browser through read-only inputs and
+is checked against its source, policy, image and SHA256 before use. Changed
+inputs or a fresh process use the ordinary build path; corrupted retained files
+fail explicitly. Browser baseline builds, dev-feature drivers, paired GUI samples
+and viewport observers still run. Real Cargo acceptance compiles another source
+into the shared cache between profiles and verifies the original normal release
+is preserved without another normal candidate build. Actual Docker acceptance
+exercises the frozen image, invocation boundary and five tampered identities/bytes.
+This removes a duplicate build even when another workline churns the cache. It
+does not shorten a successful measurement matrix or prove production speedup.
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
 Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
 copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories

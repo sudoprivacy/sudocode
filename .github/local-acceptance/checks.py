@@ -264,7 +264,8 @@ def run(name, root, output, base, execute):
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
             print("Workspace lint with warnings denied runs before long builds and PTY execution. "
                   "The integrated queue additionally checks all targets/features.", flush=True)
-            cargo("clippy", "--workspace", "--locked", "--", "-D", "warnings")
+            cargo("clippy", "--workspace", "--all-targets", "--locked", "--features", "engine-acp/mailbox",
+                  "--", "-D", "warnings")
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))

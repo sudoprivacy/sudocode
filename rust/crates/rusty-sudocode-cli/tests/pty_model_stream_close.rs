@@ -663,7 +663,7 @@ fn raw_stream_capture_reuses_compression_without_rewriting_earlier_responses() {
         let mut decoded = std::collections::BTreeSet::new();
         for entry in std::fs::read_dir(&directory).unwrap() {
             let path = entry.unwrap().path();
-            if !path.extension().is_some_and(|ext| ext == "gz") {
+            if path.extension().is_none_or(|ext| ext != "gz") {
                 continue;
             }
             let bytes = std::fs::read(&path).unwrap();

@@ -323,8 +323,10 @@ Cargo's target is bound after restore to preserve the publisher's environment
 hash. Required output prints the source and target. Real Cargo/native-process
 acceptance checks dependency reuse, candidate execution and conflicting-target
 refusal; hosted CI establishes actual remote restores and timings. These are
-executor checks, with no product journey credit. Existing selected lint now denies
-warnings before long builds/tests; the queue keeps all-target/all-feature lint.</p>
+executor checks, with no product journey credit. Lint now denies warnings before
+long builds/tests. Full workspace changes lint all targets with the native mailbox
+feature graph; targeted changes lint their targets. The queue additionally checks
+all features.</p>
 <p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
 scenarios remain. Short retains five A/A and seven alternating A/B pairs,
 preserving the full check that caught a real RSS regression. Long, cap, markdown,

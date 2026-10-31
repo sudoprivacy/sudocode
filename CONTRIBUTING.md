@@ -326,10 +326,10 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
-The existing selected lint scope now denies warnings before long native builds
-and PTY execution. Selected CLI-only changes lint those targets; a full workspace
-change lints the workspace. The queue retains its stronger all-target/all-feature
-lint. This moves ordinary lint failures earlier without adding another full test run.
+Lint now denies warnings before long native builds and PTY execution. Selected
+CLI-only changes lint those targets; a full workspace change lints all targets
+with the native mailbox feature graph. The queue additionally checks all features.
+This moves ordinary source/test lint failures earlier without another full test run.
 The full native workspace opts into eight declarative integration wrappers for
 128 CLI targets, selecting 91 instead of 211 integration targets. The selector
 contract was qualified before this Rust activation so installed verifiers agree

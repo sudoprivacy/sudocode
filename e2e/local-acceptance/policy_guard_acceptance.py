@@ -61,6 +61,10 @@ def main():
         if hashlib.sha256(canonical).hexdigest() != expected:
             raise RuntimeError(f"Guard fixture source differs from its protected byte pin: {path}")
         contents[path] = canonical
+    # The release recipe fingerprint also binds this image input. Staging still
+    # verifies its unchanged composite pin before any native guard executes.
+    image = ".github/local-acceptance/Dockerfile"
+    contents[image] = contents[image].replace(b"\r\n", b"\n")
     toolchain = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
                               cwd=SOURCE, text=True, capture_output=True).stdout.strip()
     candidate = output / "old-candidate"

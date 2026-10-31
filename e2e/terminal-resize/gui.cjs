@@ -11,6 +11,7 @@ const { chromium } = require('playwright');
 const { launchBrowser } = require('./browser.cjs');
 const { WebSocketServer } = require('ws');
 const { launch } = require('./host.cjs');
+const { terminalPainter } = require('./paint.cjs');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const p95 = values => [...values].sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
@@ -80,35 +81,10 @@ async function run(config) {
       && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
       && fixture.viewport().split('\n').some(row => /^\s*⏵⏵ danger-full-access(?:\s|$)/u.test(row))
       && performance.now() - fixture.lastData >= 300, config.cols);
-    const readback = await page.context().newCDPSession(page);
-    report.environment.pngReadback = { method: 'Page.captureScreenshot', optimizeForSpeed: true };
-    report.paint_observations = [];
-    const painted = async () => {
-      const started = performance.now();
-      const { clip, frameMs, boundsMs } = await page.evaluate(async () => {
-        const began = performance.now();
-        await document.fonts.ready;
-        await fixture.frame();
-        const framed = performance.now();
-        if (document.getAnimations().some(animation => animation.playState === 'running')) {
-          throw new Error('Terminal painting measurements require non-animated CSS');
-        }
-        const clip = fixture.pixelBounds();
-        return { clip, frameMs: framed - began, boundsMs: performance.now() - framed };
-      });
-      assert(clip.width > 0 && clip.height > 0, 'missing terminal pixel bounds');
-      const ready = performance.now();
-      // Read the completed PNG directly. Generic page screenshots prepare
-      // animation/caret state and repeat layout work before capturing pixels.
-      const { data } = await readback.send('Page.captureScreenshot', {
-        format: 'png', clip: { ...clip, scale: 1 },
-        captureBeyondViewport: false, optimizeForSpeed: true,
-      });
-      report.paint_observations.push({ frame_ms: frameMs, bounds_ms: boundsMs,
-        ready_rpc_ms: ready - started, readback_ms: performance.now() - ready,
-        total_ms: performance.now() - started });
-      return Buffer.from(data, 'base64');
-    };
+    const painter = await terminalPainter(page);
+    const painted = painter.capture;
+    report.environment.pngReadback = painter.environment;
+    report.paint_observations = painter.observations;
     const progress = label => fs.writeFileSync(path.join(config.logRoot, 'progress.txt'), label);
     const resources = async label => {
       progress(label);

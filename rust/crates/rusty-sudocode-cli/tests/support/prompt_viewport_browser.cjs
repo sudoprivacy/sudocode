@@ -135,7 +135,10 @@ websocket.on('connection', socket => {
     await page.keyboard.press('Control+u');
     await page.waitForFunction(() => window.fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
     const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-    const painted = terminalPainter(page);
+    const painter = await terminalPainter(page);
+    const painted = painter.capture;
+    report.pngReadback = painter.environment;
+    report.paint_observations = painter.observations;
     let previousPixels = hash(await painted());
     for (let index = 0; index < guiPolicy.sampling.input_delays_ms.length; index++) {
       await new Promise(resolve => setTimeout(resolve, guiPolicy.sampling.input_delays_ms[index]));

@@ -248,6 +248,7 @@ def performance_scope_acceptance(directory):
     paths = [("e2e/local-acceptance/" + name, False) for name in independent]
     paths += [(name, True) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
         ".github/local-acceptance/checks.py", ".github/scripts/local_acceptance.py",
+        ".github/scripts/check_pr_history.py",
         "spec/local_acceptance.json", ".github/workflows/local-acceptance.yml"]]
     for path, guard in paths:
         base = command("git", "rev-parse", "HEAD", cwd=repository)

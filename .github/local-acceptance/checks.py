@@ -256,10 +256,15 @@ def run(name, root, output, base, execute):
             arguments = ["--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
+            print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
+            cargo("clippy", *arguments, "--", "-D", "warnings")
             native_tests(*arguments)
         else:
             command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
+            print("Workspace lint with warnings denied runs before long builds and PTY execution. "
+                  "The integrated queue additionally checks all targets/features.", flush=True)
+            cargo("clippy", "--workspace", "--locked", "--", "-D", "warnings")
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
@@ -271,7 +276,6 @@ def run(name, root, output, base, execute):
             native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
-            cargo("clippy", "--workspace", "--locked")
     elif name == "native-examples":
         print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
               "This profile never runs example entry points.", flush=True)
@@ -372,6 +376,11 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
+        ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
+        "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
+        ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
+        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
@@ -379,7 +388,7 @@ def native_guard_files():
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
-        ".github/local-acceptance/native_guard.py": "1f7fb546bf9bc846e2a03e5f724f9830e7f0e2865bf37fd1af11206bb1c2118f",
+        ".github/local-acceptance/native_guard.py": "8ff6a11217784336314dfbc1e71a9e3d65c6a826bdae4fbf87e6df7fdedb7f3a",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "e201deed5b24275964be93a0e3d1adce22894461f1f2dffd7540ac1e485f3f25",
         "e2e/local-acceptance/run.py": "5cf6dc374353cf4d753fd0bae6ff9f74f3a8405cfbb0917b353d3bccdec723c0",

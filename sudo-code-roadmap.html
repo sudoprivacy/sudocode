@@ -314,18 +314,33 @@ scenario accounted for 360.46 of 1,989.19 recorded driver seconds. That projects
 81.9% less sample work before this failure; it is not a measured new production
 latency result and excludes compilation and lease waiting. Passing-run cost is
 not reduced by that scheduling change.</p>
+<p><strong>Shared native cache paths and earlier lint (2026-10-31).</strong>
+The cache publisher and native consumers derive paths from one helper. Native
+sources remain in <code>candidate/rust</code>; compiled outputs use the publisher's
+<code>rust/target</code> path. Previously, Linux and macOS requested an existing
+main key but reported no cache because their path-derived cache versions differed.
+Cargo's target is bound after restore to preserve the publisher's environment
+hash. Required output prints the source and target. Real Cargo/native-process
+acceptance checks dependency reuse, candidate execution and conflicting-target
+refusal; hosted CI establishes actual remote restores and timings. These are
+executor checks, with no product journey credit. Existing selected lint now denies
+warnings before long builds/tests; the queue keeps all-target/all-feature lint.</p>
 <p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
 scenarios remain. Short retains five A/A and seven alternating A/B pairs,
 preserving the full check that caught a real RSS regression. Long, cap, markdown,
 foreground and background use three A/A and three A/B pairs. With two warm-ups
 per scenario this is 96 native samples instead of 156. Browser comparison uses
 three A/A and three A/B pairs plus two warm-ups: 14 instead of 26 runs. Per-run
-interaction counts, workloads, budgets, relative evaluator and separate viewport
-checks stay unchanged. The repeated-turn stress scenario retains five A/A and
-seven A/B pairs. This removes 72 of 182 repeated rendering/browser runs (39.6%);
-it does not imply a 39.6% reduction in total CI or local elapsed time.
+interaction counts, workloads, budgets and the relative evaluator stay unchanged.
+Headless and painted viewport comparisons also inherit 3/3 rounds: each runs 14
+instead of 26 samples. The separate 60-sample painted interaction check remains.
+The repeated-turn stress scenario retains five A/A and seven A/B pairs.
+Across these repeated comparisons this removes 96 of 234 runs (41.0%);
+it does not imply a 41% reduction in total CI or local elapsed time.
 <strong>Coverage reduction:</strong> fewer repetitions reduce precision and the
-chance of exposing intermittent regressions. Equivalent statistical sensitivity
+chance of exposing intermittent regressions or environmental noise. A preserved
+actual viewport A/A calibration refuses CPU noise with five pairs but not its
+first three; the original record remains noisy. Equivalent statistical sensitivity
 is not established. Required output prints pair counts; both changed recipes
 need fresh execution. Real native infrastructure canaries verify counts,
 alternating sides, regression refusals and minimum-round refusals without claiming
@@ -688,13 +703,16 @@ script remains available for diagnosis and earns no additional coverage credit.<
       <td><code>e2e/local-acceptance/</code></td>
     </tr>
     <tr>
-      <td>Paired rendering/browser measurements</td>
-      <td>Six rendering scenarios and browser interactions remain; 96 and 14
-      native runs respectively. Short retains its full 5/7 paired rounds; other
-      core scenarios and browser use 3/3. Lower repeat coverage can miss
-      intermittent regressions. Budgets and per-run interactions stay intact.</td>
+      <td>Paired rendering/browser/viewport measurements</td>
+      <td>Six rendering scenarios remain: 96 runs. Browser, headless viewport
+      and painted viewport comparisons each run 14 samples; total 138 instead
+      of 234. Short retains its full 5/7 paired rounds; the other comparisons
+      use 3/3. Lower repeat coverage can miss intermittent regressions and
+      environmental noise. Budgets and per-run interactions stay intact;
+      the separate 60-sample painted interaction check remains.</td>
       <td>No additional journey credit from repeated measurements.</td>
-      <td><code>benchmark.py</code> / <code>gui-benchmark.py</code></td>
+      <td><code>benchmark.py</code> / <code>gui-benchmark.py</code> /
+      <code>benchmark_prompt_viewport.py</code></td>
     </tr>
     <tr>
       <td>SSE archive compressor reuse</td>

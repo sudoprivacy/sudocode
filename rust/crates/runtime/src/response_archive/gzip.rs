@@ -16,7 +16,7 @@ impl Write for Output {
 
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
-        self.0.as_mut().map_or(Ok(()), |writer| writer.flush())
+        self.0.as_mut().map_or(Ok(()), Write::flush)
     }
 }
 

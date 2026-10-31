@@ -1,6 +1,7 @@
 """Execute trusted native profiles against the checked-out PR, without secrets."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -31,6 +32,17 @@ root, output = Path.cwd(), Path(os.environ["ACCEPTANCE_OUTPUT"])
 for name in native_checks:
     if not name.startswith("native-"):
         raise RuntimeError("Only native profiles may execute in the complementary CI job")
+
+if os.environ.get("GITHUB_WORKSPACE"):
+    layout_module = load("native_cache_layout", trusted / ".github/local-acceptance/cache_layout.py")
+    layout = layout_module.resolve(Path(os.environ["GITHUB_WORKSPACE"]), root / "rust")
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if configured and Path(configured).resolve() != Path(layout["target"]):
+        raise RuntimeError(f"Native Cargo target differs from the restored cache: {configured}; expected {layout['target']}")
+    # Cache restore has already finished. Setting this earlier changes the key's
+    # environment hash and makes otherwise identical publisher caches miss.
+    os.environ["CARGO_TARGET_DIR"] = layout["target"]
+    print("CI_CACHE_BINDING=" + json.dumps(layout), flush=True)
 
 if os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true":
     # Preserve the former Windows job's protection against mock-server sockets

@@ -360,7 +360,7 @@ impl ResponseRecorder for SessionResponseRecorder {
             .encoder
             .take()
             .is_some_and(|encoder| match encoder.finish() {
-                Ok(_) => true,
+                Ok(()) => true,
                 Err(error) => {
                     self.error = Some(error.to_string());
                     false

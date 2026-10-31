@@ -365,6 +365,15 @@ configuration stay unchanged; modified content is still rejected.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>
+<p>Windows SDK initialization no longer restores the launcher's inherited
+<code>NO_COLOR</code> after acceptance cleared it. Explicit fixture values remain
+honored. The native policy guard uses actual Cargo/SDK child processes for
+inherited, explicit and empty values, including cached initialization. An old
+executor fails the inherited-color case; the corrected executor passes all three.
+Product commands, assertions and budgets remain unchanged. Protected equivalence
+entries retain earlier successful exact-head evidence; the expanded policy guard
+requires a fresh run. This removes an environment-dependent local failure and
+adds no product feature-coverage credit.</p>
 <p>Native release acceptance reuses the workspace test-profile driver, with its
 mailbox feature graph, instead of compiling release dev-dependencies again.
 <code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release

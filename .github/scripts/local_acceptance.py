@@ -475,10 +475,6 @@ def run_command(command, cwd, log, env=None):
     import psutil
 
     environment = os.environ.copy()
-    # Acceptance exercises explicit TrueColor/Ansi256 and NoColor fixtures.
-    # A parent's output preference must not suppress the colored fixtures.
-    # An explicit command environment may still select NO_COLOR below.
-    environment.pop("NO_COLOR", None)
     if os.name == "nt" and not environment.get("LIB") and (
             Path(command[0]).stem.lower() in {"cargo", "cargo-nextest"} or any(
                 path in str(arg) for arg in command for path in ("e2e/build-metadata/run.py", "e2e/startup/run.py"))):
@@ -502,6 +498,10 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
+    # SDK discovery captures the parent's environment, including NO_COLOR.
+    # Clear that inherited preference after setup; explicit fixture values
+    # below still select NoColor, including when the SDK environment is cached.
+    environment.pop("NO_COLOR", None)
     environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})

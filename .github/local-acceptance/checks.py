@@ -414,15 +414,38 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
     image = f"sudocode-local-acceptance:{context_hash.hexdigest()[:24]}"
     image_receipt = output / "image-id.txt"
-    command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
-            extra={"DOCKER_BUILDKIT": "1"})
+    # This map exists only in the current trusted runner process. Never infer
+    # provenance from a previous output directory or a shared mutable cache.
+    try:
+        invocations = container.invocations
+    except AttributeError:
+        invocations = {}
+    key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
+    previous = invocations.get(key) if name == "browser" else None
+    if previous is None:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+                extra={"DOCKER_BUILDKIT": "1"})
+    else:
+        image_receipt.write_text(previous["image_id"] + "\n", encoding="utf-8")
+        print("Reusing this invocation's immutable rendering image for browser acceptance: "
+              f"{previous['image_id']}", flush=True)
     image_id = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
-    (output / "container-provenance.json").write_text(json.dumps({
+    identity = {
         "candidate": candidate, "baseline": reference, "policy": protected,
         "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
-    }, indent=2))
+    }
+    (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
+    (sources / "identity.json").write_text(json.dumps(identity, indent=2))
+    if previous is not None:
+        reused = sources / "candidate-release"
+        reused.mkdir()
+        shutil.copy2(previous["binary"], reused / "scode")
+        (reused / "identity.json").write_text(json.dumps({
+            **identity, "version": 1, "sha256": previous["sha256"],
+        }, indent=2))
+        verified_candidate_release(sources)
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
@@ -437,6 +460,32 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
+    if name == "rendering":
+        binary = output / "scode-candidate"
+        report = json.loads((output / "container/rendering/measurements/report.json").read_text())
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
+            raise RuntimeError("Rendering candidate binary does not match its completed measurements")
+        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id}
+        container.invocations = invocations
+
+
+def verified_candidate_release(inputs):
+    """Accept only the same invocation's read-only, hash-bound normal release."""
+    directory = inputs / "candidate-release"
+    if not directory.exists():
+        return None
+    binary, receipt = directory / "scode", directory / "identity.json"
+    if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
+        raise RuntimeError("Reused benchmark release must contain regular files")
+    expected = json.loads((inputs / "identity.json").read_text())
+    observed = json.loads(receipt.read_text())
+    if observed.get("version") != 1 or any(observed.get(name) != expected[name]
+            for name in ["candidate", "policy", "image_id", "context_sha256"]):
+        raise RuntimeError("Reused benchmark release belongs to different source, policy or image")
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
+        raise RuntimeError("Reused benchmark release bytes changed after rendering")
+    return binary
 
 
 def copy_checkout_file(source, destination):
@@ -672,7 +721,14 @@ def benchmark_locked(name, root, output, base, command, target):
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
     driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
+    reused = verified_candidate_release(inputs) if name == "browser" else None
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
+        if label == "candidate" and reused is not None:
+            shutil.copy2(reused, output / "scode-candidate")
+            print("Browser acceptance reuses the measured normal release from rendering; "
+                  "source, protected policy, immutable image and binary SHA256 match. "
+                  "Browser drivers and every observer still run.", flush=True)
+            continue
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
                 "--target-dir", str(build_targets[label]), "-p", "rusty-sudocode-cli", "--bin", "scode")
         shutil.copy2(build_targets[label] / "release/scode", output / f"scode-{label}")

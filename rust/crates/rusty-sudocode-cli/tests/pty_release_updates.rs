@@ -312,14 +312,19 @@ fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
             ("SCODE_MIRROR", mirror.base.as_str()),
             ("SCODE_CHECK_UPDATES", "1"),
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+            ("SCODE_TRACE_STARTUP", "1"),
         ];
+        let startup_started = Instant::now();
         let mut child = env.spawn_with_env(&[], &options);
-        child.expect("❯").unwrap_or_else(|error| {
+        let startup_output = child.expect("❯").unwrap_or_else(|error| {
             panic!(
                 "terminal startup: {error}\n{}",
                 child.render(screen_contents)
             )
         });
+        let prompt_observed_after = startup_started.elapsed();
+        // Keep both parent observation time and child timings on failure:
+        // a delayed reader can outlast the metadata request's own deadline.
         // The server withholds its reply until the real terminal is usable.
         // A synchronous startup check would block this workflow.
         mirror.release.store(true, Ordering::SeqCst);
@@ -328,7 +333,7 @@ fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
         while !cache.exists() {
             assert!(
                 Instant::now() < deadline,
-                "metadata cache was not written: mode={mode}; requests={}\n{}",
+                "metadata cache was not written: mode={mode}; requests={}; prompt_observed_after={prompt_observed_after:?}\nstartup output:\n{startup_output}\n{}",
                 mirror.requests.load(Ordering::SeqCst),
                 child.render(screen_contents)
             );

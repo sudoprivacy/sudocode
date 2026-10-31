@@ -57,6 +57,7 @@ enum ResponseKind {
     ResponsesSlow,
     FiniteHeartbeat,
     SignedCapture,
+    CaptureDistinct,
     GeminiCapture,
     CapturePaced,
     CaptureBurst,
@@ -609,6 +610,93 @@ fn set_response_recording(env: &TestEnv, recording: Value) {
     };
     settings["responseRecording"] = recording;
     std::fs::write(path, settings.to_string()).unwrap();
+}
+
+#[test]
+fn raw_stream_capture_reuses_compression_without_rewriting_earlier_responses() {
+    let env = TestEnv::new_mock("response-compression-reuse");
+    let provider = StreamProvider::new(ResponseKind::CaptureDistinct);
+    configure_peer(&env, &provider, ResponseKind::CaptureDistinct);
+    let mut cli = env.spawn(&[]);
+    common::expect_input_line_cleared(&cli, env.timeout(), "compression reuse prompt");
+    let mut retained = std::collections::BTreeMap::new();
+    let mut expected = std::collections::BTreeSet::new();
+    for index in 0..6 {
+        let marker = common::turn_status_marker(&cli);
+        cli.send(&format!("Capture a separate response {index}\r"))
+            .unwrap();
+        common::expect_turn_complete_after(
+            &cli,
+            &marker,
+            env.timeout(),
+            "distinct archived response completed",
+        );
+        let (session, directory) = capture_session_paths(&env);
+        expected.insert(padded_capture_body(
+            &format!("ARCHIVE_CAPTURE_{index:02}_"),
+            (index + 1) * 17,
+        ));
+        common::expect_screen(
+            &cli,
+            |_| {
+                let files: Vec<_> = std::fs::read_dir(&directory)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                    .collect();
+                files.len() == index + 1
+                    && files.iter().all(|path| {
+                        std::fs::read(path)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .is_some_and(|value| {
+                                value["gzip_complete"] == true
+                                    && value["saved_all_observed_bytes"] == true
+                            })
+                    })
+            },
+            env.timeout(),
+            "all response files finalized",
+        );
+        let mut decoded = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.extension().is_some_and(|ext| ext == "gz") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            if let Some(previous) = retained.get(&path) {
+                assert_eq!(
+                    &bytes, previous,
+                    "reusing compression changed an earlier file"
+                );
+            }
+            let mut text = String::new();
+            flate2::read::GzDecoder::new(bytes.as_slice())
+                .read_to_string(&mut text)
+                .unwrap();
+            decoded.insert(text);
+            retained.insert(path, bytes);
+        }
+        assert_eq!(
+            decoded, expected,
+            "response bodies or CRC state crossed captures"
+        );
+        let restored = runtime::Session::load_from_path(&session).unwrap();
+        assert_eq!(
+            restored
+                .messages()
+                .iter()
+                .filter(|message| message.role == runtime::MessageRole::Assistant)
+                .count(),
+            index + 1
+        );
+    }
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 6);
 }
 
 fn capture_session_paths(env: &TestEnv) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -2095,6 +2183,9 @@ fixture_text
                     }
                     ResponseKind::GeminiCapture => body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"STREAM_BODY_VERIFIED\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":8}}\n\n".to_string(),
                     ResponseKind::SignedCapture => body = signed_capture_body(),
+                    ResponseKind::CaptureDistinct => {
+                        body = padded_capture_body(&format!("ARCHIVE_CAPTURE_{index:02}_"), (index + 1) * 17);
+                    }
                     ResponseKind::CapturePaced => {
                         body = padded_capture_body("SSE_LOG_ONLY_PADDING", 512);
                     }

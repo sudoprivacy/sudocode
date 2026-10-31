@@ -697,6 +697,17 @@ script remains available for diagnosis and earns no additional coverage credit.<
       <td><code>benchmark.py</code> / <code>gui-benchmark.py</code></td>
     </tr>
     <tr>
+      <td>SSE archive compressor reuse</td>
+      <td>Real PTY checks six distinct responses and earlier-file integrity.
+      A conditional PR check writes 42 real files, with six concurrent captures,
+      independently decodes them and compares exact gzip bytes and quota failure
+      prefixes. At most one finished compression state is retained, after
+      releasing its file, session budget and attachment lease.</td>
+      <td>PTY assertions cover archive persistence; native codec checks add no
+      provider or user journey coverage.</td>
+      <td><code>pty_model_stream_close</code> / <code>e2e/response-gzip/</code></td>
+    </tr>
+    <tr>
       <td>Compile-only examples</td>
       <td>Normal example binaries are compiled and linked. Grouped/unknown
       sources use <code>native-examples</code>; original selection retains its

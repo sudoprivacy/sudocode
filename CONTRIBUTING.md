@@ -273,6 +273,15 @@ remain unchanged. Actual native fixture processes verify the 96/14 schedules,
 alternating sides, the full short check and rejection of relative RSS/browser
 regressions and policies below their minimum rounds. These fixtures add no
 product performance coverage credit.
+
+Default SSE response archives reuse at most one finished deflate state across
+captures. Active captures retain separate states; a finished state releases its
+file, session budget and attachment lease before reuse. Compression level, gzip
+bytes, CRC, per-session limits and context separation stay unchanged. Real PTY
+acceptance checks six consecutive distinct responses and earlier-file integrity.
+The conditional PR codec check also writes 42 actual files, including six
+concurrent captures, independently decodes them and compares quota failure
+prefixes with the previous flate2 encoder. It adds no live-provider coverage.
 These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 preflight checks actual conflicts against its supplied base and fetched

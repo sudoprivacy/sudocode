@@ -25,6 +25,84 @@ def load(name, path):
     return module
 
 
+def cache_migration(output, checks, command):
+    """Preserve a real Cargo build across migration, then reject stale code."""
+    output.mkdir()
+    state, legacy = output / "state", output / "legacy"
+    source = state / "leased-benchmarks-v1/rendering/candidate"
+    target = state / "leased-benchmarks-v1/target/rendering/candidate"
+    source.mkdir(parents=True)
+    (state / "cargo").mkdir()
+    (state / "cargo/config.toml").write_text("# private dependency-cache sentinel\n")
+    (state / "unrelated.txt").write_text("Do not migrate obsolete cache directories or unrelated files\n")
+    (source / "Cargo.toml").write_text('[package]\nname="cache-migration"\nversion="0.0.0"\nedition="2021"\n'
+                                      '[[bin]]\nname="cache-migration"\npath="main.rs"\n')
+    (source / "main.rs").write_text('fn main() { println!("candidate-A"); }\n')
+    command("cargo", "generate-lockfile", "--manifest-path", str(source / "Cargo.toml"))
+
+    def build():
+        return command("cargo", "build", "--locked", "--manifest-path", str(source / "Cargo.toml"),
+                       "--target-dir", str(target), "--message-format=json-render-diagnostics")
+
+    build()
+    binary = target / "debug/cache-migration"
+    before = (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    state.rename(legacy)
+    state.mkdir()
+    checks.migrate_benchmark_cache(legacy, state)
+    assert before == (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    assert (state / "cargo/config.toml").read_bytes() == (legacy / "cargo/config.toml").read_bytes()
+    assert not (state / "unrelated.txt").exists()
+    log = build()
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    artifacts = [row for row in rows if row.get("reason") == "compiler-artifact"]
+    assert artifacts and all(row["fresh"] for row in artifacts), "Migrated Cargo graph went cold"
+    assert before == (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    # A completed migration never overwrites an active Linux checkout from an
+    # older workline still using the read-only legacy cache.
+    (legacy / "leased-benchmarks-v1/rendering/candidate/main.rs").write_text('compile_error!("obsolete legacy source");\n')
+    marker = state / ".host-cache-migration-v1.json"
+    receipt = marker.read_bytes()
+    checks.migrate_benchmark_cache(legacy, state)
+    assert marker.read_bytes() == receipt
+    changed = output / "changed-source.rs"
+    changed.write_text('fn main() { println!("candidate-B"); }\n')
+    checks.copy_checkout_file(changed, source / "main.rs")
+    log = build()
+    assert "Compiling " in log.read_text(), "Changed source was falsely Cargo-fresh"
+    assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-B"
+    assert subprocess.check_output([str(legacy / "leased-benchmarks-v1/target/rendering/candidate/debug/cache-migration")]).decode().strip() == "candidate-A"
+    # A partially copied destination has no completion receipt. Re-entering
+    # repairs it from the same legacy bytes; unrelated files remain untouched.
+    marker.unlink()
+    (legacy / "leased-benchmarks-v1/rendering/candidate/main.rs").write_bytes(changed.read_bytes())
+    binary.unlink()
+    (source / "main.rs").write_text('compile_error!("partial copy must be repaired");\n')
+    checks.migrate_benchmark_cache(legacy, state)
+    assert json.loads(marker.read_text())["status"] == "complete"
+    assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-A"
+    build()
+    assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-B"
+    unsafe = output / "unsafe-state"
+    unsafe.mkdir()
+    (unsafe / "cargo").symlink_to(output / "must-not-write", target_is_directory=True)
+    try:
+        checks.migrate_benchmark_cache(legacy, unsafe)
+        raise AssertionError("An escaped cache root was copied")
+    except RuntimeError as error:
+        assert "Unexpected benchmark cache root" in str(error)
+    assert not (output / "must-not-write").exists() and not (unsafe / marker.name).exists()
+    marker.write_text('{"version":1,"status":"incomplete"}\n')
+    try:
+        checks.migrate_benchmark_cache(legacy, state)
+        raise AssertionError("An incomplete migration receipt was accepted")
+    except RuntimeError as error:
+        assert "Invalid benchmark cache migration receipt" in str(error)
+    return {"migrated_graph_fresh": True, "binary_hash_and_mtime_preserved": True,
+            "changed_source_recompiled": True, "legacy_binary_unchanged": True,
+            "partial_copy_recovered": True, "escaped_root_and_invalid_marker_refused": True}
+
+
 def rendering_matrix(output, checks, command):
     """Drive the unchanged paired evaluator through real native fixture processes."""
     output.mkdir()
@@ -307,9 +385,11 @@ out=Path(a.output);out.mkdir()
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})
     assert len(target_trees) == 4, target_trees
+    migration = cache_migration(output / "cache-migration", checks, command)
     matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
-              "target_trees": target_trees, "cross_profile_candidate_build_reused": True, "rendering_matrix": matrix,
+              "target_trees": target_trees, "cross_profile_candidate_build_reused": True,
+              "rendering_matrix": matrix, "cache_migration": migration,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production browser build executor, Cargo and npm; distinct baseline/candidate and native integration drivers, reusable dev artifacts, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

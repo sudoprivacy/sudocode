@@ -387,8 +387,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
 
     state, lease_volume = container_storage()
     state.mkdir(parents=True, exist_ok=True)
-    # The container leases its reusable checkouts and targets exclusively;
-    # dependency downloads remain shared across profiles.
+    # Keep active Cargo/npm state on Docker's Linux filesystem. The previous
+    # host cache stays read-only and seeds the volume under the same lease.
     def revision(ref):
         return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
 
@@ -431,7 +431,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
-            "--mount", f"type=bind,source={state},target=/state",
+            "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
+            "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
             "--mount", f"type=volume,source={lease_volume},target=/locks",
             "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
@@ -522,7 +523,51 @@ def exclusive_benchmark_state(directory=Path("/locks")):
 
 def benchmark(name, root, output, base, command, target):
     with exclusive_benchmark_state():
+        migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
         benchmark_locked(name, root, output, base, command, target)
+
+
+def migrate_benchmark_cache(legacy, state):
+    """Seed the Linux volume without changing canonical paths or Cargo mtimes."""
+    marker = state / ".host-cache-migration-v1.json"
+    if checkout_link(marker):
+        raise RuntimeError(f"Benchmark cache migration receipt must be a regular file: {marker}")
+    if marker.is_file():
+        receipt = json.loads(marker.read_text(encoding="utf-8"))
+        if receipt.get("version") != 1 or receipt.get("status") != "complete":
+            raise RuntimeError(f"Invalid benchmark cache migration receipt: {marker}")
+        return
+    if not legacy.is_dir() or checkout_link(legacy) or checkout_link(state):
+        raise RuntimeError("Benchmark cache migration requires real legacy/state directories")
+    started = time.monotonic()
+    copied = []
+    print("Preparing Linux benchmark cache under the shared lease. "
+          "Existing host cache stays read-only; source/target paths and timestamps are preserved. "
+          "This one-time copy counts toward local acceptance time.", flush=True)
+    # Ignore pre-lease disposable checkouts. Both profiles already share these
+    # canonical paths; preserving them keeps existing Cargo dep-info reusable.
+    for name in ["cargo", "leased-benchmarks-v1"]:
+        source = legacy / name
+        if checkout_link(source):
+            raise RuntimeError(f"Unexpected benchmark cache root: {source}")
+        if not source.exists():
+            continue
+        destination = state / name
+        if checkout_link(source) or checkout_link(destination) or not source.is_dir():
+            raise RuntimeError(f"Unexpected benchmark cache root: {source}")
+        destination.mkdir(parents=True, exist_ok=True)
+        print(f"Copying existing {name} cache to Linux storage; no compiler runs during migration.", flush=True)
+        # cp -a retains nanosecond mtimes, modes and internal Cargo links. A
+        # failed/interrupted copy leaves no completion marker and is retried.
+        subprocess.run(["nice", "-n", "10", "cp", "-a", "--", str(source) + "/.", str(destination)], check=True)
+        copied.append(name)
+    receipt = {"version": 1, "status": "complete", "copied": copied,
+               "elapsed_seconds": round(time.monotonic() - started, 3)}
+    temporary = marker.with_suffix(".tmp")
+    temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(marker)
+    print(f"Linux benchmark cache ready after {receipt['elapsed_seconds']:.3f}s; "
+          f"reused directories: {copied}. Full command logs remain in the host evidence directory.", flush=True)
 
 
 def benchmark_storage(name):

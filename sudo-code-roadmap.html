@@ -246,6 +246,25 @@ binary graph and budgets remain. A failed A/A calibration is inconclusive.
 There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
 unchanged performance pairs; docs-only changes run preflight. Local compiler
 workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p><strong>Keep active benchmark build state on Linux storage (2026-10-31).</strong>
+The reusable checkouts, npm trees, Cargo dependency cache and targets now use a
+Docker Linux volume, while command logs and measurement evidence remain on the
+host. The first invocation copies only the existing <code>cargo</code> and
+<code>leased-benchmarks-v1</code> directories under the original global lease.
+It preserves canonical <code>/state</code> paths, modes and timestamps; the old
+host cache remains read-only and is not deleted. The completion receipt is
+written only after copying succeeds. First-run migration counts toward local
+time; future runs reuse the volume. Workloads, samples and budgets are unchanged,
+and both changed Docker recipes require fresh evidence. Native recipes remain
+unchanged. Real Cargo checks artifact freshness and identity after migration,
+changed-source rebuilding, interrupted-copy recovery and invalid-root/receipt
+refusal. Real Docker launcher checks retain frozen Git/image inputs and private
+labelled-volume cleanup. A separate actual Windows-bind-to-Linux-volume trial
+verified a previously warm graph stayed warm, with identical binary bytes and
+mtime, then rebuilt changed source; this is infrastructure evidence, not a
+production end-to-end speed claim. Windows bind timestamps rounded Cargo dep-info
+to whole seconds in the initial fast fixture, making that legacy graph already
+stale before migration; no timestamps or assertions were changed to hide it.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
 (2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
 alternating A/B pairs and all interaction counts and budgets. The successful

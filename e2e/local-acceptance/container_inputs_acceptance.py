@@ -30,6 +30,7 @@ def run(output, base_image):
     executor = load("container_executor", SOURCE / ".github/scripts/local_acceptance.py")
     token = uuid.uuid4().hex
     lease = f"sudocode-container-inputs-{token}"
+    cache = lease + "-cache-v1"
     storage = output / "private-cache"
     checks.container_storage = lambda: (storage, lease)
     commands, tags, images = [], set(), set()
@@ -98,9 +99,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     candidate = commit("candidate-policy", protected)
     (root / "private-untracked.txt").write_text("An untracked fixture must never enter the container.")
     configuration = {"baseline": baseline, "protected": protected, "candidate": candidate,
-                     "base_image": base_image, "fixture_label": token}
+                     "base_image": base_image, "fixture_label": token, "cache_volume": cache}
     (output / "configuration.json").write_text(json.dumps(configuration, indent=2))
     execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", lease])
+    execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", cache])
 
     def launch(name, policy_ref, expected, *, swap_image=None):
         evidence = output / name
@@ -132,6 +134,8 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         actual_run = next(row["command"] for row in commands[::-1]
                           if docker_operation(row, "run"))
         assert provenance["image_id"] in actual_run and provenance["image_tag"] not in actual_run
+        assert f"type=volume,source={cache},target=/state" in actual_run
+        assert f"type=bind,source={storage},target=/legacy-state,readonly" in actual_run
         return provenance
 
     try:
@@ -170,11 +174,12 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             if inspected.stdout.strip() != token:
                 raise RuntimeError(f"Refusing to clean an image outside this fixture: {target}")
             subprocess.run(["docker", "image", "rm", target], check=True, capture_output=True)
-        inspected = subprocess.check_output(["docker", "volume", "inspect", "--format",
-            '{{index .Labels "scode.container-input-fixture"}}', lease], text=True).strip()
-        if inspected != token:
-            raise RuntimeError(f"Refusing to clean a volume outside this fixture: {lease}")
-        subprocess.run(["docker", "volume", "rm", lease], check=True, capture_output=True)
+        for volume in [lease, cache]:
+            inspected = subprocess.check_output(["docker", "volume", "inspect", "--format",
+                '{{index .Labels "scode.container-input-fixture"}}', volume], text=True).strip()
+            if inspected != token:
+                raise RuntimeError(f"Refusing to clean a volume outside this fixture: {volume}")
+            subprocess.run(["docker", "volume", "rm", volume], check=True, capture_output=True)
     (output / "result.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result), flush=True)
 

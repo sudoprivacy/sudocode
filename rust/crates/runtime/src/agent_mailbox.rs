@@ -2,7 +2,7 @@
 //!
 //! [`MailboxEnvelope`] is the SINGLE envelope type for all inter-agent
 //! messaging — both the local JSONL mailbox (`.sudocode-inbox/*.jsonl`,
-//! used by coordinator sub-agents) and the nexus DT_STREAM A2A path
+//! used by coordinator sub-agents) and the nexus `DT_STREAM` A2A path
 //! (`/agents/<name>/chat-with-me`, used for cross-machine messaging).
 //! The a2a substrate's `from`-stamping hook operates on raw JSON and
 //! only touches `from`, so the extra fields are transparent to it.
@@ -108,7 +108,7 @@ const PEER_FRAMING: &str = "Messages from other agents are delivered into this \
      reply is your decision.";
 
 /// Unified mailbox envelope — the ONE envelope type for all inter-agent
-/// messaging (local JSONL + nexus DT_STREAM A2A).
+/// messaging (local JSONL + nexus `DT_STREAM` A2A).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailboxEnvelope {
     /// Scheduling intent; it never grants permission to cancel the recipient.
@@ -155,6 +155,10 @@ pub struct MailboxEnvelope {
     pub request_id: Option<String>,
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde's skip_serializing_if callback borrows the field."
+)]
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -186,7 +190,7 @@ impl MailboxEnvelope {
         format!("{header}>\n{body}\n</{tag}>")
     }
 
-    /// Serialise to JSON bytes (the nexus DT_STREAM wire format).
+    /// Serialise to JSON bytes (the nexus `DT_STREAM` wire format).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()
@@ -273,7 +277,7 @@ pub fn neutralize_untrusted_markup(body: &str) -> String {
         .into_owned()
 }
 
-/// Default DT_STREAM capacity for mailbox streams (matches
+/// Default `DT_STREAM` capacity for mailbox streams (matches
 /// `a2a::mailbox_stamping_policy::MAILBOX_STREAM_CAPACITY`).
 pub const DEFAULT_STREAM_CAPACITY: u64 = 65_536;
 
@@ -371,7 +375,7 @@ pub fn append_envelope(
 /// lands — host disk for a CLI session, a kernel for a co-hosted agent.
 ///
 /// Reaching for `std::fs` here instead is what made a co-hosted agent's replies
-/// disappear: a conversation whose DT_STREAM could not be created falls back to
+/// disappear: a conversation whose `DT_STREAM` could not be created falls back to
 /// this JSONL shape, and the reply was then written to a HOST path named like a
 /// VFS one, which the peer reading the VFS could never see. The send reported
 /// success, the peer heard nothing, and the envelope was re-delivered forever.

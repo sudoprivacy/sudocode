@@ -45,11 +45,11 @@ fn same_process_turn_repairs_orphan_before_model_request() {
     let engine = SessionEngine::build(
         workspace.path(),
         &BTreeMap::new(),
-        Default::default(),
+        runtime::SystemPromptOverrides::default(),
         runtime::memory::MemoryMode::default(),
-        Default::default(),
-        "claude-sonnet".into(),
-        Some("claude-sonnet".into()),
+        runtime::SystemPrompt::default(),
+        "claude-sonnet",
+        Some("claude-sonnet"),
         None,
         None,
         None,
@@ -57,24 +57,7 @@ fn same_process_turn_repairs_orphan_before_model_request() {
     )
     .expect("session engine");
     let path = engine.session_handle().path;
-    engine.with_session_mut(&mut |session| {
-        session
-            .push_user_text("original request")
-            .expect("user append");
-        session
-            .push_message(ConversationMessage::assistant(vec![
-                ContentBlock::ToolUse {
-                    id: "interrupted-call".into(),
-                    name: "PowerShell".into(),
-                    input: "{}".into(),
-                    thought_signature: None,
-                },
-            ]))
-            .expect("orphan append");
-        session
-            .push_user_text("first unanswered follow-up")
-            .expect("follow-up append");
-    });
+    seed_interrupted_call(&engine);
 
     for _ in 0..2 {
         let complete = engine
@@ -125,9 +108,13 @@ fn same_process_turn_repairs_orphan_before_model_request() {
     assert_eq!(persisted.messages().len(), snapshot.messages().len());
 
     let requests = rt.block_on(mock.captured_requests());
+    assert_repaired_requests(requests.into_iter().map(|request| request.raw_body));
+}
+
+fn assert_repaired_requests(bodies: impl IntoIterator<Item = String>) {
     let mut checked = 0;
-    for request in requests {
-        let body: Value = serde_json::from_str(&request.raw_body).expect("request JSON");
+    for raw_body in bodies {
+        let body: Value = serde_json::from_str(&raw_body).expect("request JSON");
         let Some(messages) = body["messages"].as_array() else {
             continue;
         };
@@ -156,4 +143,25 @@ fn same_process_turn_repairs_orphan_before_model_request() {
         }
     }
     assert!(checked >= 2, "resumed turns must send the repaired history");
+}
+
+fn seed_interrupted_call(engine: &SessionEngine) {
+    engine.with_session_mut(&mut |session| {
+        session
+            .push_user_text("original request")
+            .expect("user append");
+        session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "interrupted-call".into(),
+                    name: "PowerShell".into(),
+                    input: "{}".into(),
+                    thought_signature: None,
+                },
+            ]))
+            .expect("orphan append");
+        session
+            .push_user_text("first unanswered follow-up")
+            .expect("follow-up append");
+    });
 }

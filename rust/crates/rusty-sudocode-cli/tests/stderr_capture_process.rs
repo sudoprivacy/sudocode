@@ -1,6 +1,6 @@
 //! Actual process stderr, OS pipe backpressure and the production forwarder.
 //! The printer is gated to control scheduling; native input preservation stays
-//! covered by pty_render_boundaries and pty_sync_repl_receive.
+//! covered by `pty_render_boundaries` and `pty_sync_repl_receive`.
 
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ mod input {
     }
 
     /// A retained library handle must stay on its old pipe across dup2 or
-    /// SetStdHandle. A global stderr write can instead retry on its restored
+    /// `SetStdHandle`. A global stderr write can instead retry on its restored
     /// target, or fail on Darwin when dup2 cancels its in-flight fd-2 write.
     #[cfg(unix)]
     #[inline]
@@ -85,6 +85,50 @@ mod input {
             .unwrap()
             .as_file()
             .unwrap()
+    }
+
+    fn write_blocked_stderr(
+        log: &Path,
+        kind: Writer,
+        retained: &mut Option<std::fs::File>,
+        locked: &mpsc::Sender<()>,
+        finished: &mpsc::Sender<std::io::Result<()>>,
+    ) {
+        let mut stderr = std::io::stderr().lock();
+        stage(log, "writer locked stderr");
+        locked.send(()).unwrap();
+        // Larger than the native pipe plus the Windows capture queue.
+        // With the forwarder gated, this write must remain in flight.
+        let bytes = vec![b'x'; 8 * 1024 * 1024];
+        let result = match kind {
+            Writer::Retained => retained.as_mut().unwrap().write_all(&bytes),
+            Writer::Global => stderr.write_all(&bytes),
+            Writer::Diagnostics => {
+                // Force a notice through the same real pipe boundary as
+                // the raw writer. This leaked test-only text lives only in
+                // this child; production notices remain short constants.
+                let pending = Box::leak("x".repeat(bytes.len()).into_boxed_str());
+                let diagnostics = telemetry::RetryDiagnostics::new(
+                    "capture-fixture",
+                    "reader",
+                    pending,
+                    "checks recovered",
+                );
+                diagnostics.failed("first", "ORIGINAL_READER_TRANSPORT_ERROR");
+                diagnostics.succeeded("first");
+                // The original attempt and its recovery must survive even
+                // when the terminal notice failed partway through. A
+                // second scope proves the observer thread kept running.
+                diagnostics.failed("second", "NEXT_READER_CHECK_CONTINUED");
+                diagnostics.succeeded("second");
+                Ok(())
+            }
+        };
+        drop(stderr);
+        // Never panic/report an IO error while owning the global stderr
+        // lock. Preserve the original result even if cleanup later stalls.
+        stage(log, &format!("writer completed: {result:?}"));
+        let _ = finished.send(result);
     }
 
     pub(super) fn exercise_rearm(log: &Path, kind: Writer) {
@@ -112,41 +156,7 @@ mod input {
         let (finished, written) = mpsc::channel();
         let writer_log = log.to_path_buf();
         let writer = std::thread::spawn(move || {
-            let mut stderr = std::io::stderr().lock();
-            stage(&writer_log, "writer locked stderr");
-            locked.send(()).unwrap();
-            // Larger than the native pipe plus the Windows capture queue.
-            // With the forwarder gated, this write must remain in flight.
-            let bytes = vec![b'x'; 8 * 1024 * 1024];
-            let result = match kind {
-                Writer::Retained => retained.as_mut().unwrap().write_all(&bytes),
-                Writer::Global => stderr.write_all(&bytes),
-                Writer::Diagnostics => {
-                    // Force a notice through the same real pipe boundary as
-                    // the raw writer. This leaked test-only text lives only in
-                    // this child; production notices remain short constants.
-                    let pending = Box::leak("x".repeat(bytes.len()).into_boxed_str());
-                    let diagnostics = telemetry::RetryDiagnostics::new(
-                        "capture-fixture",
-                        "reader",
-                        pending,
-                        "checks recovered",
-                    );
-                    diagnostics.failed("first", "ORIGINAL_READER_TRANSPORT_ERROR");
-                    diagnostics.succeeded("first");
-                    // The original attempt and its recovery must survive even
-                    // when the terminal notice failed partway through. A
-                    // second scope proves the observer thread kept running.
-                    diagnostics.failed("second", "NEXT_READER_CHECK_CONTINUED");
-                    diagnostics.succeeded("second");
-                    Ok(())
-                }
-            };
-            drop(stderr);
-            // Never panic/report an IO error while owning the global stderr
-            // lock. Preserve the original result even if cleanup later stalls.
-            stage(&writer_log, &format!("writer completed: {result:?}"));
-            let _ = finished.send(result);
+            write_blocked_stderr(&writer_log, kind, &mut retained, &locked, &finished);
         });
         writing.recv_timeout(BUDGET).unwrap();
         let early_write = written.recv_timeout(Duration::from_millis(100));

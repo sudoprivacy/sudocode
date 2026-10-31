@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from ctypes import wintypes
+from nativeTuiPrompt import update_prompt_visible
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 
@@ -206,6 +207,9 @@ try:
             data = b''
         if data:
             take(data)
+        if update_prompt_visible(tail):
+            trace('unsafe_update_prompt')
+            break
         if close_requested.is_set() and closing is None:
             closing = time.monotonic()
             trace('close_received')

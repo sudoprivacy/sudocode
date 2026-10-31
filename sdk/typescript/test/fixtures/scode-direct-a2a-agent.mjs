@@ -1,11 +1,15 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 
 // Protocol fixture only. Real engine/policy/mailbox and zero-inference proofs
 // belong to sudocode's stdio acceptance, not this Hydra transport smoke.
 const scenario = process.argv[2] ?? 'normal';
+const actor = scenario === 'operator'
+  ? JSON.parse(readFileSync(path.join(process.cwd(),'.nexus/sudocode/settings.json'),'utf8')).agentName
+  : process.env.SCODE_DIRECT_FIXTURE_ACTOR ?? 'bound-fixture-actor';
 const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
 const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
 let sessionId;
@@ -32,7 +36,7 @@ const result = (value, tool, input) => {
   const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([0])); frame(hash, content);
   return { content, isError: scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
     version: 1, commandId: `external-a2a-${randomUUID()}`, sessionId: scenario === 'bad-audit' ? 'wrong' : sessionId,
-    actor: 'bound-fixture-actor', namespaceRoot: '', tool,
+    actor, namespaceRoot: '', tool,
     requestedInputSha256: inputDigest(tool, input), effectiveInputSha256: inputDigest(tool, input), resultSha256: hash.digest('hex'),
   } } } } };
 };
@@ -42,6 +46,15 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
       version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
     } } } }),
   }))
+  .onRequest(acp.methods.agent.session.new, () => {
+    sessionId=`session-${randomUUID()}`;log({method:'session/new',sessionId});return {sessionId};
+  })
+  .onRequest('_fixture/peer', value=>value, async ctx=>{
+    await ctx.client.notify(acp.methods.client.session.update,{sessionId:ctx.params.wrongSession?'another-session':sessionId,
+      update:{sessionUpdate:'user_message_chunk',content:{type:'text',text:ctx.params.text}},
+      _meta:{sudocode:{a2a:{from:ctx.params.from,kind:'message'}}}});
+    return {};
+  })
   .onRequest(acp.methods.agent.session.load, ctx => { sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId }); return {}; })
   .onRequest(acp.methods.agent.session.prompt, async ctx => {
     log({ method: 'session/prompt' });
@@ -65,10 +78,12 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     if (ctx.params.sessionId !== sessionId) throw new Error('Unknown native session');
     if (scenario === 'loss') process.exit(17); // Request journal exists, response is lost.
     if (scenario === 'malformed') return { queued: true };
-    return result({ success: true, routing: { sender: 'bound-fixture-actor', to: ctx.params.to }, text: ctx.params.message }, 'send', ctx.params);
+    return result({ success: true, routing: { sender: actor, to: ctx.params.to }, text: ctx.params.message }, 'send', ctx.params);
   })
-  .onRequest('_sudocode/a2a/agent_list', value => value, ctx => {
+  .onRequest('_sudocode/a2a/agent_list', value => value, async ctx => {
     log({ method: '_sudocode/a2a/agent_list', input: ctx.params });
+    const gate=process.env.SCODE_DIRECT_FIXTURE_LIST_GATE;
+    while(gate&&!existsSync(gate))await new Promise(resolve=>setTimeout(resolve,10));
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })
   .onRequest(acp.methods.agent.session.close, () => ({}));

@@ -31,7 +31,7 @@ fn thinking_content_is_rendered_before_the_answer() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
@@ -45,7 +45,7 @@ fn thinking_content_is_rendered_before_the_answer() {
     // when no reasoning is rendered at all. The glyph is emitted only by
     // `cli::format::thinking_header`.
     sess.expect("✻ Thinking").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("thinking header should render: {e}\nPTY:\n{screen}");
     });
 
@@ -54,12 +54,12 @@ fn thinking_content_is_rendered_before_the_answer() {
     // line the previous delta opened, which is exactly where a per-delta
     // spinner clear used to erase what had been drawn.
     sess.expect("Reasoning step one").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("first reasoning delta should render: {e}\nPTY:\n{screen}");
     });
     sess.expect("step two continues the same line")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!(
                 "a reasoning delta that resumes mid-line must not be erased \
                  by the spinner clear: {e}\nPTY:\n{screen}"
@@ -67,18 +67,18 @@ fn thinking_content_is_rendered_before_the_answer() {
         });
     sess.expect("The answer follows the reasoning")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("the answer must still render after thinking: {e}\nPTY:\n{screen}");
         });
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should return to prompt: {e}\nPTY:\n{screen}");
     });
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY:\n{screen}");
     });
     assert_eq!(exit, 0, "clean exit code");

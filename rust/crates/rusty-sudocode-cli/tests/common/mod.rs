@@ -48,14 +48,15 @@ use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// A free function keeps both Screen lifetimes late-bound for PtySession::render.
-fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
+/// Keep both `Screen` lifetimes late-bound for `PtySession::render` callbacks.
+#[must_use]
+pub fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
     screen.contents()
 }
 
 /// Preserve physical row boundaries for assertions about inline UI layout.
 /// `contents()` joins soft-wrapped rows, including a full-width rule followed
-/// by a question header in ConPTY. Transcript assertions still use that view.
+/// by a question header in `ConPTY`. Transcript assertions still use that view.
 fn screen_rows(screen: &pty_expect::Screen<'_>) -> String {
     screen
         .raw()
@@ -342,7 +343,7 @@ pub fn input_line_of(screen: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Current InputSlot and FooterSlot, excluding obsolete UI that an extreme
+/// Current `InputSlot` and `FooterSlot`, excluding obsolete UI that an extreme
 /// resize may have pushed into retained scrollback. Unlike `input_line_of`,
 /// this also locates question, picker and size-warning bodies without a prompt.
 /// Do not use it for duplicate-free resize assertions: those must inspect the

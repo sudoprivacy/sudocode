@@ -76,7 +76,7 @@ impl WireAction {
                     draft,
                     input,
                     delivery,
-                    context,
+                    context: context.map(Box::new),
                 }
             }
             Self::Flush => InputAction::Flush,

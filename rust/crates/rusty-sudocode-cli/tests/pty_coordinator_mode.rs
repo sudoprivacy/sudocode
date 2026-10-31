@@ -13,7 +13,7 @@
 //! `coordinator_system_prompt()` to the system prompt's dynamic
 //! sections. This gives the model a coordinator role directive
 //! (Research → Synthesis → Implementation → Verification, delegate via
-//! Agent, stop via pid_kill) that takes primacy over the default
+//! Agent, stop via `pid_kill`) that takes primacy over the default
 //! identity.
 //!
 //! ## Two branches this PTY test covers
@@ -66,12 +66,12 @@ fn coordinator_prompt_absent_without_env_var() {
     let exit = sess.expect_eof().expect("scode system-prompt should exit");
     assert_eq!(exit, 0, "system-prompt turn should exit 0; got {exit}");
 
-    let rendered = sess.render(|screen| screen.contents());
+    let rendered = sess.render(common::screen_contents);
     assert!(
         !rendered.contains(COORDINATOR_MARKER),
         "Default system prompt must NOT contain the coordinator marker \"{COORDINATOR_MARKER}\" \
          — got output containing it. First 400 chars: {snip}",
-        snip = &rendered.chars().take(400).collect::<String>(),
+        snip = rendered.chars().take(400).collect::<String>(),
     );
 }
 

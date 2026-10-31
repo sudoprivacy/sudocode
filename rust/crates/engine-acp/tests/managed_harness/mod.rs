@@ -62,7 +62,7 @@ fn connect(
     response(&mailbox, "open")?;
     Ok(mailbox)
 }
-fn pump(mailbox: SessionMailbox<Kernel>, stop: HookAbortSignal) -> Result<(), String> {
+fn pump(mailbox: &SessionMailbox<Kernel>, stop: &HookAbortSignal) -> Result<(), String> {
     while !stop.is_aborted() {
         match mailbox.receive(200) {
             Ok(Some(SessionPayload::Rpc { message }))
@@ -76,7 +76,7 @@ fn pump(mailbox: SessionMailbox<Kernel>, stop: HookAbortSignal) -> Result<(), St
                     .unwrap()["optionId"]
                     .clone();
                 send(
-                    &mailbox,
+                    mailbox,
                     json!({"jsonrpc":"2.0","id":message["id"],"result":{"outcome":{"outcome":"selected","optionId":option}}}),
                 )?;
             }
@@ -133,7 +133,7 @@ pub fn spawn_managed_agent(
     let stop = HookAbortSignal::new();
     let thread_stop = stop.clone();
     let join = std::thread::spawn(move || {
-        let _ = pump(mailbox, thread_stop);
+        let _ = pump(&mailbox, &thread_stop);
     });
     Ok(TestHost {
         abort_signal: TestAbort { stop, host },
@@ -185,6 +185,6 @@ pub fn attach_controller(
     let thread_stop = stop.clone();
     Ok(Controller {
         stop,
-        join: Some(std::thread::spawn(move || pump(mailbox, thread_stop))),
+        join: Some(std::thread::spawn(move || pump(&mailbox, &thread_stop))),
     })
 }

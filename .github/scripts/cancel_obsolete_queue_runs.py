@@ -4,8 +4,18 @@ import argparse
 import datetime as dt
 import json
 from pathlib import Path
+import re
 import subprocess
 from urllib.parse import quote
+
+
+class GitHubRequestError(RuntimeError):
+    """Preserve the CLI's HTTP status without treating arbitrary errors as conflicts."""
+
+    def __init__(self, result):
+        super().__init__(result.stderr or result.stdout)
+        status = re.search(r"\(HTTP (\d{3})\)\s*$", result.stderr)
+        self.status = int(status.group(1)) if status else None
 
 
 def request(path, payload=None, missing_ok=False):
@@ -18,9 +28,10 @@ def request(path, payload=None, missing_ok=False):
         capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode:
-        if missing_ok and "HTTP 404" in result.stderr:
+        error = GitHubRequestError(result)
+        if missing_ok and error.status == 404:
             return None
-        raise RuntimeError(result.stderr or result.stdout)
+        raise error
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
@@ -33,6 +44,13 @@ def queue_heads(owner, name):
     if queue is None:
         raise RuntimeError("Expected an active main merge queue")
     return {node["headCommit"]["oid"] for node in queue["entries"]["nodes"] if node["headCommit"]}
+
+
+def verify_run_identity(actual, expected):
+    """Require the same queue execution before acting on its current state."""
+    if (actual["event"] != "merge_group" or any(actual[key] != expected[key]
+            for key in ("id", "head_sha", "head_branch"))):
+        raise RuntimeError("Run identity changed during cleanup")
 
 
 def main():
@@ -76,16 +94,28 @@ def main():
             if run["head_sha"] in queue_heads(owner, name):
                 continue
             current = request(f"{prefix}/actions/runs/{run['id']}")
+            verify_run_identity(current, run)
             if current["status"] == "completed":
                 continue
-            if current["event"] != "merge_group" or current["head_sha"] != run["head_sha"]:
-                raise RuntimeError("Run identity changed during cleanup")
             item = {"id": run["id"], "workflow": run["name"], "head": run["head_sha"],
                     "reason": "Queue ref removed and commit absent from current queue", "cancel_requested": False}
             report["runs"].append(item)
             if args.cancel:
-                request(f"{prefix}/actions/runs/{run['id']}/cancel", {})
-                item["cancel_requested"] = True
+                try:
+                    request(f"{prefix}/actions/runs/{run['id']}/cancel", {})
+                    item["cancel_requested"] = True
+                except GitHubRequestError as error:
+                    if error.status != 409:
+                        raise
+                    # Completion can win the race after our last read. It is
+                    # already the desired terminal state; never retry mutation.
+                    finished = request(f"{prefix}/actions/runs/{run['id']}")
+                    verify_run_identity(finished, run)
+                    item["status_after_conflict"] = finished["status"]
+                    if finished["status"] != "completed":
+                        raise
+                    item["completed_before_cancel"] = True
+                    item["conclusion"] = finished["conclusion"]
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

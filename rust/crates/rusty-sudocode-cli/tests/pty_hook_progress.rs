@@ -82,7 +82,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // any of them fails here rather than passing on a partial match.
     sess.expect(r"\[hook PreToolUse\] [Bb]ash: echo hook-observed")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("hook start should be announced: {e}\nPTY screen:\n{screen}");
         });
 
@@ -90,7 +90,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // rather than stalled inside the hook.
     sess.expect(r"\[hook done PreToolUse\] [Bb]ash: echo hook-observed")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("hook completion should be announced: {e}\nPTY screen:\n{screen}");
         });
 
@@ -104,16 +104,16 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // tests, where this one is about the progress lines.
     if env.is_mock() {
         sess.expect("bash completed:").unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("the hooked tool call should still run: {e}\nPTY screen:\n{screen}");
         });
     }
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert_eq!(
         exit, 0,
         "a hooked turn should exit 0; got {exit}\nPTY screen:\n{screen}"
@@ -173,7 +173,7 @@ fn early_hook_exit_preserves_its_decision_with_unread_tool_input() {
                             .map(|offset| body[offset..].chars().take(500).collect::<String>())
                     })
                     .collect();
-                let screen = session.render(|s| s.contents());
+                let screen = session.render(common::screen_contents);
                 panic!("{error}; captured batch markers: {markers:?}\nPTY screen:\n{screen}");
             });
         common::expect_turn_complete_after(
@@ -185,7 +185,7 @@ fn early_hook_exit_preserves_its_decision_with_unread_tool_input() {
         common::expect_input_line_cleared(&session, env.timeout(), "ready to exit");
         session.send("/exit\r").unwrap();
         let exit = session.expect_eof().unwrap();
-        let screen = session.render(|screen| screen.contents());
+        let screen = session.render(common::screen_contents);
         assert!(!screen.contains("failed to start"), "{screen}");
         assert_eq!(exit, 0, "{screen}");
         if code == 0 {
@@ -223,7 +223,7 @@ fn quick_hooks_preserve_nonzero_exit_decisions() {
         sess.expect(&format!(r"\[hook {outcome} PreToolUse\] [Bb]ash:"))
             .expect("the terminal must retain the hook's exit decision");
         assert_eq!(sess.expect_eof().expect("hooked turn exits"), 0);
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         assert!(screen.contains("hook-observed"), "{screen}");
         assert!(!screen.contains("Broken pipe"), "{screen}");
         assert!(!screen.contains("failed to start"), "{screen}");
@@ -253,10 +253,10 @@ fn no_hook_configured_prints_no_hook_progress() {
     sess.set_default_timeout(common::LIVE_TURN_BUDGET);
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert_eq!(
         exit, 0,
         "an unhooked turn should exit 0; got {exit}\nPTY screen:\n{screen}"

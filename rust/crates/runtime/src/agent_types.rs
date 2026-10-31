@@ -459,8 +459,7 @@ mod tests {
             "sudocode-agent-types-{label}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_nanos())
         ));
         std::fs::create_dir_all(root.join(".sudocode").join("agents")).expect("create agents dir");
         root

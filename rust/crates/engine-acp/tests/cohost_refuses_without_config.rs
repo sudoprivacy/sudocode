@@ -35,14 +35,13 @@ fn a_cohost_without_sudocode_configuration_refuses_and_names_what_is_missing() {
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
 
-    // `SpawnHandle` is not `Debug`, so match rather than `expect_err`.
-    let refusal = match spawn_managed_agent(
+    // The successful SpawnHandle does not implement Debug.
+    let Err(refusal) = spawn_managed_agent(
         Arc::clone(&kernel),
         make_desc("pid-no-config", "unconfigured-agent", "claude-sonnet"),
         |_, _| {},
-    ) {
-        Err(reason) => reason,
-        Ok(_) => panic!("a host with no sudocode configuration must refuse to spawn an agent"),
+    ) else {
+        panic!("a host with no sudocode configuration must refuse to spawn an agent");
     };
 
     // What an operator needs from it: which side is misconfigured, and where the

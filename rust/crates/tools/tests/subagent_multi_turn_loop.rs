@@ -3,7 +3,7 @@
 //!
 //! Prior to the multi-turn refactor, `run_agent_job_returning_text`
 //! was a one-shot: run one `run_turn`, return final text, exit.
-//! SendMessage plain-text envelopes accumulated on disk with no
+//! `SendMessage` plain-text envelopes accumulated on disk with no
 //! consumer. The multi-turn loop closes that gap — after each
 //! `run_turn`, the loop drains new envelopes from the agent's
 //! mailbox and treats them as the next user-turn's prompt.
@@ -12,12 +12,12 @@
 //!
 //! 1. **Empty mailbox → one-shot exit** — no envelopes ever arrive,
 //!    loop matches pre-refactor behavior (regression sentinel).
-//! 2. **SendMessage → resume with synth prompt** — parent writes a
+//! 2. **`SendMessage` → resume with synth prompt** — parent writes a
 //!    plain-text envelope AFTER turn 1; loop drains it, calls
 //!    `run_turn_fn` again with the composed
 //!    `<mailbox-message from="…">…</mailbox-message>` block; loop
 //!    exits after turn 2 because inbox is empty again.
-//! 3. **shutdown_request → clean exit** — parent writes a
+//! 3. **`shutdown_request` → clean exit** — parent writes a
 //!    `shutdown_request` envelope; loop sees it in the drain, exits
 //!    with the last final text WITHOUT calling `run_turn` again
 //!    (mirrors CC-fork's `resumeAgentBackground` → abort path).
@@ -48,8 +48,7 @@ use tools::testing::run_multi_turn_loop_for_test;
 fn unique_workspace(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "sudocode-multi-turn-{label}-{nanos}-{}",
         std::process::id()
@@ -98,7 +97,7 @@ fn empty_mailbox_yields_single_turn() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         16,
         move |prompt| {
@@ -137,7 +136,7 @@ fn message_after_turn_1_triggers_synthetic_turn_2_then_exit() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         16,
         move |prompt| {
@@ -194,7 +193,7 @@ fn shutdown_request_envelope_causes_immediate_exit_without_extra_turn() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         16,
         move |_prompt| {
@@ -236,7 +235,7 @@ fn abort_signal_after_turn_exits_without_draining_or_resuming() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         16,
         move |_prompt| {
@@ -281,7 +280,7 @@ fn two_envelopes_between_drains_are_folded_into_one_synth_turn() {
     let _ = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         16,
         move |prompt| {
@@ -339,7 +338,7 @@ fn max_multi_turns_cap_prevents_infinite_resume() {
     let _ = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         3,
         move |_prompt| {
@@ -371,7 +370,7 @@ fn failed_or_capped_delivery_stays_unread_including_a_mixed_shutdown_batch() {
         let result = run_multi_turn_loop_for_test(
             "worker",
             &ws,
-            HookAbortSignal::default(),
+            &HookAbortSignal::default(),
             "initial".into(),
             if is_capped { 1 } else { 2 },
             |prompt| {
@@ -404,7 +403,7 @@ fn failed_or_capped_delivery_stays_unread_including_a_mixed_shutdown_batch() {
         run_multi_turn_loop_for_test(
             "worker",
             &ws,
-            HookAbortSignal::default(),
+            &HookAbortSignal::default(),
             "restart".into(),
             3,
             |prompt| {

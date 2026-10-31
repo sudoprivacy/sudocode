@@ -1,6 +1,6 @@
 //! Real receiver threads, backend locks, reader-register writes and delivery.
 //! Only the two register writes are faulted, at the existing backend boundary.
-//! Unlike a disk renew() test, this actually enters the claiming-reader Err
+//! Unlike a disk `renew()` test, this actually enters the claiming-reader Err
 //! branch. It tests diagnostics there, not a real network/daemon outage.
 
 #[allow(dead_code)]
@@ -120,16 +120,7 @@ fn child_receiver() {
     wait_for("both original messages delivered", || {
         seen.lock().unwrap().len() == 2
     });
-    for path in &paths {
-        wait_for("natural reader commit", || {
-            std::fs::read(path)
-                .ok()
-                .and_then(|raw| {
-                    serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&raw).ok()
-                })
-                .is_some_and(|reader| reader.read_offset > 0)
-        });
-    }
+    wait_for_original_reader_commits(&paths);
     // Discovery and empty polls continue making real healthy checks.
     std::thread::sleep(Duration::from_millis(2_300));
     let last_error = runtime::mailbox::last_receiver_error(AGENT)
@@ -154,19 +145,7 @@ fn child_receiver() {
             "original message from peer-b"
         ]
     );
-    for peer in ["peer-a", "peer-b"] {
-        assert!(
-            initial_events.iter().any(|event| {
-                event.peer == peer
-                    && event.stall == runtime::mailbox::DeliveryStall::ClaimFailed
-                    && event.holder.is_empty()
-                    && event.offset.is_none()
-                    && event.tail.is_none()
-                    && event.loss.is_none()
-            }),
-            "the same real claim failure must reach the structured consumer: {initial_events:?}"
-        );
-    }
+    assert_original_claim_events(&initial_events);
 }
 
 #[test]
@@ -378,4 +357,33 @@ fn read_records(path: &Path) -> Vec<serde_json::Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn assert_original_claim_events(initial_events: &[runtime::mailbox::DeliveryEvent]) {
+    for peer in ["peer-a", "peer-b"] {
+        assert!(
+            initial_events.iter().any(|event| {
+                event.peer == peer
+                    && event.stall == runtime::mailbox::DeliveryStall::ClaimFailed
+                    && event.holder.is_empty()
+                    && event.offset.is_none()
+                    && event.tail.is_none()
+                    && event.loss.is_none()
+            }),
+            "the same real claim failure must reach the structured consumer: {initial_events:?}"
+        );
+    }
+}
+
+fn wait_for_original_reader_commits(paths: &[String]) {
+    for path in paths {
+        wait_for("natural reader commit", || {
+            std::fs::read(path)
+                .ok()
+                .and_then(|raw| {
+                    serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&raw).ok()
+                })
+                .is_some_and(|reader| reader.read_offset > 0)
+        });
+    }
 }

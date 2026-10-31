@@ -357,7 +357,7 @@ impl GeminiClient {
                 &headers,
                 &payload,
                 &self.retry_policy,
-                |response| check_gemini_response(response),
+                check_gemini_response,
                 trace_id,
             )
             .await?;
@@ -765,10 +765,9 @@ impl SseParser {
 
         let (frame_end, sep_len) = if let Some(pos) = text.find("\n\n") {
             (pos, 2)
-        } else if let Some(pos) = text.find("\r\n\r\n") {
-            (pos, 4)
         } else {
-            return None;
+            let pos = text.find("\r\n\r\n")?;
+            (pos, 4)
         };
 
         let frame_text = &text[..frame_end];

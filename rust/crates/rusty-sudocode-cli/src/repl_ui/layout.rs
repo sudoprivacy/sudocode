@@ -170,14 +170,14 @@ impl ChromeLayout {
 
         // Explicit counts replace even the per-slot summaries, not state.
         layout.pending = Placement::measured(ansi(combined_summary), measurements);
-        layout.status = Placement::measured(Default::default(), measurements);
-        layout.todo = Placement::measured(Default::default(), measurements);
-        layout.footer = Placement::measured(Default::default(), measurements);
+        layout.status = Placement::measured(std::sync::Arc::default(), measurements);
+        layout.todo = Placement::measured(std::sync::Arc::default(), measurements);
+        layout.footer = Placement::measured(std::sync::Arc::default(), measurements);
         layout.separators = 0;
         if width >= 16 && layout.pending.rows < available {
             layout.input_rows = desired_input.min(available - layout.pending.rows);
         } else {
-            layout.pending = Placement::measured(Default::default(), measurements);
+            layout.pending = Placement::measured(std::sync::Arc::default(), measurements);
             layout.input_rows = available;
             layout.warning = Some("Enlarge terminal".into());
         }

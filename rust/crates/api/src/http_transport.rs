@@ -113,13 +113,39 @@ pub struct HttpTransport {
     retry_notifier: Option<std::sync::Arc<dyn RetryNotifier>>,
 }
 
+/// Freeze response metadata before provider-specific validation consumes it.
+struct ResponseStart {
+    started_ms: u64,
+    status: u16,
+    headers: Map<String, Value>,
+    is_streaming: bool,
+}
+
+impl ResponseStart {
+    fn new(response: &reqwest::Response) -> Self {
+        let started_ms = current_timestamp_ms();
+        let status = response.status().as_u16();
+        let headers = mask_response_headers(response.headers());
+        let is_streaming = headers
+            .get("content-type")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("text/event-stream"));
+        Self {
+            started_ms,
+            status,
+            headers,
+            is_streaming,
+        }
+    }
+}
+
 impl std::fmt::Debug for HttpTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpTransport")
             .field("inner", &self.inner)
             .field("session_tracer", &self.session_tracer)
             .field("retry_notifier", &self.retry_notifier.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -190,7 +216,7 @@ impl HttpTransport {
     /// # Arguments
     /// * `trace_id` - Optional external trace ID for request tracking. If provided,
     ///   it will be used as the `request_id` and sent as `X-Request-ID` header.
-    ///   This enables end-to-end tracing from SudoWork to SudoRouter.
+    ///   This enables end-to-end tracing from `SudoWork` to `SudoRouter`.
     pub async fn send_json<F, Fut>(
         &self,
         url: &str,
@@ -218,232 +244,71 @@ impl HttpTransport {
         let mut last_error: Option<ApiError>;
 
         // Use external trace_id if provided, otherwise generate a new request_id
-        let request_id = trace_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
+        let request_id = trace_id.map_or_else(
+            || format!("req_{}", uuid::Uuid::new_v4()),
+            std::string::ToString::to_string,
+        );
 
         loop {
             attempts += 1;
             let start_timestamp_ms = current_timestamp_ms();
-            let observed_attempt = if let Some(scope) = &request_scope {
-                scope.begin_attempt(
-                    RetryPolicy {
-                        max_retries,
-                        ..retry_policy.clone()
-                    },
-                    TransportState {
-                        request_id: request_id.clone(),
-                        path: path.clone(),
-                        started_ms: start_timestamp_ms,
-                        idle_timeout: self.timeout.read_timeout,
-                        tracer: self.session_tracer.clone(),
-                        notifier: self.retry_notifier.clone(),
-                    },
-                )?
-            } else {
-                attempts
+            let attempt = telemetry::HttpRequestAttempt {
+                request_id: &request_id,
+                attempt: attempts,
+                method: "POST",
+                path: &path,
+                start_timestamp_ms,
             };
-
-            // Log started.
-            if let Some(tracer) = &self.session_tracer {
-                tracer.record_http_request_started(
-                    &request_id,
-                    observed_attempt,
-                    "POST",
-                    &path,
-                    Map::new(),
-                );
-            }
-
-            // Log debug (every attempt — matches existing Anthropic behavior).
-            // Include X-Request-ID in the logged headers for visibility.
-            if let Some(tracer) = &self.session_tracer {
-                let mut logged_headers = telemetry::mask_sensitive_headers(headers);
-                logged_headers.insert(
-                    "X-Request-ID".to_string(),
-                    Value::String(request_id.clone()),
-                );
-                tracer.record_http_request_debug(
-                    &request_id,
-                    url,
-                    "POST",
-                    logged_headers,
-                    body.clone(),
-                );
-            }
+            let observed_attempt = self.begin_request_attempt(
+                request_scope.as_ref(),
+                retry_policy,
+                max_retries,
+                attempt,
+            )?;
+            let attempt = telemetry::HttpRequestAttempt {
+                attempt: observed_attempt,
+                ..attempt
+            };
+            self.log_request_attempt(attempt, url, headers, body);
 
             runtime::compaction_scope::reserve_request_attempt()
                 .map_err(|error| ApiError::Configuration(error.to_string()))?;
             // Build and send request.
-            let send_result = if let Some(nexus) = &self.nexus {
-                nexus.send(url, headers, body, &request_id).await
-            } else {
-                let mut builder = self.inner.post(url);
-                for (name, value) in headers {
-                    builder = builder.header(name.as_str(), value.as_str());
-                }
-                // Add X-Request-ID header for end-to-end tracing
-                builder = builder.header("X-Request-ID", &request_id);
-                // Debug: print when trace_id is provided (from external source)
-                if trace_id.is_some() {
-                    eprintln!(
-                        "[TRACE-ID] Sending request with X-Request-ID: {}",
-                        request_id
-                    );
-                }
-                builder.json(body).send().await.map_err(ApiError::from)
-            };
+            let send_result = self
+                .send_json_once(url, headers, body, &request_id, trace_id)
+                .await;
 
-            match send_result {
+            let checked = match send_result {
                 Ok(response) => {
-                    let response_started_ms = current_timestamp_ms();
-                    let status = response.status().as_u16();
-                    let response_headers = mask_response_headers(response.headers());
-
-                    // Check if this is a streaming response (content-type: text/event-stream)
-                    let is_streaming = response_headers
-                        .get("content-type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.contains("text/event-stream"))
-                        .unwrap_or(false);
-
-                    match check_response(response).await {
-                        Ok(response) => {
-                            // Log response debug after successful check
-                            // For streaming responses, body is consumed via SSE events
-                            if let Some(tracer) = &self.session_tracer {
-                                tracer.record_http_response_debug(
-                                    &request_id,
-                                    status,
-                                    response_headers,
-                                    if is_streaming {
-                                        serde_json::json!({"streaming": true, "note": "Response body consumed via SSE events"})
-                                    } else {
-                                        Value::Null
-                                    },
-                                );
-                            }
-
-                            if let Some(tracer) = &self.session_tracer {
-                                tracer.record_http_request_succeeded(
-                                    telemetry::HttpRequestAttempt {
-                                        request_id: &request_id,
-                                        attempt: observed_attempt,
-                                        method: "POST",
-                                        path: &path,
-                                        start_timestamp_ms,
-                                    },
-                                    status,
-                                    request_id_from_headers(response.headers()),
-                                    Map::new(),
-                                );
-                            }
-                            let capture = self.session_tracer.as_ref().and_then(|tracer| {
-                                if !tracer.has_response_archive()
-                                    || (!is_streaming
-                                        && body.get("stream").and_then(Value::as_bool)
-                                            != Some(true)
-                                        && !url.contains(":streamGenerateContent"))
-                                {
-                                    return None;
-                                }
-                                let endpoint = reqwest::Url::parse(url).ok().map_or_else(
-                                    || "unknown".to_string(),
-                                    |url| {
-                                        format!("{}{}", url.host_str().unwrap_or(""), url.path())
-                                            .chars()
-                                            .take(512)
-                                            .collect()
-                                    },
-                                );
-                                Some((
-                                    tracer.clone(),
-                                    telemetry::ResponseCaptureMetadata {
-                                        request_id: request_id.clone(),
-                                        model: body
-                                            .get("model")
-                                            .and_then(Value::as_str)
-                                            .map(|v| v.chars().take(256).collect()),
-                                        endpoint,
-                                        status,
-                                        content_type: response
-                                            .headers()
-                                            .get("content-type")
-                                            .and_then(|v| v.to_str().ok())
-                                            .unwrap_or("")
-                                            .chars()
-                                            .take(128)
-                                            .collect(),
-                                        provider_request_id: request_id_from_headers(
-                                            response.headers(),
-                                        )
-                                        .map(|v| v.chars().take(128).collect()),
-                                        gateway_request_id: response
-                                            .headers()
-                                            .get(ONEAPI_REQUEST_ID_HEADER)
-                                            .and_then(|v| v.to_str().ok())
-                                            .map(|v| v.chars().take(128).collect()),
-                                        started_at_ms: start_timestamp_ms,
-                                    },
-                                ))
-                            });
-                            return Ok(HttpRequestResult {
-                                response: crate::RecordedResponse::new(response, capture),
-                                request_id,
-                                request_started_ms: start_timestamp_ms,
-                                response_started_ms,
-                                attempts: observed_attempt,
-                            });
-                        }
-                        Err(error)
-                            if error.is_retryable()
-                                && attempts <= max_retries.saturating_add(1)
-                                && !compaction_active =>
-                        {
-                            self.record_failure(
-                                &request_id,
-                                observed_attempt,
-                                &path,
-                                &error,
-                                start_timestamp_ms,
-                            );
-                            last_error = Some(error);
-                        }
-                        Err(error) => {
-                            self.record_failure(
-                                &request_id,
-                                observed_attempt,
-                                &path,
-                                &error,
-                                start_timestamp_ms,
-                            );
-                            return Err(error);
-                        }
-                    }
+                    let response_start = ResponseStart::new(&response);
+                    check_response(response)
+                        .await
+                        .map(|response| (response, response_start))
                 }
-                Err(error)
-                    if error.is_retryable()
-                        && attempts <= max_retries.saturating_add(1)
-                        && !compaction_active =>
-                {
-                    self.record_failure(
-                        &request_id,
-                        observed_attempt,
-                        &path,
-                        &error,
-                        start_timestamp_ms,
-                    );
-                    last_error = Some(error);
+                Err(error) => Err(error),
+            };
+            match checked {
+                Ok((response, response_start)) => {
+                    let response_started_ms = response_start.started_ms;
+                    let response =
+                        self.record_response_success(response, attempt, response_start, url, body);
+                    return Ok(HttpRequestResult {
+                        response,
+                        request_id,
+                        request_started_ms: start_timestamp_ms,
+                        response_started_ms,
+                        attempts: observed_attempt,
+                    });
                 }
                 Err(error) => {
-                    self.record_failure(
-                        &request_id,
-                        observed_attempt,
-                        &path,
-                        &error,
-                        start_timestamp_ms,
-                    );
-                    return Err(error);
+                    self.record_failure(attempt, &error);
+                    if !error.is_retryable()
+                        || attempts > max_retries.saturating_add(1)
+                        || compaction_active
+                    {
+                        return Err(error);
+                    }
+                    last_error = Some(error);
                 }
             }
 
@@ -455,35 +320,13 @@ impl HttpTransport {
                 break;
             }
 
-            let retry_after = last_error.as_ref().and_then(ApiError::retry_after);
-            let delay = retry_policy.delay_for_attempt(observed_attempt, retry_after)?;
-            // Surface retry attempts to the user so they know scode
-            // isn't hung — it's waiting for the provider to recover.
-            if let Some(ref error) = last_error {
-                let reason = match error {
-                    ApiError::Api {
-                        status, message, ..
-                    } => {
-                        let msg = message.as_deref().unwrap_or("unknown error");
-                        format!("{status}: {msg}")
-                    }
-                    other => format!("{other}"),
-                };
-                // Reported only through the notifier. A transport writing to
-                // the terminal itself is the boundary leak the engine/renderer
-                // split exists to remove: it lands wherever the cursor happens
-                // to be, no renderer can style or suppress it, and — the reason
-                // this comment exists — it silently stood in for the real
-                // indicator once the notifier stopped being installed, which is
-                // what let that regression go unnoticed.
-                if let Some(ref notifier) = self.retry_notifier {
-                    notifier.on_retry(observed_attempt, max_retries, &reason);
-                }
-            }
-            tokio::time::sleep(delay).await;
-            if let Some(ref notifier) = self.retry_notifier {
-                notifier.on_retry_end();
-            }
+            self.wait_before_retry(
+                retry_policy,
+                observed_attempt,
+                max_retries,
+                last_error.as_ref(),
+            )
+            .await?;
         }
 
         Err(ApiError::RetriesExhausted {
@@ -494,23 +337,239 @@ impl HttpTransport {
         })
     }
 
-    fn record_failure(
+    async fn wait_before_retry(
         &self,
-        request_id: &str,
-        attempt: u32,
-        path: &str,
-        error: &ApiError,
-        start_timestamp_ms: u64,
+        retry_policy: &RetryPolicy,
+        observed_attempt: u32,
+        max_retries: u32,
+        error: Option<&ApiError>,
+    ) -> Result<(), ApiError> {
+        let retry_after = error.and_then(ApiError::retry_after);
+        let delay = retry_policy.delay_for_attempt(observed_attempt, retry_after)?;
+        self.notify_retry(observed_attempt, max_retries, error);
+        tokio::time::sleep(delay).await;
+        if let Some(ref notifier) = self.retry_notifier {
+            notifier.on_retry_end();
+        }
+        Ok(())
+    }
+
+    fn begin_request_attempt(
+        &self,
+        scope: Option<&RequestScope>,
+        retry_policy: &RetryPolicy,
+        max_retries: u32,
+        attempt: telemetry::HttpRequestAttempt<'_>,
+    ) -> Result<u32, ApiError> {
+        if let Some(scope) = scope {
+            scope.begin_attempt(
+                RetryPolicy {
+                    max_retries,
+                    ..retry_policy.clone()
+                },
+                TransportState {
+                    request_id: attempt.request_id.to_string(),
+                    path: attempt.path.to_string(),
+                    started_ms: attempt.start_timestamp_ms,
+                    idle_timeout: self.timeout.read_timeout,
+                    tracer: self.session_tracer.clone(),
+                    notifier: self.retry_notifier.clone(),
+                },
+            )
+        } else {
+            Ok(attempt.attempt)
+        }
+    }
+
+    fn log_request_attempt(
+        &self,
+        attempt: telemetry::HttpRequestAttempt<'_>,
+        url: &str,
+        headers: &[(String, String)],
+        body: &Value,
     ) {
+        // Log started.
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_http_request_started(
+                attempt.request_id,
+                attempt.attempt,
+                "POST",
+                attempt.path,
+                Map::new(),
+            );
+        }
+
+        // Log debug (every attempt — matches existing Anthropic behavior).
+        // Include X-Request-ID in the logged headers for visibility.
+        if let Some(tracer) = &self.session_tracer {
+            let mut logged_headers = telemetry::mask_sensitive_headers(headers);
+            logged_headers.insert(
+                "X-Request-ID".to_string(),
+                Value::String(attempt.request_id.to_string()),
+            );
+            tracer.record_http_request_debug(
+                attempt.request_id,
+                url,
+                "POST",
+                logged_headers,
+                body.clone(),
+            );
+        }
+    }
+
+    async fn send_json_once(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &Value,
+        request_id: &str,
+        trace_id: Option<&str>,
+    ) -> Result<reqwest::Response, ApiError> {
+        if let Some(nexus) = &self.nexus {
+            nexus.send(url, headers, body, request_id).await
+        } else {
+            let mut builder = self.inner.post(url);
+            for (name, value) in headers {
+                builder = builder.header(name.as_str(), value.as_str());
+            }
+            // Add X-Request-ID header for end-to-end tracing
+            builder = builder.header("X-Request-ID", request_id);
+            // Debug: print when trace_id is provided (from external source)
+            if trace_id.is_some() {
+                eprintln!("[TRACE-ID] Sending request with X-Request-ID: {request_id}");
+            }
+            builder.json(body).send().await.map_err(ApiError::from)
+        }
+    }
+
+    fn record_response_success(
+        &self,
+        response: reqwest::Response,
+        attempt: telemetry::HttpRequestAttempt<'_>,
+        response_start: ResponseStart,
+        url: &str,
+        body: &Value,
+    ) -> crate::RecordedResponse {
+        // Log response debug after successful check
+        // For streaming responses, body is consumed via SSE events
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_http_response_debug(
+                attempt.request_id,
+                response_start.status,
+                response_start.headers,
+                if response_start.is_streaming {
+                    serde_json::json!({"streaming": true, "note": "Response body consumed via SSE events"})
+                } else {
+                    Value::Null
+                },
+            );
+        }
+
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_http_request_succeeded(
+                attempt,
+                response_start.status,
+                request_id_from_headers(response.headers()),
+                Map::new(),
+            );
+        }
+        let capture = self.capture_response(
+            &response,
+            attempt,
+            url,
+            body,
+            response_start.is_streaming,
+            response_start.status,
+        );
+        crate::RecordedResponse::new(response, capture)
+    }
+
+    fn capture_response(
+        &self,
+        response: &reqwest::Response,
+        attempt: telemetry::HttpRequestAttempt<'_>,
+        url: &str,
+        body: &Value,
+        is_streaming: bool,
+        status: u16,
+    ) -> Option<(SessionTracer, telemetry::ResponseCaptureMetadata)> {
+        let tracer = self.session_tracer.as_ref()?;
+        if !tracer.has_response_archive()
+            || (!is_streaming
+                && body.get("stream").and_then(Value::as_bool) != Some(true)
+                && !url.contains(":streamGenerateContent"))
+        {
+            return None;
+        }
+        let endpoint = reqwest::Url::parse(url).ok().map_or_else(
+            || "unknown".to_string(),
+            |url| {
+                format!("{}{}", url.host_str().unwrap_or(""), url.path())
+                    .chars()
+                    .take(512)
+                    .collect()
+            },
+        );
+        Some((
+            tracer.clone(),
+            telemetry::ResponseCaptureMetadata {
+                request_id: attempt.request_id.to_string(),
+                model: body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(|v| v.chars().take(256).collect()),
+                endpoint,
+                status,
+                content_type: response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .chars()
+                    .take(128)
+                    .collect(),
+                provider_request_id: request_id_from_headers(response.headers())
+                    .map(|v| v.chars().take(128).collect()),
+                gateway_request_id: response
+                    .headers()
+                    .get(ONEAPI_REQUEST_ID_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.chars().take(128).collect()),
+                started_at_ms: attempt.start_timestamp_ms,
+            },
+        ))
+    }
+
+    fn notify_retry(&self, attempt: u32, max_retries: u32, error: Option<&ApiError>) {
+        // Surface retry attempts to the user so they know scode
+        // isn't hung — it's waiting for the provider to recover.
+        if let Some(error) = error {
+            let reason = match error {
+                ApiError::Api {
+                    status, message, ..
+                } => {
+                    let msg = message.as_deref().unwrap_or("unknown error");
+                    format!("{status}: {msg}")
+                }
+                other => format!("{other}"),
+            };
+            // Reported only through the notifier. A transport writing to
+            // the terminal itself is the boundary leak the engine/renderer
+            // split exists to remove: it lands wherever the cursor happens
+            // to be, no renderer can style or suppress it, and — the reason
+            // this comment exists — it silently stood in for the real
+            // indicator once the notifier stopped being installed, which is
+            // what let that regression go unnoticed.
+            if let Some(ref notifier) = self.retry_notifier {
+                notifier.on_retry(attempt, max_retries, &reason);
+            }
+        }
+    }
+
+    fn record_failure(&self, attempt: telemetry::HttpRequestAttempt<'_>, error: &ApiError) {
         if let Some(tracer) = &self.session_tracer {
             tracer.record_http_request_failed(
-                telemetry::HttpRequestAttempt {
-                    request_id,
-                    attempt,
-                    method: "POST",
-                    path,
-                    start_timestamp_ms,
-                },
+                attempt,
                 error.to_string(),
                 error.is_retryable(),
                 Map::new(),
@@ -581,7 +640,7 @@ fn extract_path(url: &str) -> String {
 /// Checks multiple header names in order of preference:
 /// 1. `request-id` (Anthropic standard)
 /// 2. `x-request-id` (Common alternative)
-/// 3. `x-oneapi-request-id` (OneAPI gateways)
+/// 3. `x-oneapi-request-id` (`OneAPI` gateways)
 pub fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get(REQUEST_ID_HEADER)
@@ -634,8 +693,9 @@ fn jitter_for_base(base: Duration) -> Duration {
     }
     let raw_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+        });
     let tick = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut mixed = raw_nanos
         .wrapping_add(tick)

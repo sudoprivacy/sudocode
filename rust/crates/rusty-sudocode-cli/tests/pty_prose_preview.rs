@@ -206,7 +206,7 @@ fn ambiguous_grapheme_width_uses_complete_block_fallback() {
             common::DEFAULT_TIMEOUT,
             "ambiguous grapheme canonical flush",
         );
-        let screen = session.render(|screen| screen.contents());
+        let screen = session.render(common::screen_contents);
         let logical_text = screen.split_whitespace().collect::<String>();
         assert_eq!(screen.matches(start).count(), 1, "{screen}");
         // A legacy host may wrap inside a word; require every character

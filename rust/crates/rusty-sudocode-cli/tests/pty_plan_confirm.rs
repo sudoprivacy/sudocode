@@ -87,7 +87,7 @@ fn choose_plan_action(name: &str, choice: &str, expected: &str, is_error: bool) 
     // A user can pause before Enter. Span several spinner ticks: background
     // progress must not erase the choice editor while it owns the terminal.
     std::thread::sleep(Duration::from_millis(300));
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(
         screen.contains(&format!("Your choice: {choice}")),
         "the pending choice must remain visible: {screen}"
@@ -101,7 +101,7 @@ fn choose_plan_action(name: &str, choice: &str, expected: &str, is_error: bool) 
     sess.send("\r").expect("submit /exit");
     sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("clean exit after write_plan dialog: {e}\nPTY:\n{screen}");
     });
     assert_eq!(exit, 0, "scode should exit 0 after /exit; got {exit}");

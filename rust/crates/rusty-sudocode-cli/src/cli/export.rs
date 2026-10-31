@@ -331,8 +331,7 @@ pub(crate) fn command_exists(name: &str) -> bool {
     Command::new("which")
         .arg(name)
         .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|output| output.status.success())
 }
 
 pub(crate) fn parse_history_count(raw: Option<&str>) -> Result<usize, String> {
@@ -398,7 +397,7 @@ pub(crate) fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit
         "Prompt history".to_string(),
         format!("  Total            {total}"),
         format!("  Showing          {} most recent", shown.len()),
-        format!("  Reverse search   Ctrl-R in the REPL"),
+        "  Reverse search   Ctrl-R in the REPL".to_string(),
         String::new(),
     ];
     for (offset, entry) in shown.iter().enumerate() {

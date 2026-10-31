@@ -45,26 +45,36 @@ def main():
     else:
         raise RuntimeError("Unexpected workflow event")
     success = False
-    error = "Native acceptance did not complete successfully"
-    if run["conclusion"] == "success":
-        try:
-            with tempfile.TemporaryDirectory(prefix="acceptance-event-") as directory:
-                path = Path(directory) / "event.json"
-                path.write_text(json.dumps(event))
-                os.environ["GITHUB_EVENT_PATH"] = str(path)
-                selection = gate.main()
-            jobs = gate.pages(f"repos/{repository}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
-            required = ["Verify local acceptance"]
-            required += [f"Complement local host ({system})" for system in selection["platforms"]]
-            for name in required:
-                matching = [job for job in jobs if job["name"] == name]
-                if len(matching) != 1 or matching[0]["conclusion"] != "success":
-                    raise RuntimeError(f"Required current-attempt job did not pass: {name}")
-            success = True
-        except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as problem:
-            error = str(problem)
+    error = "Source acceptance failed; inspect the acceptance workflow's jobs and responsibility plan"
+    description = "Carried signed source acceptance; deployment is separate"
+    try:
+        # Revalidate even a failed run so the status exposes a missing receipt
+        # or the exact failed platform rather than a generic red check.
+        with tempfile.TemporaryDirectory(prefix="acceptance-event-") as directory:
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps(event))
+            os.environ["GITHUB_EVENT_PATH"] = str(path)
+            selection = gate.main()
+        jobs = gate.pages(f"repos/{repository}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
+        for name in selection["required_jobs"]:
+            matching = [job for job in jobs if job["name"] == name]
+            if len(matching) != 1 or matching[0]["conclusion"] != "success":
+                raise RuntimeError(f"Required current-attempt job did not pass: {name}")
+        if run["conclusion"] != "success":
+            raise RuntimeError(error)
+        if selection["plan"]:
+            plan = selection["plan"]
+            targets = dict.fromkeys(target for job in plan["ci"] for target in job["targets"])
+            description = (f"Local {plan['author']['system']} + CI {','.join(targets) or 'none'} passed; "
+                           "source only, deployment separate")
+        if run["event"] == "pull_request":
+            description = description.replace("source only, deployment separate", "source only")
+            description += f". When ready: gh pr merge {event['pull_request']['number']} --auto"
+        success = True
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as problem:
+        error = str(problem)
     body = {"state": "success" if success else "failure", "context": "Local acceptance",
-            "description": "Signed local evidence and complementary native CI passed" if success else error[:140],
+            "description": (description if success else error)[:140],
             "target_url": f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}
     request = urllib.request.Request(f"https://api.github.com/repos/{repository}/statuses/{head}",
                                      data=json.dumps(body).encode(), method="POST",

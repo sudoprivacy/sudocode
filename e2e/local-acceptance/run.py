@@ -193,7 +193,7 @@ def performance_scope_acceptance(directory):
     policy = command("git", "rev-parse", "HEAD", cwd=repository)
     helper = repository / ".github/scripts/local_acceptance.py"
 
-    def expect(base, expected, *, native=True, guard=None):
+    def expect(base, expected, *, workspace=True, guard=None):
         text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
                        "--host", "windows", "--architecture", "AMD64", cwd=repository)
         plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
@@ -204,7 +204,8 @@ def performance_scope_acceptance(directory):
         assert "Statistical performance profiles:" in text, text
         if not expected:
             assert "indirect performance effects" in text, text
-        assert ("native-workspace" in names) == native, text
+        # Full-workspace coverage is independent of other native profiles.
+        assert ("native-workspace" in names) == workspace, text
         if guard is not None:
             assert ("guard-contract" in names) == guard, text
         native_checks = {name for name in names if name.startswith("native-")}
@@ -248,7 +249,7 @@ def performance_scope_acceptance(directory):
     history.write_text("changed Git history acceptance fixture\n")
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "Git-only history fixture", cwd=repository)
-    expect(base, [], native=False, guard=False)
+    expect(base, [], workspace=False, guard=False)
     for path in ["e2e/pr-history/future.py", "rust/crates/runtime/src/history_fixture.rs"]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         destination = repository / path
@@ -257,24 +258,24 @@ def performance_scope_acceptance(directory):
         history.write_text(history.read_text() + "mixed fixture edit\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", "History fixture with conservative native input", cwd=repository)
-        expect(base, [], native=True, guard=False)
+        expect(base, [], workspace=True, guard=False)
     for left, right in [("e2e/pr-history/run.py", "rust/crates/runtime/src/moved_history.rs"),
                         ("rust/crates/runtime/src/moved_history.rs", "e2e/pr-history/run.py")]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         command("git", "mv", left, right, cwd=repository)
         command("git", "commit", "-m", "Move across Git-only fixture boundary", cwd=repository)
-        expect(base, [], native=True, guard=False)
+        expect(base, [], workspace=True, guard=False)
     print("PASS: public planner keeps Git-only history acceptance in CI preflight; mixed, unknown and renamed native inputs retain product validation")
     # These three independent executor fixtures already run in scoped PR CI.
-    # They do not change enforcement or its pinned native helpers. Unknown
+    # Their Docker matrix scope is independent of workspace/performance scopes. Unknown
     # future fixtures and every shared contract input remain conservative.
     independent = ["benchmark_targets_acceptance.py", "container_inputs_acceptance.py", "clippy_fail_fast.py"]
-    paths = [("e2e/local-acceptance/" + name, False) for name in independent]
-    paths += [(name, True) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
+    paths = [("e2e/local-acceptance/" + name, False, []) for name in independent]
+    paths += [(name, True, both if name == ".github/local-acceptance/checks.py" else []) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
         ".github/local-acceptance/checks.py", ".github/scripts/local_acceptance.py",
         ".github/scripts/check_pr_history.py",
         "spec/local_acceptance.json", ".github/workflows/local-acceptance.yml"]]
-    for path, guard in paths:
+    for path, guard, performance in paths:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
         file.parent.mkdir(parents=True, exist_ok=True)
@@ -284,7 +285,7 @@ def performance_scope_acceptance(directory):
             file.write_text("changed enforcement-scope input\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"Enforcement input {path}", cwd=repository)
-        expect(base, [], native=False, guard=guard)
+        expect(base, performance, workspace=False, guard=guard)
     for shared in [False, True]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         for name in independent + (["run.py"] if shared else []):
@@ -292,18 +293,18 @@ def performance_scope_acceptance(directory):
             file.write_text(file.read_text() + "mixed change\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"Independent fixtures with shared={shared}", cwd=repository)
-        expect(base, [], native=False, guard=shared)
+        expect(base, [], workspace=False, guard=shared)
     for source, target in [("benchmark_targets_acceptance.py", "moved_guard.py"),
                            ("moved_guard.py", "benchmark_targets_acceptance.py")]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         command("git", "mv", "e2e/local-acceptance/" + source, "e2e/local-acceptance/" + target, cwd=repository)
         command("git", "commit", "-m", "Move across enforcement boundary", cwd=repository)
-        expect(base, [], native=False, guard=True)
+        expect(base, [], workspace=False, guard=True)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "rm", "e2e/local-acceptance/clippy_fail_fast.py", cwd=repository)
     command("git", "commit", "-m", "Delete independent fixture input", cwd=repository)
-    expect(base, [], native=False, guard=False)
-    print("PASS: public Git planner skips unchanged enforcement for three independently gated fixtures; shared/mixed/unknown inputs and both rename directions retain it")
+    expect(base, [], workspace=False, guard=False)
+    print("PASS: public Git planner keeps independent executor fixtures in scoped CI; shared/mixed/unknown inputs and both rename directions retain contract validation")
 
 
 def plan_acceptance(directory):

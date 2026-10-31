@@ -184,7 +184,7 @@ def main():
     (candidate / "spec/local_acceptance.json").write_text(json.dumps(data))
     changed_scope = commit("Change protected grouping selection rules without updating their pin")
     try:
-        profiles.stage_profile_executor(candidate, changed_scope, "guard-contract", output / "rejected-scope-policy")
+        profiles.stage_profile_executor(candidate, changed_scope, "native-guard", output / "rejected-scope-policy")
         raise AssertionError("Changed grouping scope policy was accepted")
     except RuntimeError as error:
         assert "Native grouping scope policy changed" in str(error), error

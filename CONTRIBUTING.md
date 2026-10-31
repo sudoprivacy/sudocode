@@ -292,6 +292,23 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+The full native workspace opts into eight integration wrappers for 128 CLI
+targets, reducing integration binaries from 211 to 91. Original per-file Cargo
+commands stay available, and new ungrouped targets are selected automatically.
+The selector checks real Cargo metadata and exact declarative wrapper bytes;
+missing, duplicated, redirected, unregistered or feature-hidden members fail.
+Wrappers retain the original helper namespaces and explicitly allow only
+Clippy's `duplicate_mod` diagnostic there. Other lint rules and test assertions
+remain required. Self-spawning cases and named release, performance and terminal
+drivers stay standalone. Nextest still isolates every case in a fresh process.
+Real Cargo/nextest regression compares inventories and ignored markers, proves
+process-state isolation, runs the original developer/driver commands and checks
+that the normal product stays Cargo-fresh with identical bytes.
+New `test=false` targets skip unchanged product/performance builds only when
+their names and wrapper paths are new, their fields are exactly name/path/test,
+and workspace/existing manifest inputs are unchanged. Existing target edits,
+extra fields, missing files and unknown metadata retain ordinary checks. This
+exception does not cover changed dev dependencies or measurement sources.
 Release acceptance builds the normal release `scode` once, copies it outside
 Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox

@@ -42,11 +42,11 @@ fn probe(index: u8) -> String {
         }
     }
     command.push_str("PALETTE-DONE\\r\\n'; IFS= read -r release");
-    let mut session = PtySession::spawn(&crate::common::resolve_sh(), &["-c", &command]).unwrap();
-    crate::common::expect_screen(
+    let mut session = PtySession::spawn(&super::common::resolve_sh(), &["-c", &command]).unwrap();
+    super::common::expect_screen(
         &session,
         |s| s.contains("PALETTE-DONE"),
-        crate::common::DEFAULT_TIMEOUT,
+        super::common::DEFAULT_TIMEOUT,
         "independent terminal palette control",
     );
     let colors: BTreeMap<_, _> = session.render(|screen| {

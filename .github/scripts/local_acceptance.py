@@ -311,6 +311,59 @@ def without_development_dependencies(manifest):
     return result
 
 
+def opt_in_test_target_inputs(paths, base, head):
+    """Recognize only newly added disabled targets with previously absent names/paths."""
+    manifests = [path for path in paths if path.startswith("rust/crates/")
+                 and path.count("/") == 3 and path.endswith("/Cargo.toml")]
+    if tomllib is None or not manifests:
+        return set()
+    ignored = set()
+    try:
+        def document(ref, path):
+            return tomllib.loads(tracked(ref, path).decode("utf-8"))
+        if document(base, "rust/Cargo.toml") != document(head, "rust/Cargo.toml"):
+            return ignored
+        for path in manifests:
+            try:
+                before, after = document(base, path), document(head, path)
+            except RuntimeError:
+                continue
+            old, new = before.get("test", []), after.get("test", [])
+            if (not isinstance(old, list) or not isinstance(new, list) or len(new) <= len(old)
+                    or new[:len(old)] != old
+                    or {k: v for k, v in before.items() if k != "test"}
+                       != {k: v for k, v in after.items() if k != "test"}):
+                continue
+            names = {target["name"] for target in old}
+            directory = path.removesuffix("Cargo.toml")
+            def files(ref):
+                rows = git("ls-tree", "-r", "-z", ref, "--", directory + "tests").stdout.decode("utf-8").split("\0")
+                return {name: info.split()[0] for row in rows if row for info, name in [row.split("\t", 1)]}
+            old_files, new_files = files(base), files(head)
+            valid = True
+            for target in new[len(old):]:
+                name = target.get("name", "")
+                relative = target.get("path", "")
+                if (set(target) != {"name", "path", "test"} or target["test"] is not False
+                        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in names
+                        or relative != f"tests/acceptance_groups/{name}.rs"):
+                    valid = False
+                    break
+                names.add(name)
+                if any(directory + candidate in old_files for candidate in [relative, f"tests/{name}.rs"]):
+                    valid = False
+                    break
+                mode = new_files.get(directory + relative)
+                if mode not in {"100644", "100755"}:
+                    valid = False
+                    break
+            if valid:
+                ignored.add(path)
+    except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return set()
+    return ignored
+
+
 def development_lock_change(before, after, manifests):
     """Require every existing production resolution/edge to remain unchanged."""
     if {k: v for k, v in before.items() if k != "package"} != {k: v for k, v in after.items() if k != "package"}:
@@ -344,7 +397,7 @@ def development_lock_change(before, after, manifests):
     return True
 
 
-def production_build_paths(paths, base, head):
+def production_build_paths(paths, base, head, *, opt_in=None):
     """Discard proven dev-only Cargo inputs for normal product builds only.
 
     All Rust sources, test harnesses, normal/build dependencies, features,
@@ -352,6 +405,9 @@ def production_build_paths(paths, base, head):
     The metadata verifier reads Git/TOML; candidate code is never executed.
     """
     paths = list(paths)
+    if opt_in is None:
+        opt_in = opt_in_test_target_inputs(paths, base, head)
+    paths = [path for path in paths if path not in opt_in]
     metadata = [p for p in paths if p == "rust/Cargo.lock" or p == "rust/Cargo.toml"
                 or (p.startswith("rust/crates/") and p.count("/") == 3 and p.endswith("/Cargo.toml"))]
     if not metadata or tomllib is None:
@@ -393,18 +449,27 @@ def production_build_paths(paths, base, head):
 
 def selected(policy, paths, *, base=None, head=None):
     paths = list(paths)
-    product_paths = production_build_paths(paths, base, head) if base and head else paths
+    opt_in = opt_in_test_target_inputs(paths, base, head) if base and head else set()
+    product_paths = production_build_paths(paths, base, head, opt_in=opt_in) if base and head else paths
     if product_paths != paths:
         print("Development-only Cargo metadata skips unchanged normal product builds; "
-              "native test and performance input scopes remain unchanged.", flush=True)
+              + ("native workspace validation remains selected." if opt_in
+                 else "native test and performance input scopes remain unchanged."), flush=True)
         print("BUILD_INPUT_SCOPE=" + json.dumps({"base": base, "head": head,
               "normal_product_ignored": [p for p in paths if p not in product_paths],
               "applies_to": ["native-release", "native-services", "native-cohost"],
-              "native_tests_and_performance_scope_unchanged": True}), flush=True)
+              "native_tests_and_performance_scope_unchanged": not bool(opt_in)}), flush=True)
+    if opt_in:
+        print("New disabled acceptance targets preserve existing product and named performance builds; "
+              "native workspace validation still runs. Existing target edits or unknown metadata keep full scope.", flush=True)
+        print("OPT_IN_TEST_TARGET_SCOPE=" + json.dumps({"base": base, "head": head,
+              "unchanged_benchmark_metadata": sorted(opt_in)}), flush=True)
     return [name for name, rule in policy["checks"].items()
             if name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
-                   for p in (product_paths if name in {"native-release", "native-services", "native-cohost"} else paths))]
+                   for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
+                             else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
+                             else paths))]
 
 
 NATIVE_TARGETS = {

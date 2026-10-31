@@ -350,6 +350,14 @@ the guard fingerprint without invalidating unrelated completed native profiles.
 The container takes no shared benchmark lease. In a same-source probe, the full
 matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
 single trials concern infrastructure validation, not production PR latency.</p>
+<p>Changes limited to the independent Cargo benchmark, Docker input or Clippy
+executor fixtures skip the unchanged local enforcement matrix. CI preflight
+still requires each changed fixture. Shared executors, policy/signers, guard
+fixtures and unknown new fixtures retain the complete guard, including mixed
+changes and renames in either direction. The planner and mandatory command
+output explain the CI responsibility directly. Real Git/public-planner and
+CI-selector regressions verify these boundaries; product checks and selected
+fixture assertions are unchanged.</p>
 <p>The guard fixture handles Windows archive CRLF conversion by reconstructing
 only bytes that exactly match each original protected SHA256 pin. Its private
 Git fixture keeps those bytes unchanged. Production pin checks and author Git

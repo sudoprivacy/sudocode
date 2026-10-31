@@ -351,6 +351,8 @@ def report_plan(plan):
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")
+    lines.append("Hosted CI preflight also runs changed Cargo/Docker/Clippy executor fixtures, "
+                 "selected from committed Git inputs.")
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)

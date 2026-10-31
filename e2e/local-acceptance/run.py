@@ -54,7 +54,7 @@ def scope_acceptance(directory):
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
 
-    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False):
+    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -68,6 +68,7 @@ def scope_acceptance(directory):
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
         assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
         assert f"container_required={str(container).lower()}" in output.read_text()
+        assert f"clippy_executor_required={str(clippy_executor).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -93,7 +94,8 @@ def scope_acceptance(directory):
              (".github/local-acceptance/checks.py", False, False, False),
              (".github/scripts/local_acceptance.py", False, False, False),
              ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False),
-             ("e2e/local-acceptance/container_inputs_acceptance.py", False, False, False)]
+             ("e2e/local-acceptance/container_inputs_acceptance.py", False, False, False),
+             ("e2e/local-acceptance/clippy_fail_fast.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -122,7 +124,8 @@ def scope_acceptance(directory):
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
-                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"})
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"}, path in {
+                ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"})
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -167,18 +170,21 @@ def performance_scope_acceptance(directory):
     policy = command("git", "rev-parse", "HEAD", cwd=repository)
     helper = repository / ".github/scripts/local_acceptance.py"
 
-    def expect(base, expected):
+    def expect(base, expected, *, native=True, guard=None):
         text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
                        "--host", "windows", "--architecture", "AMD64", cwd=repository)
         plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
                                if line.startswith("ACCEPTANCE_PLAN=")))
         names = set(plan["local_checks"])
+        assert "Hosted CI preflight also runs changed Cargo/Docker/Clippy executor fixtures" in text, text
         assert names & {"rendering", "browser"} == set(expected), text
         assert "Statistical performance profiles:" in text, text
         if not expected:
             assert "indirect performance effects" in text, text
-        assert "native-workspace" in names, text
-        assert {job["os"] for job in plan["ci"]} == {"ubuntu-latest", "macos-latest"}, text
+        assert ("native-workspace" in names) == native, text
+        if guard is not None:
+            assert ("guard-contract" in names) == guard, text
+        assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native else set()), text
         for job in plan["ci"]:
             assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
 
@@ -210,6 +216,44 @@ def performance_scope_acceptance(directory):
     command("git", "commit", "-m", "Delete measurement input", cwd=repository)
     expect(base, both)
     print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
+    # These three independent executor fixtures already run in scoped PR CI.
+    # They do not change enforcement or its pinned native helpers. Unknown
+    # future fixtures and every shared contract input remain conservative.
+    independent = ["benchmark_targets_acceptance.py", "container_inputs_acceptance.py", "clippy_fail_fast.py"]
+    paths = [("e2e/local-acceptance/" + name, False) for name in independent]
+    paths += [(name, True) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
+        ".github/local-acceptance/checks.py", ".github/scripts/local_acceptance.py",
+        "spec/local_acceptance.json", ".github/workflows/local-acceptance.yml"]]
+    for path, guard in paths:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        file = repository / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        if file == helper:
+            file.write_text(file.read_text() + "\n# Changed shared contract input\n")
+        else:
+            file.write_text("changed enforcement-scope input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", f"Enforcement input {path}", cwd=repository)
+        expect(base, [], native=False, guard=guard)
+    for shared in [False, True]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        for name in independent + (["run.py"] if shared else []):
+            file = repository / "e2e/local-acceptance" / name
+            file.write_text(file.read_text() + "mixed change\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", f"Independent fixtures with shared={shared}", cwd=repository)
+        expect(base, [], native=False, guard=shared)
+    for source, target in [("benchmark_targets_acceptance.py", "moved_guard.py"),
+                           ("moved_guard.py", "benchmark_targets_acceptance.py")]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        command("git", "mv", "e2e/local-acceptance/" + source, "e2e/local-acceptance/" + target, cwd=repository)
+        command("git", "commit", "-m", "Move across enforcement boundary", cwd=repository)
+        expect(base, [], native=False, guard=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", "e2e/local-acceptance/clippy_fail_fast.py", cwd=repository)
+    command("git", "commit", "-m", "Delete independent fixture input", cwd=repository)
+    expect(base, [], native=False, guard=False)
+    print("PASS: public Git planner skips unchanged enforcement for three independently gated fixtures; shared/mixed/unknown inputs and both rename directions retain it")
 
 
 def plan_acceptance(directory):

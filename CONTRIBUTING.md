@@ -185,12 +185,21 @@ the installed runner automatically, including when pushing an older worktree.
 The hook runs applicable real checks before a branch push. A Windows author runs
 the Windows workspace, resize, release and service checks locally; CI runs Linux
 and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
-author runs Linux locally; CI runs Windows and macOS. Co-host release verification
+author runs Linux locally; CI runs Windows and macOS. Co-host build verification
 follows the same host split when its inputs change. SDK changes additionally
 require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Pre-merge co-host acceptance uses the workspace dev profile with the deployed
+`daemon,driver-ai,egress-gate-presidio` features and runs the resulting binary to
+verify its exact source revision stamp. This avoids a separate optimized build
+graph on each PR. Optimized co-host builds and platform size budgets remain
+required on release tags before publication. This reduces pre-merge coverage:
+optimization-specific failures and footprint regressions are caught at release
+time. The required command prints this split. A real Git/Cargo/native-process
+guard verifies feature compilation, dev execution and refusal of a missing stamp;
+it adds no product journey coverage.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when CLI, engine-core, shared PTY helpers,

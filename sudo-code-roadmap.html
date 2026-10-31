@@ -223,6 +223,19 @@ service checks reuse the same command profiles on the local and hosted sides.
 All three operating systems remain covered; every CPU architecture is not a
 per-PR promise. Tagged co-host releases retain their five-platform builds.</p>
 
+<p><strong>Co-host build graph (2026-10-31).</strong> Pre-merge
+<code>native-cohost</code> uses the workspace dev profile with the deployed
+<code>daemon,driver-ai,egress-gate-presidio</code> features and runs the resulting
+binary to verify its exact source revision stamp. This avoids a separate
+optimized build graph per PR. Tagged releases still require five-platform
+optimized builds, version checks and platform size budgets before publication.
+This deliberately reduces pre-merge coverage: optimization-specific failures
+and footprint regressions are caught at release time. A real Git/Cargo/native
+canary checks the production dispatcher, required features, dev execution and
+refusal of a missing stamp; it adds no product journey coverage. Actual product
+builds qualify the migration on the author and complementary native hosts.
+Elapsed savings remain unmeasured until those builds finish.</p>
+
 <p>A managed Git pre-push hook selects checks from changed inputs and blocks a
 push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
 diff base, native host, command exit codes and local log hashes. Full logs stay
@@ -666,6 +679,14 @@ script remains available for diagnosis and earns no additional coverage credit.<
       existing behavior. Entry points are not run by this check.</td>
       <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
       <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Co-host build and identity</td>
+      <td>Pre-merge dev build with deployed features and exact revision stamp,
+      on all three native OSes. Optimized builds and footprint budgets run on
+      five-platform release tags; optimized-only regressions can reach main.</td>
+      <td>No; build and startup checks add no product PTY journey credit.</td>
+      <td><code>native-cohost</code> / <code>release-nexusd-cohost.yml</code></td>
     </tr>
     <tr>
       <td>Mock parity harness</td>

@@ -149,6 +149,8 @@ def main():
     assert grouped["status"] == "PASS" and grouped["exact_case_and_ignore_state_preserved"]
     examples = json.loads((output / "positive/examples/result.json").read_text())
     assert examples["status"] == "PASS" and examples["broken_example_refused"]
+    cohost = json.loads((output / "positive/cohost/result.json").read_text())
+    assert cohost["status"] == "PASS" and cohost["wrong_version_refused"]
     wrong_artifact = json.loads((output / "positive/release-executor/wrong-artifact.command.json").read_text())
     assert wrong_artifact["exit_code"] == 101
     for path, digest in pins.items():

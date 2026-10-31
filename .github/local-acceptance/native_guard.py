@@ -46,6 +46,11 @@ def main():
         sys.executable, str(SOURCE / "e2e/local-acceptance/release_acceptance.py"),
         "--output", str(output / "release-executor"),
     ], SOURCE, output / "release.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/grouped_targets_acceptance.py"),
+        "--repository", str(repository), "--output", str(output / "grouped-targets"),
+        "--executable", str(args.executable), "--options", args.options,
+    ], SOURCE, output / "grouped-targets.log"))
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,
     }, indent=2))

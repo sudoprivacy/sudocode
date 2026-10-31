@@ -216,6 +216,7 @@ def verify_profile_compatibility(directory, work, command):
                          "--base", original_main, "--policy-ref", original_main,
                          "--output", fixture / ("conditional-" + label), "--publish")
             assert "Running real-process" in output, "Each fixture head needs an actual new native-process receipt"
+            run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
             run(sys.executable, trusted, "verify", "--head", candidate,
                 "--base", original_main, "--policy-ref", conditional_policy,
                 success=False, error="Acceptance commands changed")

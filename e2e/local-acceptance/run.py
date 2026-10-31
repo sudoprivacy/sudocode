@@ -351,10 +351,6 @@ def enforcement_acceptance():
         scope_acceptance(directory)
         performance_scope_acceptance(directory)
         plan_acceptance(directory)
-        print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
-                      "--output", directory / "dependency-scope", cwd=SOURCE))
-        print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
-        print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)
@@ -554,6 +550,12 @@ def enforcement_acceptance():
         (work / "input.txt").write_text("uncommitted")
         command(sys.executable, helper, "check", cwd=work, success=False)
         print("PASS: actual hook/push, failed process, signed notes, fresh head, tamper, preserved notes and dirty inputs")
+        # Reject Git/signature/authorization errors before any Cargo fixture.
+        # Passing runs retain every native build, cache and policy guard below.
+        print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
+                      "--output", directory / "dependency-scope", cwd=SOURCE))
+        print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
+        print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
 
 
 def main():

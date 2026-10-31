@@ -487,6 +487,10 @@ fresh validation. Real Git/SSH regression checks modern and legacy notes, runs
 an actual native process for every negative fixture head, and refuses to carry
 those receipts into grouped execution. This avoids repeating unchanged native
 work on old branches when the executor is upgraded.</p>
+<p>Contract validation now runs Docker Git/signature/authorization checks before
+its Cargo fixtures, then runs the author-host native guards. Passing runs retain
+all checks. Metadata errors stop before later compilation; first-failure evidence
+and unrun work remain recorded.</p>
 <p>The protected migration policy pairs exact old and new execution hashes so
 already completed full-Cargo evidence for the same candidate can remain valid.
 The new runner-enforcement guard still executes. Real Git/SSH regressions cover

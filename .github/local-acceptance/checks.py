@@ -210,8 +210,9 @@ def run(name, root, output, base, execute):
         print("History preflight uses the protected policy checker; the author branch stays unchanged.", flush=True)
         command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
-        print("Local contract validation: policy-owned native recovery, nextest and release guards, "
-              "then the full private Docker decision matrix. No product build or benchmark lease.", flush=True)
+        print("Local contract validation: full private Docker matrix, with Git/signature checks before Cargo; "
+              "then author-host native recovery, nextest, release and grouping guards. "
+              "No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
                                "then retry this push or the printed acceptance command.")
@@ -223,12 +224,12 @@ def run(name, root, output, base, execute):
                                f"guard log above. Native smoke and matrix have not started: {error}") from error
         policy_ref = execution_policy_ref()
         entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
+        contract_container(root, output, command)
         command(sys.executable, str(entry), "--repository", str(root),
                 "--output", str(output / "native-guard"),
                 "--executable", str(nextest_binary(output)),
                 "--source-receipt", str(output / "nextest-source.json"),
                 "--options", json.dumps(nextest_options(output)))
-        contract_container(root, output, command)
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -366,14 +367,14 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         "e2e/local-acceptance/policy_guard_acceptance.py": "dbbd39de176e9a7298eaa4398b3b127d7451156989889e760758d73b486f0975",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "b3e9ad5bb52c8a85d0dba5b368ed6de9a879a0c43a5d4b71ce8cb8415790e37b",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "53ef7506137c4727dbbbd131274a146df6f9e37e5a2f82193549f3b011c7db62",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "acea14254302c6255123b1f3b68f61ed4b9c2e048f9bcd9c7e4fa456ad1751d0",
         ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
         ".github/scripts/local_acceptance.py": "248f3fc7aaa6b09159417bae325e1c5ca9b90b4aaeee585443e5c59e07a64480",
-        "e2e/local-acceptance/run.py": "88e055f0772a6fdd28033e71650db03ea13cf90534d49fe1f5b2dfa30a1ac9f7",
+        "e2e/local-acceptance/run.py": "73713e7e051e29846c98de2ad312c76a6dd8470bf032db8bc642b03b7de86307",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",

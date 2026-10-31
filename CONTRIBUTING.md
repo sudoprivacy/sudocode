@@ -314,6 +314,9 @@ for a committed source without group files or declarations. The verifier reads
 Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
 members and grouped sources require fresh validation. This conditional pair
 cannot authorize the new grouped execution from an old original-target pass.
+Contract validation checks the Docker Git/signature/authorization matrix before
+Cargo fixtures and author-host native guards. Passing runs keep every existing
+check; an early metadata failure leaves later compilation unrun.
 Release acceptance builds the normal release `scode` once, copies it outside
 Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox

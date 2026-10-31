@@ -18,6 +18,6 @@ const FRAMES: [&str; 12] = [
 ];
 
 #[inline]
-pub(super) fn frame(index: usize) -> &'static str {
+pub(crate) fn frame(index: usize) -> &'static str {
     FRAMES[index % FRAMES.len()]
 }

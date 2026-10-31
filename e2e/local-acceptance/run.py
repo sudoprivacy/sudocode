@@ -216,6 +216,31 @@ def performance_scope_acceptance(directory):
     command("git", "commit", "-m", "Delete measurement input", cwd=repository)
     expect(base, both)
     print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
+    # This actual-Git fixture is required by CI preflight. Editing it alone
+    # must not select product Cargo/PTY builds on all three native hosts.
+    history = repository / "e2e/pr-history/run.py"
+    history.parent.mkdir(parents=True, exist_ok=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    history.write_text("changed Git history acceptance fixture\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Git-only history fixture", cwd=repository)
+    expect(base, [], native=False, guard=False)
+    for path in ["e2e/pr-history/future.py", "rust/crates/runtime/src/history_fixture.rs"]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        destination = repository / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("actual mixed product or unknown input\n")
+        history.write_text(history.read_text() + "mixed fixture edit\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", "History fixture with conservative native input", cwd=repository)
+        expect(base, [], native=True, guard=False)
+    for left, right in [("e2e/pr-history/run.py", "rust/crates/runtime/src/moved_history.rs"),
+                        ("rust/crates/runtime/src/moved_history.rs", "e2e/pr-history/run.py")]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        command("git", "mv", left, right, cwd=repository)
+        command("git", "commit", "-m", "Move across Git-only fixture boundary", cwd=repository)
+        expect(base, [], native=True, guard=False)
+    print("PASS: public planner keeps Git-only history acceptance in CI preflight; mixed, unknown and renamed native inputs retain product validation")
     # These three independent executor fixtures already run in scoped PR CI.
     # They do not change enforcement or its pinned native helpers. Unknown
     # future fixtures and every shared contract input remain conservative.
@@ -223,6 +248,7 @@ def performance_scope_acceptance(directory):
     paths = [("e2e/local-acceptance/" + name, False) for name in independent]
     paths += [(name, True) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
         ".github/local-acceptance/checks.py", ".github/scripts/local_acceptance.py",
+        ".github/scripts/check_pr_history.py",
         "spec/local_acceptance.json", ".github/workflows/local-acceptance.yml"]]
     for path, guard in paths:
         base = command("git", "rev-parse", "HEAD", cwd=repository)

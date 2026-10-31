@@ -5,7 +5,9 @@ leftover conflict markers.
 `check_pr_history.py <base> <head>` checks every merge commit in
 `merge-base(base, head)..head`. For a pull request, base is `origin/main`; in
 a merge queue, base is the group's base commit — which also checks the merges
-GitHub itself made. A PR may be behind main: the queue integrates it.
+GitHub itself made. A clean PR may be behind main: the queue integrates it.
+Actual conflicts with the supplied target or fetched origin/main fail before
+expensive local acceptance. The checkout and index remain untouched.
 
 For each merge, Git's own merge of its two parents is recomputed
 (`git merge-tree`). A file that differs from that result is allowed only if it
@@ -19,6 +21,7 @@ is already published cannot be rewritten, so it can instead be declared with a
 `Merge-adapts: <path>` trailer on any commit in the range.
 """
 
+import json
 import subprocess
 import sys
 
@@ -35,6 +38,37 @@ def paths(output):
     return set(output.rstrip(b"\0").split(b"\0")) - {b""}
 
 
+def merge_tree(left, right):
+    result = subprocess.run(
+        ["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", left, right],
+        capture_output=True,
+    )
+    if result.returncode not in (0, 1):
+        sys.exit(f"Cannot recompute merge {left[:12]} + {right[:12]}: {result.stderr.decode(errors='replace')}")
+    tree, _, conflicted = result.stdout.partition(b"\0")
+    return tree.decode(), paths(conflicted)
+
+
+def target_conflicts(base, head):
+    targets = [("supplied base", base)]
+    # Local acceptance passes the diff's merge-base. Its normal fetch has
+    # already updated origin/main; check that tip too without doing network I/O.
+    present = subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"])
+    if present.returncode == 0:
+        target = commit("refs/remotes/origin/main")
+        if target != base:
+            targets.append(("origin/main", target))
+    elif present.returncode != 1:
+        sys.exit("Cannot inspect fetched origin/main for merge conflicts.")
+    errors = []
+    for label, target in targets:
+        _, conflicted = merge_tree(target, head)
+        if conflicted:
+            errors.append({"target": label, "commit": target,
+                           "paths": [path.decode(errors="replace") for path in sorted(conflicted)]})
+    return errors
+
+
 def hidden_merge_edits(base, head):
     declared = {
         line.strip().encode()
@@ -49,22 +83,16 @@ def hidden_merge_edits(base, head):
         if len(parents) != 2:
             errors.append(f"{merge[:12]}: only two-parent merges can be verified")
             continue
-        result = subprocess.run(
-            ["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", *parents],
-            capture_output=True,
-        )
-        if result.returncode not in (0, 1):
-            sys.exit(f"Cannot recompute merge {merge[:12]}: {result.stderr.decode(errors='replace')}")
-        tree, _, conflicted = result.stdout.partition(b"\0")
-        edited = paths(git("diff", "--no-renames", "--name-only", "-z", tree.decode(), merge))
-        for path in sorted(edited - paths(conflicted) - declared):
+        tree, conflicted = merge_tree(*parents)
+        edited = paths(git("diff", "--no-renames", "--name-only", "-z", tree, merge))
+        for path in sorted(edited - conflicted - declared):
             errors.append(f"{merge[:12]}  {path.decode(errors='replace')}")
     return errors
 
 
 def main():
-    base, head = (commit(ref) for ref in sys.argv[1:])
-    base = git("merge-base", base, head).decode().strip()
+    target, head = (commit(ref) for ref in sys.argv[1:])
+    base = git("merge-base", target, head).decode().strip()
     errors = hidden_merge_edits(base, head)
     if errors:
         sys.exit(
@@ -76,6 +104,18 @@ def main():
             "own commit, or declare a published merge on any commit with a trailer, e.g.\n"
             "  git commit --allow-empty -m 'Declare merge adaptation' -m 'Merge-adapts: <path>'"
         )
+    conflicts = target_conflicts(target, head)
+    if conflicts:
+        print("LOCAL_ACCEPTANCE_MERGE_CONFLICTS=" + json.dumps({"head": head, "conflicts": conflicts}),
+              file=sys.stderr)
+        sys.exit(
+            "Resolve these actual target conflicts before expensive local acceptance:\n"
+            + "".join(f"  {item['target']} ({item['commit'][:12]}): {path}\n"
+                      for item in conflicts for path in item["paths"])
+            + "Integrate the fetched target on your branch, preserve both sides, and commit the resolutions.\n"
+            "Then rerun local acceptance for the resulting commit. Clean branches may remain behind main;\n"
+            "there is no need to update a branch merely to catch up. No checkout or index files were changed."
+        )
     # Check Git's conflict markers without imposing new whitespace rules on docs.
     result = subprocess.run([
         "git", "-c", "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab",
@@ -83,7 +123,7 @@ def main():
     ])
     if result.returncode:
         sys.exit("Resolve the leftover conflict markers before merging.")
-    print("Every merge commit matches Git's merge outside its conflicts; no conflict markers.")
+    print("Every merge commit matches Git's merge outside its conflicts; no conflict markers or target conflicts.")
 
 
 if __name__ == "__main__":

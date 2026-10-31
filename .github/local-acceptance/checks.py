@@ -333,18 +333,16 @@ def run(name, root, output, base, execute):
                     stream.extractall(folder)
                 executable.chmod(0o755)
             env["PROTOC"] = str(executable)
-        profile = "cohost-release-windows" if os.name == "nt" else "cohost-release"
+        print("Native cohost acceptance uses the workspace dev graph with daemon, model and egress features. "
+              "Optimized builds and platform size budgets run on nexusd-cohost release tags.", flush=True)
         version = "local-" + subprocess.check_output(["git", "rev-parse", "--short=12", "HEAD"], cwd=root).decode().strip()
         env["NEXUSD_BUILD_VERSION"] = version
-        cargo("build", "--locked", "--profile", profile, "-p", "nexusd-cohost", "--features",
+        cargo("build", "--locked", "--profile", "dev", "-p", "nexusd-cohost", "--features",
               "daemon,driver-ai,egress-gate-presidio", "--bin", "nexusd-cohost")
-        binary = target / profile / ("nexusd-cohost" + suffix)
+        binary = target / "debug" / ("nexusd-cohost" + suffix)
         path = command(str(binary), "--version")
         if version not in path.read_text(errors="replace"):
             raise RuntimeError("Co-host build version stamp was lost")
-        limits = {"Windows": 42, "Darwin": 45 if platform.machine().lower() == "arm64" else 46, "Linux": 55}
-        if binary.stat().st_size > limits[platform.system()] * 1024 * 1024:
-            raise RuntimeError("Co-host exceeds the existing platform release size budget")
     elif name in {"rendering", "browser"}:
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
             benchmark(name, root, output, base, command, target)
@@ -374,13 +372,14 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "6ac93a84fcf01f07e9d201948566cef15f06f4f0f0a03a4909cc2915ac6459e2",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
-        ".github/local-acceptance/native_guard.py": "73bb0489909a9a99607b9430a12585349d17df72895e03355096dab406c6e7c2",
+        ".github/local-acceptance/native_guard.py": "1f7fb546bf9bc846e2a03e5f724f9830e7f0e2865bf37fd1af11206bb1c2118f",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "e201deed5b24275964be93a0e3d1adce22894461f1f2dffd7540ac1e485f3f25",
         "e2e/local-acceptance/run.py": "73713e7e051e29846c98de2ad312c76a6dd8470bf032db8bc642b03b7de86307",
@@ -419,7 +418,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "524bc892fcd10dbf73663e67ef363367f904b2904ae89b188d1d2c9e85d92dd9":
+    if actual_scope != "60ee84d57f41a7fcfa0a056bac0f1524db68e9595e7e60914c0bbd3d1d63a00b":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

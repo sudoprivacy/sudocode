@@ -114,6 +114,81 @@ def changed_cli_test_targets(root, base):
     return sorted({Path(path).stem for path in inputs})
 
 
+def test_group_source(names):
+    """Keep opt-in wrappers declarative so selection cannot hide extra Rust code."""
+    return ("//! Opt-in acceptance target; original individual Cargo test targets stay available.\n\n"
+            + '#![allow(\n    clippy::duplicate_mod,\n'
+              '    reason = "Original test modules keep their own helper namespaces."\n)]\n\n'
+            + "\n\n".join(f'#[path = "../{name}.rs"]\nmod {name};' for name in names) + "\n")
+
+
+def grouped_workspace_test_targets(root, metadata):
+    """Replace only validated original integration targets with opt-in wrappers."""
+    packages = [package for package in metadata["packages"] if package["id"] in metadata["workspace_members"]]
+    groups, covered, targets = {}, set(), []
+    for package in packages:
+        directory = Path(package["manifest_path"]).parent.resolve()
+        group_directory = directory / "tests/acceptance_groups"
+        declarations = {Path(target["src_path"]) for target in package["targets"]
+                        if target["kind"] == ["test"] and Path(target["src_path"]).parent == group_directory}
+        if set(group_directory.glob("*.rs")) != declarations:
+            raise RuntimeError(f"Every acceptance wrapper must have an explicit Cargo test target: {group_directory}. "
+                               "Register each wrapper with matching name/path and test=false, or remove the obsolete wrapper; "
+                               "individual ungrouped tests are selected automatically.")
+        original = {target["name"]: target for target in package["targets"]
+                    if target["kind"] == ["test"] and target["test"]}
+        for target in package["targets"]:
+            if target["kind"] != ["test"]:
+                continue
+            path = Path(target["src_path"])
+            if path.parent != group_directory:
+                continue
+            if target["test"] or target["name"] != path.stem:
+                raise RuntimeError(f"Acceptance wrapper must keep its name and test=false: {path}")
+            if any((directory / "tests" / candidate).exists()
+                   for candidate in [target["name"] + ".rs", target["name"] + "/main.rs"]):
+                raise RuntimeError(f"Acceptance wrapper shadows an individual Cargo target: {path}. "
+                                   "Choose an unused group name so the original target remains available.")
+            if (checkout_link(path) or not path.resolve().is_relative_to(directory)
+                    or not directory.is_relative_to(root.resolve())):
+                raise RuntimeError(f"Acceptance test wrapper escaped its package: {path}")
+            if target.get("required-features"):
+                raise RuntimeError(f"Acceptance wrapper must not conditionally omit its modules: {path}")
+            source = path.read_text(encoding="utf-8")
+            names = re.findall(r'^#\[path = "\.\./([A-Za-z_][A-Za-z0-9_]*)\.rs"\]\nmod \1;$', source, re.MULTILINE)
+            if not names or source.strip() != test_group_source(names).strip():
+                raise RuntimeError(f"Acceptance wrapper must contain only canonical path modules: {path}")
+            members = []
+            for name in names:
+                identity = (package["id"], name)
+                if (name not in original or identity in covered
+                        or Path(original[name]["src_path"]).resolve() != directory / "tests" / (name + ".rs")):
+                    raise RuntimeError(f"Missing, duplicate or redirected acceptance test module {name}: {path}")
+                covered.add(identity)
+                members.append(name)
+            groups[(package["id"], target["name"])] = members
+    if not groups:
+        return [], {"mode": "original-workspace", "groups": []}
+    for package in packages:
+        for target in package["targets"]:
+            identity = (package["id"], target["name"])
+            if target["kind"] == ["test"] and ((target["test"] and identity not in covered) or identity in groups):
+                targets.append(target["name"])
+            elif target["test"] and target["kind"] not in [["test"], ["lib"], ["bin"], ["proc-macro"]]:
+                raise RuntimeError(f"Unsupported enabled test target kind: {target}")
+            elif not target["test"] and target["kind"] in [["lib"], ["bin"], ["proc-macro"]]:
+                raise RuntimeError(f"Grouped workspace selection requires an explicit disabled library/bin plan: {target}")
+    if len(targets) != len(set(targets)) or any(name in targets for _, name in covered):
+        raise RuntimeError("Test target names overlap packages; keep the overlapping module standalone")
+    arguments = ["--lib", "--bins"]
+    for name in sorted(targets):
+        arguments += ["--test", name]
+    return arguments, {"mode": "grouped-workspace", "covered_original_targets": len(covered),
+                       "selected_integration_targets": len(targets),
+                       "groups": [{"package": package, "target": name, "modules": members}
+                                  for (package, name), members in sorted(groups.items())]}
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -189,7 +264,11 @@ def run(name, root, output, base, execute):
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox")
+            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
+            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
+            print("Native workspace test selection: " + json.dumps(selection), flush=True)
+            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
             cargo("clippy", "--workspace", "--locked")
@@ -295,11 +374,14 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
-        ".github/local-acceptance/native_guard.py": "422ec7331d5ab293b9fdb5e2a319e683bb00487bc36dfb8d0347e70b8cfa837f",
+        ".github/local-acceptance/native_guard.py": "28ee4a24a9664f4ded7d850cf079df1d44d3979cf7eb08f56ae2c27a741f80e3",
         ".github/local-acceptance/nextest_guard.py": "ee376e77ea8c79da73c54409cbd07a95a786d0e7710e406e6977967d633a7d82",
-        ".github/scripts/local_acceptance.py": "6212dd73f8f1e914c6200d41134a096da21dfdb17ff52840a29750c888801ccc",
-        "e2e/local-acceptance/run.py": "eb34581ac821b793f687ff27c71537dbc22aeef5210e12aa58747cf07c24209d",
+        ".github/scripts/local_acceptance.py": "69113a32954e9b866d5f7ac1dba5f816902f48aa2fac00fca86a91e2f532f7f2",
+        "e2e/local-acceptance/run.py": "0ad9d1696b04a5805dee9b4d976bd9325b6b98191c45c362fcccbf26b2609cca",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "3f6fee4455ecf6d1d6aa6aad285d81eed6224e572f7093e6c0874be1fad76f27",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "9deb55f9d48a134e41a26da3a876fdadb954db822517a16c690c0094c32ec1bc",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -329,6 +411,21 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
         destination.write_bytes(contents)
     if name == "preflight":
         return policy_root / ".github/scripts/check_pr_history.py"
+    # The grouping fixture needs actual protected selection rules. Bind only
+    # those fields: approval maps contain these recipe hashes and cannot be
+    # included in their own input digest. Signer data is not used by the planner.
+    policy = json.loads(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
+    selection = {key: policy[key] for key in ["version", "repository", "checks"]}
+    data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
+    actual_scope = hashlib.sha256(data).hexdigest()
+    if actual_scope != "898b0539d8510c0022a3f7073e21a532e752560125693613d2e1cdfba96980cf":
+        raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
+                           "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
+                           "then rerun contract-update through the installed hook. No grouping guard has started.")
+    policy_file = policy_root / "spec/local_acceptance.json"
+    policy_file.parent.mkdir(parents=True, exist_ok=True)
+    policy_file.write_bytes(data)
     # The release fixture imports this module. Bind the exact branch it executes
     # without a cyclic byte hash of a file containing its own execution pins.
     spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")

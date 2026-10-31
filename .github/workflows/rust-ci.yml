@@ -49,7 +49,7 @@ on:
   workflow_dispatch:
     inputs:
       live_only:
-        description: 'Run genuine ACP and Linux/Windows model acceptance only; normal PR gates remain unchanged'
+        description: 'Explicit paid company-key acceptance; ordinary PR/queue/main runs never call models'
         type: boolean
         default: false
       cache_only:
@@ -320,7 +320,7 @@ jobs:
           python-version: '3.12'
       - name: Install metadata schema validator
         if: *full_preflight
-        run: python3 -m pip install jsonschema==4.26.0
+        run: python3 -m pip install jsonschema==4.26.0 psutil==7.2.2
       - name: Check formatting
         if: *full_preflight
         working-directory: rust
@@ -376,6 +376,9 @@ jobs:
       - name: Exercise provider probe contracts
         if: *full_preflight
         run: node --test .github/scripts/probe_live_usage.test.cjs
+      - name: Exercise explicit model selection and shared native runner without a key
+        if: *full_preflight
+        run: python3 .github/scripts/live_model_acceptance_e2e.py --output "${{ runner.temp }}/live-model-policy"
       # Seconds, no build: this is the invariant the co-host rests on, and it is
       # cheap enough to answer before anything compiles.
       #
@@ -500,17 +503,10 @@ jobs:
     needs: one-nexus-vfs-pin
     name: Live API smoke test
     timeout-minutes: 30
-    # Also runnable on demand against any branch. Restricting it to pushes on
-    # main meant a break in this job could only ever be discovered *after* a
-    # merge, and a fix for one could not be verified before merging it — which
-    # is how `live_subagent_smoke_stdio` stayed red across three merges.
-    # `workflow_dispatch` is safe here in a way that `pull_request` is not: it
-    # can only be started by someone with write access, so the token secret is
-    # never exposed to a fork's code.
-    if: >-
-      !inputs.cache_only &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.one-nexus-vfs-pin.outputs.live_required == 'true'))
+    # Only this shared explicit manual condition authorizes paid calls.
+    # Native PTYs and the real-daemon queue gate remain credential-free.
+    if: &paid_model_acceptance >-
+      github.event_name == 'workflow_dispatch' && inputs.live_only && !inputs.cache_only
     runs-on: ubuntu-latest
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -523,6 +519,11 @@ jobs:
       SCODE_LOG_PATH: ${{ github.workspace }}/scode-acp-live-trace.jsonl
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install shared native process monitor
+        run: python -m pip install psutil==7.2.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -551,21 +552,21 @@ jobs:
           # The dedicated CI credential owns this acceptance run's quota.
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
-        run: cargo test -p rusty-sudocode-cli --test acp_live_smoke -- --test-threads=1
+        run: python ../.github/scripts/live_model_acceptance.py --suite acp --execute --output "${{ runner.temp }}/live-acceptance/acp"
       - name: Claude native cache and subagent smoke
         working-directory: rust
         env:
           PROXY_AUTH_TOKEN: *native_key
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
           SCODE_LIVE_MODEL: *native_model
-        run: cargo test -p rusty-sudocode-cli --test acp_live_smoke live_subagent_smoke_stdio -- --test-threads=1
+        run: python ../.github/scripts/live_model_acceptance.py --suite native-acp --execute --output "${{ runner.temp }}/live-acceptance/native-acp"
       - name: Real model through the co-host controller mailbox
         working-directory: rust
         env:
           ANTHROPIC_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           ANTHROPIC_BASE_URL: https://api.sudorouter.ai
           SUDOCODE_TEST_MODEL: *live_model
-        run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
+        run: python ../.github/scripts/live_model_acceptance.py --suite mailbox --execute --output "${{ runner.temp }}/live-acceptance/mailbox"
       - name: Deliver offline Nexus mail through a real model and first receiver start
         working-directory: .
         env:
@@ -585,7 +586,7 @@ jobs:
             models: {}
           }), { mode: 0o600 });
           NODE
-          bash e2e/nexus-a2a/run-live-offline.sh
+          python .github/scripts/live_model_acceptance.py --suite offline-nexus --execute --output "${{ runner.temp }}/live-acceptance/offline-nexus"
       - name: Remove offline Nexus model credentials
         if: always()
         env:
@@ -607,15 +608,15 @@ jobs:
           path: |
             ${{ runner.temp }}/scode-acp-live-evidence.json
             ${{ runner.temp }}/provider-usage-contract.json
+            ${{ runner.temp }}/live-acceptance/**/result.json
+            ${{ runner.temp }}/live-acceptance/**/*.execution.json
+            ${{ runner.temp }}/live-acceptance/**/*.command.json
           retention-days: 7
 
   live-model-pty:
     needs: one-nexus-vfs-pin
     name: Live model PTY (${{ matrix.os }})
-    if: >-
-      !inputs.cache_only &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.one-nexus-vfs-pin.outputs.live_required == 'true'))
+    if: *paid_model_acceptance
     strategy:
       fail-fast: true
       matrix:
@@ -634,6 +635,11 @@ jobs:
       SCODE_AZURE_CHANNEL: ${{ vars.SUDOROUTER_AZURE_CHANNEL }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install shared native process monitor
+        run: python -m pip install psutil==7.2.2
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -689,24 +695,7 @@ jobs:
       - name: Run live model and tool journeys through the real PTY
         shell: bash
         run: |
-          cargo test -p rusty-sudocode-cli --test pty_step_budget live_step_budget_preserves_results_across_turns -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_edit_uniqueness live_model_recovers_with_unique_context -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_headless -- --test-threads=1 --nocapture
-          SCODE_LIVE_AUTH_PROFILE=sudorouter-azure SCODE_LIVE_MODEL="$SCODE_AZURE_MODEL" cargo test -p rusty-sudocode-cli --test pty_azure_inline_reasoning azure_live_file_roundtrip_has_a_final_answer -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_offline_delivery persisted_message_is_consumed_when_the_receiver_first_starts -- --exact --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_a2a_overlay queued_and_offline_messages_survive_receiver_restart -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_a2a_overlay pending_batch_and_two_runtimes_share_one_durable_reader -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_shared_session live_independent_runtimes_preserve_tools_and_outputs_in_one_session -- --ignored --exact --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_background_tasks inspecting_running_task_does_not_acknowledge_its_future_result -- --nocapture
-          cargo test -p rusty-sudocode-cli --test pty_background_tasks exiting_during_a_foreground_tool_reaps_both_process_groups -- --nocapture
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cargo test -p rusty-sudocode-cli --test pty_file_operations windows_verbatim_paths_read_the_same_file -- --nocapture
-            cargo test -p rusty-sudocode-cli --test pty_file_operations edit_then_verify_on_disk -- --nocapture
-          fi
-          cargo test -p rusty-sudocode-cli --test pty_block_spacing -- --test-threads=1 --nocapture
+          python ../.github/scripts/live_model_acceptance.py --suite pty --execute --output "${{ runner.temp }}/live-acceptance/pty"
       - name: Summarize live model routing evidence
         if: always()
         working-directory: .
@@ -722,6 +711,9 @@ jobs:
             ${{ runner.temp }}/scode-live-model-evidence.json
             ${{ runner.temp }}/pty-provider-contract.json
             ${{ runner.temp }}/scode-live-requests/**/*.json
+            ${{ runner.temp }}/live-acceptance/**/result.json
+            ${{ runner.temp }}/live-acceptance/**/*.execution.json
+            ${{ runner.temp }}/live-acceptance/**/*.command.json
           retention-days: 7
       - name: Remove live test credentials
         if: always()

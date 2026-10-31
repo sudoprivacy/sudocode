@@ -145,6 +145,8 @@ def main():
     assert [row["command"]["exit_code"] for row in native["checks"]] == [0, 100, 4]
     release = json.loads((output / "positive/release-executor/result.json").read_text())
     assert release["status"] == "PASS"
+    grouped = json.loads((output / "positive/grouped-targets/result.json").read_text())
+    assert grouped["status"] == "PASS" and grouped["exact_case_and_ignore_state_preserved"]
     wrong_artifact = json.loads((output / "positive/release-executor/wrong-artifact.command.json").read_text())
     assert wrong_artifact["exit_code"] == 101
     for path, digest in pins.items():
@@ -177,6 +179,16 @@ def main():
         except RuntimeError as error:
             assert "Candidate changes the protected acceptance contract" in str(error), error
     git("switch", "--detach", protected)
+    data = json.loads((candidate / "spec/local_acceptance.json").read_text())
+    data["checks"]["native-workspace"]["include"].append("scope-policy-negative/**")
+    (candidate / "spec/local_acceptance.json").write_text(json.dumps(data))
+    changed_scope = commit("Change protected grouping selection rules without updating their pin")
+    try:
+        profiles.stage_profile_executor(candidate, changed_scope, "guard-contract", output / "rejected-scope-policy")
+        raise AssertionError("Changed grouping scope policy was accepted")
+    except RuntimeError as error:
+        assert "Native grouping scope policy changed" in str(error), error
+    git("switch", "--detach", protected)
     selector = candidate / ".github/local-acceptance/checks.py"
     selector.write_text(selector.read_text().replace(next(iter(pins)), "../escape.py"))
     bad = commit("Reject an executor outside the protected contract")
@@ -195,6 +207,8 @@ def main():
         "actual_signed_resume_smoke": smoke,
         "actual_native_child_and_failure_and_empty_selection": native,
         "actual_release_driver_and_wrong_artifact_refusal": release,
+        "actual_grouped_target_inventory_and_process_guards": grouped,
+        "changed_grouping_scope_policy_refused": True,
         "only_owner_fingerprint_changes": fingerprint_results,
         "unprotected_input_refused_before_commands": True,
         "old_candidate_head_and_checkout_unchanged": True,

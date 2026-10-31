@@ -144,6 +144,10 @@ const connect = async (label, events, socket=selectedSocket, env=childEnv) => {
   receipt.stages.push(label+' connected');
   return client;
 };
+const processAlive = pid => {
+  try{process.kill(pid,0);return true;}
+  catch(error){if(error.code==='ESRCH')return false;throw error;}
+};
 const closeTui = async own => {
   if(own.closed)return;
   own.closed=true;
@@ -494,41 +498,94 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         }
         await closeTui(resumer);
       }
-      if(operatorContext && !seededResume && !receipt.legacyImport){
+      const receivePeer = async (original,epoch) => {
         const {connectScode,sendScodeMessage}=require(library);
         const peer=await connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
         try{
           phase='peer-inbound';
-          const original=receipt.autojoinClaims[0];
+          const before=receipt.modelRequests.length;
+          const callback=path.join(root,'bindings',original.threadId+'.callback.jsonl');
+          const acceptedRows=()=>fs.existsSync(callback)?fs.readFileSync(callback,'utf8').split('\n').filter(Boolean)
+            .map(line=>JSON.parse(line)).filter(row=>row.phase==='accepted'):[];
+          const acceptedBefore=acceptedRows().length;
           await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
           const sent=await sendScodeMessage(peer,{to:original.actor,
-            message:peerMarker+' Peer data only. Do not reply or ACK.',summary:'Isolated automatic peer reception'});
+            message:peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.',summary:'Isolated automatic peer reception'});
           assert.equal(sent.isError,false,JSON.stringify(sent));
           const end=Date.now()+15000;
           while(true){
             const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
-            const callback=path.join(root,'bindings',original.threadId+'.callback.jsonl');
-            const rows=fs.existsSync(callback)?fs.readFileSync(callback,'utf8').trim().split('\n').map(line=>JSON.parse(line)):[];
-            const accepted=rows.filter(row=>row.phase==='accepted');
-            if(receipt.modelRequests.some(row=>row.peerMarkerSeen)&&accepted.length===1&&thread.status.type==='idle'){
-              receipt.actualPeerReception={peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
-                targetThreadId:thread.id,targetActor:original.actor,accepted:accepted[0],
-                modelRequestsAfterArrival:receipt.modelRequests.length,untrustedPeerMarkerReachedNativeModel:true,sent};break;
+            const accepted=acceptedRows();
+            if(receipt.modelRequests.slice(before).some(row=>row.peerMarkerSeen)
+                &&accepted.length===acceptedBefore+1&&thread.status.type==='idle'){
+              assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
+              return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
+                targetThreadId:thread.id,targetActor:original.actor,accepted:accepted.at(-1),
+                modelRequestsAfterArrival:receipt.modelRequests.length,nativeRequestsAdded:receipt.modelRequests.length-before,
+                untrustedPeerMarkerReachedNativeModel:true,sent};
             }
             if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
             await new Promise(resolve=>setTimeout(resolve,50));
           }
-          assert.equal(receipt.modelRequests.length,startupModelRequests+1,'one actual received peer input, no duplicate native inference');
         }finally{await peer.close();}
+      };
+      if(operatorContext && !seededResume && !receipt.legacyImport){
+        receipt.actualPeerReception=await receivePeer(receipt.autojoinClaims[0],'before frontend close');
+        assert.equal(receipt.modelRequests.length,startupModelRequests+1,'one actual received peer input, no duplicate native inference');
+        if(managedPackageRoot){
+          const first=tuis.find(own=>own.label==='first');
+          const second=tuis.find(own=>own.label==='second');
+          const pid=receipt.autojoinOwner[0].pid;
+          const observation=receipt.survivingRootObservation={startedAt:new Date().toISOString(),ownerPid:pid,
+            originalInventory:receipt.inventory.slice(),firstFrontendPid:first.lines.find(row=>row.event==='spawn').pid,
+            secondFrontendPid:second.lines.find(row=>row.event==='spawn').pid};
+          await closeTui(first);
+          observation.firstFrontendExitedNormally=true;
+          const unloadDeadline=Date.now()+5000;
+          let remaining;
+          for(;;){
+            remaining=(await request(observer,'first frontend unload while second stays open','thread/loaded/list',{})).data;
+            observation.lastInventory=remaining;
+            if(remaining.length===1&&receipt.inventory.includes(remaining[0]))break;
+            assert.ok(Date.now()<unloadDeadline,'first native root did not unload while the second frontend stayed open');
+            await new Promise(resolve=>setTimeout(resolve,100));
+          }
+          observation.observedAt=new Date().toISOString();
+          observation.unloadedThreadId=receipt.inventory.find(id=>!remaining.includes(id));
+          observation.secondFrontendStillRunning=!second.closed&&processAlive(observation.secondFrontendPid);
+          observation.ownerStillRunning=processAlive(pid);
+          const {thread}=await request(observer,'surviving native root','thread/read',{threadId:remaining[0],includeTurns:false});
+          observation.remainingThread={id:thread.id,status:thread.status,threadSource:thread.threadSource,
+            parentThreadId:thread.parentThreadId,ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput};
+          assert.equal(observation.secondFrontendStillRunning,true,'second native frontend must remain open during this assertion');
+          assert.equal(observation.ownerStillRunning,true,'closing one native frontend must not terminate the other root\'s shared bridge');
+          const claim=receipt.autojoinClaims.find(row=>row.threadId===thread.id);
+          assert.ok(claim,'the surviving root must keep its original claim');
+          const beforeSend=receipt.modelRequests.length;
+          const result=await request(observer,'surviving native MCP routing','mcpServer/tool/call',{
+            threadId:thread.id,server:'nexus_auto',tool:'scode_send',
+            arguments:{to:operatorContext.recipient,message:'Surviving original root 🧪',summary:'independent frontend lifetime'},
+          });
+          observation.directSend=result;
+          assert.equal(result.isError,false,JSON.stringify(result));
+          assert.equal(JSON.parse(result.content[0].text).routing.sender,claim.actor);
+          const expected=receipt.realNodeEnrollment.find(row=>row.threadId===thread.id);
+          const returned=fs.readFileSync(path.join(root,'autojoin-audit.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line))
+            .filter(row=>row.phase==='returned'&&row.nativeThreadId===thread.id).at(-1);
+          assert.equal(returned.nativeAudit.sessionId,expected.sessionId,'surviving frontend keeps the original real ACP SID');
+          assert.equal(receipt.modelRequests.length,beforeSend,'surviving direct send adds no inference');
+          observation.peerReception=await receivePeer(claim,'after first frontend unload');
+          assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'frontend close never creates another actor or operation');
+          assert.equal(receipt.modelRequests.length,startupModelRequests+2,'two distinct explicit peer arrivals, one native request each');
+        }
       }
       if(managedPackageRoot && options.autojoin){
         for(const own of tuis)await closeTui(own);
         const pid=receipt.autojoinOwner[0].pid;
         let ownerExitObservedAt;
         await waitUntil(()=>{
-          try{process.kill(pid,0);return false;}catch(error){
-            if(error.code==='ESRCH'){ownerExitObservedAt=new Date().toISOString();return true;}throw error;
-          }
+          if(processAlive(pid))return false;
+          ownerExitObservedAt=new Date().toISOString();return true;
         },15000,'shared owner retirement after native unload');
         const version=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','version'],
           {encoding:'utf8',env:childEnv,timeout:10000}));
@@ -584,9 +641,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     }
     if(receipt.autojoinOwner){
       try{
-        await waitUntil(()=>receipt.autojoinOwner.every(owner=>{
-          try{process.kill(owner.pid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}
-        }),10000,'last MCP entry closes its shared owner');
+        await waitUntil(()=>receipt.autojoinOwner.every(owner=>!processAlive(owner.pid)),10000,'last MCP entry closes its shared owner');
         receipt.cleanup.push('shared autojoin owner exited');
       }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }

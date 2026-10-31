@@ -503,8 +503,9 @@ def selected(policy, paths, *, base=None, head=None):
     separate_examples = False
     if "native-examples" in policy["checks"] and any(path.startswith("rust/") for path in paths):
         separate_examples = head is None or committed_test_groups(head)
-        print("EXAMPLE_BUILD_SCOPE=" + json.dumps({"head": head, "separate_profile": separate_examples,
-              "reason": "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
+        if head is not None:
+            print("EXAMPLE_BUILD_SCOPE=" + json.dumps({"head": head, "separate_profile": separate_examples,
+                  "reason": "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
     opt_in = opt_in_test_target_inputs(paths, base, head) if base and head else set()
     product_paths = production_build_paths(paths, base, head, opt_in=opt_in) if base and head else paths
     if product_paths != paths:

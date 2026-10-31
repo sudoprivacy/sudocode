@@ -366,6 +366,18 @@ fn assert_rejected_migrations_preserve_source(
         cwd,
     )
     .unwrap();
+    // An admitted recorder for an owned backup may still be finalizing when
+    // deletion publishes its tombstone. Hold its real native lock so physical
+    // reclaim must take the supported deferred path, independent of timing.
+    let recorder = StdFsBackend
+        .try_lock(
+            &archives[0]
+                .with_extension("responses.lock")
+                .to_string_lossy(),
+            30_000,
+        )
+        .unwrap()
+        .expect("the backup recorder lock is initially free");
     runtime::subagent_completion::CompletionJournal::purge_stored(
         std::sync::Arc::new(StdFsBackend),
         path,
@@ -380,6 +392,14 @@ fn assert_rejected_migrations_preserve_source(
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
+    assert!(
+        path.exists(),
+        "a live backup recorder defers physical reclaim"
+    );
+    assert_eq!(legacy_archives(directory).as_slice(), archives);
+    drop(recorder);
+    // Release the real recorder lease, then use main's bounded reclamation
+    // observation. Never retry deletion or invoke cleanup from this test.
     wait_for_reclaimed_session(path, &directory.join(".cleanup"));
     assert!(!path.exists());
     assert!(

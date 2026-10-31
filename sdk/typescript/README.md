@@ -66,6 +66,39 @@ machine values outside the package. Keep the MCP server optional so an offline
 node cannot prevent ordinary Codex startup. Existing project or launch-time
 overrides need an explicit migration; a global entry cannot override them.
 
+On Windows, the initializer also returns `ownerPreparationArgv`. Run that
+preparation command before installing the MCP entry, review the generated
+current-user Task Scheduler XML and run its returned `installationArgv` once.
+Preparation writes a plan; it does not register or start the task. Registration
+does not silently overwrite an existing task. The action uses the signed-in user's token
+without a password, elevation or a scheduled trigger. When an MCP entry needs
+the shared owner, it requests that action once and authenticates the same
+exclusive loopback endpoint. The existing native-root inventory still decides
+when the owner can retire. A missing task reports the preparation step; it
+does not launch a temporary replacement under the MCP process.
+
+This distinction matters on Windows: native Codex contains each stdio MCP in a
+Job that terminates its descendants when that root unloads. Node's `detached`
+option does not give a shared owner independent lifetime in that Job. Task
+Scheduler launches the same canonical owner outside the individual MCP's
+lifetime. No native Job flags or permissions are changed. Mac and Linux keep
+their existing detached owner launch.
+
+For rollback, let the selected owner exit normally before running the returned
+`removalArgv`, then restore the prior reviewed MCP/config entry. Removing the
+registration does not serve as an owner-stop command. Retain the original
+bindings and ACP sessions. Install version updates in a new private directory;
+preparation refuses an existing XML plan with different bytes. Use an
+owner-protected parent ACL on Windows. Current task plans reject percent
+placeholders in action paths so Windows cannot expand them to a different
+command. This setup manages only the Codex bridge; it does not install or
+restart Nexus or the native Codex daemon.
+The task runs in the selected user's environment. For a nondefault native home
+or endpoint, pin it in the existing `native.env`/`native.socket` config and keep
+the full official wrapper argv. Do not rely on per-MCP inherited variables to
+select the shared native server; `native.env`, when present, is the complete
+proxy environment.
+
 The result also includes the official `nativePreparationArgv` (shared daemon
 start) and `nativeProxyArgv` for API frontends. Ordinary official CLI startup
 uses its managed package context after one-time preparation. A legacy frontend

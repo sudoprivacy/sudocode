@@ -12,7 +12,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { CodexAutojoin, CodexAgentClaim } from '../src/codexAutojoin';
 const root = path.resolve(__dirname,'../..');
 const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
-const directory = fs.mkdtempSync(path.join(os.tmpdir(),'codex-autojoin-'));
+const directory = fs.mkdtempSync(path.join(os.tmpdir(),process.platform==='win32'
+  ? "codex-owner ' & 🧪-" : 'codex-autojoin-'));
 const workspaceAlias = path.join(directory,'workspace-alias');
 fs.symlinkSync(directory,workspaceAlias,'junction');
 let nativeWorkspace = workspaceAlias;
@@ -26,6 +27,7 @@ let owner: CodexAutojoin | undefined;
 let mcp: Client | undefined;
 let mcpOwnerPid: number | undefined;
 let auditFailureOwner: ChildProcess | undefined;
+let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindowsCodexOwner']> | undefined;
 let holdReads = false;
 let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
@@ -172,6 +174,18 @@ async function main() {
     enrollmentArgv:[process.execPath,path.join(root,'test/fixtures/codexAgentEnrollment.cjs'),directory],
     endpoint:{port:reserved.port,token:'01'.repeat(32)},
   }),{mode:0o600});
+  if(process.platform==='win32'){
+    const {prepareWindowsCodexOwner}=require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
+    const prepared=prepareWindowsCodexOwner(mcpConfig,path.join(root,'dist/server.cjs'));
+    assert.equal(prepared.registered,false);assert.equal(prepared.started,false);
+    const beforeMissingTask=rows().length;
+    assert.throws(()=>execFileSync(process.execPath,[path.join(root,'dist/server.cjs'),'--codex','--config',mcpConfig],
+      {timeout:7000,stdio:['ignore','pipe','pipe']}),/prepared task/,
+    'a missing user task must not fall back to a child in the native MCP Job');
+    assert.equal(rows().length,beforeMissingTask,'missing preparation cannot start an ACP receiver');
+    execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),{timeout:10000,windowsHide:true});
+    windowsOwnerTask=prepared;
+  }
   mcp=new Client({name:'autojoin-process-acceptance',version:'1'},{capabilities:{}});
   await mcp.connect(new StdioClientTransport({command:process.execPath,args:[path.join(root,'dist/server.cjs'),
     '--codex','--config',mcpConfig],stderr:'pipe'}));
@@ -325,5 +339,7 @@ void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(asy
   if(auditFailureOwner?.exitCode===null){auditFailureOwner.kill('SIGKILL');await once(auditFailureOwner,'exit');}
   for(const client of server.clients)client.terminate();
   await new Promise<void>(resolve=>server.close(()=>resolve()));
+  if(windowsOwnerTask)execFileSync(windowsOwnerTask.removalArgv[0],windowsOwnerTask.removalArgv.slice(1),
+    {timeout:10000,windowsHide:true});
   fs.rmSync(directory,{recursive:true,force:true});
 });

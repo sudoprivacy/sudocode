@@ -103,11 +103,14 @@ const waitUntil = async (test, ms, label) => {
 };
 let phase='idle';
 const peerMarker='REAL_NODE_AUTOJOIN_'+crypto.randomUUID();
+let expectedPeerInput;
 const heldResponses=new Set();
 const endpoint = http.createServer((req,res)=>{
   const observation={method:req.method,url:req.url,phase};receipt.modelRequests.push(observation);
+  const peerInput=expectedPeerInput;
   let body='';req.on('data',bytes=>{if(body.length<=2097152)body+=bytes;});
-  req.on('end',()=>{observation.peerMarkerSeen=body.includes(peerMarker);observation.bodyBytes=Buffer.byteLength(body);});
+  req.on('end',()=>{observation.peerMarkerSeen=body.includes(peerMarker);
+    observation.exactPeerInputSeen=peerInput!==undefined&&body.includes(peerInput);observation.bodyBytes=Buffer.byteLength(body);});
   if(phase==='cancelled-seed' && req.method==='POST' && req.url==='/v1/responses'){
     // A 503 drives retries before the user item appears on some native builds.
     // Keep this explicit cancelled seed pending until turn/interrupt or cleanup.
@@ -131,6 +134,8 @@ const tuis = [];
 let native;
 let nativeExited;
 let nativeStderr = '';
+let windowsOwnerPreparation;
+let legacySocket;
 const request = async (client,label,method,params) => {
   receipt.requests.push({client:label,method,threadId:params.threadId});
   return client.request(method,params);
@@ -144,6 +149,11 @@ const connect = async (label, events, socket=selectedSocket, env=childEnv) => {
   receipt.stages.push(label+' connected');
   return client;
 };
+const processAlive = pid => {
+  try{process.kill(pid,0);return true;}
+  catch(error){if(error.code==='ESRCH')return false;throw error;}
+};
+const protocolRows = profile => fs.readFileSync(profile.protocolLog,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line));
 const closeTui = async own => {
   if(own.closed)return;
   own.closed=true;
@@ -188,6 +198,14 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           : [process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
         endpoint:{port,token:crypto.randomBytes(32).toString('hex')},
       }),{mode:0o600});
+      if(process.platform==='win32'){
+        const prepared=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
+        const registered=execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),
+          {encoding:'utf8',timeout:10000,windowsHide:true});
+        windowsOwnerPreparation=prepared;
+        receipt.windowsOwnerTask={...prepared,registered:true,registrationOutput:registered,
+          scope:'private fixture only; canonical owner is launched by the user scheduler, never by an MCP Job'};
+      }
     }
     fs.writeFileSync(path.join(isolatedHome,'config.toml'),
       (managedPackageRoot?'thread_unload_delay_secs = 1\n':'')+
@@ -209,11 +227,17 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       fs.writeFileSync(file,withoutGlobal+'[mcp_servers.nexus_legacy]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--config',legacyProfile].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n');
       const legacyEnv={...childEnv};delete legacyEnv.CODEX_MANAGED_PACKAGE_ROOT;delete legacyEnv.CODEX_MANAGED_BY_NPM;
-      const legacySocket=path.join(os.tmpdir(),'cx-legacy-'+crypto.randomUUID()+'.sock');
+      // Let the official listener create its parent with the platform's private
+      // permissions. The shared temporary directory cannot satisfy Windows DACLs.
+      legacySocket=path.join(os.tmpdir(),'cx-legacy-'+crypto.randomUUID(),'s.sock');
+      assert(!fs.existsSync(path.dirname(legacySocket)),'The native listener must create its own private parent');
+      receipt.legacyListenerPreparation={socket:legacySocket,parentInitiallyAbsent:true,
+        createdBy:'official native app-server listener'};
       native=spawn(configured.codexArgv[0],['app-server','--listen','unix://'+legacySocket],
         {cwd:workspace,env:legacyEnv,stdio:['ignore','ignore','pipe']});nativeExited=once(native,'close');
       native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
       await waitUntil(()=>socketEntryPresent(legacySocket),10000,'private legacy listener');
+      receipt.legacyListenerPreparation.listenerReady=true;
       const old=await connect('legacy observer',receipt.observerNotifications,legacySocket,legacyEnv);
       const tui=await spawnTui('legacy',['--remote','unix://'+legacySocket],legacyEnv);
       let original;
@@ -239,13 +263,13 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       assert.equal(receipt.modelRequests.length,1,'one explicit legacy seed; direct send does not infer');
       phase='legacy-closed';await closeTui(tui);await old.close();
       native.kill('SIGTERM');await bounded(nativeExited,5000,'owned legacy backend exit');native=undefined;
-      if(fs.existsSync(legacySocket))fs.unlinkSync(legacySocket);
       const imported=await require(library).prepareExistingCodexBinding(autojoinConfig,{threadId:original.id,
         workspace,actor,configFile:operatorContext.inboundSenderProfile,acpSessionId:profile.acpSessionId});
       assert.equal(imported.startedAgent,false);
       receipt.legacyImport={originalThreadId:original.id,actor,originalAcpSessionId:profile.acpSessionId,
         nativeCanonicalWorkspace:fs.realpathSync(workspace),acpCanonicalWorkspace:fs.realpathSync(profile.workspace),
-        oldBackendExitedBeforeManagedStartup:true,oldTuiExitedNormally:true,legacySeedModelRequests:1,imported};
+        oldBackendExitedBeforeManagedStartup:true,oldTuiExitedNormally:true,legacySeedModelRequests:1,imported,
+        priorAcpRequests:protocolRows(profile).filter(row=>row.direction==='outgoing').map(row=>row.message.method)};
       fs.writeFileSync(file,standard);
     }
     const startupModelRequests=receipt.modelRequests.length;
@@ -291,10 +315,32 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
     }
     {
-      for(const label of ['first','second'])await spawnTui(label,
-        label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
+      let observer;
+      for(const label of ['first','second']){
+        await spawnTui(label,label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
+        if(label==='first'&&managedPackageRoot&&operatorContext&&!seededResume&&!receipt.legacyImport){
+          const audit=path.join(root,'autojoin-audit.jsonl');
+          await waitUntil(()=>{
+            if(!fs.existsSync(audit))return false;
+            receipt.firstOwnerBeforeSecondFrontend=fs.readFileSync(audit,'utf8').split('\n').filter(Boolean)
+              .map(line=>JSON.parse(line)).find(row=>row.phase==='listening');
+            return !!receipt.firstOwnerBeforeSecondFrontend;
+          },10000,'first frontend elects its shared owner before the second starts');
+          receipt.autojoinOwner=[receipt.firstOwnerBeforeSecondFrontend];
+          observer=await connect('observer',receipt.observerNotifications);
+          await bounded((async()=>{
+            for(;;){
+              const snapshot=await request(observer,'existing first root before second frontend','thread/loaded/list',{});
+              assert.equal(snapshot.nextCursor,null);
+              assert.ok(snapshot.data.length<=1,'a second root cannot precede the second frontend');
+              if(snapshot.data.length===1){receipt.inventoryBeforeSecondFrontend=snapshot.data;return;}
+              await new Promise(resolve=>setTimeout(resolve,50));
+            }
+          })(),5000,'first native root becomes visible before the second frontend');
+        }
+      }
       await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'isolated native listener');
-      const observer=await connect('observer',receipt.observerNotifications);
+      observer??=await connect('observer',receipt.observerNotifications);
       if(managedPackageRoot){
         receipt.nativeManagedVersion=JSON.parse(execFileSync(configured.codexArgv[0],
           ['app-server','daemon','version'],{encoding:'utf8',env:childEnv,timeout:10000}));
@@ -336,7 +382,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       assert.notEqual(...receipt.created.map(thread=>thread.id));
       receipt.inventory=inventory.data;
       receipt.startedSeenByObserver=receipt.observerNotifications.filter(n=>n.method==='thread/started').map(n=>n.threadId);
-      assert(receipt.created.every(thread=>receipt.startedSeenByObserver.includes(thread.id)));
+      assert(receipt.created.every(thread=>receipt.startedSeenByObserver.includes(thread.id)
+        || receipt.inventoryBeforeSecondFrontend?.includes(thread.id)),
+        'every root is either present in the initial one-root inventory or observed starting after attachment');
       assert.equal(receipt.modelRequests.length,startupModelRequests);
       receipt.modelRequestsBeforeSeed=startupModelRequests;
       if(receipt.legacyImport){
@@ -363,35 +411,25 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         assert.equal(new Set(receipt.autojoinClaims.map(claim=>claim.actor)).size,2,'same-cwd roots need distinct Agents');
         assert.deepEqual(receipt.autojoinClaims.map(claim=>claim.threadId).sort(),receipt.inventory.slice().sort());
         assert(receipt.autojoinClaims.every(claim=>!claim.actor.includes(claim.threadId)),'Agent name is not a transcript id');
-        if(operatorContext){
-          await waitUntil(()=>receipt.autojoinClaims.every(claim=>{
-            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
-            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
-            return fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
-              .filter(row=>row.direction==='outgoing'&&row.message?.method==='_sudocode/a2a/agent_list').length>=2;
-          }),10000,'actual creator and owner ACP identity checks');
-          receipt.realNodeEnrollment=receipt.autojoinClaims.map(claim=>{
-            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
-            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
-            const calls=fs.readFileSync(profile.protocolLog,'utf8').trim().split('\n').map(line=>JSON.parse(line))
-              .filter(row=>row.direction==='outgoing').map(row=>row.message.method);
-            assert.equal(calls.filter(method=>method==='session/new').length,1);
-            assert.equal(calls.filter(method=>method==='session/load').length,binding.origin==='existing'?3:1);
-            assert(!calls.includes('session/prompt'));
-            if(binding.origin==='existing'){
-              assert.equal(claim.actor,receipt.legacyImport.actor);
-              assert.equal(profile.acpSessionId,receipt.legacyImport.originalAcpSessionId);
-            }else assert.equal(binding.workspaceBinding.operationId,claim.operationId);
-            assert.notEqual(binding.acp.canonicalWorkspace,binding.canonicalWorkspace);
-            return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,sessionId:profile.acpSessionId,calls};
-          });
-          assert(!fs.existsSync(path.join(workspace,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
-        }else{
+        if(!operatorContext){
           const log=path.join(root,'acp.jsonl');
           await waitUntil(()=>fs.existsSync(log)&&fs.readFileSync(log,'utf8').trim().split('\n').filter(line=>JSON.parse(line).method==='_sudocode/a2a/agent_list').length===2,10000,'authenticated ACP identity checks');
           receipt.autojoinAcp=fs.readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
           assert.equal(new Set(receipt.autojoinAcp.map(call=>call.pid)).size,2,'one receiver owner per distinct Agent');
           assert(!receipt.autojoinAcp.some(call=>call.method==='session/prompt'),'autojoin must not start the inner model');
+        }
+        if(operatorContext){
+          const deadline=Date.now()+10000;
+          for(;;){
+            const status=await request(observer,'actual current MCP owner readiness','mcpServer/tool/call',{
+              threadId:receipt.autojoinClaims[0].threadId,server:'nexus_auto',tool:'scode_status',arguments:{}});
+            assert.notEqual(status.isError,true,JSON.stringify(status));
+            receipt.autojoinReadiness=JSON.parse(status.content[0].text);
+            if(receipt.autojoinReadiness.state==='observing'&&receipt.autojoinClaims.every(claim=>
+              receipt.autojoinReadiness.agents.some(agent=>agent.threadId===claim.threadId&&agent.actor===claim.actor&&agent.state==='connected')))break;
+            assert.ok(Date.now()<deadline,'actual current owner did not attach both original roots');
+            await new Promise(resolve=>setTimeout(resolve,50));
+          }
         }
         receipt.autojoinTools=[];
         for(const claim of receipt.autojoinClaims){
@@ -413,6 +451,37 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         assert.equal(new Set(receipt.autojoinCommandAudit.map(row=>row.pid)).size,2,'distinct actual receiver processes execute the two roots');
         assert(receipt.autojoinCommandAudit.every(row=>receipt.autojoinClaims.some(claim=>
           row.nativeThreadId===claim.threadId&&row.nativeAudit.actor===claim.actor)));
+        if(operatorContext){
+          // The real commands above prove this owner's attachment completed.
+          // Historical list calls cannot establish readiness for an imported SID.
+          receipt.realNodeEnrollment=receipt.autojoinClaims.map(claim=>{
+            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',claim.threadId+'.json'),'utf8'));
+            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
+            const rows=protocolRows(profile);
+            const calls=rows.filter(row=>row.direction==='outgoing').map(row=>row.message.method);
+            const epoch=rows.slice(rows.findLastIndex(row=>row.direction==='outgoing'&&row.message.method==='initialize'));
+            const ownerAttachmentRequests=epoch.filter(row=>row.direction==='outgoing').map(row=>row.message.method);
+            assert.equal(calls.filter(method=>method==='session/new').length,1);
+            const priorLoads=binding.origin==='existing'
+              ? receipt.legacyImport.priorAcpRequests.filter(method=>method==='session/load').length : 0;
+            assert.equal(calls.filter(method=>method==='session/load').length,priorLoads+1,
+              'this owner adds exactly one load after the closed prior ACP epoch');
+            assert.equal(ownerAttachmentRequests.filter(method=>method==='session/load').length,1);
+            assert.equal(ownerAttachmentRequests.filter(method=>method==='_sudocode/a2a/agent_list').length,1);
+            const loaded=epoch.find(row=>row.direction==='outgoing'&&row.message.method==='session/load').message;
+            assert.equal(loaded.params.sessionId,profile.acpSessionId);
+            assert.equal(receipt.autojoinCommandAudit.find(row=>row.nativeThreadId===claim.threadId).nativeAudit.sessionId,profile.acpSessionId);
+            assert(!calls.includes('session/prompt'));
+            if(binding.origin==='existing'){
+              assert.equal(claim.actor,receipt.legacyImport.actor);
+              assert.equal(profile.acpSessionId,receipt.legacyImport.originalAcpSessionId);
+            }else assert.equal(binding.workspaceBinding.operationId,claim.operationId);
+            assert.notEqual(binding.acp.canonicalWorkspace,binding.canonicalWorkspace);
+            return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,
+              sessionId:profile.acpSessionId,calls,ownerAttachmentRequests};
+          });
+          assert(!fs.existsSync(path.join(workspace,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
+        }
         assert.equal(receipt.modelRequests.length,startupModelRequests,'autojoin must not start the native model');
       }
       if(seededResume){
@@ -498,27 +567,85 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         const {connectScode,sendScodeMessage}=require(library);
         const peer=await connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
         try{
-          phase='peer-inbound';
-          const original=receipt.autojoinClaims[0];
-          await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
-          const sent=await sendScodeMessage(peer,{to:original.actor,
-            message:peerMarker+' Peer data only. Do not reply or ACK.',summary:'Isolated automatic peer reception'});
-          assert.equal(sent.isError,false,JSON.stringify(sent));
-          const end=Date.now()+15000;
-          while(true){
-            const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
+          const receivePeer = async (original,epoch) => {
+            phase='peer-inbound';
+            const before=receipt.modelRequests.length;
             const callback=path.join(root,'bindings',original.threadId+'.callback.jsonl');
-            const rows=fs.existsSync(callback)?fs.readFileSync(callback,'utf8').trim().split('\n').map(line=>JSON.parse(line)):[];
-            const accepted=rows.filter(row=>row.phase==='accepted');
-            if(receipt.modelRequests.some(row=>row.peerMarkerSeen)&&accepted.length===1&&thread.status.type==='idle'){
-              receipt.actualPeerReception={peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
-                targetThreadId:thread.id,targetActor:original.actor,accepted:accepted[0],
-                modelRequestsAfterArrival:receipt.modelRequests.length,untrustedPeerMarkerReachedNativeModel:true,sent};break;
+            const acceptedRows=()=>fs.existsSync(callback)?fs.readFileSync(callback,'utf8').split('\n').filter(Boolean)
+              .map(line=>JSON.parse(line)).filter(row=>row.phase==='accepted'):[];
+            const acceptedBefore=acceptedRows().length;
+            await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
+            expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
+            const sent=await sendScodeMessage(peer,{to:original.actor,
+              message:expectedPeerInput,summary:'Isolated automatic peer reception'});
+            assert.equal(sent.isError,false,JSON.stringify(sent));
+            const end=Date.now()+15000;
+            while(true){
+              const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
+              const accepted=acceptedRows();
+              if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
+                  &&accepted.length===acceptedBefore+1&&thread.status.type==='idle'){
+                assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
+                return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
+                  targetThreadId:thread.id,targetActor:original.actor,accepted:accepted.at(-1),
+                  modelRequestsAfterArrival:receipt.modelRequests.length,nativeRequestsAdded:receipt.modelRequests.length-before,
+                  untrustedPeerMarkerReachedNativeModel:true,sent};
+              }
+              if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
+              await new Promise(resolve=>setTimeout(resolve,50));
             }
-            if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
-            await new Promise(resolve=>setTimeout(resolve,50));
-          }
+          };
+          receipt.actualPeerReception=await receivePeer(receipt.autojoinClaims[0],'before frontend close');
           assert.equal(receipt.modelRequests.length,startupModelRequests+1,'one actual received peer input, no duplicate native inference');
+          if(managedPackageRoot){
+            const first=tuis.find(own=>own.label==='first');
+            const second=tuis.find(own=>own.label==='second');
+            const pid=receipt.autojoinOwner[0].pid;
+            const observation=receipt.survivingRootObservation={startedAt:new Date().toISOString(),ownerPid:pid,
+              originalInventory:receipt.inventory.slice(),firstFrontendPid:first.lines.find(row=>row.event==='spawn').pid,
+              secondFrontendPid:second.lines.find(row=>row.event==='spawn').pid};
+            await closeTui(first);
+            observation.firstFrontendExitedNormally=true;
+            const unloadDeadline=Date.now()+5000;
+            let remaining;
+            for(;;){
+              const snapshot=await request(observer,'first frontend unload while second stays open','thread/loaded/list',{});
+              assert.equal(snapshot.nextCursor,null,'the surviving-root inventory must be complete');
+              remaining=snapshot.data;
+              observation.lastInventory=remaining;
+              if(remaining.length===1&&receipt.inventory.includes(remaining[0]))break;
+              assert.ok(Date.now()<unloadDeadline,'first native root did not unload while the second frontend stayed open');
+              await new Promise(resolve=>setTimeout(resolve,100));
+            }
+            observation.observedAt=new Date().toISOString();
+            observation.unloadedThreadId=receipt.inventory.find(id=>!remaining.includes(id));
+            observation.secondFrontendStillRunning=!second.closed&&processAlive(observation.secondFrontendPid);
+            observation.ownerStillRunning=processAlive(pid);
+            assert.equal(pid,receipt.firstOwnerBeforeSecondFrontend.pid,'the closed first frontend elected this original owner');
+            const {thread}=await request(observer,'surviving native root','thread/read',{threadId:remaining[0],includeTurns:false});
+            observation.remainingThread={id:thread.id,status:thread.status,threadSource:thread.threadSource,
+              parentThreadId:thread.parentThreadId,ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput};
+            assert.equal(observation.secondFrontendStillRunning,true,'second native frontend must remain open during this assertion');
+            assert.equal(observation.ownerStillRunning,true,'closing one native frontend must not terminate the other root\'s shared bridge');
+            const claim=receipt.autojoinClaims.find(row=>row.threadId===thread.id);
+            assert.ok(claim,'the surviving root must keep its original claim');
+            const beforeSend=receipt.modelRequests.length;
+            const result=await request(observer,'surviving native MCP routing','mcpServer/tool/call',{
+              threadId:thread.id,server:'nexus_auto',tool:'scode_send',
+              arguments:{to:operatorContext.recipient,message:'Surviving original root 🧪',summary:'independent frontend lifetime'},
+            });
+            observation.directSend=result;
+            assert.equal(result.isError,false,JSON.stringify(result));
+            assert.equal(JSON.parse(result.content[0].text).routing.sender,claim.actor);
+            const expected=receipt.realNodeEnrollment.find(row=>row.threadId===thread.id);
+            const returned=fs.readFileSync(path.join(root,'autojoin-audit.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line))
+              .filter(row=>row.phase==='returned'&&row.nativeThreadId===thread.id).at(-1);
+            assert.equal(returned.nativeAudit.sessionId,expected.sessionId,'surviving frontend keeps the original real ACP SID');
+            assert.equal(receipt.modelRequests.length,beforeSend,'surviving direct send adds no inference');
+            observation.peerReception=await receivePeer(claim,'after first frontend unload');
+            assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'frontend close never creates another actor or operation');
+            assert.equal(receipt.modelRequests.length,startupModelRequests+2,'two distinct explicit peer arrivals, one native request each');
+          }
         }finally{await peer.close();}
       }
       if(managedPackageRoot && options.autojoin){
@@ -526,9 +653,8 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         const pid=receipt.autojoinOwner[0].pid;
         let ownerExitObservedAt;
         await waitUntil(()=>{
-          try{process.kill(pid,0);return false;}catch(error){
-            if(error.code==='ESRCH'){ownerExitObservedAt=new Date().toISOString();return true;}throw error;
-          }
+          if(processAlive(pid))return false;
+          ownerExitObservedAt=new Date().toISOString();return true;
         },15000,'shared owner retirement after native unload');
         const version=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','version'],
           {encoding:'utf8',env:childEnv,timeout:10000}));
@@ -584,9 +710,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     }
     if(receipt.autojoinOwner){
       try{
-        await waitUntil(()=>receipt.autojoinOwner.every(owner=>{
-          try{process.kill(owner.pid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}
-        }),10000,'last MCP entry closes its shared owner');
+        await waitUntil(()=>receipt.autojoinOwner.every(owner=>!processAlive(owner.pid)),10000,'last MCP entry closes its shared owner');
         receipt.cleanup.push('shared autojoin owner exited');
       }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
@@ -594,6 +718,21 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     const ownerAudit=path.join(root,'autojoin-audit.jsonl');
     if(fs.existsSync(ownerAudit))receipt.ownerLifecycle=fs.readFileSync(ownerAudit,'utf8').trim().split('\n')
       .map(line=>JSON.parse(line)).filter(row=>row.provenance==='codex-autojoin-owner');
+    if(windowsOwnerPreparation){
+      try{
+        const prepared=windowsOwnerPreparation;
+        const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
+          {encoding:'utf8',timeout:10000,windowsHide:true});
+        receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,output});
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
+    }
+    if(legacySocket){
+      try{
+        try{fs.unlinkSync(legacySocket);}catch(error){if(error.code!=='ENOENT')throw error;}
+        if(fs.existsSync(path.dirname(legacySocket)))fs.rmdirSync(path.dirname(legacySocket));
+        receipt.cleanup.push({privateLegacySocketDirectoryRemoved:path.dirname(legacySocket)});
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
+    }
     receipt.nativeStderr=nativeStderr;
     const name='native-codex-lifecycle-'+receipt.at.replace(/[:.]/g,'')+'.receipt.json';
     fs.writeFileSync(path.join(evidence,name),JSON.stringify(receipt,null,2)+'\n',{mode:0o600,flag:'wx'});

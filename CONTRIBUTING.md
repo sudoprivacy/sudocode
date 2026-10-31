@@ -201,6 +201,17 @@ time. The required command prints this split. A real Git/Cargo/native-process
 guard verifies feature compilation, dev execution and refusal of a missing stamp;
 it adds no product journey coverage.
 
+One acceptance runs per host at a time. Every `check`, whether from the hook,
+`contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
+while its profiles run; a second invocation prints the holder from
+`host-lease.json` and starts when that holder exits, including an abrupt exit.
+Concurrent suites on one machine contend for CPU, memory and temporary paths,
+which turns timing budgets into failures that cost whole profile reruns.
+Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
+fixture checks nested inside an acceptance run without waiting for their parent.
+`attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
+is unchanged.
+
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when CLI, engine-core, shared PTY helpers,
 measurement sources or Rust build/dependency inputs change. Other crates' source

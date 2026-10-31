@@ -378,8 +378,8 @@ def native_guard_files():
     return {
         ".github/local-acceptance/native_guard.py": "99e7a7fd043f8fecb6000ca6b0745939b8dd28671983a0fb62ac819304192e48",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
-        ".github/scripts/local_acceptance.py": "4b537c9a84cc144509009f12fa280c7df69733d5db8f80a810e43817719dfb8e",
-        "e2e/local-acceptance/run.py": "0ad9d1696b04a5805dee9b4d976bd9325b6b98191c45c362fcccbf26b2609cca",
+        ".github/scripts/local_acceptance.py": "3410af87c128b3dcb8331853d885918257efb3546091e125a58854ed247747f5",
+        "e2e/local-acceptance/run.py": "2b11abdbc0b338058385f5d832d3b6aebacbe77ee602e201d332e4107b18d57a",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/policy_guard_acceptance.py": "84ab8a128f792c866ac5c1ace498dc69ae08b5479452a505e07b2c44a81e090a",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
@@ -392,8 +392,8 @@ def native_guard_files():
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
+        "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
     }
-
 
 def stage_profile_executor(root, policy_ref, name, policy_root):
     """Materialize one hash-bound native tool set without changing the candidate."""

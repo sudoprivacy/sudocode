@@ -58,6 +58,28 @@ only when no qualified root remains. Unavailable inventory keeps the owner
 alive and tools unavailable; it does not establish that roots have exited.
 It never stops the native server or the Nexus Node.
 
+On Windows, the owner is launched by a prepared current-user on-demand Task
+Scheduler action. Actual native 0.163.0 field evidence showed the old detached
+owner inside the first MCP's non-breakaway, kill-on-close Job; closing that
+root terminated the shared owner while another qualified root and TUI remained
+open. A detached Node child is therefore insufficient on this platform.
+`--prepare-codex-owner` validates the same config and writes the reviewed action
+plan; its returned registration command is an explicit machine-setup step.
+The MCP entry may request that registered action once, then must authenticate
+the real owner endpoint. A task-start reply alone is not readiness. Missing
+preparation never selects the old child-spawn path. No task is registered from
+an MCP call and no native Job containment is changed. Mac and Linux retain
+their existing owner launch; all platforms share the same receiver, inventory,
+actor audit, command policy and retirement implementation.
+
+Windows acceptance must exercise actual registration, cold task launch,
+first-frontend close with the second frontend still open, the surviving native
+send/original SID and distinct inbound callback, then normal owner retirement
+and removal of only the private test task. Source or scheduler command success
+does not satisfy that installed-native acceptance. Registration and XML plans
+are private machine state; upgrade/rollback waits for the selected owner to
+exit and preserves every binding and ACP session.
+
 ## Existing enrollment capability
 
 `enrollmentArgv` is an explicit operator-owned executable/argv, run without a

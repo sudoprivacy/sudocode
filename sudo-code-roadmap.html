@@ -529,6 +529,16 @@ environments match the main publisher; net timing and hit rates still require
 hosted observation. The optimization target is measured end-to-end CI latency
 at most 10% of the historical baseline, not merely fewer runner minutes.</p>
 
+<p>Local preflight checks actual merge conflicts with its supplied base and
+fetched <code>origin/main</code> before product compilation or benchmark leases.
+It prints conflicting paths and the next step at the mandatory interface;
+the checkout and index stay untouched, and clean branches may remain behind main.
+The actual-Git history regression stays required in CI preflight. Editing only
+<code>e2e/pr-history/run.py</code> skips unrelated three-OS product builds;
+mixed product changes, unknown fixtures and renames across that boundary retain
+native coverage. This catches avoidable work before a full gate; it does not
+prove the 10% latency target or detect main changes after the check.</p>
+
 <h3>Test infrastructure — two layers, one of them counts</h3>
 
 <p>Release UI and resource checks use a frozen binary built with the normal

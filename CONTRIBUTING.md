@@ -252,7 +252,12 @@ are byte-for-byte unchanged; the unchanged browser command list has an exact
 approved hash pair so existing signed browser evidence remains reusable.
 These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
-compilers use one job and BelowNormal/nice priority while Cargo and tests stay
+preflight checks actual conflicts against its supplied base and fetched
+`origin/main` before product builds and benchmark leases. It prints the exact
+paths and recovery step without changing the checkout or index. Clean branches
+may stay behind main. The Git-only `e2e/pr-history/run.py` fixture stays required
+in CI preflight; editing it alone skips unrelated native product builds.
+Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
 Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and

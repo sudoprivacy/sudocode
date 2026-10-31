@@ -564,3 +564,25 @@ publisher. CI summaries show each check/target assignment; `Local acceptance`'s
 status description exposes the host split to `gh` and API clients directly.
 Missing SDK commands and mismatched signed plans are refusals. A passing source
 receipt explicitly leaves installation and deployed-system acceptance unproven.
+
+## Detect real conflicts before local builds
+
+The Nexus workline's `5e191b85` SudoCode acceptance passed its eight profiles in
+9,043.535 seconds, then discovered three merge conflicts. Those same paths already
+conflicted with `b885db9f`, the protected main revision at the start of that run.
+The old history checker accepts this pair; the new actual-Git preflight reports
+the conflicts in 1.038 seconds. This is a replay of the known inputs, not a measured
+production rollout saving. The full run and its timing remain in the record.
+
+History preflight now checks both its supplied target and fetched `origin/main`,
+because local acceptance supplies an ancestral diff base. Git's merge-tree leaves
+the checkout and index untouched. Its required output lists exact paths and the
+next step, including machine-readable `LOCAL_ACCEPTANCE_MERGE_CONFLICTS`. Clean
+branches behind main remain valid; changes landing after this check can still
+introduce conflicts. Provenance and conflict-marker checks remain.
+
+The Git-only `e2e/pr-history/run.py` regression remains mandatory in CI preflight.
+Editing that exact fixture alone no longer selects unrelated native product
+builds on the author host and both complementary CI hosts. Public-planner Git
+regressions retain native validation for mixed source, unknown fixtures and
+renames crossing this boundary. Product scenarios and their assertions stay.

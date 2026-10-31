@@ -43,6 +43,7 @@
       ],
       "exclude": [
         "e2e/local-acceptance/**",
+        "e2e/pr-history/run.py",
         "**/README.md"
       ]
     },

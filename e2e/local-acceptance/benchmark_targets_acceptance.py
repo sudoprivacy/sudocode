@@ -25,6 +25,23 @@ def load(name, path):
     return module
 
 
+def standalone_layout(command):
+    """Inspect the real Cargo package, not only this fixture's tiny workspace."""
+    log = command("cargo", "metadata", "--no-deps", "--locked", "--format-version=1",
+                  "--manifest-path", str(SOURCE / "rust/Cargo.toml"), cwd=SOURCE)
+    metadata = json.loads(log.read_text())
+    package = next(row for row in metadata["packages"] if row["name"] == "scode-benchmark-drivers")
+    expected = {f"benchmark_{name}": SOURCE / f"rust/crates/rusty-sudocode-cli/tests/pty_{name}.rs"
+                for name in ["render_performance", "hyperlinks", "prompt_viewport"]}
+    assert {row["name"] for row in package["targets"]} == set(expected), "The driver package gained an extra target"
+    for row in package["targets"]:
+        assert row["kind"] == ["test"] and not row["test"], "Benchmark drivers must be opt-in tests only"
+        assert Path(row["src_path"]).resolve() == expected[row["name"]].resolve(), "Driver sources diverged"
+        assert not any(other["name"] == row["name"] for other_package in metadata["packages"]
+                       if other_package["id"] != package["id"] for other in other_package["targets"]), "Driver names collide"
+    return {"package": package["name"], "targets": sorted(expected), "normal_acceptance_disabled": True}
+
+
 def cache_migration(output, checks, command):
     """Preserve a real Cargo build across migration, then reject stale code."""
     output.mkdir()
@@ -512,6 +529,7 @@ out=Path(a.output);out.mkdir()
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})
     assert len(target_trees) == 4, target_trees
+    layout = standalone_layout(command)
 
     # An older author snapshot still uses its original target. A present but
     # broken new package must fail; it cannot silently fall back to CLI targets.
@@ -562,6 +580,7 @@ out=Path(a.output);out.mkdir()
               "target_trees": target_trees, "cross_profile_candidate_build_reused": True,
               "interleaved_other_candidate_does_not_rebuild_normal_release": True,
               "standalone_drivers_emit_no_cli_binary": True,
+              "actual_source_driver_layout": layout,
               "legacy_candidate_supported": True, "broken_standalone_package_refused": True,
               "expected_broken_package_failure": {"record": str(refusal_path), **refusal},
               "rendering_matrix": matrix, "cache_migration": migration,

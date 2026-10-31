@@ -713,7 +713,9 @@ script remains available for diagnosis and earns no additional coverage credit.<
       identity. Grouping fixtures use small native programs. Benchmark builder
       fixtures also inspect real Cargo artifacts, reject broken standalone driver
       packages and exercise original targets for older candidates; no unused
-      CLI binary is built with standalone drivers.</td>
+      CLI binary is built with standalone drivers. Actual Cargo metadata protects
+      unique opt-in targets and shared sources; real Git events require this
+      guard when the driver package changes.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>

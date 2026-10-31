@@ -256,6 +256,9 @@ unused CLI prove the production builder omits that extra binary, while retaining
 normal/dev feature separation, actual driver execution and all observers. These
 infrastructure fixtures add no product journey coverage. Per-run assertions,
 sampling policy, baselines and budgets stay unchanged.
+The guard also reads actual Cargo metadata to require unique opt-in test targets
+that reference the original sources. Changes inside the driver package select
+this guard in CI; real Git event fixtures check that selection.
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
 Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
 copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories

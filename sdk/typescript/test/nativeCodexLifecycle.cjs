@@ -554,15 +554,15 @@ const spawnTui = async (label,args=[],env=childEnv) => {
               .map(line=>JSON.parse(line)).filter(row=>row.phase==='accepted'):[];
             const acceptedBefore=acceptedRows().length;
             await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
-          expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
-          const sent=await sendScodeMessage(peer,{to:original.actor,
-            message:expectedPeerInput,summary:'Isolated automatic peer reception'});
+            expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
+            const sent=await sendScodeMessage(peer,{to:original.actor,
+              message:expectedPeerInput,summary:'Isolated automatic peer reception'});
             assert.equal(sent.isError,false,JSON.stringify(sent));
             const end=Date.now()+15000;
             while(true){
               const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
               const accepted=acceptedRows();
-            if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
+              if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
                   &&accepted.length===acceptedBefore+1&&thread.status.type==='idle'){
                 assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
                 return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
@@ -600,7 +600,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
             observation.unloadedThreadId=receipt.inventory.find(id=>!remaining.includes(id));
             observation.secondFrontendStillRunning=!second.closed&&processAlive(observation.secondFrontendPid);
             observation.ownerStillRunning=processAlive(pid);
-          assert.equal(pid,receipt.firstOwnerBeforeSecondFrontend.pid,'the closed first frontend elected this original owner');
+            assert.equal(pid,receipt.firstOwnerBeforeSecondFrontend.pid,'the closed first frontend elected this original owner');
             const {thread}=await request(observer,'surviving native root','thread/read',{threadId:remaining[0],includeTurns:false});
             observation.remainingThread={id:thread.id,status:thread.status,threadSource:thread.threadSource,
               parentThreadId:thread.parentThreadId,ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput};

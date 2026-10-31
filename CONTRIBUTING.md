@@ -297,22 +297,13 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
-Grouped or unknown sources also select `native-examples`: a separate normal
-`cargo build --workspace --locked --features engine-acp/mailbox --examples` on
-the author and complementary hosts. It compiles and links examples without
-running their entry points. Explicit nextest target selection otherwise omits
-this original default Cargo/nextest compile-only coverage. Known ungrouped
-sources retain their existing selection without adding a duplicate example
-build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
-native guard proves normal linking, no implicit example execution and refusal
-of a deliberately broken example. These checks add no product PTY coverage.
-The native executor supports declarative opt-in integration wrappers. This
-contract prerequisite keeps the current original-target graph; the Rust wrapper
-activation lands separately after installed verifiers understand its selection.
-A Windows prototype grouped 128 CLI targets into eight wrappers, selecting 91
-instead of 211 integration targets, and passed all 2,505 active cases with 70
-ignored markers. Original per-file Cargo commands stay available, and new
-ungrouped targets are selected automatically.
+The full native workspace opts into eight declarative integration wrappers for
+128 CLI targets, selecting 91 instead of 211 integration targets. The selector
+contract was qualified before this Rust activation so installed verifiers agree
+on its required checks. A Windows prototype passed all 2,505 active cases with
+70 ignored markers; activation still requires fresh exact-head author and
+complementary native acceptance. Original per-file Cargo commands stay available,
+and new ungrouped targets are selected automatically.
 The selector checks real Cargo metadata and exact declarative wrapper bytes;
 missing, duplicated, redirected, unregistered or feature-hidden members fail.
 Wrappers retain the original helper namespaces and explicitly allow only
@@ -332,6 +323,15 @@ for a committed source without group files or declarations. The verifier reads
 Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
 members and grouped sources require fresh validation. This conditional pair
 cannot authorize the new grouped execution from an old original-target pass.
+Grouped or unknown sources also select `native-examples`: a separate normal
+`cargo build --workspace --locked --features engine-acp/mailbox --examples` on
+the author and complementary hosts. It compiles and links examples without
+running their entry points. Explicit nextest target selection otherwise omits
+this original default Cargo/nextest compile-only coverage. Known ungrouped
+sources retain their existing selection without adding a duplicate example
+build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
+native guard proves normal linking, no implicit example execution and refusal
+of a deliberately broken example. These checks add no product PTY coverage.
 Contract validation checks the Docker Git/signature/authorization matrix before
 Cargo fixtures and author-host native guards. Passing runs keep every existing
 check; an early metadata failure leaves later compilation unrun.

@@ -739,9 +739,20 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
-    # SDK discovery captures the parent's environment, including NO_COLOR.
-    # Clear that inherited preference after setup; explicit fixture values
-    # below still select NoColor, including when the SDK environment is cached.
+    # SDK discovery also captures hook-exported repository selectors. Fixtures
+    # run Git in their own repositories, so clear inherited selectors after
+    # setup and before applying explicit per-command settings.
+    # Mirror Git's local environment contract without requiring Git in minimal
+    # execution containers. The native guard injects the installed Git's full
+    # --local-env-vars list, so an added selector requires an explicit update.
+    local_git = {"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                 "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+                 "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+                 "GIT_SHALLOW_FILE", "GIT_COMMON_DIR"}
+    environment = {key: setting for key, setting in environment.items() if key not in local_git
+                   and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    # Explicit fixture values below still select NoColor, including when the
+    # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
     environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})

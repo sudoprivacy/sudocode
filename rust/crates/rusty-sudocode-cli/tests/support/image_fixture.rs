@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use crate::common::TestEnv;
+use super::common::TestEnv;
 
 /// Minimal valid PNG: 128×128, yellow background, red rectangle,
 /// cyan circle. Same fixture used in the sudowork e2e yaml

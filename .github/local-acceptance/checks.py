@@ -379,8 +379,8 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         ".github/local-acceptance/native_guard.py": "11bc15d025522a5a039f34f181d907e60129c8533b0f807e9028847208d6fbc8",
-        ".github/local-acceptance/nextest_guard.py": "ee376e77ea8c79da73c54409cbd07a95a786d0e7710e406e6977967d633a7d82",
-        ".github/scripts/local_acceptance.py": "9cb6fd6fd03ab3ae54781444beee4288209c27abc04568bf8fef3f870f9691cd",
+        ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
+        ".github/scripts/local_acceptance.py": "4b537c9a84cc144509009f12fa280c7df69733d5db8f80a810e43817719dfb8e",
         "e2e/local-acceptance/run.py": "0ad9d1696b04a5805dee9b4d976bd9325b6b98191c45c362fcccbf26b2609cca",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d7e972cddaad4c13c80a83bffc5f9b721c02eb3e4ee011f28519a3c680767ae1",
@@ -437,7 +437,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "5cb6b33238fe8348e326d854f7481ba10d1739c14a890fcd0d6233e52c4de68d"
+    expected = "6521867052078d0e61204ae64745e6c4c6ec9390f8451e279024e600d70c23df"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

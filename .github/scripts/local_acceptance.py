@@ -9,6 +9,7 @@ No candidate code is executed by the GitHub verification job.
 import argparse
 import ast
 import base64
+import contextlib
 import copy
 import fnmatch
 import hashlib
@@ -40,6 +41,7 @@ NAMESPACE = "sudocode-local-acceptance"
 AUTHORIZATION_CONTEXT = "Acceptance contract authorization"
 CONTRACT_UPDATE_COMMAND = ('python "$(git rev-parse --path-format=absolute --git-common-dir)/'
                            'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin')
+HOST_LEASE_ENV = "SUDOCODE_ACCEPTANCE_HOST_LEASE"
 ROOT = Path(__file__).resolve().parents[2]
 MSVC_ENV = None
 
@@ -1035,6 +1037,69 @@ def previous_local_output(head, base):
     return None
 
 
+def try_host_lock(descriptor):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def host_acceptance_lease(attempt, head):
+    """Run one acceptance at a time on this host.
+
+    Concurrent suites contend for CPU, memory and temporary paths, which turns
+    timing budgets into failures that cost whole profile reruns. The operating
+    system releases the lock when its holder exits, including after a crash or
+    a memory kill. Processes started under the holder inherit HOST_LEASE_ENV and
+    are already serialized, so nested fixture checks do not wait for their parent.
+    """
+    if os.environ.get(HOST_LEASE_ENV):
+        yield
+        return
+    directory = Path.home() / ".nexus/local-acceptance"
+    directory.mkdir(parents=True, exist_ok=True)
+    lock, holder = directory / "host.lock", directory / "host-lease.json"
+    started = time.monotonic()
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        reported = None
+        while not try_host_lock(descriptor):
+            if reported is None or time.monotonic() - reported >= 600:
+                try:
+                    current = holder.read_text(encoding="utf-8").strip()
+                except OSError:
+                    current = "an unrecorded process"
+                print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
+                      "One acceptance runs per host; this one starts when that holder exits.", flush=True)
+                reported = time.monotonic()
+            time.sleep(5)
+        attempt["host_lease_wait_seconds"] = round(time.monotonic() - started, 3)
+        holder.write_bytes(canonical({"pid": os.getpid(), "head": head, "root": str(ROOT),
+                                      "acquired_at": time.time()}))
+        print(f"Acquired this host's local acceptance lease after {attempt['host_lease_wait_seconds']:.3f}s",
+              flush=True)
+        os.environ[HOST_LEASE_ENV] = str(os.getpid())
+        try:
+            yield
+        finally:
+            os.environ.pop(HOST_LEASE_ENV, None)
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
+
+
 def check(args):
     """Record failed and successful local attempts, including time before CI."""
     started = time.monotonic()
@@ -1120,19 +1185,20 @@ def perform_check(args, attempt):
     if resumed is not None:
         receipt["resumed_from"] = resumed
     try:
-        for name in needed:
-            if name in reusable:
-                print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
-                results[name] = reusable[name]
-            else:
-                print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-                results[name] = module.run(name, ROOT, output / name, base, run_command)
-            timing["checks_finished_at"] = time.time()
-            save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
-            print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-                  "If this process exits, resume with: "
-                  f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
-                  f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+        with host_acceptance_lease(attempt, head):
+            for name in needed:
+                if name in reusable:
+                    print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+                    results[name] = reusable[name]
+                else:
+                    print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+                    results[name] = module.run(name, ROOT, output / name, base, run_command)
+                timing["checks_finished_at"] = time.time()
+                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+                print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
+                      "If this process exits, resume with: "
+                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()

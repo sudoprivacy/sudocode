@@ -24,6 +24,8 @@ mod input {
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
+    const BUDGET: Duration = Duration::from_secs(5);
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(super) enum Writer {
         Retained,
@@ -34,21 +36,25 @@ mod input {
     struct GatedPrinter {
         entered: Option<mpsc::Sender<()>>,
         release: mpsc::Receiver<()>,
+        delivered: mpsc::Sender<()>,
         log: PathBuf,
         expired: Arc<AtomicBool>,
     }
 
     impl rustyline::ExternalPrinter for GatedPrinter {
-        fn print(&mut self, _text: String) -> rustyline::Result<()> {
+        fn print(&mut self, text: String) -> rustyline::Result<()> {
             if let Some(entered) = self.entered.take() {
                 stage(&self.log, "printer gated");
                 entered.send(()).unwrap();
                 // Release even on a regression so a panic need not write into
                 // the same full pipe. The timeout is asserted after cleanup.
-                if self.release.recv_timeout(Duration::from_secs(5)).is_err() {
+                if self.release.recv_timeout(BUDGET).is_err() {
                     self.expired.store(true, Ordering::Release);
                     stage(&self.log, "printer gate expired");
                 }
+            }
+            if text == "notice after pipe drain" {
+                self.delivered.send(()).unwrap();
             }
             Ok(())
         }
@@ -100,6 +106,7 @@ mod input {
         // Larger than the native pipe plus the Windows capture queue.
         // With the forwarder gated, this write must remain in flight.
         let bytes = vec![b'x'; 8 * 1024 * 1024];
+        let started = std::time::Instant::now();
         let result = match kind {
             Writer::Retained => retained.as_mut().unwrap().write_all(&bytes),
             Writer::Global => stderr.write_all(&bytes),
@@ -124,22 +131,90 @@ mod input {
                 Ok(())
             }
         };
+        let elapsed = started.elapsed();
         drop(stderr);
         // Never panic/report an IO error while owning the global stderr
         // lock. Preserve the original result even if cleanup later stalls.
-        stage(log, &format!("writer completed: {result:?}"));
+        stage(
+            log,
+            &format!(
+                "writer completed: {result:?}; write_ms={}",
+                elapsed.as_millis()
+            ),
+        );
         let _ = finished.send(result);
     }
 
-    pub(super) fn exercise_rearm(log: &Path, kind: Writer) {
-        const BUDGET: Duration = Duration::from_secs(5);
+    #[cfg(target_os = "linux")]
+    #[inline]
+    fn resize_pipe(log: &Path, capacity: Option<i32>) {
+        if let Some(capacity) = capacity {
+            use std::os::fd::AsRawFd;
+            let actual = nix::fcntl::fcntl(
+                std::io::stderr().as_raw_fd(),
+                nix::fcntl::FcntlArg::F_SETPIPE_SZ(capacity),
+            )
+            .unwrap();
+            // Linux rounds requests up to a page on hosts with larger pages.
+            assert!(actual >= capacity);
+            assert_eq!(
+                nix::fcntl::fcntl(
+                    std::io::stderr().as_raw_fd(),
+                    nix::fcntl::FcntlArg::F_GETPIPE_SZ,
+                )
+                .unwrap(),
+                actual,
+                "exercise the kernel's actual pipe capacity"
+            );
+            stage(log, &format!("pipe capacity: {actual}"));
+        }
+    }
+
+    #[inline]
+    #[cfg(unix)]
+    fn wait_for_full_pipe() {
+        use std::os::fd::AsFd;
+        // Confirm kernel backpressure, rather than inferring a full pipe
+        // from a thread which might simply not have been scheduled yet.
+        let stderr = std::io::stderr();
+        let mut descriptors = [nix::poll::PollFd::new(
+            stderr.as_fd(),
+            nix::poll::PollFlags::POLLOUT,
+        )];
+        let deadline = std::time::Instant::now() + BUDGET;
+        while nix::poll::poll(&mut descriptors, 0u16).unwrap() != 0 {
+            assert!(std::time::Instant::now() < deadline, "pipe never filled");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[inline]
+    fn idle_notice(
+        output: &stderr::StderrOutput,
+        delivery: &mpsc::Receiver<()>,
+    ) -> Result<(), mpsc::RecvTimeoutError> {
+        // Wake the forwarder after both the data and notice queues are idle.
+        // A data-only readiness wait must not strand peer notices or Drop.
+        std::thread::sleep(Duration::from_millis(100));
+        output
+            .printer()
+            .print("notice after pipe drain".into())
+            .unwrap();
+        let delivered = delivery.recv_timeout(BUDGET);
+        std::thread::sleep(Duration::from_millis(100));
+        delivered
+    }
+
+    pub(super) fn exercise_rearm(log: &Path, kind: Writer, pipe_capacity: Option<i32>) {
         let (entered, printing) = mpsc::channel();
         let (release, released) = mpsc::channel();
+        let (delivered, delivery) = mpsc::channel();
         let expired = Arc::new(AtomicBool::new(false));
         let output = Arc::new(
             stderr::StderrOutput::activate(GatedPrinter {
                 entered: Some(entered),
                 release: released,
+                delivered,
                 log: log.to_path_buf(),
                 expired: Arc::clone(&expired),
             })
@@ -147,6 +222,10 @@ mod input {
         );
         stage(log, "capture created");
         output.set_active(true).unwrap();
+        #[cfg(target_os = "linux")]
+        resize_pipe(log, pipe_capacity);
+        #[cfg(not(target_os = "linux"))]
+        let _ = pipe_capacity;
         stage(log, "capture active");
         output.printer().print("hold the forwarder".into()).unwrap();
         printing.recv_timeout(BUDGET).unwrap();
@@ -162,21 +241,7 @@ mod input {
         let early_write = written.recv_timeout(Duration::from_millis(100));
         let was_blocked = matches!(early_write, Err(mpsc::RecvTimeoutError::Timeout));
         #[cfg(unix)]
-        {
-            use std::os::fd::AsFd;
-            // Confirm kernel backpressure, rather than inferring a full pipe
-            // from a thread which might simply not have been scheduled yet.
-            let stderr = std::io::stderr();
-            let mut descriptors = [nix::poll::PollFd::new(
-                stderr.as_fd(),
-                nix::poll::PollFlags::POLLOUT,
-            )];
-            let deadline = std::time::Instant::now() + BUDGET;
-            while nix::poll::poll(&mut descriptors, 0u16).unwrap() != 0 {
-                assert!(std::time::Instant::now() < deadline, "pipe never filled");
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
+        wait_for_full_pipe();
 
         // Suspension must not wait for a pipe writer that needs this caller
         // to release the printer gate.
@@ -213,6 +278,7 @@ mod input {
         };
         writer.join().unwrap();
         reader.join().unwrap();
+        let delivered = idle_notice(&output, &delivery);
         output.set_active(false).unwrap();
         drop(output);
         stage(log, "capture dropped");
@@ -223,6 +289,7 @@ mod input {
         }
         suspended.expect("suspend with an in-flight writer");
         released.expect("release the gated printer");
+        delivered.expect("wake the idle forwarder for a peer notice");
         let written = written.expect("drain blocked writer");
         // Darwin cancels an in-flight write to fd 2 when dup2 replaces it,
         // even while other descriptors keep both pipe ends alive. The
@@ -248,6 +315,7 @@ async fn a_full_capture_pipe_can_drain_while_the_next_prompt_rearms() {
     run_capture_case(
         "a_full_capture_pipe_can_drain_while_the_next_prompt_rearms",
         input::Writer::Retained,
+        None,
     )
     .await;
 }
@@ -257,6 +325,7 @@ async fn a_global_stderr_write_exposes_its_actual_handoff_outcome() {
     run_capture_case(
         "a_global_stderr_write_exposes_its_actual_handoff_outcome",
         input::Writer::Global,
+        None,
     )
     .await;
 }
@@ -266,14 +335,26 @@ async fn a_retry_notice_cannot_abort_its_observer_during_terminal_handoff() {
     run_capture_case(
         "a_retry_notice_cannot_abort_its_observer_during_terminal_handoff",
         input::Writer::Diagnostics,
+        None,
     )
     .await;
 }
 
-async fn run_capture_case(test: &str, kind: input::Writer) {
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_small_capture_pipe_drains_without_polling_delays() {
+    run_capture_case(
+        "a_small_capture_pipe_drains_without_polling_delays",
+        input::Writer::Retained,
+        Some(4096),
+    )
+    .await;
+}
+
+async fn run_capture_case(test: &str, kind: input::Writer, pipe_capacity: Option<i32>) {
     const CHILD: &str = "SCODE_CAPTURE_REARM_FIXTURE";
     if let Some(log) = std::env::var_os(CHILD) {
-        input::exercise_rearm(std::path::Path::new(&log), kind);
+        input::exercise_rearm(std::path::Path::new(&log), kind, pipe_capacity);
         return;
     }
     // Informational layouts from the actual compiler/target. These do not

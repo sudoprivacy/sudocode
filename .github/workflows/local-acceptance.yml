@@ -87,10 +87,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Resolve the shared native cache paths
+        if: matrix.family == 'native'
+        id: cache_layout
+        run: python ../.trusted-acceptance/.github/local-acceptance/cache_layout.py --source candidate/rust --github-output
       - uses: Swatinem/rust-cache@v2
         if: matrix.family == 'native'
         with:
-          workspaces: candidate/rust -> target
+          workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false

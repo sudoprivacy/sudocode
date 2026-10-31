@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
-import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding } from './codexMcp';
+import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner } from './codexMcp';
 import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 
@@ -42,6 +42,7 @@ async function main(): Promise<void> {
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
+    'prepare-codex-owner': { type: 'boolean' },
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'peer-policy': {type:'string'},
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
+      + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
       + 'scode-acp-bridge --init-codex-operator --config FILE --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]\n'
       + 'Uses the shared scode ACP/MCP implementation; no Hydra application, tmux or Nexus daemon is started.');
@@ -69,6 +71,11 @@ async function main(): Promise<void> {
   }
   if (values.verify) { verify(); return; }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
+  if(values['prepare-codex-owner']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','prepare-codex-owner'].includes(key)))throw new Error('Select one owner preparation mode');
+    console.log(JSON.stringify(prepareWindowsCodexOwner(values.config,__filename)));
+    return;
+  }
   if(values['init-codex-operator']){
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','init-codex-operator','nexus-operator','scode-argv','scode-env'].includes(key)))throw new Error('Select one operator initializer mode');
     console.log(JSON.stringify(prepareCodexEnrollment(values.config,JSON.parse(values['nexus-operator']??'null'),

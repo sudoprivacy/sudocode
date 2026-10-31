@@ -62,7 +62,8 @@ def main():
         head = fetch_head(pull)
         execution_ref = acceptance.authorized_policy(head, pull["base"]["sha"], policy_ref, api)
         receipt = acceptance.verify(head, pull["base"]["sha"], execution_ref, signers_ref=policy_ref)
-        current = acceptance.selected(acceptance.load_policy(execution_ref), acceptance.changed_paths(receipt["base"], head))
+        current = acceptance.selected(acceptance.load_policy(execution_ref), acceptance.changed_paths(receipt["base"], head),
+                                      base=receipt["base"], head=head)
         plan = acceptance.acceptance_plan(acceptance.load_policy(execution_ref), current, receipt["host"])
     else:
         group = event["merge_group"]

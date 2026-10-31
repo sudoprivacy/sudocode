@@ -88,6 +88,11 @@ def verify_resume(directory, source, command, host_smoke=False):
     def events():
         return (fixture / "events.log").read_text().splitlines()
 
+    def checkpoint_directory(output):
+        pointer = output / "checkpoint.json"
+        return (output / "checkpoints" / json.loads(pointer.read_text())["generation"]
+                if pointer.exists() else output / "checkpoint")
+
     if host_smoke:
         (fixture / "events.log").touch()
     else:
@@ -191,7 +196,8 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert "Saved completed profiles" in text and "--resume-from" in text, text
     assert events() == before_events + ["native-v1"]
     assert not (failed / "envelope.json").exists()
-    checkpoint = json.loads((failed / "checkpoint/receipt.json").read_text())
+    proof_directory = checkpoint_directory(failed)
+    checkpoint = json.loads((proof_directory / "receipt.json").read_text())
     failed_attempt = json.loads((failed / "attempt.json").read_text())
     assert failed_attempt["outcome"] == "failure" and failed_attempt["elapsed_seconds"] > 0
     assert failed_attempt["started_at"] <= failed_attempt["finished_at"]
@@ -200,7 +206,7 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert checkpoint["kind"] == "completed-profiles"
     assert set(checkpoint["checks"]) == {"native-workspace"}
     assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
-    proof = json.loads((failed / "checkpoint/envelope.json").read_text())
+    proof = json.loads((proof_directory / "envelope.json").read_text())
     note = fixture / "checkpoint-note.json"
     note.write_text(json.dumps({"version": 1, "attestations": {"fixture": proof}}))
     run("git", "notes", "--ref=refs/notes/local-acceptance", "add", "-F", note, failed_head)
@@ -208,12 +214,12 @@ def verify_resume(directory, source, command, host_smoke=False):
         error="completed profiles do not satisfy full acceptance")
     run("git", "notes", "--ref=refs/notes/local-acceptance", "remove", failed_head)
     # The SSH namespace also rejects a checkpoint independently of JSON kind checks.
-    signature = failed / "checkpoint/receipt.json.sig"
+    signature = proof_directory / "receipt.json.sig"
     allowed = fixture / "checkpoint-allowed-signers"
     allowed.write_text("fixture " + key.with_suffix(".pub").read_text().strip() + "\n")
     verification = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "fixture",
         "-n", "sudocode-local-acceptance", "-s", str(signature)],
-        input=(failed / "checkpoint/receipt.json").read_bytes(), capture_output=True)
+        input=(proof_directory / "receipt.json").read_bytes(), capture_output=True)
     assert verification.returncode != 0, "checkpoint signature must not authorize full acceptance"
     damaged = fixture / "damaged-checkpoint"
     shutil.copytree(failed, damaged)
@@ -255,6 +261,68 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert automatic_receipt["timing"]["first_recorded_started_at"] == failed_attempt["started_at"]
     assert "LOCAL_ACCEPTANCE_TIMING=" in result.stdout and "LOCAL_ACCEPTANCE_OPERATION_TIMING=" in result.stdout
     print("PASS: actual later failure preserves completed signed profiles; partial notes and wrong SSH purpose cannot pass; explicit/automatic resume reruns only unfinished work")
+
+    # os._exit bypasses every exception/finally handler in the actual runner.
+    # Its earlier successful profile must already have a complete signed proof.
+    run("git", "checkout", "main")
+    profiles.write_text('import os\n' + profiles.read_text().replace(
+        '    elif name == "rendering":\n',
+        '    elif name == "rendering":\n'
+        '        if (root.parent / "abrupt-next-profile").exists():\n'
+        '            os._exit(73)\n'))
+    run("git", "add", ".")
+    run("git", "commit", "-m", "Protected recipe can exit without exception cleanup")
+    run("git", "push", "origin", "main")
+    run("git", "checkout", "feature")
+    before_events = events()
+    before_notes = run("git", "ls-remote", "origin", "refs/notes/local-acceptance")
+    abrupt = fixture / "abrupt-without-cleanup"
+    (fixture / "abrupt-next-profile").touch()
+    text = check(abrupt, success=False)
+    assert "Saved completed profiles" in text, text
+    abrupt_attempt = json.loads((abrupt / "attempt.json").read_text())
+    assert abrupt_attempt["outcome"] == "running", "The real abrupt exit unexpectedly ran finally cleanup"
+    assert not (abrupt / "envelope.json").exists()
+    checkpoint = json.loads((checkpoint_directory(abrupt) / "receipt.json").read_text())
+    assert checkpoint["kind"] == "completed-profiles" and set(checkpoint["checks"]) == {"native-workspace"}
+    assert events() == before_events + ["native-v1"]
+    assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
+    # A half-written new generation is invisible until its atomic pointer is
+    # published. It cannot hide the previous complete SSH-signed generation.
+    abandoned = abrupt / "checkpoints/999999999999999999999"
+    abandoned.mkdir()
+    (abandoned / "receipt.json").write_text('{"kind":"unsigned-partial"}\n')
+    damaged = fixture / "escaped-checkpoint-pointer"
+    shutil.copytree(abrupt, damaged)
+    (damaged / "checkpoint.json").write_text('{"version":1,"generation":"../escape"}\n')
+    check(fixture / "rejected-checkpoint-pointer", damaged, success=False,
+          error="Invalid checkpoint generation")
+    assert events() == before_events + ["native-v1"]
+    (fixture / "abrupt-next-profile").unlink()
+    recovered = fixture / "completed-after-abrupt-exit"
+    check(recovered, abrupt)
+    receipt = json.loads((recovered / "receipt.json").read_text())
+    assert receipt["resumed_from"]["profiles"] == ["native-workspace"]
+    assert receipt["timing"]["first_recorded_started_at"] == abrupt_attempt["started_at"]
+    assert events() == before_events + ["native-v1", "render-v2"]
+    # Preserve the prior on-disk checkpoint format for already-running authors.
+    legacy = fixture / "legacy-checkpoint-format"
+    shutil.copytree(abrupt, legacy)
+    shutil.copytree(checkpoint_directory(legacy), legacy / "checkpoint")
+    (legacy / "checkpoint.json").unlink()
+    check(fixture / "completed-from-legacy-checkpoint", legacy)
+    assert events() == before_events + ["native-v1", "render-v2", "render-v2"]
+    cached = isolated_home / ".nexus/local-acceptance/results" / failed_head / "2000000000"
+    shutil.copytree(abrupt, cached)
+    automatic = fixture / "automatic-after-abrupt-exit"
+    result = subprocess.run([sys.executable, str(helper), "check", "--base", "main", "--policy-ref", "main",
+        "--output", str(automatic)], cwd=work, env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Reusing signed native-workspace" in result.stdout, result.stdout
+    receipt = json.loads((automatic / "receipt.json").read_text())
+    assert receipt["timing"]["first_recorded_started_at"] == abrupt_attempt["started_at"]
+    assert events() == before_events + ["native-v1", "render-v2", "render-v2", "render-v2"]
+    print("PASS: actual abrupt CLI exit keeps completed signed profiles; explicit/automatic recovery skips them, retains first timing and accepts legacy checkpoints; unsigned generations and escaped pointers cannot replace proof")
 
 
 if __name__ == "__main__":

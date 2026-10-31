@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from local_acceptance import POLICY, SIGNERS
+from local_acceptance import POLICY, SIGNERS, production_build_paths
 
 
 def git(*args):
@@ -16,6 +16,7 @@ def git(*args):
 
 
 def main():
+    ignored_product_inputs = []
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
@@ -56,8 +57,10 @@ def main():
             # CLI integration modules are not inputs to the daemon/cohost
             # binaries or shell journeys. Native PTYs and live model scope
             # remain unchanged; manifests, src and moved source still qualify.
+            normal_inputs = production_build_paths(relevant, base, head)
+            ignored_product_inputs = [path for path in relevant if path not in normal_inputs]
             daemon = any(fnmatch.fnmatchcase(path, rule)
-                         for path in relevant
+                         for path in normal_inputs
                          if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
                          for rule in daemon_inputs)
     executor_inputs = {".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile",
@@ -67,13 +70,15 @@ def main():
                     for path in paths)
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
+    clippy_executor = any(path in {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py",
+                                  "e2e/local-acceptance/clippy_fail_fast.py"} for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
-              "clippy_required": str(clippy).lower()}
+              "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower()}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")
-    print(json.dumps({**result, "changed_paths": paths}))
+    print(json.dumps({**result, "changed_paths": paths, "normal_product_ignored": ignored_product_inputs}))
 
 
 if __name__ == "__main__":

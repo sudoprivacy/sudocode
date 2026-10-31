@@ -25,6 +25,86 @@ def load(name, path):
     return module
 
 
+def cache_migration(output, checks, command):
+    """Preserve a real Cargo build across migration, then reject stale code."""
+    output.mkdir()
+    state, legacy = output / "state", output / "legacy"
+    source = state / "leased-benchmarks-v1/rendering/candidate"
+    target = state / "leased-benchmarks-v1/target/rendering/candidate"
+    source.mkdir(parents=True)
+    (state / "cargo").mkdir()
+    (state / "cargo/config.toml").write_text("# private dependency-cache sentinel\n")
+    (state / "unrelated.txt").write_text("Do not migrate obsolete cache directories or unrelated files\n")
+    (source / "Cargo.toml").write_text('[package]\nname="cache-migration"\nversion="0.0.0"\nedition="2021"\n'
+                                      '[[bin]]\nname="cache-migration"\npath="main.rs"\n')
+    (source / "main.rs").write_text('fn main() { println!("candidate-A"); }\n')
+    command("cargo", "generate-lockfile", "--manifest-path", str(source / "Cargo.toml"))
+
+    def build():
+        return command("cargo", "build", "--locked", "--manifest-path", str(source / "Cargo.toml"),
+                       "--target-dir", str(target), "--message-format=json-render-diagnostics")
+
+    build()
+    binary = target / "debug/cache-migration"
+    before = (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    state.rename(legacy)
+    state.mkdir()
+    checks.migrate_benchmark_cache(legacy, state)
+    assert before == (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    assert (state / "cargo/config.toml").read_bytes() == (legacy / "cargo/config.toml").read_bytes()
+    assert not (state / "unrelated.txt").exists()
+    log = build()
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    artifacts = [row for row in rows if row.get("reason") == "compiler-artifact"]
+    assert artifacts and all(row["fresh"] for row in artifacts), "Migrated Cargo graph went cold"
+    assert before == (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    # A completed migration never overwrites an active Linux checkout from an
+    # older workline still using the read-only legacy cache.
+    (legacy / "leased-benchmarks-v1/rendering/candidate/main.rs").write_text('compile_error!("obsolete legacy source");\n')
+    marker = state / ".host-cache-migration-v1.json"
+    receipt = marker.read_bytes()
+    checks.migrate_benchmark_cache(legacy, state)
+    assert marker.read_bytes() == receipt
+    changed = output / "changed-source.rs"
+    changed.write_text('fn main() { println!("candidate-B"); }\n')
+    checks.copy_checkout_file(changed, source / "main.rs")
+    log = build()
+    changed_artifacts = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    changed_artifacts = [row for row in changed_artifacts if row.get("reason") == "compiler-artifact"]
+    assert changed_artifacts and all(not row["fresh"] for row in changed_artifacts), "Changed source was falsely Cargo-fresh"
+    assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-B"
+    assert subprocess.check_output([str(legacy / "leased-benchmarks-v1/target/rendering/candidate/debug/cache-migration")]).decode().strip() == "candidate-A"
+    # A partially copied destination has no completion receipt. Re-entering
+    # repairs it from the same legacy bytes; unrelated files remain untouched.
+    marker.unlink()
+    (legacy / "leased-benchmarks-v1/rendering/candidate/main.rs").write_bytes(changed.read_bytes())
+    binary.unlink()
+    (source / "main.rs").write_text('compile_error!("partial copy must be repaired");\n')
+    checks.migrate_benchmark_cache(legacy, state)
+    assert json.loads(marker.read_text())["status"] == "complete"
+    assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-A"
+    build()
+    assert subprocess.check_output([str(binary)]).decode().strip() == "candidate-B"
+    unsafe = output / "unsafe-state"
+    unsafe.mkdir()
+    (unsafe / "cargo").symlink_to(output / "must-not-write", target_is_directory=True)
+    try:
+        checks.migrate_benchmark_cache(legacy, unsafe)
+        raise AssertionError("An escaped cache root was copied")
+    except RuntimeError as error:
+        assert "Unexpected benchmark cache root" in str(error)
+    assert not (output / "must-not-write").exists() and not (unsafe / marker.name).exists()
+    marker.write_text('{"version":1,"status":"incomplete"}\n')
+    try:
+        checks.migrate_benchmark_cache(legacy, state)
+        raise AssertionError("An incomplete migration receipt was accepted")
+    except RuntimeError as error:
+        assert "Invalid benchmark cache migration receipt" in str(error)
+    return {"migrated_graph_fresh": True, "binary_hash_and_mtime_preserved": True,
+            "changed_source_recompiled": True, "legacy_binary_unchanged": True,
+            "partial_copy_recovered": True, "escaped_root_and_invalid_marker_refused": True}
+
+
 def rendering_matrix(output, checks, command):
     """Drive the unchanged paired evaluator through real native fixture processes."""
     output.mkdir()
@@ -288,6 +368,25 @@ out=Path(a.output);out.mkdir()
     (inputs / "trusted/rust/src/main.rs").write_text('fn main() {}\n', encoding="utf-8")
     stage_digests = []
     for name in ["rendering", "browser"]:
+        if name == "browser":
+            # Preserve the measured normal binary from this invocation, then
+            # actually compile another workline's source at the shared canonical
+            # path before browser acceptance restores its own exact sources.
+            identity = {"candidate": "fixture-candidate-A", "policy": "fixture-protected",
+                        "image_id": "sha256:" + "1" * 64, "context_sha256": "2" * 64}
+            (inputs / "identity.json").write_text(json.dumps(identity))
+            retained = inputs / "candidate-release"
+            retained.mkdir()
+            shutil.copy2(output / "subsequent-rendering/scode-candidate", retained / "scode")
+            (retained / "identity.json").write_text(json.dumps({
+                **identity, "version": 1, "sha256": digest,
+            }))
+            cached = output / "state/rendering/candidate/rust"
+            (cached / "src/main.rs").write_text('fn main() { println!("other-workline"); }\n')
+            command("cargo", "build", "--locked", "--release", "--manifest-path", str(cached / "Cargo.toml"),
+                    "--target-dir", str(output / "state/target/rendering/candidate"), "-p", "rusty-sudocode-cli", "--bin", "scode")
+            assert subprocess.check_output([str(candidate_target / "release/scode")]).decode().strip() == "other-workline"
+        before = len(commands)
         stage = output / ("subsequent-" + name)
         stage.mkdir()
         with checks.exclusive_benchmark_state(locks):
@@ -295,6 +394,12 @@ out=Path(a.output);out.mkdir()
         stage_digests += [hashlib.sha256((stage / "scode-candidate").read_bytes()).hexdigest(),
                           json.loads((stage / ("measurements/short/fixture.json" if name == "rendering"
                                               else "measurements/fixture.json")).read_text())["candidate_sha256"]]
+        if name == "browser":
+            extra_builds = [row for row in commands[before:] if "build" in row["command"]
+                            and "--manifest-path" in row["command"]
+                            and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml")]
+            assert not extra_builds, "Browser rebuilt the already measured normal release"
+            assert len(commands) - before == 8, "A required browser driver/observer was omitted"
     candidate_builds = [(index, row["command"]) for index, row in enumerate(commands)
                         if "build" in row["command"] and "--manifest-path" in row["command"]
                         and row["command"][row["command"].index("--manifest-path") + 1].endswith("/candidate/rust/Cargo.toml")]
@@ -302,14 +407,16 @@ out=Path(a.output);out.mkdir()
     assert len({args[args.index("--manifest-path") + 1] for _, args in candidate_builds}) == 1, "Candidate source path must stay canonical across profiles"
     assert len({args[args.index("--target-dir") + 1] for _, args in candidate_builds}) == 1, "Candidate outputs must stay with the same source path"
     assert all(value == digest for value in stage_digests), "Production candidate changed between profiles"
-    final_build_log = (output / "commands" / f"{candidate_builds[-1][0]:03d}.log").read_text(encoding="utf-8")
-    assert "Compiling " not in final_build_log, "Browser redundantly compiled the candidate after rendering"
+    assert subprocess.check_output([str(candidate_target / "release/scode")]).decode().strip() == "candidate:dev"
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})
     assert len(target_trees) == 4, target_trees
+    migration = cache_migration(output / "cache-migration", checks, command)
     matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
-              "target_trees": target_trees, "cross_profile_candidate_build_reused": True, "rendering_matrix": matrix,
+              "target_trees": target_trees, "cross_profile_candidate_build_reused": True,
+              "interleaved_other_candidate_does_not_rebuild_normal_release": True,
+              "rendering_matrix": matrix, "cache_migration": migration,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production browser build executor, Cargo and npm; distinct baseline/candidate and native integration drivers, reusable dev artifacts, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

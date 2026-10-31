@@ -1,0 +1,321 @@
+"""Exercise development-only build selection through real Git, Cargo and CLI."""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+SOURCE = Path(__file__).resolve().parents[2]
+PRODUCT = {"native-release", "native-services", "native-cohost"}
+
+
+def run(output):
+    output.mkdir(parents=True, exist_ok=False)
+    repository = output / "repository"
+    repository.mkdir()
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                       CARGO_BUILD_JOBS="1", CARGO_PROFILE_DEV_DEBUG="0",
+                       CARGO_PROFILE_TEST_DEBUG="0", CARGO_INCREMENTAL="0")
+    if os.name == "nt":
+        # Identical Windows links otherwise change timestamps/PDB GUIDs.
+        # Make this private canary reproducible; product flags stay untouched.
+        if "CARGO_ENCODED_RUSTFLAGS" in environment:
+            environment["CARGO_ENCODED_RUSTFLAGS"] += "\x1f-C\x1flink-arg=/Brepro"
+        else:
+            environment["RUSTFLAGS"] = environment.get("RUSTFLAGS", "") + " -C link-arg=/Brepro"
+    commands, cases = [], []
+
+    def command(*args, success=True):
+        result = subprocess.run(list(map(str, args)), cwd=repository, env=environment,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if (result.returncode == 0) != success:
+            raise AssertionError(str(args) + "\n" + result.stdout + result.stderr)
+        return result.stdout.strip() if success else result.stdout + result.stderr
+
+    def write(path, text):
+        destination = repository / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+
+    def commit(subject):
+        command("git", "add", ".")
+        command("git", "commit", "-m", subject)
+        return command("git", "rev-parse", "HEAD")
+
+    command("git", "init", "--initial-branch=main")
+    command("git", "config", "user.name", "Dependency scope acceptance")
+    command("git", "config", "user.email", "scope@example.invalid")
+    command("git", "config", "core.autocrlf", "false")
+    configuration = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
+                                   cwd=SOURCE, env=environment, capture_output=True, text=True).stdout.strip()
+    if configuration:
+        command("git", "config", "localAcceptance.vsdevcmd", configuration)
+    for name in [".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py", "spec/local_acceptance.json"]:
+        write(name, (SOURCE / name).read_text(encoding="utf-8"))
+    write(".gitignore", "rust/target/\n")
+    workspace = '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n'
+    application = ('[package]\nname="rusty-sudocode-cli"\nversion="0.1.0"\nedition="2021"\n'
+                   '[[bin]]\nname="scope-product"\npath="src/main.rs"\n'
+                   '[dependencies]\nruntime={path="../runtime"}\n')
+    write("rust/Cargo.toml", workspace)
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", application)
+    write("rust/crates/rusty-sudocode-cli/src/main.rs", 'fn main() { println!("product-{}", runtime::value()); }\n')
+    write("rust/crates/rusty-sudocode-cli/tests/development.rs", '#[test] fn native_case() { assert_eq!(runtime::value(), 42); }\n')
+    write("rust/crates/runtime/Cargo.toml", '[package]\nname="runtime"\nversion="0.1.0"\nedition="2021"\n[features]\ntest-helper=[]\n')
+    write("rust/crates/runtime/src/lib.rs", '#[cfg(not(feature="test-helper"))] pub fn value() -> u8 { 42 }\n'
+          '#[cfg(feature="test-helper")] pub fn value() -> u8 { 99 }\n')
+    write("rust/crates/helper/Cargo.toml", '[package]\nname="scope-helper"\nversion="0.1.0"\nedition="2021"\n'
+          '[dependencies]\nruntime={path="../runtime",features=["test-helper"]}\n')
+    write("rust/crates/helper/src/lib.rs", 'pub fn value() -> u8 { runtime::value() }\n')
+    command("cargo", "generate-lockfile", "--offline", "--manifest-path", "rust/Cargo.toml")
+    base = commit("Baseline native product and unused development helper")
+    helper = SOURCE / ".github/scripts/local_acceptance.py"
+    spec = importlib.util.spec_from_file_location("dependency_scope_executor", helper)
+    executor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(executor)
+    executor.ROOT = repository
+    target = repository / "rust/target"
+    build_environment = {**environment, "CARGO_TARGET_DIR": str(target)}
+
+    def cargo(*args):
+        result = executor.run_command(["cargo", *args], repository / "rust",
+                                      output / f"cargo-{len(commands):02}.log", build_environment)
+        commands.append(result)
+        return result
+
+    def product():
+        cargo("build", "--locked", "--offline", "-p", "rusty-sudocode-cli")
+        binary = target / "debug" / ("scope-product.exe" if os.name == "nt" else "scope-product")
+        assert command(binary) == "product-42"
+        return hashlib.sha256(binary.read_bytes()).hexdigest()
+
+    original_binary = product()
+    development = application + '[dev-dependencies]\nscope-helper={path="../helper"}\n'
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", development)
+    write("rust/crates/rusty-sudocode-cli/tests/development.rs", '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); }\n')
+    command("cargo", "generate-lockfile", "--offline", "--manifest-path", "rust/Cargo.toml")
+    changed = commit("Add development dependency and actual native helper case")
+
+    def expect(label, diff_base, expected):
+        text = command(sys.executable, helper, "plan", "--base", diff_base, "--policy-ref", "main",
+                       "--host", "windows", "--architecture", "AMD64")
+        plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ACCEPTANCE_PLAN=")))
+        names = set(plan["local_checks"])
+        assert names & PRODUCT == set(expected), (label, text)
+        assert "native-workspace" in names, (label, text)
+        assert {"rendering", "browser"} <= names, (label, text)
+        cases.append({"label": label, "base": diff_base, "head": command("git", "rev-parse", "HEAD"),
+                      "product_checks": sorted(names & PRODUCT), "native_tests_and_performance_retained": True})
+        (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
+        print("PASS: " + label, flush=True)
+
+    def ci_scope(diff_base, daemon):
+        head = command("git", "rev-parse", "HEAD")
+        keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
+        previous = {key: environment.get(key) for key in keys}
+        try:
+            for event, data in [
+                ("pull_request", {"pull_request": {"base": {"sha": diff_base}, "head": {"sha": head}}}),
+                ("push", {"before": diff_base, "after": head}),
+                ("merge_group", {"merge_group": {"base_sha": diff_base, "head_sha": head}}),
+            ]:
+                event_path = output / "ci-event.json"
+                event_path.write_text(json.dumps(data))
+                result_path = output / "ci-output.txt"
+                result_path.write_text("")
+                environment.update(GITHUB_EVENT_NAME=event, GITHUB_EVENT_PATH=str(event_path),
+                                   GITHUB_OUTPUT=str(result_path))
+                result = json.loads(command(sys.executable, repository / ".github/scripts/ci_input_scope.py"))
+                assert result["daemon_required"] == str(daemon).lower(), result
+                assert result["clippy_required"] == "true", result
+                assert result["live_required"] == "true", result
+                print(f"PASS: actual {event} selector daemon={daemon}; native lint/provider coverage retained", flush=True)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    environment.pop(key, None)
+                else:
+                    environment[key] = value
+
+    expect("dev-only manifest/lock skips unchanged normal products", base, [])
+    ci_scope(base, False)
+    assert product() == original_binary
+    cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+    assert product() == original_binary
+    positive_lock = (repository / "rust/Cargo.lock").read_text()
+
+    variants = [
+        ("normal dependency features", "rust/crates/rusty-sudocode-cli/Cargo.toml",
+         development.replace('runtime={path="../runtime"}', 'runtime={path="../runtime",features=["test-helper"]}'), PRODUCT),
+        ("optional normal dependency", "rust/crates/rusty-sudocode-cli/Cargo.toml",
+         development.replace('[dependencies]', '[dependencies]\nother={package="scope-helper",path="../helper",optional=true}'), PRODUCT),
+        ("build dependency", "rust/crates/rusty-sudocode-cli/Cargo.toml",
+         development + '[build-dependencies]\nscope-helper={path="../helper"}\n', PRODUCT),
+        ("target normal dependency", "rust/crates/rusty-sudocode-cli/Cargo.toml",
+         development + '[target.\'cfg(windows)\'.dependencies]\nother={package="scope-helper",path="../helper"}\n', PRODUCT),
+        ("feature definition", "rust/crates/rusty-sudocode-cli/Cargo.toml", development + '[features]\nextra=[]\n', PRODUCT),
+        ("workspace resolver change", "rust/Cargo.toml", workspace.replace('"2"', '"1"'), PRODUCT),
+        ("unknown workspace setting", "rust/Cargo.toml", workspace + '[profile.dev]\nopt-level=1\n', PRODUCT),
+        ("malformed manifest", "rust/crates/rusty-sudocode-cli/Cargo.toml", '[package\n', PRODUCT),
+        ("normal lock package changed", "rust/Cargo.lock", positive_lock.replace('name = "runtime"\nversion = "0.1.0"', 'name = "runtime"\nversion = "0.2.0"'), PRODUCT),
+        ("ambiguous additional lock version", "rust/Cargo.lock", positive_lock + '\n[[package]]\nname="runtime"\nversion="0.2.0"\n', PRODUCT),
+        ("lock format changed", "rust/Cargo.lock", positive_lock.replace('version = 4', 'version = 3'), PRODUCT),
+        ("source stays a normal product input", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT),
+        ("release assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-release"}),
+        ("service assertion stays required", "e2e/shared-services/scope.py", '# actual changed service fixture\n', {"native-services"}),
+        ("target-specific development alias", "rust/crates/rusty-sudocode-cli/Cargo.toml",
+         application + '[target.\'cfg(windows)\'.dev-dependencies]\nalias={package="scope-helper",path="../helper"}\n', []),
+    ]
+    for index, (label, path, text, expected) in enumerate(variants):
+        command("git", "switch", "--detach", changed)
+        write(path, text)
+        if path.endswith("Cargo.lock"):
+            assert text != positive_lock, label
+        commit("Scope boundary " + str(index))
+        expect(label, base, expected)
+        if label == "source stays a normal product input":
+            ci_scope(base, True)
+    command("git", "switch", "--detach", changed)
+    command("git", "mv", "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/renamed.rs")
+    commit("Keep both sides of a renamed source")
+    expect("renamed product source stays required", base, PRODUCT)
+    command("git", "switch", "--detach", changed)
+    assert not command("git", "status", "--porcelain")
+    # An earlier broader receipt/checkpoint must retain actual completed work
+    # when this protected selector removes only irrelevant normal builds.
+    command("git", "switch", "--detach", base)
+    key = output / "signing-key"
+    command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key)
+    policy = {"version": 1, "repository": "acceptance/fixture", "checks": {
+        "preflight": {"include": ["**"]},
+        "native-workspace": {"include": ["rust/**"]},
+        **{name: {"include": ["rust/Cargo.lock", "rust/crates/*/Cargo.toml",
+                              "rust/crates/rusty-sudocode-cli/tests/**"]}
+           for name in ["native-release", "native-services", "native-cohost"]},
+    }}
+    write("spec/local_acceptance.json", json.dumps(policy))
+    write("spec/local_acceptance_signers.json", json.dumps({"signers": {"fixture": {
+        "platform": executor.host()["system"], "public_key": key.with_suffix(".pub").read_text().strip()}}}))
+    write(".github/workflows/local-acceptance.yml", "# Private acceptance metadata\n")
+    write(".github/workflows/local-acceptance-publish.yml", "# Private publisher metadata\n")
+    write(".github/local-acceptance/Dockerfile", "FROM scratch\n")
+    write(".github/local-acceptance/checks.py", 'import sys\n'
+          'def run(name, root, output, base, execute):\n'
+          ' output.mkdir(parents=True)\n'
+          ' return [execute([sys.executable, "scope_check.py", name], root, output / "command.log")]\n')
+    write("scope_check.py", 'import os,sys\nfrom pathlib import Path\n'
+          'with Path(os.environ["SCOPE_CHECK_LOG"]).open("a") as log: log.write(sys.argv[1]+"\\n")\n'
+          'print("Actual native profile process: "+sys.argv[1])\n'
+          'raise SystemExit(9 if os.environ.get("FAIL_SCOPE_PROFILE")==sys.argv[1] else 0)\n')
+    protected = commit("Private signed-scope policy and native process checker")
+    command("git", "config", "localAcceptance.signer", "fixture")
+    command("git", "config", "localAcceptance.key", key)
+    # Use a real earlier broader protected policy, so the regression also
+    # runs from Docker's history-free tracked-source snapshot.
+    old_helper = helper
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", development)
+    write("rust/crates/rusty-sudocode-cli/tests/earlier_scope.rs", "// Earlier policy selects this native input\n")
+    command("cargo", "generate-lockfile", "--offline", "--manifest-path", "rust/Cargo.toml")
+    full_head = commit("Development-only source for an earlier broader full receipt")
+    environment["SCOPE_CHECK_LOG"] = str(output / "full-profile-count.txt")
+    old_full = output / "old-full"
+    command(sys.executable, old_helper, "check", "--base", protected, "--policy-ref", protected, "--output", old_full)
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 5
+    note = output / "actual-signed-note.json"
+    note.write_text(json.dumps({"version": 1, "attestations": {
+        "fixture": json.loads((old_full / "envelope.json").read_text())}}))
+    command("git", "notes", "--ref=refs/notes/local-acceptance", "add", "-F", note, full_head)
+    command("git", "switch", "--detach", protected)
+    for name in PRODUCT:
+        policy["checks"][name]["include"].remove("rust/crates/rusty-sudocode-cli/tests/**")
+    write("spec/local_acceptance.json", json.dumps(policy))
+    narrowed = commit("Protected policy narrows unchanged normal product selection")
+    command("git", "switch", "--detach", full_head)
+    text = command(sys.executable, helper, "verify", "--head", full_head, "--base", protected, "--policy-ref", narrowed)
+    assert "earlier scope" in text, text
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 5
+    print("PASS: actual earlier full Git/SSH receipt keeps valid execution without rerunning profiles", flush=True)
+    legacy = json.loads((old_full / "receipt.json").read_text())
+    legacy.pop("plan")
+    envelope = executor.sign_receipt(legacy, output / "legacy-without-plan", "fixture", key)
+    legacy_note = output / "legacy-signed-note.json"
+    legacy_note.write_text(json.dumps({"version": 1, "attestations": {"fixture": envelope}}))
+    command("git", "notes", "--ref=refs/notes/local-acceptance", "add", "--force", "-F", legacy_note, full_head)
+    command(sys.executable, helper, "verify", "--head", full_head, "--base", protected, "--policy-ref", narrowed)
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 5
+    print("PASS: actual legacy signed full receipt without a plan retains known completed checks", flush=True)
+    # Produce a real later failure and retain its signed earlier progress.
+    write("rust/crates/rusty-sudocode-cli/tests/scope_note.rs", "// A distinct unchanged-product commit\n")
+    partial_head = commit("Distinct development-only source for actual failed broader attempt")
+    environment["SCOPE_CHECK_LOG"] = str(output / "partial-profile-count.txt")
+    environment["FAIL_SCOPE_PROFILE"] = "native-cohost"
+    old_partial = output / "old-partial"
+    command(sys.executable, old_helper, "check", "--base", protected, "--policy-ref", protected,
+            "--output", old_partial, success=False)
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 5
+    resumed = output / "new-resumed"
+    command(sys.executable, helper, "check", "--base", protected, "--policy-ref", narrowed,
+            "--resume-from", old_partial, "--output", resumed)
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 5
+    saved = json.loads((resumed / "receipt.json").read_text())
+    assert set(saved["checks"]) == {"preflight", "native-workspace"}
+    checkpoint = json.loads((old_partial / "attempt.json").read_text())
+    assert saved["timing"]["first_recorded_started_at"] == checkpoint["first_recorded_started_at"]
+    assert json.loads((old_partial / "native-cohost/command.command.json").read_text())["exit_code"] == 9
+    environment.pop("FAIL_SCOPE_PROFILE")
+    print("PASS: actual failed broader checkpoint resumes only current checks without repeating completed work or erasing failure/time", flush=True)
+    command("git", "switch", "--detach", narrowed)
+    policy["checks"]["new-required"] = {"include": ["**"]}
+    write("spec/local_acceptance.json", json.dumps(policy))
+    expanded = commit("Protected policy adds an actual required check")
+    command("git", "switch", "--detach", partial_head)
+    failure = command(sys.executable, helper, "verify", "--head", full_head, "--base", protected,
+                      "--policy-ref", expanded, success=False)
+    assert "new-required" in failure or "Acceptance commands changed" in failure, failure
+    print("PASS: the same actual signed full receipt cannot omit a newly required profile", flush=True)
+    command("git", "switch", "--detach", protected)
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", development.replace(
+        'runtime={path="../runtime"}', 'runtime={path="../runtime",features=["test-helper"]}'))
+    command("cargo", "generate-lockfile", "--offline", "--manifest-path", "rust/Cargo.toml")
+    commit("Normal feature change retains the actual failing profile")
+    environment["SCOPE_CHECK_LOG"] = str(output / "normal-failure-count.txt")
+    environment["FAIL_SCOPE_PROFILE"] = "native-cohost"
+    normal_partial = output / "normal-old-partial"
+    command(sys.executable, old_helper, "check", "--base", protected, "--policy-ref", protected,
+            "--output", normal_partial, success=False)
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 5
+    failure = command(sys.executable, helper, "check", "--base", protected, "--policy-ref", narrowed,
+                      "--resume-from", normal_partial, "--output", output / "normal-new-still-fails", success=False)
+    assert len(Path(environment["SCOPE_CHECK_LOG"]).read_text().splitlines()) == 6
+    assert "Local acceptance failed (9)" in failure, failure
+    environment.pop("FAIL_SCOPE_PROFILE")
+    print("PASS: an actual normal-input change still reruns and fails its required profile", flush=True)
+    observed = [priority for row in commands for priority in row.get("compiler_priorities", {}).values()]
+    expected_priority = 16384 if os.name == "nt" else 10
+    assert observed and all(priority == expected_priority for priority in observed), observed
+    result = {"status": "PASS", "cases": cases, "commands": commands,
+              "unchanged_normal_binary_sha256": original_binary,
+              "actual_development_feature_case_passed": True,
+              "normal_binary_after_development_driver_unchanged": True,
+              "earlier_broader_full_and_partial_signed_evidence_reused": True,
+              "legacy_signed_receipt_without_plan_reused": True,
+              "original_failure_and_first_timing_preserved": True,
+              "newly_required_profile_refused": True,
+              "required_normal_failure_still_fails": True,
+              "actual_pr_push_queue_selectors_keep_lint_and_provider_scope": True,
+              "compiler_priority": expected_priority,
+              "scope": "Actual Git/public planner and Cargo/native canaries. No product runtime, provider or performance coverage claimed."}
+    (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(f"PASS: {len(cases)} actual Git boundaries, native development case and unchanged normal binary; {output}", flush=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    run(parser.parse_args().output.resolve())

@@ -246,6 +246,46 @@ binary graph and budgets remain. A failed A/A calibration is inconclusive.
 There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
 unchanged performance pairs; docs-only changes run preflight. Local compiler
 workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p><strong>Keep active benchmark build state on Linux storage (2026-10-31).</strong>
+The reusable checkouts, npm trees, Cargo dependency cache and targets now use a
+Docker Linux volume, while command logs and measurement evidence remain on the
+host. The first invocation copies only the existing <code>cargo</code> and
+<code>leased-benchmarks-v1</code> directories under the original global lease.
+It preserves canonical <code>/state</code> paths, modes and timestamps; the old
+host cache remains read-only and is not deleted. The completion receipt is
+written only after copying succeeds. First-run migration counts toward local
+time; future runs reuse the volume. Workloads, samples and budgets are unchanged,
+and both changed Docker recipes require fresh evidence. Native recipes remain
+unchanged. Real Cargo checks artifact freshness and identity after migration,
+changed-source rebuilding, interrupted-copy recovery and invalid-root/receipt
+refusal. Real Docker launcher checks retain frozen Git/image inputs and private
+labelled-volume cleanup. A separate actual Windows-bind-to-Linux-volume trial
+verified a previously warm graph stayed warm, with identical binary bytes and
+mtime, then rebuilt changed source; this is infrastructure evidence, not a
+production end-to-end speed claim. Windows bind timestamps rounded Cargo dep-info
+to whole seconds in the initial fast fixture, making that legacy graph already
+stale before migration; no timestamps or assertions were changed to hide it.</p>
+<p><strong>Retain one measured normal release across performance profiles
+(2026-10-31).</strong> In the same acceptance process, browser reuses rendering's
+immutable image ID and saved candidate release when the candidate, protected
+policy and Docker context match. An in-memory entry authorizes reuse; prior
+output directories and mutable image tags cannot. Read-only staged inputs bind
+the source, policy, image and binary SHA256. Fresh processes or changed inputs
+build normally; corrupted retained files fail. Baselines, dev-feature drivers,
+GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
+workline's source into the shared cache between profiles, then verifies that
+browser uses the original normal release without another normal candidate build.
+Actual Docker acceptance checks frozen images, the invocation boundary and five
+tampered release identities/bytes. This removes duplicate compilation without
+reducing measurement coverage; production elapsed savings remain unmeasured.
+The host and container entrypoint now share the canonical
+<code>container/&lt;profile&gt;</code> output layout. Docker regression uses the
+real entrypoint, dispatcher and native child command before retaining the
+binary for browser reuse; its workload replaces product measurements. This
+fixes a host file lookup that could fail after all six real rendering scenarios
+passed. Previous failed records remain failed; raw output is not promoted into
+signed acceptance.
+Both Docker recipes require new evidence; native recipes stay unchanged.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
 (2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
 alternating A/B pairs and all interaction counts and budgets. The successful
@@ -287,16 +327,24 @@ Keep whole-PR and final-head observations. Older/manual local history may be
 unknown, and abrupt termination can leave an unfinished record; neither counts
 as zero elapsed time or a complete end-to-end sample. Historical hosted means
 remain reference thresholds because historical local timing was not collected.</p>
-<p>Later local failures preserve SSH-signed checkpoints of already completed
-profiles when the source is still clean and unchanged. The installed push path
+<p>Every successful local profile preserves an SSH-signed checkpoint while the
+source is still clean and unchanged, before starting the next profile. Complete
+signed generations are immutable; an atomic <code>checkpoint.json</code> pointer
+advertises only a verified generation. This preserves earlier completed work
+even when a later profile exits without exception cleanup. The installed push path
 automatically reuses compatible same-head, same-base, same-host evidence and its
 original log hashes. Custom output runs print an executable resume command.
 Only unfinished or changed profiles rerun. Checkpoints have a separate signature
 purpose and cannot substitute for full acceptance, publish a successful GitHub
-status or authorize a push. Abrupt termination may prevent a checkpoint.
+status or authorize a push. Legacy <code>checkpoint/</code> records remain readable.
+An unfinished profile cannot be reused, and this does not claim host power-loss
+recovery. An unsigned abandoned generation cannot replace completed proof.
 The actual Git/SSH regression exercises a successful native process followed by
 a failed rendering process, partial-note rejection, damaged logs, automatic
-discovery and a complete successful resume. This removes repeated validation
+discovery and a complete successful resume. It additionally uses a real abrupt CLI
+exit, explicit/automatic recovery without repeating the completed process, a
+legacy checkpoint, an unsigned generation and an escaped-pointer refusal. The
+earliest recorded local time remains in the resumed receipt. This removes repeated validation
 without reducing product checks.</p>
 <p>Acceptance-contract changes run the complete Git/SSH decision matrix in a
 private local Docker container, with a pinned Rust/Python-capable image. The
@@ -310,6 +358,14 @@ the guard fingerprint without invalidating unrelated completed native profiles.
 The container takes no shared benchmark lease. In a same-source probe, the full
 matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
 single trials concern infrastructure validation, not production PR latency.</p>
+<p>Changes limited to the independent Cargo benchmark, Docker input or Clippy
+executor fixtures skip the unchanged local enforcement matrix. CI preflight
+still requires each changed fixture. Shared executors, policy/signers, guard
+fixtures and unknown new fixtures retain the complete guard, including mixed
+changes and renames in either direction. The planner and mandatory command
+output explain the CI responsibility directly. Real Git/public-planner and
+CI-selector regressions verify these boundaries; product checks and selected
+fixture assertions are unchanged.</p>
 <p>The guard fixture handles Windows archive CRLF conversion by reconstructing
 only bytes that exactly match each original protected SHA256 pin. Its private
 Git fixture keeps those bytes unchanged. Production pin checks and author Git
@@ -317,6 +373,15 @@ configuration stay unchanged; modified content is still rejected.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>
+<p>Windows SDK initialization no longer restores the launcher's inherited
+<code>NO_COLOR</code> after acceptance cleared it. Explicit fixture values remain
+honored. The native policy guard uses actual Cargo/SDK child processes for
+inherited, explicit and empty values, including cached initialization. An old
+executor fails the inherited-color case; the corrected executor passes all three.
+Product commands, assertions and budgets remain unchanged. Protected equivalence
+entries retain earlier successful exact-head evidence; the expanded policy guard
+requires a fresh run. This removes an environment-dependent local failure and
+adds no product feature-coverage credit.</p>
 <p>Native release acceptance reuses the workspace test-profile driver, with its
 mailbox feature graph, instead of compiling release dev-dependencies again.
 <code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release
@@ -347,6 +412,17 @@ sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
 <p>Native, SDK and installer test matrices stop peer work after the first failure.
+Strict all-target/all-feature Clippy also stops scheduling extra crates after
+its first error, allowing matrix cancellation sooner; already running compilers
+can finish. All three queue platforms and <code>-D warnings</code> remain.
+A real Cargo/Clippy fixture with three independent feature-gated warning failures
+compares continuing compilation with the current CI command, then verifies all
+three clean packages, test targets and enabled features. Actual compiler
+priorities are retained. This infrastructure check runs once on changed lint
+workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
+after a failure without reducing passing-run product or lint coverage; its small
+fixture timings are not a production PR latency claim.</p>
+<p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
 the same executor/profile/image ran every currently required check. New source
@@ -460,6 +536,33 @@ jobs per event without deleting a unique product case. Shared native cache
 environments match the main publisher; net timing and hit rates still require
 hosted observation. The optimization target is measured end-to-end CI latency
 at most 10% of the historical baseline, not merely fewer runner minutes.</p>
+
+<p>Local preflight checks actual merge conflicts with its supplied base and
+fetched <code>origin/main</code> before product compilation or benchmark leases.
+It prints conflicting paths and the next step at the mandatory interface;
+the checkout and index stay untouched, and clean branches may remain behind main.
+The checker comes from the hash-pinned protected policy, including on older
+author branches; no source update is needed just to acquire the check.
+The actual-Git history regression stays required in CI preflight. Editing only
+<code>e2e/pr-history/run.py</code> skips unrelated three-OS product builds;
+mixed product changes, unknown fixtures and renames across that boundary retain
+native coverage. This catches avoidable work before a full gate; it does not
+prove the 10% latency target or detect main changes after the check.</p>
+
+<p>Normal release, service, co-host and daemon build selection shares one
+Git/TOML comparison for development-only Cargo metadata. Resolver 2, workspace
+settings and normal/build dependency declarations must stay unchanged; existing
+lock packages/normal edges cannot change. New versions of existing names,
+deleted nodes and malformed/unknown metadata retain the ordinary scope. Rust
+sources and changed release/service assertions retain their own input rules.
+Native workspace/lint, provider, resize and both performance scopes remain.
+The mandatory interface prints ignored normal-build inputs. Earlier broader
+signed full receipts/checkpoints retain valid completed work and original timing;
+the current canonical plan supplies required checks and missing hosts. New checks
+and still-required failures remain blocking. Real Git/Cargo/process/SSH regressions
+cover these boundaries, dev-feature isolation, unchanged normal binary bytes,
+legacy receipts and actual failed-profile recovery. This reduces redundant
+execution for qualifying inputs; it is not measured proof of the 10% target.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
 

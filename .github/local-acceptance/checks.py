@@ -135,7 +135,9 @@ def run(name, root, output, base, execute):
 
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
-        command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
+        entry = stage_profile_executor(root, execution_policy_ref(), name, output / "history-policy")
+        print("History preflight uses the protected policy checker; the author branch stays unchanged.", flush=True)
+        command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
         print("Local contract validation: full private Docker decision matrix. "
               "No product build or benchmark lease.", flush=True)
@@ -150,11 +152,7 @@ def run(name, root, output, base, execute):
                                f"guard log above. The decision matrix has not started: {error}") from error
         contract_container(root, output, command)
     elif name == "native-guard":
-        try:
-            policy_ref, _ = run.execution_refs
-        except AttributeError:
-            policy_ref = "origin/main"
-        policy_ref = policy_ref or "origin/main"
+        policy_ref = execution_policy_ref()
         entry = stage_profile_executor(root, policy_ref, name, output / "policy")
         command(sys.executable, str(entry), "--repository", str(root),
                 "--output", str(output / "executor"),
@@ -285,26 +283,40 @@ def run(name, root, output, base, execute):
     return results
 
 
+def execution_policy_ref():
+    """Use the dispatcher's frozen policy even for an older author checkout."""
+    try:
+        policy_ref, _ = run.execution_refs
+    except AttributeError:
+        policy_ref = None
+    return policy_ref or "origin/main"
+
+
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         ".github/local-acceptance/native_guard.py": "422ec7331d5ab293b9fdb5e2a319e683bb00487bc36dfb8d0347e70b8cfa837f",
         ".github/local-acceptance/nextest_guard.py": "ee376e77ea8c79da73c54409cbd07a95a786d0e7710e406e6977967d633a7d82",
-        ".github/scripts/local_acceptance.py": "86377abf0d99bc83dc5b6b46d86d174d5308bd044a4490d775edb8ddb1e16d86",
-        "e2e/local-acceptance/run.py": "b02f5d845b18466bb68a31f5ab5a0437b95840895ad122ff166490c3685a4bba",
+        ".github/scripts/local_acceptance.py": "6212dd73f8f1e914c6200d41134a096da21dfdb17ff52840a29750c888801ccc",
+        "e2e/local-acceptance/run.py": "bf710d5325e66d7a77f6861e0b1862a6f9eee95cb8162c85eebdb252e13bea1a",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/resume_acceptance.py": "4bfa5af7e5e690bcdef13c7cae39665c70ed4ab32ce00b5251c792252da3ec9f",
-        "e2e/local-acceptance/release_acceptance.py": "21272f1e5b701410af25238eae2b354badf1f8aa2a193ec6698071e9ef037164",
+        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
+        ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
     }
 
 
 def stage_profile_executor(root, policy_ref, name, policy_root):
     """Materialize one hash-bound native tool set without changing the candidate."""
-    if name != "native-guard":
+    files = native_guard_files()
+    if name == "preflight":
+        files = {".github/scripts/check_pr_history.py": files[".github/scripts/check_pr_history.py"]}
+    elif name != "native-guard":
         raise RuntimeError(f"No policy-owned native executor for {name}")
-    for relative, expected in native_guard_files().items():
+    for relative, expected in files.items():
         destination = (policy_root / relative).resolve()
         if not destination.is_relative_to(policy_root.resolve()):
             raise RuntimeError("Executor input escaped its policy snapshot")
@@ -315,13 +327,15 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
                                "Update its protected pin before running acceptance.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents)
+    if name == "preflight":
+        return policy_root / ".github/scripts/check_pr_history.py"
     # The release fixture imports this module. Bind the exact branch it executes
     # without a cyclic byte hash of a file containing its own execution pins.
     spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "819ea1ba1656f50066033adafb5fc6b0412c2e75812fadf19026940a9b9b73fe"
+    expected = "5cb6b33238fe8348e326d854f7481ba10d1739c14a890fcd0d6233e52c4de68d"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
@@ -388,11 +402,16 @@ def container_storage():
     return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
 
 
+def container_profile_output(evidence, name):
+    """Map the mounted evidence root to the container entrypoint's profile output."""
+    return evidence / "container" / name
+
+
 def container(name, root, output, base, command, execute, policy_ref, candidate_ref, images=None):
     state, lease_volume = container_storage()
     state.mkdir(parents=True, exist_ok=True)
-    # The container leases its reusable checkouts and targets exclusively;
-    # dependency downloads remain shared across profiles.
+    # Keep active Cargo/npm state on Docker's Linux filesystem. The previous
+    # host cache stays read-only and seeds the volume under the same lease.
     def revision(ref):
         return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
 
@@ -420,7 +439,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     image_receipt = output / "image-id.txt"
     # A check invocation owns this map. Reuse only its actual build result,
     # never a mutable tag or an image left by another acceptance invocation.
-    cached = images.get(digest) if images is not None else None
+    key = (str(output.parent.resolve()), candidate, protected, digest)
+    cached = images.get(key) if images is not None else None
     # BuildKit can discard the previous image index when another build exports
     # the same tag. Keep an independent reference until this invocation finishes.
     image = (cached["image_tag"] if cached is not None
@@ -439,13 +459,27 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         # fail, rather than pulling a tag or silently rebuilding another image.
         command("docker", "image", "inspect", "--format", "{{.Id}}", image_id)
         image_receipt.write_text(image_id + "\n")
-    elif images is not None:
-        images[digest] = {"image_id": image_id, "image_tag": image, "build_receipt": build_receipt}
-    (output / "container-provenance.json").write_text(json.dumps({
+    record = cached if cached is not None else {
+        "image_id": image_id, "image_tag": image, "build_receipt": build_receipt,
+    }
+    if images is not None:
+        images[key] = record
+    identity = {
         "candidate": candidate, "baseline": reference, "policy": protected,
         "image_id": image_id, "image_tag": image, "context_sha256": digest,
         "image_reused": cached is not None, "image_build_receipt": build_receipt,
-    }, indent=2))
+    }
+    (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
+    (sources / "identity.json").write_text(json.dumps(identity, indent=2))
+    previous = record.get("release") if name == "browser" else None
+    if previous is not None:
+        reused = sources / "candidate-release"
+        reused.mkdir()
+        shutil.copy2(previous["binary"], reused / "scode")
+        (reused / "identity.json").write_text(json.dumps({
+            **identity, "version": 1, "sha256": previous["sha256"],
+        }, indent=2))
+        verified_candidate_release(sources)
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
@@ -454,11 +488,38 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
-            "--mount", f"type=bind,source={state},target=/state",
+            "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
+            "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
             "--mount", f"type=volume,source={lease_volume},target=/locks",
             "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
+    if name == "rendering":
+        profile_output = container_profile_output(output, name)
+        binary = profile_output / "scode-candidate"
+        report = json.loads((profile_output / "measurements/report.json").read_text())
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
+            raise RuntimeError("Rendering candidate binary does not match its completed measurements")
+        record["release"] = {"binary": binary, "sha256": digest}
+
+
+def verified_candidate_release(inputs):
+    """Accept only the same invocation's read-only, hash-bound normal release."""
+    directory = inputs / "candidate-release"
+    if not directory.exists():
+        return None
+    binary, receipt = directory / "scode", directory / "identity.json"
+    if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
+        raise RuntimeError("Reused benchmark release must contain regular files")
+    expected = json.loads((inputs / "identity.json").read_text())
+    observed = json.loads(receipt.read_text())
+    if observed.get("version") != 1 or any(observed.get(name) != expected[name]
+            for name in ["candidate", "policy", "image_id", "context_sha256"]):
+        raise RuntimeError("Reused benchmark release belongs to different source, policy or image")
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
+        raise RuntimeError("Reused benchmark release bytes changed after rendering")
+    return binary
 
 
 def copy_checkout_file(source, destination):
@@ -557,7 +618,51 @@ def run_viewport_browser_cases(driver, command, environment):
 
 def benchmark(name, root, output, base, command, target):
     with exclusive_benchmark_state():
+        migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
         benchmark_locked(name, root, output, base, command, target)
+
+
+def migrate_benchmark_cache(legacy, state):
+    """Seed the Linux volume without changing canonical paths or Cargo mtimes."""
+    marker = state / ".host-cache-migration-v1.json"
+    if checkout_link(marker):
+        raise RuntimeError(f"Benchmark cache migration receipt must be a regular file: {marker}")
+    if marker.is_file():
+        receipt = json.loads(marker.read_text(encoding="utf-8"))
+        if receipt.get("version") != 1 or receipt.get("status") != "complete":
+            raise RuntimeError(f"Invalid benchmark cache migration receipt: {marker}")
+        return
+    if not legacy.is_dir() or checkout_link(legacy) or checkout_link(state):
+        raise RuntimeError("Benchmark cache migration requires real legacy/state directories")
+    started = time.monotonic()
+    copied = []
+    print("Preparing Linux benchmark cache under the shared lease. "
+          "Existing host cache stays read-only; source/target paths and timestamps are preserved. "
+          "This one-time copy counts toward local acceptance time.", flush=True)
+    # Ignore pre-lease disposable checkouts. Both profiles already share these
+    # canonical paths; preserving them keeps existing Cargo dep-info reusable.
+    for name in ["cargo", "leased-benchmarks-v1"]:
+        source = legacy / name
+        if checkout_link(source):
+            raise RuntimeError(f"Unexpected benchmark cache root: {source}")
+        if not source.exists():
+            continue
+        destination = state / name
+        if checkout_link(source) or checkout_link(destination) or not source.is_dir():
+            raise RuntimeError(f"Unexpected benchmark cache root: {source}")
+        destination.mkdir(parents=True, exist_ok=True)
+        print(f"Copying existing {name} cache to Linux storage; no compiler runs during migration.", flush=True)
+        # cp -a retains nanosecond mtimes, modes and internal Cargo links. A
+        # failed/interrupted copy leaves no completion marker and is retried.
+        subprocess.run(["nice", "-n", "10", "cp", "-a", "--", str(source) + "/.", str(destination)], check=True)
+        copied.append(name)
+    receipt = {"version": 1, "status": "complete", "copied": copied,
+               "elapsed_seconds": round(time.monotonic() - started, 3)}
+    temporary = marker.with_suffix(".tmp")
+    temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(marker)
+    print(f"Linux benchmark cache ready after {receipt['elapsed_seconds']:.3f}s; "
+          f"reused directories: {copied}. Full command logs remain in the host evidence directory.", flush=True)
 
 
 def benchmark_storage(name):
@@ -662,7 +767,14 @@ def benchmark_locked(name, root, output, base, command, target):
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
     driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
+    reused = verified_candidate_release(inputs) if name == "browser" else None
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
+        if label == "candidate" and reused is not None:
+            shutil.copy2(reused, output / "scode-candidate")
+            print("Browser acceptance reuses the measured normal release from rendering; "
+                  "source, protected policy, immutable image and binary SHA256 match. "
+                  "Browser drivers and every observer still run.", flush=True)
+            continue
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
                 "--target-dir", str(build_targets[label]), "-p", "rusty-sudocode-cli", "--bin", "scode")
         shutil.copy2(build_targets[label] / "release/scode", output / f"scode-{label}")
@@ -717,7 +829,7 @@ def main():
     parser.add_argument("--container-check", choices=["rendering", "browser"])
     parser.add_argument("--native-checks", nargs="*")
     parser.add_argument("--base", required=True)
-    parser.add_argument("--output", type=Path, default=Path("/evidence/container"))
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     runner = Path(__file__).resolve().parents[2]
     root = Path("/inputs/candidate") if args.container_check else runner
@@ -726,8 +838,9 @@ def main():
     spec.loader.exec_module(helper)
     names = [args.container_check] if args.container_check else args.native_checks
     for name in names:
-        results = run(name, root, args.output / name, args.base, helper.run_command)
-        (args.output / name / "commands.json").write_text(json.dumps(results, indent=2))
+        output = args.output / name if args.output is not None else container_profile_output(Path("/evidence"), name)
+        results = run(name, root, output, args.base, helper.run_command)
+        (output / "commands.json").write_text(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

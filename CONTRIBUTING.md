@@ -209,6 +209,41 @@ outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries
 stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
 cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+When rendering and browser run in the same acceptance process for the same
+candidate, protected policy and Docker context, browser reuses rendering's exact
+immutable image and saved normal release. The retained image ID and binary hash
+live in that process only; previous output directories and mutable image tags
+cannot authorize reuse. The release enters browser through read-only inputs and
+is checked against its source, policy, image and SHA256 before use. Changed
+inputs or a fresh process use the ordinary build path; corrupted retained files
+fail explicitly. Browser baseline builds, dev-feature drivers, paired GUI samples
+and viewport observers still run. Real Cargo acceptance compiles another source
+into the shared cache between profiles and verifies the original normal release
+is preserved without another normal candidate build. Actual Docker acceptance
+exercises the frozen image, invocation boundary and five tampered identities/bytes.
+The host and container entrypoint share the canonical `container/<profile>`
+output layout. The Docker fixture calls the actual entrypoint and dispatcher,
+then retains the resulting native binary for browser reuse; a fixture workload
+replaces statistical product measurements. Missing or mismatched output fails
+without promoting old raw results into a signed profile.
+This removes a duplicate build even when another workline churns the cache. It
+does not shorten a successful measurement matrix or prove production speedup.
+Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
+Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
+copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories
+under the same lease, preserving canonical `/state` paths, modes and mtimes.
+The host cache stays mounted read-only at `/legacy-state`; it is not deleted.
+Completed migration is not repeated; interruption leaves no completion receipt.
+The required command prints migration start/completion and includes that one-time
+copy in local elapsed time. Logs and measurement evidence remain in the host
+output directory. Keep both the data volume and the separate shared lease volume
+when managing Docker storage. Removing the data volume requires migration again;
+removing the preserved host cache as well causes a cold dependency/product build.
+Real Cargo acceptance checks warm artifact identity, changed-source rebuild,
+partial-copy recovery, and refusal of escaped roots or invalid completion records.
+The production Docker launcher is also exercised with private labelled volumes.
+This changes storage placement, not selected workloads, samples or budgets. Both
+Docker execution recipes require new evidence; native profile recipes stay unchanged.
 Rendering completes and judges one scenario at a time. Each scenario keeps its
 two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
 counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases
@@ -225,7 +260,30 @@ are byte-for-byte unchanged; the unchanged browser command list has an exact
 approved hash pair so existing signed browser evidence remains reusable.
 These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
-compilers use one job and BelowNormal/nice priority while Cargo and tests stay
+preflight checks actual conflicts against its supplied base and fetched
+`origin/main` before product builds and benchmark leases. It prints the exact
+paths and recovery step without changing the checkout or index. Clean branches
+may stay behind main. Preflight stages the exact hash-pinned checker from its
+protected policy, so an older author branch does not need a source update to
+receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays required
+in CI preflight; editing it alone skips unrelated native product builds.
+Development-only Cargo manifest/lock changes do not select normal release,
+service, co-host or daemon builds. The shared selector reads committed Git/TOML:
+resolver 2 and workspace settings must stay unchanged, manifest edits must be
+limited to dev dependencies, and existing lock packages/normal edges must stay
+unchanged. New versions of an existing package name, deleted lock nodes and
+unknown/malformed metadata keep the ordinary scope. Native workspace/lint,
+provider, resize and statistical performance scopes stay unchanged. Other
+source or assertion changes still select their checks. Required output prints
+`BUILD_INPUT_SCOPE` and CI's `normal_product_ignored` paths. Python without the
+standard TOML reader conservatively keeps all checks.
+An earlier broader signed full receipt or checkpoint can retain unchanged
+completed profiles for the same source/base/host. Its signed plan must still
+match a canonical host assignment for known profiles. The current protected
+selection drives required checks and CI hosts; new checks cannot inherit a pass.
+Legacy receipts without plans retain known completed checks. Failed/unrun
+required profiles still run, and old failures and first timing remain recorded.
+Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
 Compiler observation reads executable paths instead of argv, avoiding macOS
 process-argument permission races while preserving native command failures.
@@ -273,6 +331,10 @@ guard always needs its own actual run, including a refused process-name query.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.
+Inherited `NO_COLOR` is cleared after SDK initialization so the launcher's log
+preference cannot suppress colored fixtures. A command's explicit `NO_COLOR`
+value is still honored. The native guard runs actual Cargo/SDK processes to
+verify inherited, explicit and empty values, including cached SDK setup.
 
 A signed Git note binds the successful command list and log hashes to the exact
 commit, tree, diff base, policy and native host. The hook publishes that note
@@ -291,14 +353,23 @@ native platform and architecture. The previous policy must belong to the current
 history, its signature must still verify, and the original logs must match their
 signed hashes. Changed profiles run again. The new receipt records which profiles
 were reused and retains their original command records and completion time.
-If a later profile fails or validation is interrupted, the runner signs a separate
-checkpoint for already completed profiles while the source remains clean and
-unchanged. The failed and unrun profiles remain required. Ordinary pushes
+After each successful profile, the runner signs a separate checkpoint while the
+source remains clean and unchanged, before it starts the next profile. Complete
+receipt/signature/envelope files live in immutable numbered generations; an atomic
+`checkpoint.json` pointer advertises only a verified complete generation. An
+abrupt process exit can therefore retain earlier completed profiles without
+running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
 host; custom output directories can use the printed `check --resume-from` command.
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
-An abrupt process termination can prevent checkpoint creation.
+Earlier `checkpoint/` records remain readable. An incomplete unadvertised generation
+does not replace earlier signed progress. The active profile still needs to finish
+before its result can be saved; this does not recover a partial profile or claim
+protection against host power loss. The required command prints progress and the
+resume command directly. Real Git/SSH acceptance uses an actual abrupt CLI exit,
+explicit and automatically discovered resume, a legacy record, an unsigned partial
+generation and an escaped pointer; the earliest recorded local time is retained.
 The required interface prints `LOCAL_ACCEPTANCE_TIMING` and retains
 `attempt.json` for each started check, including failures. Signed receipts and
 checkpoints retain the first recorded start across verified resumes. Outer push
@@ -318,6 +389,16 @@ negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build
 the product. Product native acceptance and complementary CI hosts are unchanged.
+Edits limited to the independent Cargo benchmark, Docker input or Clippy
+executor fixtures skip the unchanged local enforcement matrix. Their actual
+changed fixture remains required in CI preflight. Shared executors, policy,
+signers, enforcement fixtures and unknown new acceptance fixtures still select
+the full guard; mixed changes and renames in either direction retain it.
+The public planner and mandatory command output state that CI preflight runs
+changed executor fixtures. Real Git regressions exercise isolated, mixed,
+unknown and renamed inputs through the public planner, and verify the matching
+PR/push/queue selector outputs. Product checks and selected fixture assertions
+are unchanged; this avoids repeating unrelated enforcement tests locally.
 The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
 archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git
@@ -398,6 +479,13 @@ the native suites on the combined merge-group tree. Rust-changing PRs also run
 strict all-target/all-feature Clippy on Linux; the queue runs that same strict
 check on Linux, Windows and macOS against the combined tree. The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
+The lint command stops scheduling additional crates after the first error;
+compiler jobs already running may finish before matrix cancellation. Successful
+runs retain every target, feature and `-D warnings` check. An actual three-package
+Cargo/Clippy fixture compares the old continuing command with the current CI
+command, verifies all packages/targets/features after fixing the warnings, and
+records the actual compiler priorities. It runs once on a PR only when the lint
+workflow, fixture or scope selector changes; queue/main reuse its result.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions on main are unchanged; mock transport results do not
@@ -698,7 +786,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
@@ -982,7 +1070,7 @@ Before opening a PR:
       plan on the author's platform and produced a valid exact-head receipt.
       Use its printed commands and local/CI responsibilities; do not infer a
       full Rust build from this checklist for documentation or SDK-only edits.
-- [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings`; the queue runs it on all three native platforms.
+- [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the queue runs it on all three native platforms.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen

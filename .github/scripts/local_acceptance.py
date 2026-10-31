@@ -23,6 +23,10 @@ import subprocess
 import sys
 import tempfile
 import time
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 import urllib.error
 import urllib.parse
 
@@ -282,11 +286,125 @@ def changed_paths(base, head):
     return git("diff", "--name-only", "--no-renames", "-z", base, head).stdout.decode().split("\0")[:-1]
 
 
-def selected(policy, paths):
+def manifest_dependencies(manifest, workspace, kind):
+    """Include optional and target-specific edges without executing Cargo/code."""
+    names = set()
+    tables = [manifest, *manifest.get("target", {}).values()]
+    for table in tables:
+        for alias, dependency in table.get(kind, {}).items():
+            if isinstance(dependency, dict) and dependency.get("workspace"):
+                dependency = workspace.get("workspace", {}).get("dependencies", {})[alias]
+            names.add(dependency.get("package", alias) if isinstance(dependency, dict) else alias)
+    return names
+
+
+def without_development_dependencies(manifest):
+    result = copy.deepcopy(manifest)
+    result.pop("dev-dependencies", None)
+    for target in result.get("target", {}).values():
+        target.pop("dev-dependencies", None)
+    # Removing a target's only dev table must not become a product change.
+    if "target" in result:
+        result["target"] = {name: value for name, value in result["target"].items() if value}
+        if not result["target"]:
+            result.pop("target")
+    return result
+
+
+def development_lock_change(before, after, manifests):
+    """Require every existing production resolution/edge to remain unchanged."""
+    if {k: v for k, v in before.items() if k != "package"} != {k: v for k, v in after.items() if k != "package"}:
+        return False
+    def packages(lock):
+        items = lock.get("package", [])
+        indexed = {(p["name"], p["version"], p.get("source")): p for p in items}
+        if len(items) != len(indexed):
+            raise ValueError("Duplicate lock package identities")
+        return indexed
+    old, new = packages(before), packages(after)
+    if not old.keys() <= new.keys():
+        return False
+    # A new version/source of an existing name can change how an unqualified
+    # lock edge resolves. Keep all normal gates for that case.
+    old_names = {key[0] for key in old}
+    if any(key[0] in old_names for key in new.keys() - old.keys()):
+        return False
+    for identity, previous in old.items():
+        current = new[identity]
+        if previous == current:
+            continue
+        allowed = manifests.get(identity[0]) if identity[2] is None else None
+        if allowed is None:
+            return False
+        if {k: v for k, v in previous.items() if k != "dependencies"} != {k: v for k, v in current.items() if k != "dependencies"}:
+            return False
+        changed = set(previous.get("dependencies", [])) ^ set(current.get("dependencies", []))
+        if any(edge.split()[0] not in allowed for edge in changed):
+            return False
+    return True
+
+
+def production_build_paths(paths, base, head):
+    """Discard proven dev-only Cargo inputs for normal product builds only.
+
+    All Rust sources, test harnesses, normal/build dependencies, features,
+    workspace settings and unknown inputs retain their ordinary path scope.
+    The metadata verifier reads Git/TOML; candidate code is never executed.
+    """
+    paths = list(paths)
+    metadata = [p for p in paths if p == "rust/Cargo.lock" or p == "rust/Cargo.toml"
+                or (p.startswith("rust/crates/") and p.count("/") == 3 and p.endswith("/Cargo.toml"))]
+    if not metadata or tomllib is None:
+        return paths
+    try:
+        def document(ref, path):
+            return tomllib.loads(tracked(ref, path).decode("utf-8"))
+        old_workspace = document(base, "rust/Cargo.toml")
+        new_workspace = document(head, "rust/Cargo.toml")
+        if old_workspace != new_workspace or old_workspace.get("workspace", {}).get("resolver") != "2":
+            return paths
+        ignored = {"rust/Cargo.toml"} & set(metadata)
+        allowed = {}
+        for path in metadata:
+            if path in {"rust/Cargo.toml", "rust/Cargo.lock"}:
+                continue
+            # Added/deleted crates keep their own build scope. Their unique
+            # dev-only lock nodes may still be irrelevant to other products.
+            try:
+                before, after = document(base, path), document(head, path)
+            except RuntimeError:
+                continue
+            if without_development_dependencies(before) != without_development_dependencies(after):
+                continue
+            name = before["package"]["name"]
+            development = (manifest_dependencies(before, old_workspace, "dev-dependencies")
+                           | manifest_dependencies(after, new_workspace, "dev-dependencies"))
+            normal = set().union(*(manifest_dependencies(before, old_workspace, kind)
+                                   for kind in ["dependencies", "build-dependencies"]))
+            allowed[name] = development - normal
+            ignored.add(path)
+        if "rust/Cargo.lock" in metadata and development_lock_change(
+                document(base, "rust/Cargo.lock"), document(head, "rust/Cargo.lock"), allowed):
+            ignored.add("rust/Cargo.lock")
+    except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return paths
+    return [path for path in paths if path not in ignored]
+
+
+def selected(policy, paths, *, base=None, head=None):
+    paths = list(paths)
+    product_paths = production_build_paths(paths, base, head) if base and head else paths
+    if product_paths != paths:
+        print("Development-only Cargo metadata skips unchanged normal product builds; "
+              "native test and performance input scopes remain unchanged.", flush=True)
+        print("BUILD_INPUT_SCOPE=" + json.dumps({"base": base, "head": head,
+              "normal_product_ignored": [p for p in paths if p not in product_paths],
+              "applies_to": ["native-release", "native-services", "native-cohost"],
+              "native_tests_and_performance_scope_unchanged": True}), flush=True)
     return [name for name, rule in policy["checks"].items()
             if name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
-                   for p in paths)]
+                   for p in (product_paths if name in {"native-release", "native-services", "native-cohost"} else paths))]
 
 
 NATIVE_TARGETS = {
@@ -351,6 +469,8 @@ def report_plan(plan):
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")
+    lines.append("Hosted CI preflight also runs changed Cargo/Docker/Clippy executor fixtures, "
+                 "selected from committed Git inputs.")
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
@@ -496,7 +616,9 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
-    # Normalize platform/inherited color settings before explicit fixture overrides.
+    # SDK discovery captures the parent's environment, including NO_COLOR.
+    # Clear that inherited preference after setup; explicit fixture values
+    # below still select NoColor, including when the SDK environment is cached.
     environment.pop("NO_COLOR", None)
     environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
@@ -587,12 +709,12 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head))
+    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head), base=receipt["base"], head=head)
     if not required:
         raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     checks = receipt.get("checks", {})
-    if completed_only and (not checks or not set(checks).issubset(required)):
-        raise RuntimeError("Checkpoint must contain nonempty completed profiles from its protected plan")
+    if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
+        raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
     compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
     if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
             or (not compatible and "commands_sha256" in receipt)):
@@ -629,8 +751,16 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
             if command.get("exit_code") != 0 or not command.get("command") or len(command.get("log_sha256", "")) != 64:
                 raise RuntimeError(f"Incomplete/failed command in {name}")
     plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
-    if receipt.get("plan", plan) != plan:
+    legacy_names = [name for name in load_policy(policy_ref)["checks"] if name in checks]
+    original_plan = receipt.get("plan", acceptance_plan(load_policy(policy_ref), legacy_names, receipt["host"]))
+    declared = original_plan.get("local_checks") if isinstance(original_plan, dict) else None
+    ordered = [name for name in load_policy(policy_ref)["checks"] if isinstance(declared, list) and name in declared]
+    if (declared != ordered or not set(checks).issubset(declared)
+            or original_plan != acceptance_plan(load_policy(policy_ref), declared, receipt["host"])):
         raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
+    if original_plan != plan:
+        print("Reusing unchanged completed execution from an earlier scope; the current protected plan "
+              "still determines required checks and missing CI hosts.", flush=True)
     if completed_only:
         print(f"Verified completed profiles for {head[:12]}: {', '.join(checks)}; full acceptance still required.", flush=True)
     else:
@@ -675,10 +805,29 @@ def publish(head, envelope, remote):
         git("update-ref", "-d", temporary)
 
 
+def local_proof_directory(directory):
+    """Read one atomic checkpoint pointer to an immutable signed generation."""
+    if (directory / "envelope.json").is_file():
+        return directory
+    pointer = directory / "checkpoint.json"
+    if pointer.exists():
+        value = json.loads(pointer.read_bytes())
+        generation = value.get("generation")
+        if value.get("version") != 1 or not isinstance(generation, str) or not re.fullmatch(r"[0-9]+", generation):
+            raise RuntimeError("Invalid checkpoint generation; keep the original signed evidence")
+        proof = directory / "checkpoints" / generation
+        if (pointer.is_symlink() or proof.is_symlink() or (directory / "checkpoints").is_symlink()
+                or not proof.resolve().is_relative_to(directory.resolve())):
+            raise RuntimeError("Checkpoint generation escaped its acceptance output")
+        return proof
+    # Earlier runners wrote one checkpoint directly in this directory.
+    return directory / "checkpoint"
+
+
 def resume_checks(directory, head, base, policy_ref, output, needed):
     """Reuse signed exact-source checks only while their commands and logs match."""
     directory = Path(directory).resolve()
-    proof = directory if (directory / "envelope.json").is_file() else directory / "checkpoint"
+    proof = local_proof_directory(directory)
     completed_only = proof != directory
     envelope = json.loads((proof / "envelope.json").read_text())
     payload = base64.b64decode(envelope["payload"], validate=True)
@@ -723,13 +872,27 @@ def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
             "signature": base64.b64encode(signature.read_bytes()).decode()}
 
 
+def save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref):
+    """Publish complete signed files before atomically advertising their generation."""
+    clean(head)
+    checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
+    generation = str(time.time_ns())
+    directory = output / "checkpoints" / generation
+    envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
+    verify_envelope(envelope, head, base_ref, policy_ref, completed_only=True)
+    (directory / "envelope.json").write_bytes(canonical(envelope))
+    pointer = output / "checkpoint.next.json"
+    pointer.write_bytes(canonical({"version": 1, "generation": generation}))
+    os.replace(pointer, output / "checkpoint.json")
+
+
 def previous_local_output(head, base):
     """Find exact-source local progress automatically for the installed push hook."""
     parent = Path.home() / ".nexus/local-acceptance/results" / head
     if not parent.is_dir():
         return None
     for directory in sorted(parent.iterdir(), reverse=True):
-        proof = directory if (directory / "envelope.json").is_file() else directory / "checkpoint"
+        proof = local_proof_directory(directory)
         if not (proof / "envelope.json").is_file():
             continue
         receipt = json.loads((proof / "receipt.json").read_bytes())
@@ -771,7 +934,7 @@ def perform_check(args, attempt):
     check_contract_changes(head, base_ref, policy_ref)
     base = value("merge-base", base_ref, head)
     print(f"Local acceptance inputs: head={head[:12]} base={base[:12]} policy={policy_ref[:12]}", flush=True)
-    needed = selected(load_policy(policy_ref), changed_paths(base, head))
+    needed = selected(load_policy(policy_ref), changed_paths(base, head), base=base, head=head)
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
@@ -831,17 +994,18 @@ def perform_check(args, attempt):
             else:
                 print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
                 results[name] = module.run(name, ROOT, output / name, base, run_command)
+            timing["checks_finished_at"] = time.time()
+            save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+            print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
+                  "If this process exits, resume with: "
+                  f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                  f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()
         if results:
             try:
-                clean(head)
-                checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
-                directory = output / "checkpoint"
-                envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
-                verify_envelope(envelope, head, base_ref, policy_ref, completed_only=True)
-                (directory / "envelope.json").write_bytes(canonical(envelope))
+                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
                 print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
                       f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
                       f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
@@ -1073,7 +1237,7 @@ def main():
             if args.architecture:
                 author["architecture"] = args.architecture
             report_plan(acceptance_plan(load_policy(args.policy_ref),
-                        selected(load_policy(args.policy_ref), changed_paths(base, head)), author))
+                        selected(load_policy(args.policy_ref), changed_paths(base, head), base=base, head=head), author))
             print("Preview only: a plan is not a successful or signed test result.")
         elif args.operation == "verify":
             head = value("rev-parse", args.head or "HEAD")

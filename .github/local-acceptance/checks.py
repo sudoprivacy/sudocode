@@ -145,6 +145,10 @@ def grouped_workspace_test_targets(root, metadata):
                 continue
             if target["test"] or target["name"] != path.stem:
                 raise RuntimeError(f"Acceptance wrapper must keep its name and test=false: {path}")
+            if any((directory / "tests" / candidate).exists()
+                   for candidate in [target["name"] + ".rs", target["name"] + "/main.rs"]):
+                raise RuntimeError(f"Acceptance wrapper shadows an individual Cargo target: {path}. "
+                                   "Choose an unused group name so the original target remains available.")
             if (checkout_link(path) or not path.resolve().is_relative_to(directory)
                     or not directory.is_relative_to(root.resolve())):
                 raise RuntimeError(f"Acceptance test wrapper escaped its package: {path}")
@@ -368,12 +372,12 @@ def native_guard_files():
     return {
         "e2e/local-acceptance/policy_guard_acceptance.py": "dbbd39de176e9a7298eaa4398b3b127d7451156989889e760758d73b486f0975",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "53ef7506137c4727dbbbd131274a146df6f9e37e5a2f82193549f3b011c7db62",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "9deb55f9d48a134e41a26da3a876fdadb954db822517a16c690c0094c32ec1bc",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "acea14254302c6255123b1f3b68f61ed4b9c2e048f9bcd9c7e4fa456ad1751d0",
         ".github/local-acceptance/nextest_guard.py": "9483d3ce5a7fada0dd464fbbabe55f2e1fdd534d829a00a948fdcefd7312fe4a",
-        ".github/scripts/local_acceptance.py": "248f3fc7aaa6b09159417bae325e1c5ca9b90b4aaeee585443e5c59e07a64480",
+        ".github/scripts/local_acceptance.py": "cbbc6f8d9aceaa507730caf4545c239ffa569656cfb99f71f05df13c18472d75",
         "e2e/local-acceptance/run.py": "73713e7e051e29846c98de2ad312c76a6dd8470bf032db8bc642b03b7de86307",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",

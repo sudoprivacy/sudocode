@@ -99,6 +99,8 @@ pub fn record(name: &str) {
 #[cfg(unix)] #[test] fn platform_case() { common::native("unix"); }
 ''')
     write(package + "tests/kept_driver.rs", 'mod common;\n#[test] fn native_driver() { common::native("driver"); }\n')
+    write(package + "tests/acceptance_reserved/main.rs",
+          '#[test] fn directory_target() { group_helper::record("directory"); }\n')
     write("rust/crates/helper/tests/independent.rs", '#[test] fn independent_package() { group_helper::record("other-package"); }\n')
     for relative in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
         write(relative, (SOURCE / relative).read_text(encoding="utf-8"))
@@ -175,7 +177,7 @@ pub fn record(name: &str) {
     assert set(original_cases) <= set(grown)
     command(str(executable), "nextest", "run", *options, "--workspace", "--locked", *grown_arguments)
     pid_files = sorted((output / "pids").iterdir())
-    assert {path.name for path in pid_files} == {"one", "two", "driver", "other-package", "future",
+    assert {path.name for path in pid_files} == {"one", "two", "driver", "directory", "other-package", "future",
                                               "windows" if os.name == "nt" else "unix"}
     command("cargo", "test", "--locked", "-p", "group-product", "--test", "kept_driver", "--", "--exact", "native_driver")
     command("cargo", "test", "--locked", "-p", "group-product", "--test", "first", "--", "--exact", "native_one")
@@ -200,6 +202,21 @@ pub fn record(name: &str) {
             raise AssertionError(f"Invalid grouping accepted: {label}")
     write(wrapper, canonical)
     write(package + "Cargo.toml", manifest + declaration)
+    for name in ["kept_driver", "acceptance_reserved"]:
+        (root / wrapper).unlink()
+        shadow = package + f"tests/acceptance_groups/{name}.rs"
+        write(shadow, canonical)
+        write(package + "Cargo.toml", manifest + declaration.replace(group_name, name))
+        try:
+            profiles.grouped_workspace_test_targets(root, metadata())
+        except RuntimeError as error:
+            assert "shadows an individual Cargo target" in str(error), str(error)
+            refusals.append({"case": "shadow-" + name, "error": str(error)})
+        else:
+            raise AssertionError(f"Wrapper concealed an original Cargo target: {name}")
+        (root / shadow).unlink()
+        write(wrapper, canonical)
+        write(package + "Cargo.toml", manifest + declaration)
 
     scope_cases = []
     def scope(label, expected):
@@ -218,14 +235,16 @@ pub fn record(name: &str) {
         ("Enabled target keeps ordinary scope", declaration.replace('test=false', 'test=true'), workspace, False),
         ("Unknown target fields keep ordinary scope", declaration + 'harness=false\n', workspace, False),
         ("Existing auto target name keeps ordinary scope", declaration.replace(group_name, 'kept_driver'), workspace, False),
+        ("Existing directory target name keeps ordinary scope", declaration.replace(group_name, 'acceptance_reserved'), workspace, False),
         ("Missing wrapper keeps ordinary scope", declaration, workspace, True),
         ("Changed workspace keeps ordinary scope", declaration, workspace.replace('resolver="2"', 'resolver="3"'), False),
         ("Malformed manifest keeps ordinary scope", '\n[[test]\n', workspace, False),
     ]:
         write("rust/Cargo.toml", workspace_text)
         write(package + "Cargo.toml", manifest + replacement)
-        if 'kept_driver' in replacement:
-            write(package + 'tests/acceptance_groups/kept_driver.rs', canonical)
+        for reserved in ['kept_driver', 'acceptance_reserved']:
+            if reserved in replacement:
+                write(package + f'tests/acceptance_groups/{reserved}.rs', canonical)
         if remove:
             (root / wrapper).unlink()
         else:

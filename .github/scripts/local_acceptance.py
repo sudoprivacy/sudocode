@@ -400,7 +400,8 @@ def opt_in_test_target_inputs(paths, base, head):
                     valid = False
                     break
                 names.add(name)
-                if any(directory + candidate in old_files for candidate in [relative, f"tests/{name}.rs"]):
+                if any(directory + candidate in old_files
+                       for candidate in [relative, f"tests/{name}.rs", f"tests/{name}/main.rs"]):
                     valid = False
                     break
                 mode = new_files.get(directory + relative)

@@ -531,6 +531,79 @@ def benchmark_storage(name):
     return state / name, state / "target" / name
 
 
+def rendering_cases(terminal, arguments, output, command):
+    """Finish and judge each complete scenario before admitting the next one."""
+    policy_path = terminal / "performance-policy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    cases = policy["profiles"]["core"]
+    if not cases or len(cases) != len(set(cases)) or any(
+            not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
+        raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
+    output.mkdir(parents=True, exist_ok=False)
+    report = {"version": 1, "profile": "core", "preview": "0", "policy": policy,
+              "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
+              "status": "running", "samples": [], "metrics": [], "calibration": [],
+              "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {}}
+    metadata = None
+
+    def save():
+        (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    for case in cases:
+        # Only partition the selected scenarios. Workloads, sample counts,
+        # A/A calibration, alternating A/B pairs and every budget stay intact.
+        selected = dict(policy, profiles={**policy["profiles"], "core": [case]})
+        selected_path = output / f"{case}-policy.json"
+        selected_path.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
+        report["case_policy_sha256"][case] = hashlib.sha256(selected_path.read_bytes()).hexdigest()
+        report["active_case"] = case
+        save()
+        print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
+              f"Complete paired result: {output / case / 'report.json'}. "
+              "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
+        succeeded = False
+        try:
+            command(*arguments, "--output", str(output / case), "--policy", str(selected_path), "--profile", "core")
+            succeeded = True
+        finally:
+            child_path = output / case / "report.json"
+            try:
+                if child_path.exists():
+                    child = json.loads(child_path.read_text(encoding="utf-8"))
+                    if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
+                        raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    for key in ["base_sha256", "candidate_sha256", "driver_sha256", "harness_sha256"]:
+                        if key in report and report[key] != child[key]:
+                            raise RuntimeError(f"Rendering {key} changed between scenarios")
+                        report[key] = child[key]
+                    for sample in child["samples"]:
+                        observed = sample["data"]["metadata"]
+                        if metadata is not None and metadata != observed:
+                            raise RuntimeError("Rendering terminal observer/platform changed between scenarios")
+                        metadata = observed
+                        report["samples"].append({**sample, "path": f"{case}/{sample['path']}"})
+                    for key in ["metrics", "calibration"]:
+                        report[key].extend(child.get(key, []))
+                    report["failures"] = child.get("failures", [])
+                    if succeeded and child["status"] == "passed":
+                        report["completed_cases"].append(case)
+                        report["remaining_cases"].remove(case)
+                    else:
+                        report["status"] = child["status"] if child["status"] in {"failed", "noisy", "invalid"} else "invalid"
+                else:
+                    report.update(status="invalid", failures=[f"{case}: no completed scenario report; see command log"])
+            except (KeyError, ValueError, TypeError, OSError, RuntimeError) as error:
+                report.update(status="invalid", failures=[str(error)])
+                raise
+            finally:
+                save()
+        if not succeeded or report["status"] != "running":
+            raise RuntimeError(f"Rendering scenario {case} did not pass; scenarios without a pass: "
+                               f"{report['remaining_cases']}. See {output / 'report.json'}")
+    report.update(status="passed", active_case=None)
+    save()
+
+
 def benchmark_locked(name, root, output, base, command, target):
     # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
     # budget and sample assertions. Changing execution host changes none of them.
@@ -574,10 +647,11 @@ def benchmark_locked(name, root, output, base, command, target):
         raise RuntimeError(f"Expected exactly one compiled {driver_name} driver: {drivers}")
     script = terminal / ("benchmark.py" if name == "rendering" else "gui-benchmark.py")
     args = [sys.executable, str(script), "--driver", drivers[0], "--base", str(output / "scode-baseline"),
-            "--candidate", str(output / "scode-candidate"), "--output", str(output / "measurements")]
+            "--candidate", str(output / "scode-candidate")]
     if name == "rendering":
-        args += ["--policy", str(terminal / "performance-policy.json"), "--profile", "core"]
-    command(*args)
+        rendering_cases(terminal, args, output / "measurements", command)
+    else:
+        command(*args, "--output", str(output / "measurements"))
     if name == "browser":
         # Move the existing viewport gates too; deleting the old release job
         # must not silently drop its headless/browser CPU and painting checks.

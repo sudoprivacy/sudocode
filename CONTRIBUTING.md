@@ -206,6 +206,20 @@ outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries
 stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
 cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+Rendering completes and judges one scenario at a time. Each scenario keeps its
+two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
+counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases
+the lease; later scenarios remain unrun. A successful core matrix still runs all
+156 samples. Scenario ordering and the placement of warm-ups change, so future
+noise and latency still need observation. The mandatory command prints the active
+scenario and its evidence path. `measurements/report.json` combines the original
+case reports, with original policy and binary/observer hashes, completed scenarios
+and remaining work. Real Cargo/native-process infrastructure acceptance exercises
+full success, relative RSS regression, broken drivers and changed observers with
+the unchanged paired evaluator; it does not claim product performance coverage.
+The changed rendering recipe requires new evidence. Eight other profile recipes
+are byte-for-byte unchanged; the unchanged browser command list has an exact
+approved hash pair so existing signed browser evidence remains reusable.
 These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
 ordinary test-only changes do not rebuild an unchanged performance pair. Local
 compilers use one job and BelowNormal/nice priority while Cargo and tests stay
@@ -296,6 +310,10 @@ negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build
 the product. Product native acceptance and complementary CI hosts are unchanged.
+The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
+archive converts line endings. It accepts the reconstruction only when SHA256
+matches the original protected pin; changed content still fails. Its private Git
+repository disables automatic line-ending conversion without changing author settings.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted

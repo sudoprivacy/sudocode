@@ -246,6 +246,22 @@ binary graph and budgets remain. A failed A/A calibration is inconclusive.
 There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
 unchanged performance pairs; docs-only changes run preflight. Local compiler
 workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p><strong>Stop a failed rendering matrix after its first complete scenario
+(2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
+alternating A/B pairs and all interaction counts and budgets. The successful
+six-scenario matrix still runs 156 samples. A failed, noisy or invalid scenario
+stops later scenarios, preserving their unrun status and releasing the shared
+lease. Warm-ups and measurements now group by scenario; this changes scheduling,
+and future noise still needs observation. The required interface prints the active
+scenario and evidence path. The combined report retains original policy, binary
+and observer identities plus completed and remaining scenarios. Real native
+fixture processes exercise success, relative RSS failure, invalid drivers and
+changed observers through the unchanged paired evaluator. An offline replay of
+one complete real failed run preserved its verdict and metric rows: the first
+scenario accounted for 360.46 of 1,989.19 recorded driver seconds. That projects
+81.9% less sample work before this failure; it is not a measured new production
+latency result and excludes compilation and lease waiting. Passing-run cost is
+not reduced by this change.</p>
 <p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
 Source-only changes in API, runtime, tools, ACP and services no longer select
 these two Docker profiles. Their selected native functional checks, including
@@ -293,6 +309,10 @@ the guard fingerprint without invalidating unrelated completed native profiles.
 The container takes no shared benchmark lease. In a same-source probe, the full
 matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
 single trials concern infrastructure validation, not production PR latency.</p>
+<p>The guard fixture handles Windows archive CRLF conversion by reconstructing
+only bytes that exactly match each original protected SHA256 pin. Its private
+Git fixture keeps those bytes unchanged. Production pin checks and author Git
+configuration stay unchanged; modified content is still rejected.</p>
 <p>Complementary hosted builds use the available compiler CPUs, applied after
 cache restore; local author builds retain one worker. Test concurrency,
 assertions, deadlines and production build profiles are unchanged.</p>

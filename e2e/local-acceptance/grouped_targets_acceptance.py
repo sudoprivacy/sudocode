@@ -100,7 +100,7 @@ pub fn record(name: &str) {
 ''')
     write(package + "tests/kept_driver.rs", 'mod common;\n#[test] fn native_driver() { common::native("driver"); }\n')
     write("rust/crates/helper/tests/independent.rs", '#[test] fn independent_package() { group_helper::record("other-package"); }\n')
-    for relative in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json", "spec/local_acceptance_signers.json"]:
+    for relative in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
         write(relative, (SOURCE / relative).read_text(encoding="utf-8"))
     git("init", "--initial-branch=main")
     git("config", "user.name", "Grouped targets acceptance")

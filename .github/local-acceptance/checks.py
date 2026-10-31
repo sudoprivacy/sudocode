@@ -132,7 +132,9 @@ def grouped_workspace_test_targets(root, metadata):
         declarations = {Path(target["src_path"]) for target in package["targets"]
                         if target["kind"] == ["test"] and Path(target["src_path"]).parent == group_directory}
         if set(group_directory.glob("*.rs")) != declarations:
-            raise RuntimeError(f"Every acceptance wrapper must have an explicit Cargo test target: {group_directory}")
+            raise RuntimeError(f"Every acceptance wrapper must have an explicit Cargo test target: {group_directory}. "
+                               "Register each wrapper with matching name/path and test=false, or remove the obsolete wrapper; "
+                               "individual ungrouped tests are selected automatically.")
         original = {target["name"]: target for target in package["targets"]
                     if target["kind"] == ["test"] and target["test"]}
         for target in package["targets"]:
@@ -363,8 +365,9 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        "e2e/local-acceptance/policy_guard_acceptance.py": "dbbd39de176e9a7298eaa4398b3b127d7451156989889e760758d73b486f0975",
         "e2e/local-acceptance/profile_compat_acceptance.py": "b3e9ad5bb52c8a85d0dba5b368ed6de9a879a0c43a5d4b71ce8cb8415790e37b",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "39b9f8434b95f347f95d99042c279f1914b923435e07a06f5912dbedcc8c2acb",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "53ef7506137c4727dbbbd131274a146df6f9e37e5a2f82193549f3b011c7db62",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "acea14254302c6255123b1f3b68f61ed4b9c2e048f9bcd9c7e4fa456ad1751d0",
@@ -398,6 +401,21 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
         destination.write_bytes(contents)
     if name == "preflight":
         return policy_root / ".github/scripts/check_pr_history.py"
+    # The grouping fixture needs actual protected selection rules. Bind only
+    # those fields: approval maps contain these recipe hashes and cannot be
+    # included in their own input digest. Signer data is not used by the planner.
+    policy = json.loads(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
+    selection = {key: policy[key] for key in ["version", "repository", "checks"]}
+    data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
+    actual_scope = hashlib.sha256(data).hexdigest()
+    if actual_scope != "37c59877c043ecf6f4a7516a5ba17d25ba14b7ba4433c3ecfdd53ff5690879a5":
+        raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
+                           "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
+                           "then rerun contract-update through the installed hook. No grouping guard has started.")
+    policy_file = policy_root / "spec/local_acceptance.json"
+    policy_file.parent.mkdir(parents=True, exist_ok=True)
+    policy_file.write_bytes(data)
     # The release fixture imports this module. Bind the exact branch it executes
     # without a cyclic byte hash of a file containing its own execution pins.
     spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")

@@ -247,16 +247,30 @@ fn completed_turn_identity_survives_wrapping_and_advances_after_the_next_turn() 
     common::expect_input_line_cleared(&session, env.timeout(), "first turn ready");
     let first = common::turn_status_marker(&session);
     assert_ne!(first, "");
-    let before = session.render(|screen| common::turn_status_line(&screen.contents()));
+    // contents() joins soft wraps, so compare physical status rows after resizing.
+    let physical_status = |screen: &pty_expect::Screen<'_>| {
+        common::turn_status_line(
+            &screen
+                .raw()
+                .rows(0, screen.raw().size().1)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
+    let before = session.render(physical_status);
 
     session.resize(24, 120).unwrap();
-    let screen = common::expect_screen_settled(
+    common::expect_screen_settled(
         &session,
         |screen| screen.contains(&"─".repeat(120)) && screen.contains("· turn 1"),
         env.timeout(),
         "completed status repainted at the new width",
     );
-    assert_ne!(common::turn_status_line(&screen), before);
+    let after = session.render(physical_status);
+    assert_ne!(
+        after, before,
+        "resizing must change the physical status row"
+    );
     assert_eq!(
         common::turn_status_marker(&session),
         first,

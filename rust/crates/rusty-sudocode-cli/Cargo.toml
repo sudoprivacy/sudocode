@@ -83,3 +83,43 @@ zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["term", "poll", "signal", "fs"] }
+
+[[test]]
+name = "acceptance_cli_01"
+path = "tests/acceptance_groups/acceptance_cli_01.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_02"
+path = "tests/acceptance_groups/acceptance_cli_02.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_03"
+path = "tests/acceptance_groups/acceptance_cli_03.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_04"
+path = "tests/acceptance_groups/acceptance_cli_04.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_05"
+path = "tests/acceptance_groups/acceptance_cli_05.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_06"
+path = "tests/acceptance_groups/acceptance_cli_06.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_07"
+path = "tests/acceptance_groups/acceptance_cli_07.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_08"
+path = "tests/acceptance_groups/acceptance_cli_08.rs"
+test = false

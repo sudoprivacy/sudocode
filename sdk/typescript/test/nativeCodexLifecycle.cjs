@@ -103,11 +103,14 @@ const waitUntil = async (test, ms, label) => {
 };
 let phase='idle';
 const peerMarker='REAL_NODE_AUTOJOIN_'+crypto.randomUUID();
+let expectedPeerInput;
 const heldResponses=new Set();
 const endpoint = http.createServer((req,res)=>{
   const observation={method:req.method,url:req.url,phase};receipt.modelRequests.push(observation);
+  const peerInput=expectedPeerInput;
   let body='';req.on('data',bytes=>{if(body.length<=2097152)body+=bytes;});
-  req.on('end',()=>{observation.peerMarkerSeen=body.includes(peerMarker);observation.bodyBytes=Buffer.byteLength(body);});
+  req.on('end',()=>{observation.peerMarkerSeen=body.includes(peerMarker);
+    observation.exactPeerInputSeen=peerInput!==undefined&&body.includes(peerInput);observation.bodyBytes=Buffer.byteLength(body);});
   if(phase==='cancelled-seed' && req.method==='POST' && req.url==='/v1/responses'){
     // A 503 drives retries before the user item appears on some native builds.
     // Keep this explicit cancelled seed pending until turn/interrupt or cleanup.
@@ -297,8 +300,18 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       native.stderr.on('data',data=>{nativeStderr=(nativeStderr+data).slice(-16000);});
     }
     {
-      for(const label of ['first','second'])await spawnTui(label,
-        label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
+      for(const label of ['first','second']){
+        await spawnTui(label,label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
+        if(label==='first'&&managedPackageRoot&&operatorContext&&!seededResume&&!receipt.legacyImport){
+          const audit=path.join(root,'autojoin-audit.jsonl');
+          await waitUntil(()=>{
+            if(!fs.existsSync(audit))return false;
+            receipt.firstOwnerBeforeSecondFrontend=fs.readFileSync(audit,'utf8').split('\n').filter(Boolean)
+              .map(line=>JSON.parse(line)).find(row=>row.phase==='listening');
+            return !!receipt.firstOwnerBeforeSecondFrontend;
+          },10000,'first frontend elects its shared owner before the second starts');
+        }
+      }
       await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'isolated native listener');
       const observer=await connect('observer',receipt.observerNotifications);
       if(managedPackageRoot){
@@ -375,6 +388,19 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           receipt.autojoinAcp=fs.readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
           assert.equal(new Set(receipt.autojoinAcp.map(call=>call.pid)).size,2,'one receiver owner per distinct Agent');
           assert(!receipt.autojoinAcp.some(call=>call.method==='session/prompt'),'autojoin must not start the inner model');
+        }
+        if(operatorContext){
+          const deadline=Date.now()+10000;
+          for(;;){
+            const status=await request(observer,'actual current MCP owner readiness','mcpServer/tool/call',{
+              threadId:receipt.autojoinClaims[0].threadId,server:'nexus_auto',tool:'scode_status',arguments:{}});
+            assert.notEqual(status.isError,true,JSON.stringify(status));
+            receipt.autojoinReadiness=JSON.parse(status.content[0].text);
+            if(receipt.autojoinReadiness.state==='observing'&&receipt.autojoinClaims.every(claim=>
+              receipt.autojoinReadiness.agents.some(agent=>agent.threadId===claim.threadId&&agent.actor===claim.actor&&agent.state==='connected')))break;
+            assert.ok(Date.now()<deadline,'actual current owner did not attach both original roots');
+            await new Promise(resolve=>setTimeout(resolve,50));
+          }
         }
         receipt.autojoinTools=[];
         for(const claim of receipt.autojoinClaims){
@@ -520,14 +546,15 @@ const spawnTui = async (label,args=[],env=childEnv) => {
               .map(line=>JSON.parse(line)).filter(row=>row.phase==='accepted'):[];
             const acceptedBefore=acceptedRows().length;
             await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
-            const sent=await sendScodeMessage(peer,{to:original.actor,
-              message:peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.',summary:'Isolated automatic peer reception'});
+          expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
+          const sent=await sendScodeMessage(peer,{to:original.actor,
+            message:expectedPeerInput,summary:'Isolated automatic peer reception'});
             assert.equal(sent.isError,false,JSON.stringify(sent));
             const end=Date.now()+15000;
             while(true){
               const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
               const accepted=acceptedRows();
-              if(receipt.modelRequests.slice(before).some(row=>row.peerMarkerSeen)
+            if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
                   &&accepted.length===acceptedBefore+1&&thread.status.type==='idle'){
                 assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
                 return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
@@ -553,7 +580,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
             const unloadDeadline=Date.now()+5000;
             let remaining;
             for(;;){
-              remaining=(await request(observer,'first frontend unload while second stays open','thread/loaded/list',{})).data;
+              const snapshot=await request(observer,'first frontend unload while second stays open','thread/loaded/list',{});
+              assert.equal(snapshot.nextCursor,null,'the surviving-root inventory must be complete');
+              remaining=snapshot.data;
               observation.lastInventory=remaining;
               if(remaining.length===1&&receipt.inventory.includes(remaining[0]))break;
               assert.ok(Date.now()<unloadDeadline,'first native root did not unload while the second frontend stayed open');
@@ -563,6 +592,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
             observation.unloadedThreadId=receipt.inventory.find(id=>!remaining.includes(id));
             observation.secondFrontendStillRunning=!second.closed&&processAlive(observation.secondFrontendPid);
             observation.ownerStillRunning=processAlive(pid);
+          assert.equal(pid,receipt.firstOwnerBeforeSecondFrontend.pid,'the closed first frontend elected this original owner');
             const {thread}=await request(observer,'surviving native root','thread/read',{threadId:remaining[0],includeTurns:false});
             observation.remainingThread={id:thread.id,status:thread.status,threadSource:thread.threadSource,
               parentThreadId:thread.parentThreadId,ephemeral:thread.ephemeral,canAcceptDirectInput:thread.canAcceptDirectInput};

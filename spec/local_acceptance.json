@@ -17,6 +17,11 @@
         ".github/workflows/local-acceptance*.yml",
         ".github/workflows/acp-client.yml",
         ".github/scripts/ci_input_scope.py"
+      ],
+      "exclude": [
+        "e2e/local-acceptance/benchmark_targets_acceptance.py",
+        "e2e/local-acceptance/container_inputs_acceptance.py",
+        "e2e/local-acceptance/clippy_fail_fast.py"
       ]
     },
     "native-sdk": {

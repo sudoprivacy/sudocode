@@ -349,6 +349,16 @@ negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build
 the product. Product native acceptance and complementary CI hosts are unchanged.
+Edits limited to the independent Cargo benchmark, Docker input or Clippy
+executor fixtures skip the unchanged local enforcement matrix. Their actual
+changed fixture remains required in CI preflight. Shared executors, policy,
+signers, enforcement fixtures and unknown new acceptance fixtures still select
+the full guard; mixed changes and renames in either direction retain it.
+The public planner and mandatory command output state that CI preflight runs
+changed executor fixtures. Real Git regressions exercise isolated, mixed,
+unknown and renamed inputs through the public planner, and verify the matching
+PR/push/queue selector outputs. Product checks and selected fixture assertions
+are unchanged; this avoids repeating unrelated enforcement tests locally.
 The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
 archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git

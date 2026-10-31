@@ -10,6 +10,7 @@ import { runEnrollmentCommand } from './enrollmentCommand';
 import { validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
+import { prepareWindowsOwnerTask, startWindowsOwnerTask, type WindowsCodexOwnerPreparation } from './windowsCodexOwner';
 import { ScodeA2aError } from './scodeA2a';
 import { bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
   type CodexBinding } from './codexBindings';
@@ -32,7 +33,8 @@ export interface CodexMcpConfig {
  */
 export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
   entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {
-    configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[]; installed: false;
+    configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[];
+    ownerPreparationArgv?: string[]; installed: false;
   } {
   const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
   validateCodexConnectionConfig({codexArgv});
@@ -47,9 +49,17 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
   // command nor copies its authority into the runtime package.
   validateConfig(config);
   writeFileSync(file,JSON.stringify(config,null,2)+'\n',{flag:'wx',mode:0o600});
-  return {configFile:file,nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
+  return {configFile:file,...(process.platform==='win32'
+      ? {ownerPreparationArgv:[process.execPath,entry,'--prepare-codex-owner','--config',file]} : {}),
+    nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
     nativeProxyArgv:[...codexArgv,'app-server','proxy'],registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
     '--codex','--config',file],installed:false};
+}
+
+/** Validate the same private runtime before preparing its Windows owner action. */
+export function prepareWindowsCodexOwner(file: string, entry: string): WindowsCodexOwnerPreparation {
+  readConfig(file);
+  return prepareWindowsOwnerTask(file, entry);
 }
 
 export interface ExistingCodexAgentBinding {
@@ -269,15 +279,22 @@ export async function runCodexMcp(file: string, entry: string): Promise<void> {
   try {socket=await dial(config.endpoint.port);}
   catch(error) {
     if((error as NodeJS.ErrnoException).code!=='ECONNREFUSED')throw error;
-    const child=spawn(process.execPath,[entry,'--config',file,'--codex-owner'],{
-      stdio:'ignore',detached:true,windowsHide:true,shell:false,
-    });
-    child.on('error',()=>{});child.unref();
     const end=Date.now()+5000;
+    let launchError: unknown;
+    if(process.platform==='win32'){
+      // A detached Windows child still belongs to its MCP parent's native Job.
+      // Only the explicitly registered user task may launch the shared owner.
+      try{await startWindowsOwnerTask(file,end);}catch(error){launchError=error;}
+    }else{
+      const child=spawn(process.execPath,[entry,'--config',file,'--codex-owner'],{
+        stdio:'ignore',detached:true,windowsHide:true,shell:false,
+      });
+      child.on('error',()=>{});child.unref();
+    }
     for(;;){
       try {socket=await dial(config.endpoint.port);break;}
       catch(e){
-        if((e as NodeJS.ErrnoException).code!=='ECONNREFUSED' || Date.now()>end)throw e;
+        if((e as NodeJS.ErrnoException).code!=='ECONNREFUSED' || Date.now()>end)throw launchError??e;
         await new Promise(resolve=>setTimeout(resolve,50));
       }
     }

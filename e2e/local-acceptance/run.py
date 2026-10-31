@@ -444,6 +444,8 @@ def enforcement_acceptance():
         verify_profile_compatibility(directory, work, command)
         from resume_acceptance import verify_resume
         verify_resume(directory, SOURCE, command)
+        from host_lease_acceptance import verify_host_lease
+        verify_host_lease(directory, SOURCE, command, FIXTURE_ENV)
 
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production

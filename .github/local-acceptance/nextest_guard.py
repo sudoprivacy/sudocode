@@ -51,13 +51,16 @@ def git_environment_acceptance(helper, output):
     before = {name: (caller / ".git" / name).read_bytes() for name in ("HEAD", "index", "config")}
     head = git("rev-parse", "HEAD")
     child = output / "git-child.py"
-    child.write_text('''import json,os,subprocess,sys
+    child.write_text('''import json,os,shutil,subprocess,sys
 from pathlib import Path
 mode,root,names=sys.argv[1],Path(sys.argv[2]),json.loads(sys.argv[3])
 assert os.environ["GIT_TERMINAL_PROMPT"] == "0"
-if mode == "fresh":
+if mode != "explicit":
     assert not any(key in os.environ for key in names), "Hook repository selectors leaked into the child"
     assert not any(key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for key in os.environ)
+if mode == "no-git":
+    assert shutil.which("git") is None
+elif mode == "fresh":
     root.mkdir()
     for args in [["init","--initial-branch=main"],["config","user.name","Foreign fixture"],
                  ["config","user.email","foreign@example.invalid"]]:
@@ -70,10 +73,11 @@ else:
     assert Path(actual).resolve() == root.resolve()
     assert subprocess.check_output(["git","config","user.name"],cwd=root,text=True).strip() == "Explicit child"
 ''')
-    inherited = {"GIT_DIR": str(caller / ".git"), "GIT_COMMON_DIR": str(caller / ".git"),
+    inherited = dict.fromkeys(names, "Inherited hook selector")
+    inherited.update({"GIT_DIR": str(caller / ".git"), "GIT_COMMON_DIR": str(caller / ".git"),
                  "GIT_WORK_TREE": str(caller), "GIT_INDEX_FILE": str(caller / ".git/index"),
                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
-                 "GIT_CONFIG_VALUE_0": "Inherited caller", "GIT_TERMINAL_PROMPT": "0"}
+                 "GIT_CONFIG_VALUE_0": "Inherited caller", "GIT_TERMINAL_PROMPT": "0"})
     with patch.dict(os.environ, inherited):
         fresh = helper.run_command([sys.executable, str(child), "fresh", str(foreign), json.dumps(names)],
                                    caller, output / "git-isolation.log")
@@ -82,12 +86,15 @@ else:
             foreign, output / "git-explicit.log",
             {"GIT_DIR": str(foreign / ".git"), "GIT_CONFIG_COUNT": "1",
              "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Explicit child"})
+        without_git = helper.run_command(
+            [sys.executable, str(child), "no-git", str(foreign), json.dumps(names)],
+            caller, output / "git-unavailable.log", {"PATH": str(output / "empty-path")})
     assert all((caller / ".git" / name).read_bytes() == data for name, data in before.items())
     assert git("rev-parse", "HEAD") == head
     assert not git("status", "--porcelain")
-    print("PASS: real Git fixture writes preserve caller HEAD, index, config and source; explicit child settings remain usable")
+    print("PASS: Git fixture preserves caller HEAD/index/config/source, honors explicit settings and works without Git on PATH")
     return {"scenario": "hook Git environment isolation", "status": "pass",
-            "commands": [fresh, explicit]}
+            "commands": [fresh, explicit, without_git]}
 
 
 def main():

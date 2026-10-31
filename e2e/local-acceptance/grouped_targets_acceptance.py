@@ -233,8 +233,10 @@ pub fn record(name: &str) {
                        "--policy-ref", base, "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
         planned = json.loads(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ACCEPTANCE_PLAN=")))
         checks = set(planned["local_checks"])
-        costly = {"native-release", "native-services", "native-cohost", "rendering", "browser"}
+        costly = {"native-release", "native-services", "native-cohost"}
         assert (checks & costly == set()) if expected else (costly - {"native-cohost"}) <= checks, (label, text)
+        # Manifests and test-group wrappers are not browser terminal inputs.
+        assert "browser" not in checks, (label, text)
         assert "native-workspace" in checks
         if expected:
             assert "native-examples" in checks, text

@@ -236,6 +236,22 @@ refusal of a missing stamp; it adds no product journey coverage. Actual product
 builds qualify the migration on the author and complementary native hosts.
 Elapsed savings remain unmeasured until those builds finish.</p>
 
+<p><strong>Performance placement (2026-11-01).</strong> A full macOS acceptance
+measured 5.5 hours of command time; the statistical browser comparison (145 min)
+and rendering matrix (84 min) were 70% of it, and a dependency-only change
+selected both. Typing feel is now judged by the rendering matrix once a day on
+main (<code>.github/workflows/rendering-main.yml</code>): keypress-to-echo P95
+while reading history, waiting and streaming, plus first output, cancel, paste
+and resize, with CPU and peak memory on the 12 KB Markdown stream. Four scenarios
+replace six; each names the metrics it is judged on. The pre-merge
+<code>browser</code> profile is a functional smoke of clickable links, selection
+during streaming, viewport interaction and an idle terminal, selected by CLI
+and browser-harness inputs. This deliberately moves performance regressions
+from pre-merge to the next daily run on main, where they are bisected between
+nightly heads, and retires painted-browser latency, Chromium resource budgets
+and the viewport cost benchmarks. These measurement drivers back no Feature
+inventory row, so the coverage denominator is unchanged.</p>
+
 <p>A managed Git pre-push hook selects checks from changed inputs and blocks a
 push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
 diff base, native host, command exit codes and local log hashes. Full logs stay
@@ -644,9 +660,10 @@ Before/after performance comparisons use isolated build directories and retain
 binary and harness hashes. A failed A/A noise calibration is inconclusive,
 not a performance pass. These resource checks do not add feature-coverage credit.</p>
 
-<p>The automatic viewport on/off headless and browser budget checks run in the
-mandatory local browser profile. The existing source-before/after measurement
-script remains available for diagnosis and earns no additional coverage credit.</p>
+<p>The mandatory local browser profile runs the viewport browser interaction once
+as a functional check. The viewport on/off cost script
+(<code>scripts/benchmark_prompt_viewport.py</code>) and the source-before/after
+measurement script remain available for diagnosis and earn no coverage credit.</p>
 
 <table>
   <thead>
@@ -687,6 +704,15 @@ script remains available for diagnosis and earns no additional coverage credit.<
       five-platform release tags; optimized-only regressions can reach main.</td>
       <td>No; build and startup checks add no product PTY journey credit.</td>
       <td><code>native-cohost</code> / <code>release-nexusd-cohost.yml</code></td>
+    </tr>
+    <tr>
+      <td>Rendering matrix and browser smoke</td>
+      <td>Daily paired matrix on main: typing latency, first output, cancel,
+      paste, resize, CPU and peak memory against the fixed baseline. Pre-merge
+      painted-terminal smoke: clickable links, selection during streaming,
+      viewport interaction and an idle terminal, when CLI or harness inputs change.</td>
+      <td>No; their drivers back no Feature inventory row.</td>
+      <td><code>rendering-main.yml</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>
     <tr>
       <td>Mock parity harness</td>

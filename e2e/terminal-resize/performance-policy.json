@@ -4,17 +4,15 @@
   "rounds": { "calibration": 5, "comparison": 7 },
   "sampling": { "input": 60, "resize": 40, "cancel": 20 },
   "profiles": {
-    "core": ["short", "long", "cap", "markdown", "foreground", "background"],
-    "stress": ["short", "long", "cap", "markdown", "foreground", "background", "repeated"]
+    "core": ["short", "heavy", "foreground", "background"],
+    "stress": ["short", "heavy", "foreground", "background", "repeated"]
   },
   "cases": {
-    "short": { "kind": "prose", "bytes": 2300, "turns": 1 },
-    "long": { "kind": "prose", "bytes": 8192, "turns": 1 },
-    "cap": { "kind": "prose", "bytes": 12288, "turns": 1 },
-    "markdown": { "kind": "markdown", "bytes": 2300, "turns": 1 },
-    "foreground": { "kind": "foreground", "bytes": 0, "turns": 1, "batches": 10 },
-    "background": { "kind": "background", "bytes": 0, "turns": 1, "batches": 10 },
-    "repeated": { "kind": "prose", "bytes": 2300, "turns": 30 }
+    "short": { "kind": "prose", "bytes": 2300, "turns": 1, "judge": ["input_wait_p95_ms", "input_stream_p95_ms", "input_history_p95_ms", "first_visible_ms", "cancel_ms", "paste_ms", "resize_ms"] },
+    "heavy": { "kind": "markdown", "bytes": 12288, "turns": 1, "judge": ["input_wait_p95_ms", "input_stream_p95_ms", "input_history_p95_ms", "first_visible_ms", "cancel_ms", "cpu_ms", "rss_peak_mib"] },
+    "foreground": { "kind": "foreground", "bytes": 0, "turns": 1, "batches": 10, "judge": ["input_stream_p95_ms", "input_history_p95_ms"] },
+    "background": { "kind": "background", "bytes": 0, "turns": 1, "batches": 10, "judge": ["input_stream_p95_ms", "input_history_p95_ms"] },
+    "repeated": { "kind": "prose", "bytes": 2300, "turns": 30, "judge": ["input_wait_p95_ms", "input_stream_p95_ms", "input_history_p95_ms", "rss_growth_mib"] }
   },
   "contracts": { "idle_bytes": 0, "idle_frames": 0 },
   "metrics": {

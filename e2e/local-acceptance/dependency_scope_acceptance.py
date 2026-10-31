@@ -109,9 +109,10 @@ def run(output):
         names = set(plan["local_checks"])
         assert names & PRODUCT == set(expected), (label, text)
         assert "native-workspace" in names, (label, text)
-        assert {"rendering", "browser"} <= names, (label, text)
+        # Dependency metadata no longer selects a per-PR performance run.
+        assert not {"rendering", "browser"} & names, (label, text)
         cases.append({"label": label, "base": diff_base, "head": command("git", "rev-parse", "HEAD"),
-                      "product_checks": sorted(names & PRODUCT), "native_tests_and_performance_retained": True})
+                      "product_checks": sorted(names & PRODUCT), "native_tests_retained": True})
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 

@@ -212,39 +212,26 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
-Rendering A/A and A/B, painted browser performance and viewport resource checks
-run automatically in local Docker when CLI, engine-core, shared PTY helpers,
-measurement sources or Rust build/dependency inputs change. Other crates' source
-changes keep their selected native functional checks but skip these statistical
-performance comparisons. This deliberately reduces performance coverage for
-indirect effects from API, runtime, tools, ACP and service implementations; it
-does not establish that those effects are impossible. A change known to affect
-the performance workloads must include the corresponding measurement scenario.
-Selected measurements keep their existing baselines, rounds, assertions and budgets.
-Rendering and browser use the same canonical candidate checkout and Cargo
-outputs under the existing exclusive benchmark lease. Each baseline and the
-trusted rendering driver keep separate outputs. Copied normal release binaries
-stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
-cross-profile candidate reuse, exact binary identity and unchanged observer stages.
-When rendering and browser run in the same acceptance process for the same
-candidate, protected policy and Docker context, browser reuses rendering's exact
-immutable image and saved normal release. The retained image ID and binary hash
-live in that process only; previous output directories and mutable image tags
-cannot authorize reuse. The release enters browser through read-only inputs and
-is checked against its source, policy, image and SHA256 before use. Changed
-inputs or a fresh process use the ordinary build path; corrupted retained files
-fail explicitly. Browser baseline builds, dev-feature drivers, paired GUI samples
-and viewport observers still run. Real Cargo acceptance compiles another source
-into the shared cache between profiles and verifies the original normal release
-is preserved without another normal candidate build. Actual Docker acceptance
-exercises the frozen image, invocation boundary and five tampered identities/bytes.
-The host and container entrypoint share the canonical `container/<profile>`
-output layout. The Docker fixture calls the actual entrypoint and dispatcher,
-then retains the resulting native binary for browser reuse; a fixture workload
-replaces statistical product measurements. Missing or mismatched output fails
-without promoting old raw results into a signed profile.
-This removes a duplicate build even when another workline churns the cache. It
-does not shorten a successful measurement matrix or prove production speedup.
+Typing feel is measured by the paired rendering matrix: keypress-to-echo P95
+while reading history, waiting for the model and streaming, first visible output
+and cancel on prose, paste and resize on a short reply, and CPU and peak memory on
+a 12 KB Markdown stream. It drives the actual release binary through a headless
+terminal, which isolates scode's own cost, and compares it with the fixed baseline
+in `e2e/terminal-resize/performance-policy.json`. Each scenario names the metrics
+it is judged on; the driver records them all. Each scenario keeps two warm-ups,
+five A/A pairs and seven alternating A/B pairs, and a failed, noisy or invalid
+scenario stops the matrix. The matrix runs once a day on main
+(`.github/workflows/rendering-main.yml`), so a regression surfaces within a day
+and is bisected between nightly heads. Run it on demand with
+`python .github/local-acceptance/checks.py --native-checks rendering --base origin/main --output DIR`.
+
+The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
+PTY helpers, the browser drivers and the browser terminal harness select it. Local
+Docker builds the candidate once in the dev profile and runs it in pinned
+Chromium/xterm: Markdown links stay clickable, native selection survives
+streaming, the prompt viewport scrolls and selects, and an idle terminal receives
+no output.
+
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
 Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
 copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories
@@ -261,22 +248,7 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
-Rendering completes and judges one scenario at a time. Each scenario keeps its
-two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
-counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases
-the lease; later scenarios remain unrun. A successful core matrix still runs all
-156 samples. Scenario ordering and the placement of warm-ups change, so future
-noise and latency still need observation. The mandatory command prints the active
-scenario and its evidence path. `measurements/report.json` combines the original
-case reports, with original policy and binary/observer hashes, completed scenarios
-and remaining work. Real Cargo/native-process infrastructure acceptance exercises
-full success, relative RSS regression, broken drivers and changed observers with
-the unchanged paired evaluator; it does not claim product performance coverage.
-The changed rendering recipe requires new evidence. Eight other profile recipes
-are byte-for-byte unchanged; the unchanged browser command list has an exact
-approved hash pair so existing signed browser evidence remains reusable.
-These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
-ordinary test-only changes do not rebuild an unchanged performance pair. Local
+Documentation-only changes run preflight. Local
 preflight checks actual conflicts against its supplied base and fetched
 `origin/main` before product builds and benchmark leases. It prints the exact
 paths and recovery step without changing the checkout or index. Clean branches
@@ -810,8 +782,8 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
-Renderer changes must pass the mandatory local rendering/browser profiles and
-the required `Local acceptance` status. See the shared
+Renderer changes pass the browser smoke in the required `Local acceptance`
+status, and the daily rendering matrix on main judges their typing latency. See the shared
 [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.

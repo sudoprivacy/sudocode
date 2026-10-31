@@ -178,9 +178,8 @@ def performance_scope_acceptance(directory):
         names = set(plan["local_checks"])
         assert "Hosted CI preflight also runs changed Cargo/Docker/Clippy executor fixtures" in text, text
         assert names & {"rendering", "browser"} == set(expected), text
-        assert "Statistical performance profiles:" in text, text
-        if not expected:
-            assert "indirect performance effects" in text, text
+        assert "the paired rendering matrix runs on main, not per PR" in text, text
+        assert ("The browser terminal functional smoke runs locally." in text) == bool(expected), text
         assert ("native-workspace" in names) == native, text
         if guard is not None:
             assert ("guard-contract" in names) == guard, text
@@ -188,16 +187,20 @@ def performance_scope_acceptance(directory):
         for job in plan["ci"]:
             assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
 
-    both = ["rendering", "browser"]
+    smoke = ["browser"]
     cases = [(f"rust/crates/{crate}/src/fixture.rs", [])
-             for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host"]]
-    cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
-        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs", "rust/crates/engine-core/src/lib.rs",
-        "rust/crates/pty-harness/src/lib.rs", "rust/crates/rusty-sudocode-cli/tests/common/mod.rs",
-        "rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
-        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/host.cjs"]]
-    cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
-              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"])]
+             for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host", "engine-core"]]
+    cases += [(path, smoke) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
+        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs", "rust/crates/pty-harness/src/lib.rs",
+        "rust/crates/rusty-sudocode-cli/tests/common/mod.rs", "e2e/terminal-resize/host.cjs",
+        "e2e/terminal-resize/gui.cjs", "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
+        "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs"]]
+    # Dependency metadata and the rendering matrix inputs no longer select a
+    # per-PR performance run; the matrix runs on main.
+    cases += [(path, []) for path in ["rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/setup_windows.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs"]]
     for index, (path, expected) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -210,12 +213,12 @@ def performance_scope_acceptance(directory):
     command("git", "mv", "rust/crates/rusty-sudocode-cli/src/render.rs",
             "rust/crates/runtime/src/moved.rs", cwd=repository)
     command("git", "commit", "-m", "Move UI source into another crate", cwd=repository)
-    expect(base, both)
+    expect(base, smoke)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "rm", "e2e/terminal-resize/host.cjs", cwd=repository)
     command("git", "commit", "-m", "Delete measurement input", cwd=repository)
-    expect(base, both)
-    print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
+    expect(base, smoke)
+    print("PASS: public Git planner scopes the browser smoke, retains native hosts and sees renames/deletions")
     # This actual-Git fixture is required by CI preflight. Editing it alone
     # must not select product Cargo/PTY builds on all three native hosts.
     history = repository / "e2e/pr-history/run.py"

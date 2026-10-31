@@ -33,6 +33,13 @@ def expected_metrics(spec):
     return metrics
 
 
+def judged_metrics(spec):
+    """The visible metrics this scenario is judged on; the driver still measures all."""
+    judged = set(spec["judge"])
+    assert judged and judged <= expected_metrics(spec), "judge only metrics the workload measures"
+    return judged
+
+
 def validate(sample, case, policy):
     assert sample["version"] == 1 and sample["status"] == "complete", "incomplete workload"
     assert sample["case"] == case and sample["spec"] == policy["cases"][case], "changed workload"
@@ -126,6 +133,7 @@ def main():
     assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
     for case in cases:
         assert expected_metrics(policy["cases"][case]) <= policy["metrics"].keys()
+        judged_metrics(policy["cases"][case])
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output directory is not empty; choose a fresh path to preserve earlier evidence")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -187,12 +195,12 @@ def main():
                         pair[side] = sample(binary, case, stage, number, side)
                     collection[case].append((pair["base"], pair["candidate"]))
             if stage == "aa":
-                report["calibration"], noise_failures = assess(controls, None, policy, cases)
+                report["calibration"], noise_failures = assess(controls, None, policy, cases, judged_metrics)
                 if noise_failures:
                     report.update(status="noisy", failures=noise_failures, metrics=report["calibration"])
                     break
         if report["status"] == "running":
-            report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases)
+            report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases, judged_metrics)
             report["status"] = "failed" if report["failures"] else "passed"
     except (AssertionError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
         report["status"] = "invalid"

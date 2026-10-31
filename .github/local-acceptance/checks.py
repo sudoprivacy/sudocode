@@ -376,13 +376,13 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "6d4b6dba84a51b484a0048ea39e5e3b93cc6e53bbd70794f3552a13b84640711",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "9fd31b7dd13fa21a51bc6961e87ad29f6eeea6326b035dd674048b081e157e2f",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "1f7fb546bf9bc846e2a03e5f724f9830e7f0e2865bf37fd1af11206bb1c2118f",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "26f5044afdc527caa984399af4ef5724b7cb2b49156bbc6a95c3d23239c6ff4b",
-        "e2e/local-acceptance/run.py": "c79b8eec26681f24721bdf444e7a6d1edd52389157189883d1e807aefe138077",
+        ".github/scripts/local_acceptance.py": "18b2282275f53adb60eece8472ae5e5decd03a34ea835ccb2f47aa621972bcfb",
+        "e2e/local-acceptance/run.py": "5642254a68ca9d7ea99d2f69aea7f88ed3d17db43bd1d68bf4b935f5fa0b96c9",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
@@ -516,11 +516,16 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
 
     protected = revision(policy_ref or "origin/main")
     candidate = revision(candidate_ref or "HEAD")
-    policy = json.loads(subprocess.check_output(["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
-    reference = revision(policy["baseline_commit"] if name == "rendering" else base)
+    snapshots = {"candidate": candidate}
+    if name == "rendering":
+        # The paired matrix compares the candidate with the policy's fixed
+        # baseline, using the trusted driver and harness.
+        policy = json.loads(subprocess.check_output(
+            ["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
+        snapshots.update(baseline=revision(policy["baseline_commit"]), trusted=protected)
     sources = output / "inputs"
     sources.mkdir()
-    for label, ref in [("candidate", candidate), ("baseline", reference), ("trusted", protected)]:
+    for label, ref in snapshots.items():
         snapshot(root, ref, sources / label)
     context = output / "image-context"
     context_hash = hashlib.sha256()
@@ -536,38 +541,17 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
     image = f"sudocode-local-acceptance:{context_hash.hexdigest()[:24]}"
     image_receipt = output / "image-id.txt"
-    # This map exists only in the current trusted runner process. Never infer
-    # provenance from a previous output directory or a shared mutable cache.
-    try:
-        invocations = container.invocations
-    except AttributeError:
-        invocations = {}
-    key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
-    previous = invocations.get(key) if name == "browser" else None
-    if previous is None:
-        command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
-                extra={"DOCKER_BUILDKIT": "1"})
-    else:
-        image_receipt.write_text(previous["image_id"] + "\n", encoding="utf-8")
-        print("Reusing this invocation's immutable rendering image for browser acceptance: "
-              f"{previous['image_id']}", flush=True)
+    command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+            extra={"DOCKER_BUILDKIT": "1"})
     image_id = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
     identity = {
-        "candidate": candidate, "baseline": reference, "policy": protected,
+        **snapshots, "policy": protected,
         "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
     }
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
-    if previous is not None:
-        reused = sources / "candidate-release"
-        reused.mkdir()
-        shutil.copy2(previous["binary"], reused / "scode")
-        (reused / "identity.json").write_text(json.dumps({
-            **identity, "version": 1, "sha256": previous["sha256"],
-        }, indent=2))
-        verified_candidate_release(sources)
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
@@ -589,26 +573,6 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
             raise RuntimeError("Rendering candidate binary does not match its completed measurements")
-        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id}
-        container.invocations = invocations
-
-
-def verified_candidate_release(inputs):
-    """Accept only the same invocation's read-only, hash-bound normal release."""
-    directory = inputs / "candidate-release"
-    if not directory.exists():
-        return None
-    binary, receipt = directory / "scode", directory / "identity.json"
-    if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
-        raise RuntimeError("Reused benchmark release must contain regular files")
-    expected = json.loads((inputs / "identity.json").read_text())
-    observed = json.loads(receipt.read_text())
-    if observed.get("version") != 1 or any(observed.get(name) != expected[name]
-            for name in ["candidate", "policy", "image_id", "context_sha256"]):
-        raise RuntimeError("Reused benchmark release belongs to different source, policy or image")
-    if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
-        raise RuntimeError("Reused benchmark release bytes changed after rendering")
-    return binary
 
 
 def copy_checkout_file(source, destination):
@@ -822,86 +786,79 @@ def rendering_cases(terminal, arguments, output, command):
 
 
 def benchmark_locked(name, root, output, base, command, target):
+    if name == "browser":
+        browser_smoke(root.parent, output, command)
+        return
     # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
     # budget and sample assertions. Changing execution host changes none of them.
     inputs = root.parent
     work, targets = benchmark_storage(name)
-    # Both profiles compile the same candidate. Keep its canonical source path
-    # and Cargo outputs together, under the existing shared exclusion lease.
-    candidate_work, candidate_targets = benchmark_storage("rendering")
-    checkouts = {label: (candidate_work if label == "candidate" else work) / label
-                 for label in ["candidate", "baseline", "trusted"]}
-    build_targets = {"baseline": targets / "baseline", "candidate": candidate_targets / "candidate"}
     work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
-        destination = checkouts[label]
         # Sources are disposable copies from this invocation's exact Git archive.
-        replace_checkout(inputs / label, destination)
-    candidate, baseline, trusted = (checkouts[label] for label in ["candidate", "baseline", "trusted"])
-    driver_source = trusted if name == "rendering" else candidate
-    terminal = driver_source / "e2e/terminal-resize"
+        replace_checkout(inputs / label, work / label)
+    candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
+    terminal = trusted / "e2e/terminal-resize"
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
-    driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
-    reused = verified_candidate_release(inputs) if name == "browser" else None
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
-        if label == "candidate" and reused is not None:
-            shutil.copy2(reused, output / "scode-candidate")
-            print("Browser acceptance reuses the measured normal release from rendering; "
-                  "source, protected policy, immutable image and binary SHA256 match. "
-                  "Browser drivers and every observer still run.", flush=True)
-            continue
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", str(build_targets[label]), "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(build_targets[label] / "release/scode", output / f"scode-{label}")
-    # Share artifacts only with the same canonical source checkout. The copied
-    # production binaries above stay fixed when dev features build the drivers.
-    driver_target = targets / "driver" if name == "rendering" else build_targets["candidate"]
-    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
-                  "--target-dir", str(driver_target), "-p", "rusty-sudocode-cli", "--test", driver_name,
-                  "--no-run", "--message-format=json-render-diagnostics")
-    messages = []
+                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+    # The copied production binaries above stay fixed when dev features build the driver.
+    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
+                  "--target-dir", str(targets / "driver"), "-p", "rusty-sudocode-cli",
+                  "--test", "pty_render_performance", "--no-run", "--message-format=json-render-diagnostics")
+    drivers = compiled_drivers(log, ["pty_render_performance"])
+    args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers["pty_render_performance"],
+            "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
+    rendering_cases(terminal, args, output / "measurements", command)
+
+
+def compiled_drivers(log, names):
+    """The single test executable Cargo reported for each requested target."""
+    found = {name: [] for name in names}
     for line in log.read_text(errors="replace").splitlines():
         if line.startswith("{"):
-            messages.append(json.loads(line))
-    drivers = [row["executable"] for row in messages if row.get("reason") == "compiler-artifact"
-               and row.get("target", {}).get("name") == driver_name and row.get("executable")]
-    if len(drivers) != 1:
-        raise RuntimeError(f"Expected exactly one compiled {driver_name} driver: {drivers}")
-    script = terminal / ("benchmark.py" if name == "rendering" else "gui-benchmark.py")
-    args = [sys.executable, str(script), "--driver", drivers[0], "--base", str(output / "scode-baseline"),
-            "--candidate", str(output / "scode-candidate")]
-    if name == "rendering":
-        rendering_cases(terminal, args, output / "measurements", command)
-    else:
-        command(*args, "--output", str(output / "measurements"))
-    if name == "browser":
-        # Move the existing viewport gates too; deleting the old release job
-        # must not silently drop its headless/browser CPU and painting checks.
-        manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = str(build_targets["candidate"])
-        viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
-                        "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
-        log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,
-                      "--target-dir", viewport_target, "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport",
-                      "--no-run", "--message-format=json-render-diagnostics", extra=viewport_env)
-        records = [json.loads(line) for line in log.read_text(errors="replace").splitlines() if line.startswith("{")]
-        drivers = [row["executable"] for row in records if row.get("reason") == "compiler-artifact"
-                   and row.get("target", {}).get("name") == "pty_prompt_viewport" and row.get("executable")]
-        if len(drivers) != 1:
-            raise RuntimeError("Missing viewport measurement driver")
-        command("cargo", "test", "--release", "--locked", "--manifest-path", manifest, "--target-dir", viewport_target,
-                "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport", "viewport_browser_interaction",
-                "--", "--ignored", "--exact", "--nocapture", extra=viewport_env)
-        for observer in ["headless", "browser"]:
-            arguments = [sys.executable, str(candidate / "scripts/benchmark_prompt_viewport.py"),
-                         "--driver", drivers[0], "--binary", str(output / "scode-candidate"),
-                         "--output", str(output / ("viewport-" + observer))]
-            if observer == "browser":
-                arguments += ["--observer", "browser"]
-            command(*arguments, extra=viewport_env)
+            row = json.loads(line)
+            target = row.get("target", {}).get("name")
+            if row.get("reason") == "compiler-artifact" and target in found and row.get("executable"):
+                found[target].append(row["executable"])
+    if any(len(executables) != 1 for executables in found.values()):
+        raise RuntimeError(f"Expected exactly one compiled driver per target: {found}")
+    return {name: executables[0] for name, executables in found.items()}
 
+
+def browser_smoke(inputs, output, command):
+    """Painted-terminal behaviour, once, against a dev build of the candidate.
+
+    Typing latency is judged by the rendering matrix on main; this pass checks
+    what only a real browser terminal shows: clickable links, native selection
+    surviving streaming, viewport wheel and selection, and an idle terminal.
+    """
+    work, targets = benchmark_storage("browser")
+    work.mkdir(parents=True, exist_ok=True)
+    candidate = work / "candidate"
+    replace_checkout(inputs / "candidate", candidate)
+    terminal = candidate / "e2e/terminal-resize"
+    command("npm", "ci", "--prefix", str(terminal))
+    manifest, build = str(candidate / "rust/Cargo.toml"), str(targets / "candidate")
+    command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+            "-p", "rusty-sudocode-cli", "--bin", "scode")
+    binary = output / "scode-candidate"
+    # Copy before the drivers build: their dev features rebuild the shared graph.
+    shutil.copy2(targets / "candidate/debug/scode", binary)
+    log = command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                  "-p", "rusty-sudocode-cli", "--test", "pty_hyperlinks", "--test", "pty_prompt_viewport",
+                  "--no-run", "--message-format=json-render-diagnostics")
+    drivers = compiled_drivers(log, ["pty_hyperlinks", "pty_prompt_viewport"])
+    command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers["pty_hyperlinks"],
+            "--candidate", str(binary), "--output", str(output / "smoke"))
+    command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
+            "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport", "viewport_browser_interaction",
+            "--", "--ignored", "--exact", "--nocapture",
+            extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
 
 def main():
     parser = argparse.ArgumentParser()

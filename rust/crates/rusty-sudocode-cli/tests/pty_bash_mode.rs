@@ -8,8 +8,10 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use common::TestEnv;
 
 /// Human types `! printf …` at the prompt. The command runs immediately, its
@@ -57,7 +59,7 @@ fn bang_runs_shell_command_without_model_turn() {
 
     if env.is_mock() {
         let bodies = env.captured_message_bodies();
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         assert_eq!(
             bodies.len(),
             1,
@@ -82,7 +84,7 @@ fn bang_runs_shell_command_without_model_turn() {
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL should exit cleanly after /exit; got {e:?}\nPTY screen:\n{screen}")
     });
     assert_eq!(exit, 0);
@@ -114,7 +116,7 @@ fn bang_reports_stderr_and_exit_code() {
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL should exit cleanly after /exit; got {e:?}\nPTY screen:\n{screen}")
     });
     assert_eq!(exit, 0);

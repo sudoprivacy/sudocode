@@ -185,21 +185,68 @@ pub fn resolve_git_branch_for(cwd: &Path) -> Option<String> {
     }
 }
 
-/// Where the workspace is, for display: its branch, or the short commit when
-/// HEAD is detached. `None` outside a repository.
-///
-/// Unlike [`resolve_git_branch_for`], a detached HEAD names the commit rather
-/// than reporting "detached HEAD", which says nothing about where you are.
+/// Where the workspace is, tightly: `repo ⎇ branch`. A detached HEAD names a
+/// branch tip it sits on, `repo ⎇ origin/main@4d3c4ad4`, else just the commit.
+/// The repo is named by its shared git directory, so every worktree of one
+/// repository reports the same name. `None` outside a repository.
 #[must_use]
-pub fn resolve_git_head_label_for(cwd: &Path) -> Option<String> {
+pub fn resolve_git_position_for(cwd: &Path) -> Option<String> {
+    let common = run_git_capture_in(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let common = Path::new(common.trim());
+    let repo = if common.file_name().is_some_and(|name| name == ".git") {
+        common.parent()
+    } else {
+        Some(common)
+    }
+    .and_then(Path::file_name)
+    .map(|name| name.to_string_lossy().trim_end_matches(".git").to_string())
+    .filter(|name| !name.is_empty());
+    let head = resolve_git_head_for(cwd)?;
+    Some(match repo {
+        Some(repo) => format!("{repo} ⎇ {head}"),
+        None => format!("⎇ {head}"),
+    })
+}
+
+/// The branch, or for a detached HEAD the first branch tip it sits on plus
+/// the short commit; just the commit when no branch points at it.
+fn resolve_git_head_for(cwd: &Path) -> Option<String> {
     let branch = run_git_capture_in(cwd, &["branch", "--show-current"])?;
     let branch = branch.trim();
     if !branch.is_empty() {
         return Some(branch.to_string());
     }
     let commit = run_git_capture_in(cwd, &["rev-parse", "--short", "HEAD"])?;
-    let commit = commit.trim();
-    (!commit.is_empty()).then(|| commit.to_string())
+    let commit = commit.trim().to_string();
+    // Full names, so a symbolic `refs/remotes/origin/HEAD` is recognisable.
+    let tip = run_git_capture_in(
+        cwd,
+        &[
+            "for-each-ref",
+            "--points-at",
+            "HEAD",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .and_then(|refs| {
+        refs.lines()
+            .map(str::trim)
+            .filter(|name| !name.ends_with("/HEAD"))
+            .find_map(|name| {
+                name.strip_prefix("refs/heads/")
+                    .or_else(|| name.strip_prefix("refs/remotes/"))
+            })
+            .map(str::to_string)
+    });
+    Some(match tip {
+        Some(tip) => format!("{tip}@{commit}"),
+        None => commit,
+    })
 }
 
 #[must_use]
@@ -1292,7 +1339,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
     if config
         .auth_modes
         .get("proxy")
-        .is_none_or(|accounts| accounts.is_empty())
+        .is_none_or(std::collections::BTreeMap::is_empty)
     {
         return DiagnosticCheck::new(
             "Account",
@@ -1326,11 +1373,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
 
 #[allow(clippy::too_many_lines)]
 fn check_auth_health() -> DiagnosticCheck {
-    let env_present = |key: &str| {
-        env::var(key)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    };
+    let env_present = |key: &str| env::var(key).is_ok_and(|value| !value.trim().is_empty());
     let anthropic_api_key_present = env_present("ANTHROPIC_API_KEY");
     let anthropic_auth_token_present = env_present("ANTHROPIC_AUTH_TOKEN");
     let api_key_present = anthropic_api_key_present || anthropic_auth_token_present;

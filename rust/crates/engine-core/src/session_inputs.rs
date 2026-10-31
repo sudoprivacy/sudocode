@@ -224,8 +224,14 @@ impl SessionInputs {
                 delivery,
                 context,
             } => {
-                receipt["id"] =
-                    json!(state.submit(client_id, draft, input, delivery, context, inbox)?);
+                receipt["id"] = json!(state.submit(
+                    client_id,
+                    draft,
+                    input,
+                    delivery,
+                    context.map(|context| *context),
+                    inbox
+                )?);
             }
             InputAction::Flush | InputAction::FlushOrCancel => {
                 if state.queue.has_pending_input() {

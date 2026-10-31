@@ -70,7 +70,7 @@ fn a_refused_batch_records_a_consumer_refused_stall_with_the_stuck_offset() {
     // exactly the condition the fleet hit during a long turn.
     let seen = Arc::clone(&handed_over);
     let poller = runtime::mailbox::spawn_local_poller(
-        root.path().to_path_buf(),
+        root.path(),
         "receiver-under-test".to_string(),
         abort.clone(),
         move |_envelope: &MailboxEnvelope| {
@@ -165,17 +165,12 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
     // question this recorder exists to answer.
     let root = TempRoot::new("appending");
     let abort = runtime::HookAbortSignal::default();
-    let handed_over = Arc::new(AtomicUsize::new(0));
 
-    let seen = Arc::clone(&handed_over);
     let poller = runtime::mailbox::spawn_local_poller(
-        root.path().to_path_buf(),
+        root.path(),
         "pinned-receiver".to_string(),
         abort.clone(),
-        move |_envelope: &MailboxEnvelope| {
-            seen.fetch_add(1, Ordering::Release);
-            false
-        },
+        |_envelope: &MailboxEnvelope| false,
     );
 
     let sender = runtime::mailbox::Mailbox::workspace_local(root.path(), "chatty-peer".to_string());
@@ -183,16 +178,24 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
         .send(envelope("chatty-peer", "pinned-receiver", "first"))
         .expect("send first");
 
+    // The poller records the stall after the consumer has refused, so wait for
+    // the record itself; the moment of the refusal is too early to read it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while handed_over.load(Ordering::Acquire) < 1 && std::time::Instant::now() < deadline {
+    let tail_before = loop {
+        let tail = runtime::mailbox::delivery_events()
+            .into_iter()
+            .filter(|e| e.peer == "chatty-peer")
+            .filter_map(|e| e.tail)
+            .max();
+        if let Some(tail) = tail {
+            break tail;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a stall was recorded for the first message"
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let tail_before = runtime::mailbox::delivery_events()
-        .into_iter()
-        .filter(|e| e.peer == "chatty-peer")
-        .filter_map(|e| e.tail)
-        .max()
-        .expect("a stall was recorded for the first message");
+    };
 
     // Append while the consumer is still refusing.
     sender
@@ -248,7 +251,7 @@ fn an_accepted_batch_records_no_stall() {
 
     let seen = Arc::clone(&accepted);
     let poller = runtime::mailbox::spawn_local_poller(
-        root.path().to_path_buf(),
+        root.path(),
         "accepting-receiver".to_string(),
         abort.clone(),
         move |_envelope: &MailboxEnvelope| {

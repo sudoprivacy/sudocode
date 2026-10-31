@@ -195,7 +195,7 @@ pub fn ansi_fg(color: Color) -> String {
         Color::White => "\x1b[97m".to_string(),
         Color::AnsiValue(n) => format!("\x1b[38;5;{n}m"),
         Color::Rgb { r, g, b } => format!("\x1b[38;2;{r};{g};{b}m"),
-        _ => String::new(),
+        Color::Reset => String::new(),
     }
 }
 
@@ -489,6 +489,11 @@ fn parse_budget_token(token: &str) -> Option<u32> {
         _ => return None,
     };
     let value: f64 = num_str.parse().ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Budget literals truncate fractional tokens and saturate at u32 bounds."
+    )]
     let result = (value * multiplier) as u32;
     (result > 0).then_some(result)
 }
@@ -1674,7 +1679,10 @@ impl ResponseGlyphState {
                             out.push_str("  ");
                         } else {
                             self.started = true;
-                            out.push_str(&format!("\r\x1b[2K{BOLD}•{RESET} "));
+                            let _ = std::fmt::Write::write_fmt(
+                                &mut out,
+                                format_args!("\r\x1b[2K{BOLD}•{RESET} "),
+                            );
                         }
                     }
                     row.write_ansi(0..row.text.len(), &mut out);
@@ -1693,9 +1701,7 @@ impl ResponseGlyphState {
 }
 
 pub(crate) fn query_terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80)
+    crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize)
 }
 
 #[cfg(test)]

@@ -60,7 +60,10 @@ def main():
               ]},
               "measurement": f"{comparison}. Headless CPU/output comparisons cover identical typing phases; extra scrolling and total costs remain in every sample. Browser painting includes two animation frames and PNG readback; RSS uses phase samples and per-process high-water values where available."}
 
+    browser_metadata = None
+
     def sample(stage, number, side, enabled):
+        nonlocal browser_metadata
         binary = args.baseline if args.baseline and (stage == "aa" or side == "base") else args.binary
         enabled = enabled or args.baseline is not None
         location = args.output / f"{stage}-{number:02d}-{side}"
@@ -81,6 +84,10 @@ def main():
         assert all(isinstance(value["metrics"][key], (int, float)) and math.isfinite(value["metrics"][key])
                    and value["metrics"][key] >= 0 for key in metrics), "invalid measurement"
         if args.observer == "browser":
+            metadata = (value["browser"], value["observer"])
+            if browser_metadata is None:
+                browser_metadata = metadata
+            assert metadata == browser_metadata, "browser observer changed during comparison"
             assert len(value["samples"]) == policy["sampling"]["input"]
             assert len(value["frame_samples"]) == len(gui_policy["sampling"]["input_delays_ms"])
         else:

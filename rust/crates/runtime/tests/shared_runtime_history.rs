@@ -110,6 +110,20 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// Observe durable reclamation before the fixture removes its worker's files.
+fn wait_for_reclaimed_session(transcript: &Path, references: &Path) {
+    let deadline = Instant::now() + WAIT;
+    while transcript.exists() || std::fs::read_dir(references).unwrap().next().is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "deleted Session was not reclaimed: transcript={}, references={}",
+            transcript.display(),
+            references.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct Fixture(PathBuf);
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -237,19 +251,7 @@ fn data_dir_client(root: &Path, role: &str) {
     let store = runtime::SessionStore::from_data_dir(root.join("data"), &workspace).unwrap();
     let path = root.join("external/transcript.jsonl");
     if role == "restart" {
-        let deadline = Instant::now() + WAIT;
-        while path.exists()
-            || std::fs::read_dir(store.sessions_dir().join(".cleanup"))
-                .unwrap()
-                .next()
-                .is_some()
-        {
-            assert!(
-                Instant::now() < deadline,
-                "ordinary startup did not reclaim the external Session"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_for_reclaimed_session(&path, &store.sessions_dir().join(".cleanup"));
         return;
     }
     if role == "delete-store" {
@@ -396,20 +398,9 @@ fn assert_rejected_migrations_preserve_source(
     );
     assert_eq!(legacy_archives(directory).as_slice(), archives);
     drop(recorder);
-    // purge_stored commits deletion, not synchronous physical reclamation. A
-    // concurrent cleanup worker can also own the SID barrier at its return.
-    // Observe actual completion within the same fixture budget; do not retry
-    // the deletion or call cleanup directly from the test.
-    let references = directory.join(".cleanup");
-    let deadline = Instant::now() + WAIT;
-    while std::fs::read_dir(&references).unwrap().next().is_some() {
-        assert!(
-            Instant::now() < deadline,
-            "the deleted migration was never reclaimed after its backup recorder retired: {}",
-            references.display()
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
+    // Release the real recorder lease, then use main's bounded reclamation
+    // observation. Never retry deletion or invoke cleanup from this test.
+    wait_for_reclaimed_session(path, &directory.join(".cleanup"));
     assert!(!path.exists());
     assert!(
         legacy_archives(directory).is_empty(),
@@ -518,7 +509,8 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     journal
         .purge(&journal.storage_ref(), "delete-after-refresh")
         .unwrap();
-    assert!(store_root.join(".cleanup").is_dir());
+    let references = store_root.join(".cleanup");
+    assert_eq!(std::fs::read_dir(&references).unwrap().count(), 1);
     assert_eq!(
         a.refresh_compaction_source().unwrap_err().to_string(),
         "session_deleted"
@@ -532,26 +524,9 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
-    // Deleted while writer `a` was alive, so reclaiming the Session was left to
-    // the process-wide session-cleanup worker, which retries every second and
-    // takes file locks (creating lock files) inside this fixture. Now that the
-    // last writer has retired, the reclaim must finish: it removes the durable
-    // reference and the transcript. Removing the fixture before then raced the
-    // worker's retry (ENOTEMPTY on Linux).
-    let references = store_root.join(".cleanup");
-    let deadline = Instant::now() + WAIT;
-    while std::fs::read_dir(&references)
-        .map(|entries| entries.flatten().next().is_some())
-        .unwrap_or(false)
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the deleted Session was never reclaimed after its last writer retired: {}",
-            references.display()
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!path.exists(), "reclaim removes the deleted transcript");
+    // The worker owns deferred reclamation until the last writer retires.
+    // Observe both its durable reference and the transcript before teardown.
+    wait_for_reclaimed_session(&path, &references);
     drop(fixture);
 }
 

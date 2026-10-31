@@ -76,9 +76,11 @@ def run(args, root):
         port = listener.getsockname()[1]
     endpoint = f'127.0.0.1:{port}'
     bind_addr = f'{args.bind_host}:{port}'
+    peer_prefix = '/agents'
+    proof_path = f'{peer_prefix}/lifecycle-proof'
     native_env = env | {'NEXUS_DATA_DIR': str(data), 'NEXUS_IDENTITY_DIR': str(identity),
         'NEXUS_ADVERTISE_ADDR': endpoint, 'NEXUS_CLUSTER_INIT': 'sharedzone',
-        'NEXUS_CLUSTER_INIT_MOUNTS': '/agents=sharedzone', 'RUST_LOG': 'info'}
+        'NEXUS_CLUSTER_INIT_MOUNTS': f'{peer_prefix}=sharedzone', 'RUST_LOG': 'info'}
     daemon_log = (root / 'bootstrap.log').open('wb')
     bootstrap = subprocess.Popen([str(args.daemon), '--bind-addr', bind_addr],
         env=native_env, stdout=daemon_log, stderr=subprocess.STDOUT)
@@ -104,6 +106,7 @@ def run(args, root):
                 'error': result.stderr.decode('utf-8', errors='replace')}) + '\n')
         if result.returncode:
             with (root / 'grpc-errors.log').open('ab') as output:
+                output.write(f'{method} {payload.get("path", payload.get("zone_id", ""))}:\n'.encode())
                 output.write(result.stderr)
             result.check_returncode()
         return json.loads(result.stdout)
@@ -121,16 +124,14 @@ def run(args, root):
 
     def bootstrap_ready():
         current = membership()
-        # Raft serves membership before the rest of native boot completes.
-        # Prepare the original Box only after its single-voter leaders and
-        # actual VFS reads serve, within the existing startup observation.
-        # No setup write is retried: a timed-out write has an unknown outcome.
+        # Wait for the original single-voter leaders and actual VFS reads;
+        # retain the canonical mount's found check before the one durable write.
         if not all(item.get('isLeader') and item.get('leaderId') == item['nodeId']
                    for item in current.values()):
             return None
-        for path in ['/', '/agents', '/conversations']:
+        for path in ['/', peer_prefix, '/conversations']:
             response = grpc('Stat', {'path': path})
-            if response.get('isError'):
+            if response.get('isError') or (path == peer_prefix and not response.get('found')):
                 return None
         return current
 
@@ -172,8 +173,8 @@ def run(args, root):
         before = wait_until(bootstrap_ready)
         assert all(item['nodeId'] == before['root']['nodeId'] for item in before.values())
         marker = base64.b64encode('original durable Box body 中文\x00'.encode()).decode()
-        grpc('Write', {'path': '/agents/lifecycle-proof', 'content': marker})
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
+        grpc('Write', {'path': proof_path, 'content': marker})
+        assert grpc('Read', {'path': proof_path})['content'] == marker
         profile = {'schemaVersion': 1, 'boxEndpoint': endpoint, 'binary': str(args.daemon),
             'binarySha256': sha(args.daemon), 'dataDir': str(data), 'identityDir': str(identity),
             'nodeId': str(int.from_bytes((data / '.node_id').read_bytes(), 'big')), 'caSha256': sha(data / 'tls/ca.pem'),
@@ -249,7 +250,7 @@ def run(args, root):
         assert not (root / 'wrong-data').exists()
         assert not (services / 'runtimes').exists(), 'Recovery downloaded another native version'
         peer_messaging_resident()
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
+        assert grpc('Read', {'path': proof_path})['content'] == marker
         after = membership()
         for zone, old in before.items():
             assert after[zone]['nodeId'] == old['nodeId']
@@ -280,8 +281,8 @@ def run(args, root):
         assert restarted['persistedNodeId'] == profile['nodeId']
         assert setup()['service']['instance'] == restarted['instance']
         peer_messaging_resident()
-        assert grpc('Read', {'path': '/agents/lifecycle-proof'})['content'] == marker
-        print('PASS: acknowledged exact-target termination and ACP recovery/CLI reuse preserve state', flush=True)
+        assert grpc('Read', {'path': proof_path})['content'] == marker
+        print('PASS: acknowledged exact-target operator termination and ACP recovery/CLI reuse preserve state', flush=True)
         receipt.update(nodeId=profile['nodeId'], before=before, after=after,
             ownerPid=discovery['supervisor_pid'], nexusPid=discovery['nexus_pid'], status='PASS')
     finally:

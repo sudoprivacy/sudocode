@@ -63,9 +63,8 @@ fn cohost_fs(workspace_root: impl Into<String>) -> (Arc<Kernel>, Arc<dyn FsBacke
 fn a_cohosted_agents_subagent_store_is_written_into_its_own_vfs_subtree() {
     let (_kernel, fs) = cohost_fs("/proc/7/workspace");
 
-    let manifest =
-        tools::testing::prepare_agent_job_on(Arc::clone(&fs), "general-purpose", "do the thing")
-            .expect("preparing a sub-agent job should succeed on a co-hosted filesystem");
+    let manifest = tools::testing::prepare_agent_job_on(&fs, "general-purpose", "do the thing")
+        .expect("preparing a sub-agent job should succeed on a co-hosted filesystem");
 
     // The paths the manifest advertises are the agent's own subtree — not a
     // directory derived from the daemon's process directory, which every
@@ -193,7 +192,7 @@ fn a_live_cohost_task_receives_followups_only_through_its_session_filesystem() {
     let mut positions_during_turn = Vec::new();
     let result = tools::testing::run_multi_turn_loop_in_mailbox_for_test(
         &mailbox,
-        abort,
+        &abort,
         "first turn".into(),
         4,
         |prompt| {

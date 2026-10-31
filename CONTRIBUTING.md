@@ -109,7 +109,7 @@ sudocode is deliberately opinionated about what to test and how.
 
 | Layer | Status | When to write |
 |---|---|---|
-| **PTY (`pty-expect`)** | **Required CI gate**; the only layer counting toward the 90% e2e coverage metric | Every user-facing feature |
+| **PTY (`pty-expect`)** | **Required acceptance gate** (local + complementary CI); the only layer counting toward the 90% e2e coverage metric | Every user-facing feature |
 | Integration (mock harness) | Optional — debug accelerator, not a CI gate | When a PTY failure's blast radius is wide enough that shrinking bisection distance is worth the file |
 | **Unit** | **Forbidden by rule** | Don't. PRs adding unit tests will be asked to remove them. |
 
@@ -163,6 +163,348 @@ tool tests execute natively there too. A small number of tests that
 depend on Unix-only mechanisms (SIGINT/ESC signal delivery, `sh -c` /
 `python3` subprocesses, the ACP stdio subprocess handshake) are still
 `#[cfg(unix)]`-gated.
+
+### Mandatory local acceptance and complementary CI
+
+Install the managed pre-push hook once per clone. All worktrees share it:
+
+```bash
+python -m pip install psutil jsonschema
+ssh-keygen -t ed25519 -f ~/.nexus/sudocode-acceptance-key -N ""
+# Add only the .pub key to spec/local_acceptance_signers.json through review.
+python .github/scripts/local_acceptance.py install --signer YOUR_DEVICE_ID --key ~/.nexus/sudocode-acceptance-key
+```
+
+Enrolled device public keys are listed in `spec/local_acceptance_signers.json`;
+their private keys stay outside the repository. Each new author device enrolls
+its own platform key.
+Never commit a private key. Installation preserves existing hooks by refusing to
+overwrite them; compose an existing hook explicitly. Protected-main updates refresh
+the installed runner automatically, including when pushing an older worktree.
+
+The hook runs applicable real checks before a branch push. A Windows author runs
+the Windows workspace, resize, release and service checks locally; CI runs Linux
+and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
+author runs Linux locally; CI runs Windows and macOS. Co-host release verification
+follows the same host split when its inputs change. SDK changes additionally
+require both Linux x64 and ARM64: a Linux author supplies only their own CPU
+target, and CI supplies the other. Each supported OS remains covered; macOS and
+Windows source acceptance is by OS, not every CPU architecture on every PR.
+Actual tagged co-host releases retain their five-platform artifact builds.
+
+Rendering A/A and A/B, painted browser performance and viewport resource checks
+run automatically in local Docker when CLI, engine-core, shared PTY helpers,
+measurement sources or Rust build/dependency inputs change. Other crates' source
+changes keep their selected native functional checks but skip these statistical
+performance comparisons. This deliberately reduces performance coverage for
+indirect effects from API, runtime, tools, ACP and service implementations; it
+does not establish that those effects are impossible. A change known to affect
+the performance workloads must include the corresponding measurement scenario.
+Selected measurements keep their existing baselines, rounds, assertions and budgets.
+Rendering and browser use the same canonical candidate checkout and Cargo
+outputs under the existing exclusive benchmark lease. Each baseline and the
+trusted rendering driver keep separate outputs. Copied normal release binaries
+stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
+cross-profile candidate reuse, exact binary identity and unchanged observer stages.
+When rendering and browser run in the same acceptance process for the same
+candidate, protected policy and Docker context, browser reuses rendering's exact
+immutable image and saved normal release. The retained image ID and binary hash
+live in that process only; previous output directories and mutable image tags
+cannot authorize reuse. The release enters browser through read-only inputs and
+is checked against its source, policy, image and SHA256 before use. Changed
+inputs or a fresh process use the ordinary build path; corrupted retained files
+fail explicitly. Browser baseline builds, dev-feature drivers, paired GUI samples
+and viewport observers still run. Real Cargo acceptance compiles another source
+into the shared cache between profiles and verifies the original normal release
+is preserved without another normal candidate build. Actual Docker acceptance
+exercises the frozen image, invocation boundary and five tampered identities/bytes.
+This removes a duplicate build even when another workline churns the cache. It
+does not shorten a successful measurement matrix or prove production speedup.
+Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
+Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
+copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories
+under the same lease, preserving canonical `/state` paths, modes and mtimes.
+The host cache stays mounted read-only at `/legacy-state`; it is not deleted.
+Completed migration is not repeated; interruption leaves no completion receipt.
+The required command prints migration start/completion and includes that one-time
+copy in local elapsed time. Logs and measurement evidence remain in the host
+output directory. Keep both the data volume and the separate shared lease volume
+when managing Docker storage. Removing the data volume requires migration again;
+removing the preserved host cache as well causes a cold dependency/product build.
+Real Cargo acceptance checks warm artifact identity, changed-source rebuild,
+partial-copy recovery, and refusal of escaped roots or invalid completion records.
+The production Docker launcher is also exercised with private labelled volumes.
+This changes storage placement, not selected workloads, samples or budgets. Both
+Docker execution recipes require new evidence; native profile recipes stay unchanged.
+Rendering completes and judges one scenario at a time. Each scenario keeps its
+two warm-ups, five A/A pairs, seven alternating A/B pairs, interaction sample
+counts and budgets. A failed/noisy/invalid scenario stops the matrix and releases
+the lease; later scenarios remain unrun. A successful core matrix still runs all
+156 samples. Scenario ordering and the placement of warm-ups change, so future
+noise and latency still need observation. The mandatory command prints the active
+scenario and its evidence path. `measurements/report.json` combines the original
+case reports, with original policy and binary/observer hashes, completed scenarios
+and remaining work. Real Cargo/native-process infrastructure acceptance exercises
+full success, relative RSS regression, broken drivers and changed observers with
+the unchanged paired evaluator; it does not claim product performance coverage.
+The changed rendering recipe requires new evidence. Eight other profile recipes
+are byte-for-byte unchanged; the unchanged browser command list has an exact
+approved hash pair so existing signed browser evidence remains reusable.
+These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
+ordinary test-only changes do not rebuild an unchanged performance pair. Local
+compilers use one job and BelowNormal/nice priority while Cargo and tests stay
+Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Hosted complementary builds use the available compiler CPUs. That hosted-only
+setting is applied after cache restore; local author builds keep one worker and
+all test commands, deadlines and compiler priorities stay unchanged.
+Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
+Deterministic workspace cases use the checksum-pinned nextest runner with four
+global test workers. The runner lives in a private acceptance cache; it does not
+replace a contributor's installed tools. Retries are disabled, the first failure
+stops new work while active cases clean up, and an empty selection fails. Cargo
+still runs doctests separately. The existing live-provider commands remain on
+Cargo; no provider coverage is inferred from deterministic fixture results.
+Release acceptance builds the normal release `scode` once, copies it outside
+Cargo outputs, and points the native workspace's test-profile driver at that
+exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
+feature graph; release-only dev-dependency compilation is no longer repeated.
+The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
+An actual Cargo/native-process fixture checks driver reuse, the release binary's
+identity and rejection of a substituted debug binary. The test driver and its
+in-process fixture helpers now execute in the test profile; the product process
+still uses the normal release graph.
+Ordinary Windows shells also receive the configured/discovered MSVC environment
+when the startup measurement script compiles its native reference process.
+The protected policy records exact pairs of equivalent execution hashes for the
+runner migration. Existing full-Cargo evidence for the same candidate can remain
+valid; the new runner-enforcement guard still runs. The verifier checks the old
+recipe against signed source and the pair against the current recipe. A later
+command change or newly required check cannot inherit that approval. Reuse is
+reported directly by the hook and CI verifier.
+The native recovery smoke and executor guard share an immutable protected-policy
+snapshot with their matching helpers. Older candidate checkouts do not need
+those newly added files. The protected profile pins every staged input's SHA256,
+including helpers outside `.github/`; changed bytes fail before execution until
+their protected pins are reviewed and updated. The existing profile fingerprints
+bind those pins without changing the receipt format. The full Docker decision
+matrix still exercises candidate sources.
+Toolchain discovery still uses the candidate repository.
+Compiler monitoring uses executable identity, including versioned and target-prefixed
+compiler names, without reading command-line arguments. This avoids psutil 7.2.2's
+macOS process-name fallback failure. One compiler worker, lowered compiler priority,
+Normal test priority, commands and budgets remain unchanged; protected equivalence
+pins retain successful earlier evidence for those unchanged commands. The new native
+guard always needs its own actual run, including a refused process-name query.
+On a Windows box with unregistered Build Tools, set
+`git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
+otherwise the runner discovers Visual Studio or uses the existing Developer shell.
+Inherited `NO_COLOR` is cleared after SDK initialization so the launcher's log
+preference cannot suppress colored fixtures. A command's explicit `NO_COLOR`
+value is still honored. The native guard runs actual Cargo/SDK processes to
+verify inherited, explicit and empty values, including cached SDK setup.
+
+A signed Git note binds the successful command list and log hashes to the exact
+commit, tree, diff base, policy and native host. The hook publishes that note
+before the branch. GitHub's read-only metadata job verifies the signature against
+public keys enrolled on main and selects the missing hosts. The SDK profile runs
+the actual `npm ci`, `npm test` and runtime packaging commands locally and in CI;
+an older preflight-only receipt cannot satisfy it. Missing, failed,
+stale or tampered receipts block the Local acceptance required check. A signature
+authenticates the enrolled author's statement; it is not remote execution
+attestation. Maintainers may attest a contributor's PR by actually running its
+checks on an enrolled host; forks need not receive repository secrets.
+
+After the protected commands change, `check --resume-from /path/to/previous/output`
+can reuse unchanged profiles from a signed run of the same commit, tree, base,
+native platform and architecture. The previous policy must belong to the current protected
+history, its signature must still verify, and the original logs must match their
+signed hashes. Changed profiles run again. The new receipt records which profiles
+were reused and retains their original command records and completion time.
+After each successful profile, the runner signs a separate checkpoint while the
+source remains clean and unchanged, before it starts the next profile. Complete
+receipt/signature/envelope files live in immutable numbered generations; an atomic
+`checkpoint.json` pointer advertises only a verified complete generation. An
+abrupt process exit can therefore retain earlier completed profiles without
+running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
+automatically discover compatible checkpoints for the exact head, base and native
+host; custom output directories can use the printed `check --resume-from` command.
+Checkpoint signatures use a different SSH namespace and cannot satisfy the required
+GitHub check or authorize a branch push. Original logs must still match their hashes.
+Earlier `checkpoint/` records remain readable. An incomplete unadvertised generation
+does not replace earlier signed progress. The active profile still needs to finish
+before its result can be saved; this does not recover a partial profile or claim
+protection against host power loss. The required command prints progress and the
+resume command directly. Real Git/SSH acceptance uses an actual abrupt CLI exit,
+explicit and automatically discovered resume, a legacy record, an unsigned partial
+generation and an escaped pointer; the earliest recorded local time is retained.
+The required interface prints `LOCAL_ACCEPTANCE_TIMING` and retains
+`attempt.json` for each started check, including failures. Signed receipts and
+checkpoints retain the first recorded start across verified resumes. Outer push
+and contract operations also print `LOCAL_ACCEPTANCE_OPERATION_TIMING`; explicit
+output directories retain `operation.json`. Measure local setup, builds, lease
+waiting, retries and publication through CI failure or merge. Use the earliest
+applicable start, without adding overlapping intervals. Older/manual history can
+be missing; these diagnostics neither authorize a push nor prove complete history.
+For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
+in a private local Docker container. A native host smoke retains the actual failing
+process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
+native nextest/Cargo enforcement fixture also remains on the author OS. The full
+negative decision matrix is no longer repeated natively on Windows or macOS, so
+OS-specific negative hook paths have less coverage. The container uses its own
+temporary source/fixtures and does not take the shared performance lease or build
+the product. Product native acceptance and complementary CI hosts are unchanged.
+Edits limited to the independent Cargo benchmark, Docker input or Clippy
+executor fixtures skip the unchanged local enforcement matrix. Their actual
+changed fixture remains required in CI preflight. Shared executors, policy,
+signers, enforcement fixtures and unknown new acceptance fixtures still select
+the full guard; mixed changes and renames in either direction retain it.
+The public planner and mandatory command output state that CI preflight runs
+changed executor fixtures. Real Git regressions exercise isolated, mixed,
+unknown and renamed inputs through the public planner, and verify the matching
+PR/push/queue selector outputs. Product checks and selected fixture assertions
+are unchanged; this avoids repeating unrelated enforcement tests locally.
+The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
+archive converts line endings. It accepts the reconstruction only when SHA256
+matches the original protected pin; changed content still fails. Its private Git
+repository disables automatic line-ending conversion without changing author settings.
+
+A failed native matrix job cancels the other pending/running platforms. The
+trusted publisher checks the actual completed jobs directly; no second hosted
+summary job repeats those checks. Scheduling-only edits keep valid completed
+local evidence when its executor/profile/image are unchanged and it covers the
+current required checks. New commits or changed commands still need acceptance.
+Per-profile fingerprints retain the selected literal dispatch branch and all
+shared code, process execution and image inputs. Adding an unselected branch
+preserves that evidence. Legacy receipts require the exact attested executor to
+be recoverable from their immutable signed source or base; their signatures stay unchanged.
+The versioned semantic AST encoding ignores empty optional fields so author and
+CI Python versions compute the same execution fingerprint.
+Provider tests on main run only for changed provider inputs, and real-daemon
+queue tests run only for changed daemon inputs. Documentation/CI-only changes
+skip those unchanged expensive journeys. The explicit provider dispatch stays
+available for gateway diagnosis.
+The acceptance policy and signer registry are CI authorization metadata; changing
+them selects their acceptance checks without selecting unchanged provider calls.
+Other `spec/` inputs retain provider coverage. Source renames/deletions and explicit
+provider dispatch retain their existing selection rules.
+CLI integration-test-only edits retain native PTYs and the existing provider
+checks, but skip the daemon suite whose binaries and shell inputs are unchanged.
+CLI manifests, production source and daemon harness edits still select it.
+When a change contains only standalone CLI integration-test modules (optionally
+with root README or Markdown documentation edits), workspace acceptance runs
+those test targets with the same mailbox feature. Unchanged metadata, Mermaid,
+benchmark and production Clippy commands are reused. Shared helpers, fixtures,
+specs, source, manifests, target deletion and moves across those boundaries
+keep full workspace acceptance. All other selected native/local profiles remain.
+Shared PTY helper sources also select native terminal resize acceptance, whether
+they live under CLI `tests/common` or the test-only `rust/crates/pty-harness` path.
+
+The required `CI preflight` job shares one checkout and tool setup for format,
+generated cache schemas, docs, history, boundary, release-mirror and provider
+probe checks. Its first failing step blocks its daemon/provider dependents.
+PRs always start this job, including SDK-only changes; path filters cannot leave
+a required status pending. The queue's protected acceptance gate still checks
+the combined Git history. No unique product test is removed by this consolidation.
+After merge, main reuses those completed integrity checks. Its lightweight
+preflight still resolves the pinned protocol and changed-input scope needed by
+the existing daemon/provider jobs. PR, queue and explicit runs retain the full
+preflight; no product assertion is removed.
+Signature verification and status publication use Windows runners, with an
+explicit Python interpreter, to avoid two extra admissions to the busy Linux
+pool. This metadata placement does not replace native Linux or macOS tests.
+
+`spec/local_acceptance.json` selects required targets, and the protected runner's
+`acceptance_plan` drives both the hook and CI. Push output and CI summaries print
+the local/CI responsibilities and an `ACCEPTANCE_PLAN` JSON record. The signed
+receipt retains that plan; GitHub's required `Local acceptance` status description
+also names the local host and complementary CI targets, so `gh`/API clients see
+the split directly. To preview it without executing or attesting tests, run:
+
+```bash
+python .github/scripts/local_acceptance.py plan
+```
+
+The ACP package workflow no longer repeats PR integration tests on the author's
+platform. Ready PRs use the mandatory shared acceptance gate; drafts do not claim
+those skipped jobs passed. Main still builds and packages its exact merged
+revision on all four hosts. Explicit package dispatch remains diagnostic and
+does not replace a signed receipt. A newer head cancels obsolete acceptance runs.
+Unrelated workflow edits do not start three Rust cache
+publishers; Rust changes and changes to the publisher itself still do.
+
+These receipts establish source-test coverage. They do not prove installation,
+authenticated enrollment, frontend lifecycle or deployed cross-machine delivery.
+Do not request another author's manual platform rerun to duplicate CI; separately
+scoped deployment acceptance still exercises the actual installed system.
+
+The merge queue verifies each included PR's current receipt and completed
+cross-platform workflow, then checks the combined Git history. It does not repeat
+the native suites on the combined merge-group tree. Rust-changing PRs also run
+strict all-target/all-feature Clippy on Linux; the queue runs that same strict
+check on Linux, Windows and macOS against the combined tree. The required daemon
+gate waits for those checks and rejects failed or unexpectedly skipped jobs.
+The lint command stops scheduling additional crates after the first error;
+compiler jobs already running may finish before matrix cancellation. Successful
+runs retain every target, feature and `-D warnings` check. An actual three-package
+Cargo/Clippy fixture compares the old continuing command with the current CI
+command, verifies all packages/targets/features after fixing the warnings, and
+records the actual compiler priorities. It runs once on a PR only when the lint
+workflow, fixture or scope selector changes; queue/main reuse its result.
+A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
+that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
+Real provider/API assertions on main are unchanged; mock transport results do not
+establish live cache hits. Cache-prefix, compaction and all existing workspace
+cases remain, including standalone vendored Mermaid and benchmark type checks.
+
+Existing PRs do not need a cosmetic merge from main to acquire the hook files:
+the managed hook loads protected-main command definitions. Registering another
+public device key does not invalidate other devices' current receipts.
+
+#### Acceptance contract changes
+
+The local hook and CI verifier reject a candidate that changes the protected
+acceptance contract relative to trusted main. This includes adding checks and
+editing diagnostics, not only removing checks or lowering thresholds. The purpose
+is to prevent a candidate from authorizing the rules used to accept itself;
+the rejection does not establish that its product tests failed.
+
+The diagnostic identifies the changed protected files and trusted policy commit.
+The rejection prints the executable next step, using the installed protected
+runner so the command also works in an older worktree:
+
+```sh
+python "$(git rev-parse --path-format=absolute --git-common-dir)/local-acceptance-hooks/local_acceptance.py" contract-update --remote origin
+```
+
+This requires GitHub repository maintain/admin authority and an already enrolled
+signing device. It runs the exact candidate executor and every selected check,
+verifies its real signed receipt against keys on protected main, and pushes only
+the checked-out non-main branch through an exact-head verifying hook. It then
+publishes the separate `Acceptance contract authorization` status, bound to the
+full candidate and trusted contract hashes. That status authorizes the rule
+update; it is not the `Local acceptance` test result. The read-only gate checks
+the actor's current role and uses the approved executor for complementary hosts.
+Failed tests, invalid signatures and missing hosts still fail normal acceptance.
+
+The command requires intervening protected contract changes to be integrated.
+Unrelated main updates retain the checked-out head and its existing build outputs.
+A changed head, changed trusted rules, revoked status or lost maintainer role requires a fresh update.
+If authorization publication fails after the push, rerun the same command: a
+valid exact-head signed result is reused. Neither the installed global hook nor
+branch protection is disabled. Signer registry edits also require this route;
+an existing enrolled maintainer attests new-device enrollment.
+
+"Maintainer-reviewed" describes repository responsibility, not a requirement for
+the end user personally to read the patch or for a particular chat session to
+approve it. Human maintainers and authorized AI agents follow the same checks.
+GitHub's normal bypass protections stay active. The CI migration's explicitly
+authorized temporary admin route was specific to that migration; it is not a
+general approval route for later contract changes.
+
+Rust caches keep the existing 10 GB quota and three shared main publishers.
+Queue maintenance retains current runs and cancels obsolete merge groups only
+when both their Git ref and live queue membership are gone. See the
+[CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.
 
 ### Mock parity harness — optional
 
@@ -371,9 +713,8 @@ work, so it is not a measurement of config parsing alone. `traced_main_ms`
 covers only the instrumented portion inside `main`; `traced_wall_ms` also
 includes process creation, loading, tracing output and shutdown. The single
 traced sample is diagnostic, not the untraced median used for the budget.
-Pass `--report path.json` to retain all paired samples and phase timings; CI
-uploads one `startup-<os>` artifact per release benchmark job.
-The release-benchmark CI jobs run it on Linux, macOS and Windows. The initial
+Pass `--report path.json` to retain all paired samples and phase timings; Local acceptance retains the report; complementary CI uploads its native logs.
+The author-local and complementary jobs together run it on Linux, macOS and Windows. The initial
 100 ms budget is a coarse regression guard, not a claim of equivalent hardware
 performance: local Intel macOS medians were 22.6 ms (`--version`) and 23.1 ms
 (`version --output-format json`), with about 1.3 ms measured inside `main`.
@@ -382,8 +723,9 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
-Renderer changes must pass the required `render performance` status from the
-shared [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
+Renderer changes must pass the mandatory local rendering/browser profiles and
+the required `Local acceptance` status. See the shared
+[release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.
 
@@ -408,7 +750,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
@@ -614,9 +956,11 @@ sections and cached rendering; session snapshots survive compact/resume/fork.
 Do not refresh file-derived context as a side effect of compaction.
 
 Run `SCODE_TEST_BACKEND=mock cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety`
-from `rust/` after changing these paths. The **PTY prefix and scoped-context
-contract** CI step runs both suites on Linux, macOS, and Windows before the full
-workspace suite. These PTYs capture HTTP bodies after
+from `rust/` after changing these paths. The native workspace profile includes
+both suites: the author runs their own platform and complementary CI supplies
+the remaining hosts according to the protected acceptance plan. The merge queue
+carries those exact-head results instead of repeating the workspace suites.
+These PTYs capture HTTP bodies after
 provider conversion and compare the stable prefix through retries, discovery,
 compaction, forks, and restart. They also exercise explicit prompt replacement.
 The scoped-context cases verify config roots, CLI package discovery, layered
@@ -686,9 +1030,11 @@ relevant) `README.md`. When adding a new crate:
 Before opening a PR:
 
 - [ ] Branch off the latest `main`.
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- [ ] `cargo test --workspace` passes locally.
+- [ ] The managed hook ran every check selected by the protected acceptance
+      plan on the author's platform and produced a valid exact-head receipt.
+      Use its printed commands and local/CI responsibilities; do not infer a
+      full Rust build from this checklist for documentation or SDK-only edits.
+- [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the queue runs it on all three native platforms.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen

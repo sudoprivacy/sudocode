@@ -896,15 +896,13 @@ impl ChatStreamState {
                     let state = self.tool_calls.entry(tool_call.index).or_default();
                     state.apply(tool_call);
                     let block_index = state.block_index(tool_index_offset);
-                    let start_event = if !state.started {
-                        if let Some(event) = state.start_event(tool_index_offset)? {
-                            state.started = true;
-                            Some(event)
-                        } else {
-                            continue;
-                        }
-                    } else {
+                    let start_event = if state.started {
                         None
+                    } else if let Some(event) = state.start_event(tool_index_offset)? {
+                        state.started = true;
+                        Some(event)
+                    } else {
+                        continue;
                     };
                     let delta_event = state.delta_event(tool_index_offset);
                     let stop_event = if choice.finish_reason.as_deref() == Some("tool_calls")
@@ -1004,7 +1002,7 @@ impl ChatStreamState {
                     ),
                     stop_sequence: None,
                 },
-                usage: self.usage.clone().unwrap_or(Usage::default()),
+                usage: self.usage.clone().unwrap_or_default(),
             }));
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
         }
@@ -1194,10 +1192,9 @@ impl ResponsesSseParser {
         let text = std::str::from_utf8(&self.buffer).ok()?;
         let (frame_end, sep_len) = if let Some(pos) = text.find("\n\n") {
             (pos, 2)
-        } else if let Some(pos) = text.find("\r\n\r\n") {
-            (pos, 4)
         } else {
-            return None;
+            let pos = text.find("\r\n\r\n")?;
+            (pos, 4)
         };
 
         let frame_text = &text[..frame_end];
@@ -1234,16 +1231,21 @@ struct ResponsesStreamState {
     model: String,
     message_started: bool,
     finished: bool,
-    thinking_block_started: bool,
-    thinking_block_finished: bool,
-    thinking_block_has_delta: bool,
-    thinking_block_index: u32,
+    thinking_block: Option<ResponseThinkingBlockState>,
     text_block_started: bool,
     text_block_index: u32,
     tool_blocks: BTreeMap<u32, ResponseToolBlockState>,
     next_block_index: u32,
     usage: Option<Usage>,
     stop_reason: Option<String>,
+}
+
+/// A reasoning block exists only after its start event has been emitted.
+#[derive(Debug)]
+struct ResponseThinkingBlockState {
+    index: u32,
+    is_closed: bool,
+    has_delta: bool,
 }
 
 #[derive(Debug)]
@@ -1259,10 +1261,7 @@ impl ResponsesStreamState {
             model,
             message_started: false,
             finished: false,
-            thinking_block_started: false,
-            thinking_block_finished: false,
-            thinking_block_has_delta: false,
-            thinking_block_index: 0,
+            thinking_block: None,
             text_block_started: false,
             text_block_index: 0,
             tool_blocks: BTreeMap::new(),
@@ -1315,10 +1314,10 @@ impl ResponsesStreamState {
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 let delta = json_str(&json, "delta");
                 if !delta.is_empty() {
-                    self.ensure_thinking_block(&mut events);
-                    self.thinking_block_has_delta = true;
+                    let thinking = self.ensure_thinking_block(&mut events);
+                    thinking.has_delta = true;
                     events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                        index: self.thinking_block_index,
+                        index: thinking.index,
                         delta: ContentBlockDelta::ThinkingDelta {
                             thinking: delta.to_string(),
                         },
@@ -1401,17 +1400,21 @@ impl ResponsesStreamState {
             }
             "response.output_item.done" => {
                 let item = json.get("item").unwrap_or(&Value::Null);
-                if json_str(item, "type") == "reasoning" && self.thinking_block_started {
+                if let Some(thinking) = self
+                    .thinking_block
+                    .as_mut()
+                    .filter(|_| json_str(item, "type") == "reasoning")
+                {
                     let summary = responses_reasoning_summary_text(item);
-                    if !summary.is_empty() && !self.thinking_block_has_delta {
-                        self.thinking_block_has_delta = true;
+                    if !summary.is_empty() && !thinking.has_delta {
+                        thinking.has_delta = true;
                         events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                            index: self.thinking_block_index,
+                            index: thinking.index,
                             delta: ContentBlockDelta::ThinkingDelta { thinking: summary },
                         }));
                     }
                     events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                        index: self.thinking_block_index,
+                        index: thinking.index,
                         delta: ContentBlockDelta::SignatureDelta {
                             signature: item.to_string(),
                         },
@@ -1485,7 +1488,10 @@ impl ResponsesStreamState {
         Ok(events)
     }
 
-    fn ensure_thinking_block(&mut self, events: &mut Vec<StreamEvent>) {
+    fn ensure_thinking_block(
+        &mut self,
+        events: &mut Vec<StreamEvent>,
+    ) -> &mut ResponseThinkingBlockState {
         if !self.message_started {
             self.message_started = true;
             events.push(StreamEvent::MessageStart(MessageStartEvent {
@@ -1503,25 +1509,36 @@ impl ResponsesStreamState {
                 },
             }));
         }
-        if !self.thinking_block_started {
-            self.thinking_block_started = true;
-            self.thinking_block_index = self.next_block_index;
+        if self.thinking_block.is_none() {
+            let index = self.next_block_index;
             self.next_block_index += 1;
+            self.thinking_block = Some(ResponseThinkingBlockState {
+                index,
+                is_closed: false,
+                has_delta: false,
+            });
             events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                index: self.thinking_block_index,
+                index,
                 content_block: OutputContentBlock::Thinking {
                     thinking: String::new(),
                     signature: None,
                 },
             }));
         }
+        self.thinking_block
+            .as_mut()
+            .expect("thinking block initialized")
     }
 
     fn close_thinking_block(&mut self, events: &mut Vec<StreamEvent>) {
-        if self.thinking_block_started && !self.thinking_block_finished {
-            self.thinking_block_finished = true;
+        if let Some(thinking) = self
+            .thinking_block
+            .as_mut()
+            .filter(|block| !block.is_closed)
+        {
+            thinking.is_closed = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                index: self.thinking_block_index,
+                index: thinking.index,
             }));
         }
     }
@@ -1662,9 +1679,9 @@ struct OpenAiUsage {
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
-    /// OpenAI returns cached token counts inside `prompt_tokens_details`.
+    /// `OpenAI` returns cached token counts inside `prompt_tokens_details`.
     /// Example: `{"prompt_tokens_details": {"cached_tokens": 1234}}`
-    /// Some providers (e.g. DeepSeek) send an explicit `null` here, which
+    /// Some providers (e.g. `DeepSeek`) send an explicit `null` here, which
     /// `#[serde(default)]` alone does not handle, so coerce null to default.
     #[serde(default, deserialize_with = "null_to_default")]
     prompt_tokens_details: PromptTokensDetails,
@@ -1811,7 +1828,7 @@ pub fn is_reasoning_model(model: &str) -> bool {
         || canonical.contains("thinking")
 }
 
-/// Returns true for OpenAI-compatible DeepSeek V4 models that require prior
+/// Returns true for OpenAI-compatible `DeepSeek` V4 models that require prior
 /// assistant reasoning to be echoed back as `reasoning_content` in history.
 #[must_use]
 pub fn model_requires_reasoning_content_in_history(model: &str) -> bool {
@@ -1851,7 +1868,6 @@ fn estimate_request_body_size_for_format(
     api_format: ApiFormat,
 ) -> usize {
     let payload = match api_format {
-        ApiFormat::OpenAiCompletions => build_chat_completion_request(request, config),
         ApiFormat::OpenAiResponses => build_responses_request(request),
         _ => build_chat_completion_request(request, config),
     };
@@ -2217,132 +2233,140 @@ pub fn model_rejects_is_error_field(model: &str) -> bool {
 /// Public for benchmarking purposes.
 #[must_use]
 pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
-    let supports_is_error = !model_rejects_is_error_field(model);
     if message.role.as_str() == "assistant" {
-        let mut text = String::new();
-        let mut reasoning = String::new();
-        let mut saw_thinking = false;
-        let mut tool_calls = Vec::new();
-        for block in &message.content {
-            match block {
-                InputContentBlock::Text { text: value } => text.push_str(value),
-                InputContentBlock::Thinking {
-                    thinking: value, ..
-                } => {
-                    saw_thinking = true;
-                    reasoning.push_str(value);
-                }
-                // Nothing to add to `reasoning_content`: the payload is opaque
-                // to everyone but the Anthropic account that produced it.
-                InputContentBlock::RedactedThinking { .. } => {}
-                InputContentBlock::ToolUse {
-                    id, name, input, ..
-                } => tool_calls.push(json!({
-                    "id": id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": input.to_string(),
-                    }
-                })),
-                InputContentBlock::ToolResult { .. } | InputContentBlock::Image { .. } => {}
-            }
-        }
-        let include_reasoning = model_requires_reasoning_content_in_history(model)
-            && (saw_thinking || !tool_calls.is_empty());
-        if text.is_empty() && tool_calls.is_empty() && !include_reasoning {
-            Vec::new()
-        } else {
-            // When tool_calls are present, use empty string instead of None for content.
-            // Some providers (e.g., Gemini via OpenAI-compatible endpoint) fail to handle
-            // content: null properly, resulting in empty SSE stream responses.
-            let content = if !text.is_empty() {
-                Some(text)
-            } else if !tool_calls.is_empty() {
-                Some(String::new())
-            } else {
-                None
-            };
-            let mut msg = serde_json::json!({
-                "role": "assistant",
-                "content": content,
-            });
-            if include_reasoning {
-                msg["reasoning_content"] = json!(reasoning);
-            }
-            // Only include tool_calls when non-empty: some providers reject
-            // assistant messages with an explicit empty tool_calls array.
-            if !tool_calls.is_empty() {
-                msg["tool_calls"] = json!(tool_calls);
-            }
-            vec![msg]
-        }
+        translate_assistant_message(message, model)
     } else {
-        // Collect text + image blocks into a single user message with a
-        // content array, and tool results as separate tool messages.
-        let mut user_parts = Vec::new();
-        let mut messages = Vec::new();
-
-        for block in &message.content {
-            match block {
-                InputContentBlock::Text { text } => {
-                    user_parts.push(json!({ "type": "text", "text": text }));
-                }
-                InputContentBlock::Image { source } => {
-                    let data_url = format!("data:{};base64,{}", source.media_type, source.data);
-                    user_parts.push(json!({
-                        "type": "image_url",
-                        "image_url": { "url": data_url }
-                    }));
-                }
-                InputContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => {
-                    // Flush any accumulated user parts before the tool result.
-                    if !user_parts.is_empty() {
-                        messages.push(json!({
-                            "role": "user",
-                            "content": user_parts,
-                        }));
-                        user_parts = Vec::new();
-                    }
-                    let mut msg = json!({
-                        "role": "tool",
-                        "tool_call_id": tool_use_id,
-                        "content": flatten_tool_result_content(content),
-                    });
-                    if supports_is_error {
-                        msg["is_error"] = json!(is_error);
-                    }
-                    messages.push(msg);
-                }
-                InputContentBlock::Thinking { .. }
-                | InputContentBlock::RedactedThinking { .. }
-                | InputContentBlock::ToolUse { .. } => {}
-            }
-        }
-
-        // Flush remaining user parts.
-        if !user_parts.is_empty() {
-            // Optimise: if only a single text part, use a plain string
-            // for compatibility with providers that don't support arrays.
-            if user_parts.len() == 1 && user_parts[0]["type"] == "text" {
-                messages.push(json!({
-                    "role": "user",
-                    "content": user_parts[0]["text"],
-                }));
-            } else {
-                messages.push(json!({
-                    "role": "user",
-                    "content": user_parts,
-                }));
-            }
-        }
-
-        messages
+        translate_user_message(message, !model_rejects_is_error_field(model))
     }
+}
+
+fn translate_assistant_message(message: &InputMessage, model: &str) -> Vec<Value> {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut saw_thinking = false;
+    let mut tool_calls = Vec::new();
+    for block in &message.content {
+        match block {
+            InputContentBlock::Text { text: value } => text.push_str(value),
+            InputContentBlock::Thinking {
+                thinking: value, ..
+            } => {
+                saw_thinking = true;
+                reasoning.push_str(value);
+            }
+            // Nothing to add to `reasoning_content`: the payload is opaque
+            // to everyone but the Anthropic account that produced it.
+            InputContentBlock::RedactedThinking { .. }
+            | InputContentBlock::ToolResult { .. }
+            | InputContentBlock::Image { .. } => {}
+            InputContentBlock::ToolUse {
+                id, name, input, ..
+            } => tool_calls.push(json!({
+                "id": id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": input.to_string(),
+                }
+            })),
+        }
+    }
+    let include_reasoning = model_requires_reasoning_content_in_history(model)
+        && (saw_thinking || !tool_calls.is_empty());
+    if text.is_empty() && tool_calls.is_empty() && !include_reasoning {
+        Vec::new()
+    } else {
+        // When tool_calls are present, use empty string instead of None for content.
+        // Some providers (e.g., Gemini via OpenAI-compatible endpoint) fail to handle
+        // content: null properly, resulting in empty SSE stream responses.
+        let content = if !text.is_empty() {
+            Some(text)
+        } else if !tool_calls.is_empty() {
+            Some(String::new())
+        } else {
+            None
+        };
+        let mut msg = serde_json::json!({
+            "role": "assistant",
+            "content": content,
+        });
+        if include_reasoning {
+            msg["reasoning_content"] = json!(reasoning);
+        }
+        // Only include tool_calls when non-empty: some providers reject
+        // assistant messages with an explicit empty tool_calls array.
+        if !tool_calls.is_empty() {
+            msg["tool_calls"] = json!(tool_calls);
+        }
+        vec![msg]
+    }
+}
+
+fn translate_user_message(message: &InputMessage, supports_is_error: bool) -> Vec<Value> {
+    // Collect text + image blocks into a single user message with a
+    // content array, and tool results as separate tool messages.
+    let mut user_parts = Vec::new();
+    let mut messages = Vec::new();
+
+    for block in &message.content {
+        match block {
+            InputContentBlock::Text { text } => {
+                user_parts.push(json!({ "type": "text", "text": text }));
+            }
+            InputContentBlock::Image { source } => {
+                let data_url = format!("data:{};base64,{}", source.media_type, source.data);
+                user_parts.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": data_url }
+                }));
+            }
+            InputContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                // Flush any accumulated user parts before the tool result.
+                if !user_parts.is_empty() {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": user_parts,
+                    }));
+                    user_parts = Vec::new();
+                }
+                let mut msg = json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": flatten_tool_result_content(content),
+                });
+                if supports_is_error {
+                    msg["is_error"] = json!(is_error);
+                }
+                messages.push(msg);
+            }
+            InputContentBlock::Thinking { .. }
+            | InputContentBlock::RedactedThinking { .. }
+            | InputContentBlock::ToolUse { .. } => {}
+        }
+    }
+
+    // Flush remaining user parts.
+    if !user_parts.is_empty() {
+        // Optimise: if only a single text part, use a plain string
+        // for compatibility with providers that don't support arrays.
+        if user_parts.len() == 1 && user_parts[0]["type"] == "text" {
+            messages.push(json!({
+                "role": "user",
+                "content": user_parts[0]["text"],
+            }));
+        } else {
+            messages.push(json!({
+                "role": "user",
+                "content": user_parts,
+            }));
+        }
+    }
+
+    messages
 }
 
 /// Remove `role:"tool"` messages from `messages` that have no valid paired
@@ -2434,7 +2458,7 @@ pub fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String
     let capacity = total_len + content.len().saturating_sub(1);
 
     let mut result = String::with_capacity(capacity);
-    for block in content.iter() {
+    for block in content {
         match block {
             ToolResultContentBlock::Text { text } => {
                 if !result.is_empty() {
@@ -2820,7 +2844,7 @@ mod tests {
         normalize_response, openai_tool_choice, parse_tool_arguments, ChatStreamState,
         OpenAiCompatClient, OpenAiCompatConfig, ResponsesSseFrame, ResponsesStreamState,
     };
-    use crate::error::{ApiError, ProviderErrorBody, ProviderErrorEnvelope};
+    use crate::error::ApiError;
     use crate::types::{
         ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
         InputContentBlock, InputMessage, MessageRequest, OutputContentBlock, StreamEvent,

@@ -1,6 +1,6 @@
 //! Live PTY test: verify /model switch actually changes the model.
 //!
-//! Requires SCODE_TEST_BACKEND=live.
+//! Requires `SCODE_TEST_BACKEND=live`.
 
 mod common;
 
@@ -9,6 +9,15 @@ use std::time::Duration;
 
 #[test]
 fn model_switch_changes_active_model() {
+    // Switch to a specific model via /model <name>.
+    //
+    // Deliberately *not* the model live mode starts on (`sonnet`): `/model`
+    // only reports "Model updated" when the model actually changes, and naming
+    // the one already active prints the model listing instead. Skips when the
+    // tester's account can't reach this one — see
+    // `common::model_unavailable_in_screen`.
+    const TARGET_MODEL: &str = "claude-sonnet-4-5-20250929";
+
     let env = TestEnv::new("model-switch");
 
     if env.is_mock() {
@@ -26,22 +35,14 @@ fn model_switch_changes_active_model() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("initial prompt: {e}\nPTY:\n{screen}");
     });
 
-    // Switch to a specific model via /model <name>.
-    //
-    // Deliberately *not* the model live mode starts on (`sonnet`): `/model`
-    // only reports "Model updated" when the model actually changes, and naming
-    // the one already active prints the model listing instead. Skips when the
-    // tester's account can't reach this one — see
-    // `common::model_unavailable_in_screen`.
-    const TARGET_MODEL: &str = "claude-sonnet-4-5-20250929";
     sess.send(&format!("/model {TARGET_MODEL}\r"))
         .expect("send /model");
     if let Err(e) = sess.expect("Model updated") {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         assert!(
             common::model_unavailable_in_screen(&screen),
             "model switch report: {e}\nPTY:\n{screen}"
@@ -50,7 +51,7 @@ fn model_switch_changes_active_model() {
     }
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("prompt after switch: {e}\nPTY:\n{screen}");
     });
 
@@ -60,26 +61,26 @@ fn model_switch_changes_active_model() {
 
     // The response should mention sonnet-4, not opus
     sess.expect("(?i)sonnet").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("model should identify as sonnet after switch: {e}\nPTY:\n{screen}");
     });
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("prompt after response: {e}\nPTY:\n{screen}");
     });
 
     // Switch back to auto
     sess.send("/model auto\r").expect("send /model auto");
     sess.expect("Model updated").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("model switch back: {e}\nPTY:\n{screen}");
     });
 
     // Clean exit
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY:\n{screen}");
     });
     assert_eq!(exit, 0, "clean exit code");

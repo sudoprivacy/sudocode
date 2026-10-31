@@ -120,72 +120,7 @@ fn cache_stats_json_keeps_session_intervals_and_legacy_unknowns() {
 #[test]
 fn ttl_advisor_report_separates_forward_scenarios_from_training_and_bad_samples() {
     let env = TestEnv::new_mock("ttl-advisor-report");
-    std::fs::write(
-        env.config_home().join("settings.json"),
-        json!({"experimental":{"cacheTtlAdvisor":true}}).to_string(),
-    )
-    .unwrap();
-    let dir = env
-        .config_home()
-        .join("cache/prompt-cache/private-session-name");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("stats.json"),
-        json!({
-            "tracked_requests":12,"completion_cache_hits":0,"completion_cache_misses":0,
-            "completion_cache_writes":0,"expected_invalidations":0,"unexpected_cache_breaks":0,
-            "total_cache_read_input_tokens":0,"total_cache_creation_input_tokens":120000,
-            "last_cache_creation_input_tokens":null,"last_cache_read_input_tokens":null,
-            "last_request_hash":null,"last_completion_cache_key":null,
-            "last_break_reason":null,"last_cache_source":null
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let scenario = json!({"rows":9,"eligible_intervals":8,"fixed_5m_usd":1.0,
-        "fixed_1h_usd":0.5,"boundary_policy_usd":1.0,"transition_writes":0});
-    std::fs::write(
-        dir.join("ttl-advice.json"),
-        json!({"decisions":[{
-            "made_at_ms":1000000,"context_segment":0,"model":"claude-opus-5-5",
-            "route_key":"private-route-key","configured_ttl_seconds":300,
-            "suggested_ttl_seconds":3600,"reason":"hypothetical_1h_saving","training":scenario
-        }]})
-        .to_string(),
-    )
-    .unwrap();
-    let mut rows = Vec::new();
-    for index in 0..10u64 {
-        let at = 500000 + index * 600000;
-        rows.push(json!({"model":"claude-opus-5-5", "gateway_request_id":format!("private-request-{index}"),
-            "at_unix_secs":at/1000,"input_tokens":0,
-            "cache_creation_input_tokens":100000,"cache_read_input_tokens":0,
-            "observation":{"schema_version":1,"request_started_ms":at,
-                "response_started_ms":at+1,"response_completed_ms":at+2,
-                "attempts":1,"message_starts":1,"completed":true,"context_segment":0,
-                "request_kind":"session_request","route_key":"private-route-key","settings_key":"s",
-                "requested_ttls_seconds":[300],"upstream_ttl_seconds":null,"client_prefix_compatible":true}}));
-    }
-    rows.push(rows.last().unwrap().clone());
-    for field in ["completed", "attempts", "requested_ttls_seconds"] {
-        let mut bad = rows.last().unwrap().clone();
-        bad["gateway_request_id"] = json!(format!("bad-{field}"));
-        bad["observation"][field] = match field {
-            "completed" => json!(false),
-            "attempts" => json!(2),
-            _ => json!([300, 3600]),
-        };
-        rows.push(bad);
-    }
-    rows.push(json!({"at_unix_secs":1,"model":"claude-opus-5-5"}));
-    std::fs::write(
-        dir.join("requests.jsonl"),
-        rows.iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-    .unwrap();
+    seed_ttl_advisor_report(&env);
     let mut cli = env.spawn(&["cache", "stats", "--output-format", "json"]);
     cli.resize(180, 400).unwrap();
     cli.expect("forward_comparison").unwrap();
@@ -220,6 +155,75 @@ fn ttl_advisor_report_separates_forward_scenarios_from_training_and_bad_samples(
         assert!(!advisor.to_string().contains(identifier));
     }
     assert_eq!(env.captured_message_count(), 0);
+}
+
+fn seed_ttl_advisor_report(env: &TestEnv) {
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        json!({"experimental":{"cacheTtlAdvisor":true}}).to_string(),
+    )
+    .unwrap();
+    let dir = env
+        .config_home()
+        .join("cache/prompt-cache/private-session-name");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("stats.json"),
+        json!({
+            "tracked_requests":12,"completion_cache_hits":0,"completion_cache_misses":0,
+            "completion_cache_writes":0,"expected_invalidations":0,"unexpected_cache_breaks":0,
+            "total_cache_read_input_tokens":0,"total_cache_creation_input_tokens":120_000,
+            "last_cache_creation_input_tokens":null,"last_cache_read_input_tokens":null,
+            "last_request_hash":null,"last_completion_cache_key":null,
+            "last_break_reason":null,"last_cache_source":null
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let scenario = json!({"rows":9,"eligible_intervals":8,"fixed_5m_usd":1.0,
+        "fixed_1h_usd":0.5,"boundary_policy_usd":1.0,"transition_writes":0});
+    std::fs::write(
+        dir.join("ttl-advice.json"),
+        json!({"decisions":[{
+            "made_at_ms":1_000_000,"context_segment":0,"model":"claude-opus-5-5",
+            "route_key":"private-route-key","configured_ttl_seconds":300,
+            "suggested_ttl_seconds":3600,"reason":"hypothetical_1h_saving","training":scenario
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let mut rows = Vec::new();
+    for index in 0..10u64 {
+        let at = 500_000 + index * 600_000;
+        rows.push(json!({"model":"claude-opus-5-5", "gateway_request_id":format!("private-request-{index}"),
+            "at_unix_secs":at/1000,"input_tokens":0,
+            "cache_creation_input_tokens":100_000,"cache_read_input_tokens":0,
+            "observation":{"schema_version":1,"request_started_ms":at,
+                "response_started_ms":at+1,"response_completed_ms":at+2,
+                "attempts":1,"message_starts":1,"completed":true,"context_segment":0,
+                "request_kind":"session_request","route_key":"private-route-key","settings_key":"s",
+                "requested_ttls_seconds":[300],"upstream_ttl_seconds":null,"client_prefix_compatible":true}}));
+    }
+    rows.push(rows.last().unwrap().clone());
+    for field in ["completed", "attempts", "requested_ttls_seconds"] {
+        let mut bad = rows.last().unwrap().clone();
+        bad["gateway_request_id"] = json!(format!("bad-{field}"));
+        bad["observation"][field] = match field {
+            "completed" => json!(false),
+            "attempts" => json!(2),
+            _ => json!([300, 3600]),
+        };
+        rows.push(bad);
+    }
+    rows.push(json!({"at_unix_secs":1,"model":"claude-opus-5-5"}));
+    std::fs::write(
+        dir.join("requests.jsonl"),
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
 }
 
 const USAGE_FIXTURES: &str = include_str!("../../../../spec/cache_usage_fixtures.json");
@@ -593,8 +597,14 @@ fn untimed_observations_preserve_known_metadata_and_exact_repeats() {
     assert_eq!(advisor["coverage"]["duplicate_snapshots_ignored"], 2);
     assert_eq!(advisor["coverage"]["ineligible_rows"], 6);
     assert_eq!(advisor["coverage"]["legacy_or_malformed_rows"], 1);
-    assert!(advisor["decisions"].as_array().unwrap().is_empty());
-    assert!(advisor["forward_comparison"].as_array().unwrap().is_empty());
+    assert_eq!(
+        advisor["decisions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
+    assert_eq!(
+        advisor["forward_comparison"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -676,7 +686,10 @@ fn usage_fixture_ttl_switch_keeps_observations_explicit_and_claims_no_savings() 
         "hypothetical_not_causal_or_billed_savings"
     );
     assert_eq!(advisor["coverage"]["ineligible_rows"], 0);
-    assert!(advisor["decisions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        advisor["decisions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     assert!(
         advisor["forward_comparison"].as_array().unwrap().is_empty(),
         "observations alone must not produce a savings figure"

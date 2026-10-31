@@ -1,6 +1,6 @@
 //! PTY tests for the `TodoWrite` tool — the CC-parity todo checklist.
 //!
-//! Coverage target: roadmap row "TodoWrite + auto-verification streak nudge".
+//! Coverage target: roadmap row "`TodoWrite` + auto-verification streak nudge".
 //! `TodoWrite` takes the whole list and replaces the previous one (no per-item
 //! id, no partial update), so these tests drive it through the deterministic
 //! mock scenarios and assert the terminal + persisted store.
@@ -18,7 +18,7 @@ use common::TestEnv;
 // 1. A single TodoWrite round-trips: tool call → result → final text
 // ──────────────────────────────────────────────────────────────────────
 
-/// The model opens a two-item todo list via TodoWrite; the tool call and its
+/// The model opens a two-item todo list via `TodoWrite`; the tool call and its
 /// result surface in the terminal and the turn exits 0.
 #[test]
 fn todo_write_roundtrips_a_list() {
@@ -74,8 +74,8 @@ fn todo_write_roundtrips_a_list() {
 //    list wipes it — whole-list replace semantics on disk.
 // ──────────────────────────────────────────────────────────────────────
 
-/// After a TodoWrite the store file contains the exact list; a subsequent
-/// empty TodoWrite clears the store to `[]`. Both are verified by pointing
+/// After a `TodoWrite` the store file contains the exact list; a subsequent
+/// empty `TodoWrite` clears the store to `[]`. Both are verified by pointing
 /// `SUDOCODE_TODO_STORE` at a temp file and reading it after the turn.
 #[test]
 fn todo_write_persists_then_empty_wipes_store() {

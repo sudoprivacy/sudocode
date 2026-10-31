@@ -136,7 +136,7 @@ fn bocha_search_roundtrip() {
         assert_eq!(request["count"], 8);
         assert_eq!(request["include"], "rust-lang.org");
         assert_eq!(request["exclude"], "blocked.rust-lang.org");
-        let screen = session.render(|screen| screen.contents());
+        let screen = session.render(common::screen_contents);
         for unwanted in ["must-disappear", "unused-short-snippet"] {
             assert!(
                 !screen.contains(unwanted),
@@ -193,7 +193,7 @@ fn bocha_errors_are_returned_to_model() {
         assert_eq!(session.expect_eof().unwrap(), 0);
         server.join().unwrap();
         assert!(!session
-            .render(|screen| screen.contents())
+            .render(common::screen_contents)
             .contains("secret-body"));
     }
 }
@@ -228,6 +228,6 @@ fn bocha_does_not_reuse_tavily_credentials() {
         .unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
     assert!(!session
-        .render(|screen| screen.contents())
+        .render(common::screen_contents)
         .contains("tavily-secret"));
 }

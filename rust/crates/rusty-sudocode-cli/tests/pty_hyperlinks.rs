@@ -16,19 +16,26 @@ fn document() -> String {
          [UnsafeLink](javascript:alert) [FileLink](file:///tmp/not-opened)\n\n",
     );
     text.push_str("[QueryLink](https://example.com/search?q=a;b#fragment)\n\n");
-    text.push_str(&format!(
-        "[SemicolonLink](https://example.com/{}tail)\n\n",
-        "part;".repeat(32)
-    ));
-    text.push_str(&format!("[LongDestination]({long})\n\n"));
-    text.push_str(&format!(
-        "[OversizedDestination](https://example.com/{})\n\n",
-        "x".repeat(8192)
-    ));
+    let _ = std::fmt::Write::write_fmt(
+        &mut text,
+        format_args!(
+            "[SemicolonLink](https://example.com/{}tail)\n\n",
+            "part;".repeat(32)
+        ),
+    );
+    let _ = std::fmt::Write::write_fmt(&mut text, format_args!("[LongDestination]({long})\n\n"));
+    let _ = std::fmt::Write::write_fmt(
+        &mut text,
+        format_args!(
+            "[OversizedDestination](https://example.com/{})\n\n",
+            "x".repeat(8192)
+        ),
+    );
     for i in 0..64 {
-        text.push_str(&format!(
-            "[DenseLink{i:02}](https://example.com/dense/{i}) "
-        ));
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!("[DenseLink{i:02}](https://example.com/dense/{i}) "),
+        );
     }
     text.push_str("\n\nLinkBodyEND.");
     text
@@ -137,12 +144,14 @@ fn unsupported_terminal_keeps_destinations_visible() {
 fn browser_terminal_links_and_interaction() {
     let env = TestEnv::new_mock("browser-links");
     let path = seed(&env, document());
+    let stream_window_plan = env.workspace_root().join("stream-windows/plan.json");
     let prose = common::terminal_host::prose_prompt(
         &env,
         &document(),
         json!({
             "start_ready": env.workspace_root().join("stream-ready"),
             "start_release": env.workspace_root().join("stream-release"),
+            "window_plan": stream_window_plan,
             "chunk_chars": 60, "delay_ms": 30,
         }),
     );
@@ -168,6 +177,7 @@ fn browser_terminal_links_and_interaction() {
         "browser-links",
         json!({
             "prompt":prose, "question":question, "cols":80, "rows":38,
+            "streamWindowPlan":stream_window_plan,
             "report":std::env::var("SCODE_GUI_REPORT").ok(),
             "expectLinks":std::env::var("SCODE_GUI_EXPECT_LINKS").as_deref() != Ok("0"),
         }),

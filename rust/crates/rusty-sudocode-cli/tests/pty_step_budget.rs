@@ -1,5 +1,7 @@
 //! Step budgets stop execution through the real CLI and shared provider builder.
 mod common;
+#[path = "support/request_dumps.rs"]
+mod request_dumps;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;
 
@@ -197,7 +199,7 @@ fn live_step_budget_preserves_results_across_turns() {
     set_budget(&env, 2);
     // Each next command needs a fresh ticket from the preceding real result.
     // The requested five steps are finite; the host must stop them after two.
-    fs::write(env.workspace_root().join("step.cjs"), r#"
+    fs::write(env.workspace_root().join("step.cjs"), r"
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const [turn, ticket] = process.argv.slice(2);
@@ -211,14 +213,16 @@ state.ticket = crypto.randomBytes(12).toString('hex');
 fs.writeFileSync(path, JSON.stringify(state));
 console.log(`Completed ${state.step} of 5 steps for turn ${turn}.`);
 console.log(state.step === 5 ? 'DONE' : `NEXT_COMMAND: node step.cjs ${turn} ${state.ticket}`);
-"#).unwrap();
+").unwrap();
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let captured = std::env::var_os("SCODE_LIVE_ARTIFACTS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| env.workspace_root().join("requests"))
+        .map_or_else(
+            || env.workspace_root().join("requests"),
+            std::path::PathBuf::from,
+        )
         .join(format!("step-budget-{stamp}"));
     fs::create_dir_all(&captured).unwrap();
     let mut sess = env.spawn_with_env(
@@ -270,79 +274,14 @@ console.log(state.step === 5 ? 'DONE' : `NEXT_COMMAND: node step.cjs ${turn} ${s
         let mut paths: Vec<_> = fs::read_dir(&captured)
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .filter(|path| wire_requests::is_inference_request_dump(path))
+            .filter(|path| request_dumps::is_inference_request_dump(path))
             .collect();
         paths.sort();
         let requests: Vec<serde_json::Value> = paths
             .iter()
             .map(|path| serde_json::from_slice(&fs::read(path).unwrap()).unwrap())
             .collect();
-        let current = &requests[previous_requests..];
-        assert!(
-            current.len() >= 3,
-            "two tool rounds and a final-answer request must be captured"
-        );
-        let tool_calls = |request: &serde_json::Value| -> std::collections::BTreeMap<_, _> {
-            wire_requests::request_tool_blocks(request)
-                .into_iter()
-                .filter(|block| block["type"] == "tool_use")
-                .map(|block| (block["id"].to_string(), block))
-                .collect()
-        };
-        // Count executed tool rounds, not transport attempts. A legitimate retry
-        // can repeat a snapshot without consuming another execution step.
-        for request in current {
-            let prior_calls = tool_calls(request);
-            let has_tools = request["tools"]
-                .as_array()
-                .is_some_and(|tools| !tools.is_empty());
-            if has_tools {
-                assert!(prior_calls.len() < turn * 2, "tools offered after the cap");
-            } else {
-                assert_eq!(
-                    prior_calls.len(),
-                    turn * 2,
-                    "tools withdrawn before two completed rounds in this turn"
-                );
-                assert!(request
-                    .get("tool_choice")
-                    .is_none_or(serde_json::Value::is_null));
-            }
-        }
-        assert!(
-            current[0]["tools"]
-                .as_array()
-                .is_some_and(|tools| !tools.is_empty()),
-            "each user turn gets tools again"
-        );
-        let final_request = current.last().unwrap();
-        assert!(
-            final_request
-                .get("tools")
-                .is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)),
-            "final answer must not offer tools"
-        );
-        let calls = tool_calls(final_request);
-        assert_eq!(
-            calls.len(),
-            turn * 2,
-            "each turn adds exactly two real tool calls"
-        );
-        for call in calls.values() {
-            assert!(matches!(call["name"].as_str(), Some("bash" | "Bash")));
-            let words = shell_words::split(call["input"]["command"].as_str().unwrap()).unwrap();
-            assert_eq!(
-                words.len(),
-                4,
-                "one fixture command, no compound shell or loop"
-            );
-            assert_eq!(&words[..2], ["node", "step.cjs"]);
-            assert!(matches!(words[2].as_str(), "1" | "2"));
-            assert!(
-                words[3] == "start"
-                    || (words[3].len() == 24 && words[3].bytes().all(|b| b.is_ascii_hexdigit()))
-            );
-        }
+        assert_step_budget_requests(&requests, previous_requests, turn);
         previous_requests = requests.len();
     }
     sess.send("/exit\r").unwrap();
@@ -374,5 +313,78 @@ fn invalid_step_budgets_fail_before_a_model_request() {
             "invalid budget accepted: {value}"
         );
         assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
+fn assert_step_budget_requests(
+    requests: &[serde_json::Value],
+    previous_requests: usize,
+    turn: usize,
+) {
+    let current = &requests[previous_requests..];
+    assert!(
+        current.len() >= 3,
+        "two tool rounds and a final-answer request must be captured"
+    );
+    let tool_calls = |request: &serde_json::Value| -> std::collections::BTreeMap<_, _> {
+        wire_requests::request_tool_blocks(request)
+            .into_iter()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| (block["id"].to_string(), block))
+            .collect()
+    };
+    // Count executed tool rounds, not transport attempts. A legitimate retry
+    // can repeat a snapshot without consuming another execution step.
+    for request in current {
+        let prior_calls = tool_calls(request);
+        let has_tools = request["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty());
+        if has_tools {
+            assert!(prior_calls.len() < turn * 2, "tools offered after the cap");
+        } else {
+            assert_eq!(
+                prior_calls.len(),
+                turn * 2,
+                "tools withdrawn before two completed rounds in this turn"
+            );
+            assert!(request
+                .get("tool_choice")
+                .is_none_or(serde_json::Value::is_null));
+        }
+    }
+    assert!(
+        current[0]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "each user turn gets tools again"
+    );
+    let final_request = current.last().unwrap();
+    assert!(
+        final_request
+            .get("tools")
+            .is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)),
+        "final answer must not offer tools"
+    );
+    let calls = tool_calls(final_request);
+    assert_eq!(
+        calls.len(),
+        turn * 2,
+        "each turn adds exactly two real tool calls"
+    );
+    for call in calls.values() {
+        assert!(matches!(call["name"].as_str(), Some("bash" | "Bash")));
+        let words = shell_words::split(call["input"]["command"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            words.len(),
+            4,
+            "one fixture command, no compound shell or loop"
+        );
+        assert_eq!(&words[..2], ["node", "step.cjs"]);
+        assert!(matches!(words[2].as_str(), "1" | "2"));
+        assert!(
+            words[3] == "start"
+                || (words[3].len() == 24 && words[3].bytes().all(|b| b.is_ascii_hexdigit()))
+        );
     }
 }

@@ -27,11 +27,11 @@ pub fn redirect_to_drafts(
     let drafts_dir = workspace_root.join(DRAFTS_DIR_NAME);
 
     // Ensure .drafts/ directory exists
-    if !fs.exists(&drafts_dir.to_string_lossy()).unwrap_or(false) {
-        if fs.create_dir_all(&drafts_dir.to_string_lossy()).is_err() {
-            // Fallback: return original path
-            return requested_path.to_path_buf();
-        }
+    if !fs.exists(&drafts_dir.to_string_lossy()).unwrap_or(false)
+        && fs.create_dir_all(&drafts_dir.to_string_lossy()).is_err()
+    {
+        // Fallback: return original path
+        return requested_path.to_path_buf();
     }
 
     // Extract file name
@@ -51,27 +51,28 @@ pub fn redirect_to_drafts(
         let ext = requested_path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| format!(".{}", e))
+            .map(|e| format!(".{e}"))
             .unwrap_or_default();
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis());
 
-        dest_path = drafts_dir.join(format!("{}_{}{}", stem, timestamp, ext));
+        dest_path = drafts_dir.join(format!("{stem}_{timestamp}{ext}"));
     }
 
     dest_path
 }
 
 /// Check if a path is inside the `.drafts/` directory.
+#[must_use]
 pub fn is_in_drafts(path: &Path, workspace_root: &Path) -> bool {
     let drafts_dir = workspace_root.join(DRAFTS_DIR_NAME);
     path.starts_with(&drafts_dir)
 }
 
 /// Get the drafts directory path for a workspace.
+#[must_use]
 pub fn get_drafts_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(DRAFTS_DIR_NAME)
 }
@@ -89,7 +90,7 @@ mod tests {
         let requested = tmp_dir.join("temp_script.py");
         let result = redirect_to_drafts(&requested, &tmp_dir, &crate::fs_backend::StdFsBackend);
 
-        assert!(result.starts_with(&tmp_dir.join(DRAFTS_DIR_NAME)));
+        assert!(result.starts_with(tmp_dir.join(DRAFTS_DIR_NAME)));
         assert_eq!(result.file_name().unwrap(), "temp_script.py");
 
         // Cleanup
@@ -114,7 +115,10 @@ mod tests {
         assert!(result.starts_with(&drafts_dir));
         let name = result.file_name().unwrap().to_str().unwrap();
         assert!(name.starts_with("temp_"));
-        assert!(name.ends_with(".py"));
+        assert_eq!(
+            std::path::Path::new(&name).extension(),
+            Some(std::ffi::OsStr::new("py"))
+        );
 
         // Cleanup
         fs::remove_dir_all(&tmp_dir).expect("cleanup");

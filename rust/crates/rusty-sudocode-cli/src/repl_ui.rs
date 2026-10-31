@@ -303,8 +303,8 @@ pub enum UiCommand {
     SetCacheTip(CacheTip),
     /// A persistent tip owned by `source`; `None` clears it.
     SetStatusTip(StatusSource, Option<engine_core::Tip>),
-    /// The workspace's branch, or short commit when detached, for the footer.
-    SetBranch(Option<String>),
+    /// Where the workspace is, `repo ⎇ branch`, for the footer.
+    SetWorkspacePosition(Option<String>),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -394,8 +394,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::SetStatusTip(source, tip));
     }
 
-    pub(crate) fn set_branch(&self, label: Option<String>) {
-        let _ = self.tx.send(UiCommand::SetBranch(label));
+    pub(crate) fn set_workspace_position(&self, label: Option<String>) {
+        let _ = self.tx.send(UiCommand::SetWorkspacePosition(label));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -596,21 +596,18 @@ fn expand_paste_inner(
             Some((id_end + close + 1, real_text))
         });
 
-        match matched {
-            Some((consumed_after_prefix, real_text)) => {
-                if let Some((before, after)) = wrap {
-                    result.push_str(before);
-                    result.push_str(real_text);
-                    result.push_str(after);
-                } else {
-                    result.push_str(real_text);
-                }
-                rest = &after_prefix[consumed_after_prefix..];
+        if let Some((consumed_after_prefix, real_text)) = matched {
+            if let Some((before, after)) = wrap {
+                result.push_str(before);
+                result.push_str(real_text);
+                result.push_str(after);
+            } else {
+                result.push_str(real_text);
             }
-            None => {
-                result.push_str(placeholder_prefix);
-                rest = after_prefix;
-            }
+            rest = &after_prefix[consumed_after_prefix..];
+        } else {
+            result.push_str(placeholder_prefix);
+            rest = after_prefix;
         }
     }
     result.push_str(rest);
@@ -730,7 +727,7 @@ fn format_question_panel(
                 .unwrap_or("type your own answer");
             if on_row {
                 // Show a caret so it reads as an active field once selected.
-                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint),)
+                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint))
             } else {
                 choice.muted(hint)
             }
@@ -1376,7 +1373,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
-    let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
+    let mut paste_store = hooks.use_state(std::collections::HashMap::<u32, String>::new);
     let mut next_paste_id = hooks.use_state(|| 1u32);
     let mut input_reviewable = hooks.use_state(|| true);
     let mut measurements = hooks.use_ref_default::<Measurements>();
@@ -1415,7 +1412,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let question = match &current_slot {
                         InputSlot::DialPad(question) => Some(question),
                         InputSlot::FuzzySelect(state) => Some(&state.question),
-                        _ => None,
+                        InputSlot::TextInput => None,
                     };
                     if let Some(question) = question.filter(|q| q.description.is_some()) {
                         let document = prompt_text::render_document(
@@ -1429,9 +1426,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
-                if (!input_reviewable.get() || !input_frame.is_current())
-                    && code != KeyCode::Esc
-                    && !(code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+                if !(code == KeyCode::Esc
+                    || input_reviewable.get() && input_frame.is_current()
+                    || code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
                 }
@@ -1600,7 +1597,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             InputSlot::DialPad(q) | InputSlot::FuzzySelect(FuzzySelectState { question: q, .. }) => {
                                 q.back_value.clone()
                             }
-                            _ => None,
+                            InputSlot::TextInput => None,
                         };
                         if let Some(val) = back {
                             let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(val));
@@ -1859,7 +1856,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if let Some(captured) = redir.drain() {
                         write_iocraft_output(
                             &stdout_for_future,
-                            &transcript_for_future,
+                            transcript_for_future.as_ref(),
                             &stderr_text.push(&captured),
                             false,
                         );
@@ -1908,7 +1905,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     };
-                    write_iocraft_output(&stdout_for_future, &transcript_for_future, &text, terminated);
+                    write_iocraft_output(&stdout_for_future, transcript_for_future.as_ref(), &text, terminated);
                     is_transcript_changed |= transcript_for_future.is_some();
                 }
             }
@@ -1944,7 +1941,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         &question.presentation,
                                         crate::render::query_terminal_width(),
                                     );
-                                    write_iocraft_output(&stdout_for_future, &transcript_for_future, &document, true);
+                                    write_iocraft_output(&stdout_for_future, transcript_for_future.as_ref(), &document, true);
                                     is_transcript_changed |= transcript_for_future.is_some();
                                 }
                             }
@@ -1985,7 +1982,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .set_cache_advice(view.advice, view.actionable);
                             frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
+                        Ok(UiCommand::SetWorkspacePosition(label)) => {
+                            footer_tips.write().position(label);
+                        }
                         Ok(UiCommand::SetStatusTip(source, tip)) => {
                             footer_tips.write().status(source, tip);
                             frame.set(frame.get().wrapping_add(1));
@@ -2237,12 +2236,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    let controls = if turn_active {
-        Some(running_input_controls(pending_input))
+    // The keys for the current state follow the workspace position. Only turn
+    // and queue state choose them — never typing — so the footer changes when
+    // a turn starts or ends, as the rest of the screen does, and keystrokes
+    // never redraw it. While queued input exists, Esc flushes it.
+    let keys = if turn_active {
+        running_input_controls(pending_input)
     } else if pending_input {
-        Some("Enter send · Esc flush · ↑ edit queued")
+        "Enter send · Esc flush · ↑ edit queued"
+    } else if submitted {
+        "/help"
     } else {
-        None
+        "Type /help for commands"
     };
     let explicit_hint = footer_hint.read().clone();
     let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
@@ -2252,13 +2257,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tips = footer_tips.read();
         let hints = FooterHints {
             transient: native_hint,
-            controls,
+            keys,
         };
         hooks.use_memo(
             || {
-                let render = |permission| {
-                    Arc::new(tips.render(permission, &browser, submitted, turn_active, hints, w))
-                };
+                let render =
+                    |permission| Arc::new(tips.render(permission, &browser, turn_active, hints, w));
                 (render(&perm), render("compact · enlarge to expand"))
             },
             (
@@ -2267,7 +2271,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 browser.footer_label(false),
                 browser.footer_label(true),
                 browser.focus,
-                submitted,
                 turn_active,
                 hints,
                 w,
@@ -2759,7 +2762,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// Adapt the shared line framing to iocraft for every captured/output stream.
 fn write_iocraft_output(
     stdout: &StdoutHandle,
-    transcript: &Option<Arc<Mutex<transcript::Transcript>>>,
+    transcript: Option<&Arc<Mutex<transcript::Transcript>>>,
     text: &str,
     terminated: bool,
 ) {
@@ -2985,7 +2988,7 @@ mod tests {
             "expected overflow summary: {plain}"
         );
         let shown = plain.matches("╭─").count();
-        assert!(shown >= 1 && shown < 8, "shown={shown}: {plain}");
+        assert!((1..8).contains(&shown), "shown={shown}: {plain}");
     }
 
     fn question_with_options() -> QuestionPromptView {

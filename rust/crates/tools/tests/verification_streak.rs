@@ -8,7 +8,7 @@
 //! The counter is process-global so tests serialise on a mutex —
 //! parallel writes would race the atomic and confuse the assertions.
 //!
-//! 1. **Streak → nudge → reset → streak → nudge** — each TodoWrite
+//! 1. **Streak → nudge → reset → streak → nudge** — each `TodoWrite`
 //!    marks one more todo `completed` (whole-list replace). After the
 //!    third distinct completion, the tool result MUST include the
 //!    `<system-reminder>` nudge. Following that, a fresh streak fires
@@ -35,14 +35,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn temp_todo_store(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     std::env::temp_dir().join(format!(
         "sudocode-todo-store-{label}-{nanos}-{}",
         std::process::id()

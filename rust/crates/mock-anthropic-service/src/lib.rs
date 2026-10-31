@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -265,7 +266,7 @@ enum Scenario {
     CohostShellPwd,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
-    /// three `Agent` tool_use blocks (run synchronously) whose prompts each
+    /// three `Agent` `tool_use` blocks (run synchronously) whose prompts each
     /// carry a `PARITY_SCENARIO:subagent_calc_child` marker plus one
     /// addition. Each spawned child inherits the parent's `base_url` (so its
     /// `/v1/messages` call reaches this same mock) and its first user message
@@ -278,7 +279,7 @@ enum Scenario {
     SubagentDelegationParent,
     /// A spawned child of [`Scenario::SubagentDelegationParent`]. Detected via
     /// the marker embedded in the child's prompt; replies with only the sum of
-    /// the two addends in that prompt so the parent's tool_result carries a
+    /// the two addends in that prompt so the parent's `tool_result` carries a
     /// clean number (203 / 403 / 603).
     SubagentCalcChild,
     /// Sub-agent events contract: a parent that spawns ONE synchronous
@@ -503,6 +504,9 @@ impl Scenario {
     }
 }
 
+const SSE_RESPONSE_HEADERS: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+
 async fn handle_connection(
     mut socket: tokio::net::TcpStream,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
@@ -576,122 +580,14 @@ async fn handle_connection(
     {
         let calls = concurrency_calls(&request);
         if calls.iter().any(|call| call.stream_wait_for.is_some()) {
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
-            let body = build_stream_body(&request, scenario);
-            let thinking_count = calls.first().map_or(0, |call| call.stream_thinking.len());
-            let tool_offset = thinking_count + usize::from(concurrency_prelude(&calls).is_some());
-            let postlude_index = tool_offset + calls.len();
-            let mut text_waited = false;
-            for chunk in body.split_inclusive("\n\n") {
-                socket.write_all(chunk.as_bytes()).await?;
-                let event = chunk
-                    .lines()
-                    .find_map(|line| line.strip_prefix("data: "))
-                    .and_then(|data| serde_json::from_str::<Value>(data).ok());
-                let index = event
-                    .as_ref()
-                    .and_then(|event| event["index"].as_u64())
-                    .and_then(|index| usize::try_from(index).ok());
-                let event_type = event.as_ref().and_then(|event| event["type"].as_str());
-                let delta_type = event
-                    .as_ref()
-                    .and_then(|event| event["delta"]["type"].as_str());
-                let call = index
-                    .and_then(|index| index.checked_sub(tool_offset))
-                    .and_then(|index| calls.get(index));
-                let waiting_call = if event_type == Some("content_block_delta")
-                    && delta_type == Some("text_delta")
-                    && index == Some(postlude_index)
-                    && !text_waited
-                {
-                    text_waited = true;
-                    calls
-                        .iter()
-                        .find(|call| !call.stream_text_chunks.is_empty())
-                } else if event_type == Some("content_block_stop")
-                    && index == Some(0)
-                    && thinking_count > 0
-                {
-                    calls
-                        .first()
-                        .filter(|call| call.stream_pause_at == "thinking")
-                } else if event_type == Some("content_block_delta")
-                    && delta_type == Some("input_json_delta")
-                {
-                    call.filter(|call| call.stream_pause_at == "arguments")
-                } else if event_type == Some("content_block_stop") {
-                    call.filter(|call| {
-                        call.stream_pause_at == "tool_stop" && call.stream_text_chunks.is_empty()
-                    })
-                } else {
-                    None
-                };
-                if let Some(call) = waiting_call {
-                    if let Some(path) = &call.stream_wait_for {
-                        std::fs::write(format!("{path}.ready"), "ready")?;
-                        wait_for_fixture_release(path).await?;
-                        if call.stream_fail_after {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            return Ok(());
+            return stream_gated_concurrency(&mut socket, &request, scenario, &calls).await;
         }
     }
     if scenario == Scenario::ProsePreview && request.stream {
-        let control = prose_preview_control(&request);
-        let document = control["document"].as_str().unwrap_or(PROSE_PREVIEW_DOC);
-        let chunk_chars =
-            usize::try_from(control["chunk_chars"].as_u64().unwrap_or(12).clamp(1, 1024))
-                .unwrap_or(12);
-        let delay = Duration::from_millis(control["delay_ms"].as_u64().unwrap_or(20));
-        socket
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
-            )
-            .await?;
-        let template = final_text_sse("");
-        let (prefix, rest) = template.split_once("event: content_block_delta").unwrap();
-        let (_, suffix) = rest.split_once("event: content_block_stop").unwrap();
-        socket.write_all(prefix.as_bytes()).await?;
-        if let Some(ready) = control["start_ready"].as_str() {
-            std::fs::write(ready, "stream connected")?;
-        }
-        if let Some(release) = control["start_release"].as_str() {
-            wait_for_fixture_release(release).await?;
-        }
-        let chars: Vec<_> = document.chars().collect();
-        for chunk in chars.chunks(chunk_chars) {
-            let mut delta = String::new();
-            append_sse(
-                &mut delta,
-                "content_block_delta",
-                json!({
-                    "type": "content_block_delta", "index": 0,
-                    "delta": {"type": "text_delta", "text": chunk.iter().collect::<String>()}
-                }),
-            );
-            socket.write_all(delta.as_bytes()).await?;
-            tokio::time::sleep(delay).await;
-        }
-        if let Some(ready) = control["ready"].as_str() {
-            std::fs::write(ready, "all deltas sent")?;
-        }
-        if let Some(release) = control["release"].as_str() {
-            wait_for_fixture_release(release).await?;
-        }
-        socket
-            .write_all(format!("event: content_block_stop{suffix}").as_bytes())
-            .await?;
-        return Ok(());
+        return stream_prose_preview_response(&mut socket, &request).await;
     }
     if scenario == Scenario::SpinnerActivity && request.stream {
-        socket
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
-            )
-            .await?;
+        socket.write_all(SSE_RESPONSE_HEADERS).await?;
         for (delay, chunk) in spinner_activity_stream() {
             tokio::time::sleep(delay).await;
             socket.write_all(chunk.as_bytes()).await?;
@@ -726,6 +622,184 @@ async fn handle_connection(
         .saturating_sub(1);
     let response = build_http_response(&request, scenario, attempt);
     socket.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+/// Stream events at the file gates defined by each concurrency fixture.
+async fn stream_gated_concurrency(
+    socket: &mut tokio::net::TcpStream,
+    request: &MessageRequest,
+    scenario: Scenario,
+    calls: &[ConcurrencyCall],
+) -> io::Result<()> {
+    socket.write_all(SSE_RESPONSE_HEADERS).await?;
+    let body = build_stream_body(request, scenario);
+    let thinking_count = calls.first().map_or(0, |call| call.stream_thinking.len());
+    let tool_offset = thinking_count + usize::from(concurrency_prelude(calls).is_some());
+    let postlude_index = tool_offset + calls.len();
+    let mut text_waited = false;
+    for chunk in body.split_inclusive("\n\n") {
+        socket.write_all(chunk.as_bytes()).await?;
+        let event = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .and_then(|data| serde_json::from_str::<Value>(data).ok());
+        let index = event
+            .as_ref()
+            .and_then(|event| event["index"].as_u64())
+            .and_then(|index| usize::try_from(index).ok());
+        let event_type = event.as_ref().and_then(|event| event["type"].as_str());
+        let delta_type = event
+            .as_ref()
+            .and_then(|event| event["delta"]["type"].as_str());
+        let call = index
+            .and_then(|index| index.checked_sub(tool_offset))
+            .and_then(|index| calls.get(index));
+        let waiting_call = if event_type == Some("content_block_delta")
+            && delta_type == Some("text_delta")
+            && index == Some(postlude_index)
+            && !text_waited
+        {
+            text_waited = true;
+            calls
+                .iter()
+                .find(|call| !call.stream_text_chunks.is_empty())
+        } else if event_type == Some("content_block_stop") && index == Some(0) && thinking_count > 0
+        {
+            calls
+                .first()
+                .filter(|call| call.stream_pause_at == "thinking")
+        } else if event_type == Some("content_block_delta")
+            && delta_type == Some("input_json_delta")
+        {
+            call.filter(|call| call.stream_pause_at == "arguments")
+        } else if event_type == Some("content_block_stop") {
+            call.filter(|call| {
+                call.stream_pause_at == "tool_stop" && call.stream_text_chunks.is_empty()
+            })
+        } else {
+            None
+        };
+        if let Some(call) = waiting_call {
+            if let Some(path) = &call.stream_wait_for {
+                std::fs::write(format!("{path}.ready"), "ready")?;
+                wait_for_fixture_release(path).await?;
+                if call.stream_fail_after {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Optional backpressure for a finite stream whose consumer measures each input.
+/// Every window contains real deltas; the consumer cannot merely hold the EOF.
+struct ProseWindows {
+    directory: PathBuf,
+    count: usize,
+    chunks: usize,
+}
+
+impl ProseWindows {
+    fn from_control(control: &Value, chunks: usize) -> io::Result<Option<Self>> {
+        let Some(path) = control["window_plan"].as_str() else {
+            return Ok(None);
+        };
+        let path = Path::new(path);
+        let plan: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let count = plan["windows"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok());
+        let count = count
+            .filter(|&n| (2..=chunks).contains(&n))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream windows must each contain deltas",
+                )
+            })?;
+        Ok(Some(Self {
+            directory: path.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
+            count,
+            chunks,
+        }))
+    }
+
+    fn window(&self, chunk: usize) -> usize {
+        chunk * self.count / self.chunks
+    }
+
+    async fn before_chunk(&self, chunk: usize) -> io::Result<()> {
+        let window = self.window(chunk);
+        if chunk == 0 || window != self.window(chunk - 1) {
+            wait_for_fixture_release(self.directory.join(format!("permit-{window}"))).await?;
+        }
+        Ok(())
+    }
+
+    fn after_chunk(&self, chunk: usize) -> io::Result<()> {
+        let window = self.window(chunk);
+        if chunk + 1 == self.chunks || window != self.window(chunk + 1) {
+            let sent = self.directory.join(format!("sent-{window}"));
+            let stage = sent.with_extension("stage");
+            std::fs::write(&stage, (chunk + 1).to_string())?;
+            std::fs::rename(stage, sent)?;
+        }
+        Ok(())
+    }
+}
+
+async fn stream_prose_preview_response(
+    socket: &mut tokio::net::TcpStream,
+    request: &MessageRequest,
+) -> io::Result<()> {
+    let control = prose_preview_control(request);
+    let document = control["document"].as_str().unwrap_or(PROSE_PREVIEW_DOC);
+    let chunk_chars =
+        usize::try_from(control["chunk_chars"].as_u64().unwrap_or(12).clamp(1, 1024)).unwrap_or(12);
+    let delay = Duration::from_millis(control["delay_ms"].as_u64().unwrap_or(20));
+    let chars: Vec<_> = document.chars().collect();
+    let windows = ProseWindows::from_control(&control, chars.len().div_ceil(chunk_chars))?;
+    socket.write_all(SSE_RESPONSE_HEADERS).await?;
+    let template = final_text_sse("");
+    let (prefix, rest) = template.split_once("event: content_block_delta").unwrap();
+    let (_, suffix) = rest.split_once("event: content_block_stop").unwrap();
+    socket.write_all(prefix.as_bytes()).await?;
+    if let Some(ready) = control["start_ready"].as_str() {
+        std::fs::write(ready, "stream connected")?;
+    }
+    if let Some(release) = control["start_release"].as_str() {
+        wait_for_fixture_release(release).await?;
+    }
+    for (index, chunk) in chars.chunks(chunk_chars).enumerate() {
+        if let Some(windows) = &windows {
+            windows.before_chunk(index).await?;
+        }
+        let mut delta = String::new();
+        append_sse(
+            &mut delta,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": chunk.iter().collect::<String>()}
+            }),
+        );
+        socket.write_all(delta.as_bytes()).await?;
+        tokio::time::sleep(delay).await;
+        if let Some(windows) = &windows {
+            windows.after_chunk(index)?;
+        }
+    }
+    if let Some(ready) = control["ready"].as_str() {
+        std::fs::write(ready, "all deltas sent")?;
+    }
+    if let Some(release) = control["release"].as_str() {
+        wait_for_fixture_release(release).await?;
+    }
+    socket
+        .write_all(format!("event: content_block_stop{suffix}").as_bytes())
+        .await?;
     Ok(())
 }
 
@@ -964,12 +1038,13 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
 }
 
 /// Optional file-backed controls keep response text out of the echoed prompt.
-async fn wait_for_fixture_release(path: &str) -> io::Result<()> {
+async fn wait_for_fixture_release(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while !std::path::Path::new(path).exists() && tokio::time::Instant::now() < deadline {
+    while !path.exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    if std::path::Path::new(path).exists() {
+    if path.exists() {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -1019,7 +1094,7 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
     let is_standard_compaction = request
         .system
         .as_ref()
-        .map_or(false, |s| s.contains("summarizing conversations"));
+        .is_some_and(|s| s.contains("summarizing conversations"));
     if is_standard_compaction {
         return false;
     }
@@ -1375,54 +1450,15 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
         return subagent_workflow_step(request, scenario);
     }
     if matches!(scenario, Scenario::CohostDelegate) {
-        let results = tool_results_by_name(request);
-        return if results.contains_key("send") {
-            SubagentStep::Answer("delegation delivered".to_string())
-        } else if let Some((result, _)) = results.get("Agent") {
-            SubagentStep::Tools(vec![(
-                "toolu_delegate_reply",
-                "send",
-                json!({"to": COHOST_REPLY_TO, "message": result, "summary": "child result"}),
-            )])
-        } else {
-            SubagentStep::Tools(vec![(
-                "toolu_delegate",
-                "Agent",
-                json!({
-                    "description": "cohost calculation", "model": "inherit", "run_in_background": false,
-                    "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
-                }),
-            )])
-        };
+        return cohost_delegate_step(request);
     }
     let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
-    let background_child = |rest: &str| {
-        let prompt = child("subagent_slow_child", rest);
-        match subagent_release_path(request) {
-            Some(path) => format!("{prompt} SUBAGENT_RELEASE:{}", json!(path)),
-            None => prompt,
-        }
-    };
+    let background_child =
+        |rest: &str| with_subagent_release(request, child("subagent_slow_child", rest));
     match (scenario, done) {
         (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {
-            SubagentStep::Tools(vec![(
-                "toolu_events_sync",
-                "Agent",
-                agent_call_input(
-                    "sync child",
-                    &child(
-                        if scenario == Scenario::SubagentEventsSyncSlow {
-                            "subagent_slow_child"
-                        } else {
-                            "subagent_tool_child"
-                        },
-                        "list the workspace",
-                    ),
-                    "general-purpose",
-                    false,
-                ),
-            )])
+            subagent_sync_launch(scenario, child)
         }
         (Scenario::SubagentEventsBackground, None) => SubagentStep::Tools(vec![
             (
@@ -1504,6 +1540,58 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
         (scenario, Some(_)) => SubagentStep::Answer(format!("{} done", scenario.name())),
         (scenario, None) => SubagentStep::Answer(format!("{} has no plan", scenario.name())),
     }
+}
+
+fn with_subagent_release(request: &MessageRequest, prompt: String) -> String {
+    match subagent_release_path(request) {
+        Some(path) => format!("{prompt} SUBAGENT_RELEASE:{}", json!(path)),
+        None => prompt,
+    }
+}
+
+fn cohost_delegate_step(request: &MessageRequest) -> SubagentStep {
+    let results = tool_results_by_name(request);
+    if results.contains_key("send") {
+        SubagentStep::Answer("delegation delivered".to_string())
+    } else if let Some((result, _)) = results.get("Agent") {
+        SubagentStep::Tools(vec![(
+            "toolu_delegate_reply",
+            "send",
+            json!({"to": COHOST_REPLY_TO, "message": result, "summary": "child result"}),
+        )])
+    } else {
+        SubagentStep::Tools(vec![(
+            "toolu_delegate",
+            "Agent",
+            json!({
+                "description": "cohost calculation", "model": "inherit", "run_in_background": false,
+                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
+            }),
+        )])
+    }
+}
+
+fn subagent_sync_launch(
+    scenario: Scenario,
+    child: impl FnOnce(&str, &str) -> String,
+) -> SubagentStep {
+    SubagentStep::Tools(vec![(
+        "toolu_events_sync",
+        "Agent",
+        agent_call_input(
+            "sync child",
+            &child(
+                if scenario == Scenario::SubagentEventsSyncSlow {
+                    "subagent_slow_child"
+                } else {
+                    "subagent_tool_child"
+                },
+                "list the workspace",
+            ),
+            "general-purpose",
+            false,
+        ),
+    )])
 }
 
 fn subagent_events_sse(request: &MessageRequest, scenario: Scenario) -> String {
@@ -1712,624 +1800,65 @@ fn plan_fixture_response(request: &MessageRequest, scenario: Scenario) -> Messag
 }
 
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
-    match scenario {
-        Scenario::PlanExecutionRoundtrip | Scenario::QuestionMarkdownMany => {
-            let response = plan_fixture_response(request, scenario);
-            match &response.content[0] {
-                OutputContentBlock::ToolUse {
-                    id, name, input, ..
-                } => tool_use_sse(id, name, &[&input.to_string()]),
-                OutputContentBlock::Text { text } => final_text_sse(text),
-                _ => unreachable!("plan fixture only emits text or a tool"),
-            }
-        }
-
-        Scenario::ProsePreview => markdown_showcase_sse(PROSE_PREVIEW_DOC),
-        Scenario::SpinnerActivity => spinner_activity_stream()
-            .into_iter()
-            .map(|(_, chunk)| chunk)
-            .collect(),
-        Scenario::ToolConcurrency => match concurrency_batch_complete(request) {
-            false => {
-                let calls = concurrency_calls(request);
-                let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
-                let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
-                let uses: Vec<_> = calls
-                    .iter()
-                    .zip(&chunks)
-                    .map(|(call, chunks)| ToolUseSse {
-                        tool_id: &call.id,
-                        tool_name: &call.name,
-                        partial_json_chunks: chunks,
-                    })
-                    .collect();
-                let text_chunks: Vec<_> = calls
-                    .iter()
-                    .flat_map(|call| &call.stream_text_chunks)
-                    .map(String::as_str)
-                    .collect();
-                tool_uses_sse_with_blocks(
-                    &uses,
-                    12,
-                    concurrency_prelude(&calls),
-                    &text_chunks,
-                    &calls[0].stream_thinking,
-                )
-            }
-            true => final_text_sse("Concurrency batch done."),
-        },
-        Scenario::TranscriptSpacing => match latest_tool_result(request) {
-            None => tool_uses_sse_with_prelude(
-                &[
-                    ToolUseSse {
-                        tool_id: "toolu_spacing_1",
-                        tool_name: "bash",
-                        partial_json_chunks: &[r#"{"command":"cat spacing-one.txt"}"#],
-                    },
-                    ToolUseSse {
-                        tool_id: "toolu_spacing_2",
-                        tool_name: "bash",
-                        partial_json_chunks: &[r#"{"command":"cat spacing-two.txt"}"#],
-                    },
-                ],
-                12,
-                Some("Spacing intro.\n\n"),
-            ),
-            Some(_) => final_text_sse(SPACING_FINAL),
-        },
-        Scenario::BashRenderFixture => match latest_tool_result(request) {
-            None => tool_use_sse(
-                "toolu_render_fixture",
-                "bash",
-                &[&json!({"command": "cat render-output.txt"}).to_string()],
-            ),
-            Some(_) => final_text_sse("Render fixture done."),
-        },
-        Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
-            streaming_text_sse()
-        }
-        Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(MARKDOWN_SHOWCASE_DOC),
-        Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(&format!(
-            "{UNICODE_SHOWCASE_DOC}\n\n{LIST_WRAP_DOC}\n\nLists done."
-        )),
-        Scenario::SyntaxHighlightShowcase => markdown_showcase_sse(SYNTAX_SHOWCASE_DOC),
-        Scenario::CodexColorsShowcase => markdown_showcase_sse(CODEX_COLORS_SHOWCASE_DOC),
-        Scenario::CodexBashShowcase => match codex_bash_input(request) {
-            Some((id, input)) => tool_use_sse(id, "bash", &[&input.to_string()]),
-            None => final_text_sse("Color bash done."),
-        },
-        Scenario::CodexDiffShowcase => match latest_tool_result(request) {
-            Some(_) => final_text_sse("Color diff done."),
-            None => tool_use_sse(
-                "toolu_color_diff",
-                "edit_file",
-                &[&json!({
-                    "path": "colors.rs", "old_string": CODEX_DIFF_OLD, "new_string": CODEX_DIFF_NEW
-                })
-                .to_string()],
-            ),
-        },
-        Scenario::SyntaxHighlightLimits => markdown_showcase_sse(&syntax_limits_doc()),
-        Scenario::ThinkingThenText => thinking_then_text_sse(None),
-        Scenario::TextThinkingTransitions => thinking_then_text_sse(Some("Boundary before.\ncard")),
-        Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
-            Some((output, is_error)) => {
-                final_text_sse(&format!("search roundtrip error={is_error}: {output}"))
-            }
-            None => tool_use_sse(
-                "toolu_web_search",
-                "WebSearch",
-                &[
-                    r#"{"query":"Rust official website","allowed_domains":["rust-lang.org"],"blocked_domains":["blocked.rust-lang.org"]}"#,
-                ],
-            ),
-        },
-        Scenario::BrowserImageRoundtrip => {
-            let results = tool_results_by_name(request);
-            if results.contains_key("Read") || results.contains_key("read_file") {
-                final_text_sse("browser image received")
-            } else if results.contains_key("bash") {
-                tool_use_sse("browser-read", "Read", &[r#"{"path":"screen.png"}"#])
-            } else {
-                tool_use_sse(
-                    "browser-capture",
-                    "bash",
-                    &[r#"{"command":"bash capture.sh"}"#],
-                )
-            }
-        }
-        Scenario::ImageReadRoundtrip => match latest_tool_result(request) {
-            Some(_) => final_text_sse("image roundtrip complete"),
-            None if request.messages.iter().flat_map(|m| &m.content).any(
-                |b| matches!(b, InputContentBlock::Text { text } if text.contains("IMAGE_SINGLE")),
-            ) =>
-            {
-                tool_use_sse("image-1", "Read", &[r#"{"path":"screen.png"}"#])
-            }
-            None => tool_uses_sse(&[
-                ToolUseSse {
-                    tool_id: "image-1",
-                    tool_name: "Read",
-                    partial_json_chunks: &[r#"{"path":"screen.png"}"#],
-                },
-                ToolUseSse {
-                    tool_id: "text-2",
-                    tool_name: "read_file",
-                    partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
-                },
-            ]),
-        },
-        Scenario::ReadFileRoundtrip | Scenario::SkillReadRoundtrip => {
-            match current_turn_tool_result(request) {
-                Some((tool_output, _)) => final_text_sse(&format!(
-                    "read_file roundtrip complete: {}",
-                    extract_read_content(&tool_output)
-                )),
-                None => tool_use_sse(
-                    "toolu_read_fixture",
-                    "read_file",
-                    &[&read_roundtrip_input(scenario).to_string()],
-                ),
-            }
-        }
-        Scenario::GrepChunkAssembly => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "grep_search matched {} occurrences",
-                extract_num_matches(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_grep_fixture",
-                "grep_search",
-                &[
-                    "{\"pattern\":\"par",
-                    "ity\",\"path\":\"fixture.txt\"",
-                    ",\"output_mode\":\"count\"}",
-                ],
-            ),
-        },
-        Scenario::WriteFileAllowed => match current_turn_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "write_file succeeded: {}",
-                extract_file_path(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_write_allowed",
-                "write_file",
-                &[r#"{"path":"generated/output.txt","content":"created by mock service\n"}"#],
-            ),
-        },
-        Scenario::WriteFileDenied => match current_turn_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("write_file denied as expected: {tool_output}"))
-            }
-            None => tool_use_sse(
-                "toolu_write_denied",
-                "write_file",
-                &[r#"{"path":"generated/denied.txt","content":"should not exist\n"}"#],
-            ),
-        },
-        Scenario::MultiToolTurnRoundtrip => {
-            let tool_results = tool_results_by_name(request);
-            match (
-                tool_results.get("read_file"),
-                tool_results.get("grep_search"),
-            ) {
-                (Some((read_output, _)), Some((grep_output, _))) => final_text_sse(&format!(
-                    "multi-tool roundtrip complete: {} / {} occurrences",
-                    extract_read_content(read_output),
-                    extract_num_matches(grep_output)
-                )),
-                _ => tool_uses_sse(&[
-                    ToolUseSse {
-                        tool_id: "toolu_multi_read",
-                        tool_name: "read_file",
-                        partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
-                    },
-                    ToolUseSse {
-                        tool_id: "toolu_multi_grep",
-                        tool_name: "grep_search",
-                        partial_json_chunks: &[
-                            "{\"pattern\":\"par",
-                            "ity\",\"path\":\"fixture.txt\"",
-                            ",\"output_mode\":\"count\"}",
-                        ],
-                    },
-                ]),
-            }
-        }
-        Scenario::BashCompactResults => match compact_bash_step(request) {
-            Some((id, name, input)) => tool_use_sse(&id, name, &[&input.to_string()]),
-            None => final_text_sse("compact bash results verified"),
-        },
-        Scenario::StepBudget => match step_budget_answer(request) {
-            Some(text) => final_text_sse(&text),
-            None => tool_use_sse(
-                &step_budget_tool_id(request),
-                "bash",
-                &[r#"{"command":"echo step >> steps.txt"}"#],
-            ),
-        },
-        Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "bash completed: {}",
-                extract_bash_stdout(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_bash_stdout",
-                "bash",
-                &[r#"{"command":"printf 'alpha from bash'","timeout":30000}"#],
-            ),
-        },
-        Scenario::BashInterruptLongRunning => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "bash interrupt unexpectedly continued: {tool_output}"
-            )),
-            None => tool_use_sse(
-                "toolu_bash_interrupt",
-                "bash",
-                &[
-                    r#"{"command":"printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
-                ],
-            ),
-        },
-        Scenario::BashPermissionPromptApproved => match latest_tool_result(request) {
-            Some((tool_output, is_error)) => {
-                if is_error {
-                    final_text_sse(&format!("bash approval unexpectedly failed: {tool_output}"))
-                } else {
-                    final_text_sse(&format!(
-                        "bash approved and executed: {}",
-                        extract_bash_stdout(&tool_output)
-                    ))
-                }
-            }
-            None => tool_use_sse(
-                "toolu_bash_prompt_allow",
-                "bash",
-                &[r#"{"command":"printf 'approved via prompt'","timeout":30000}"#],
-            ),
-        },
-        Scenario::BashPermissionPromptDenied => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("bash denied as expected: {tool_output}"))
-            }
-            None => tool_use_sse(
-                "toolu_bash_prompt_deny",
-                "bash",
-                &[r#"{"command":"printf 'should not run'","timeout":30000}"#],
-            ),
-        },
-        Scenario::PluginToolRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "plugin tool completed: {}",
-                extract_plugin_message(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_plugin_echo",
-                "plugin_echo",
-                &[r#"{"message":"hello from plugin parity"}"#],
-            ),
-        },
-        Scenario::McpToolRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, is_error)) => final_text_sse(&format!(
-                "mcp tool roundtrip complete (is_error={is_error}): {}",
-                mcp_echo_verdict(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_mcp_echo",
-                "mcp__parity__echo",
-                &[r#"{"text":"hello from mcp parity"}"#],
-            ),
-        },
-        Scenario::AutoCompactTriggered => {
-            final_text_sse_with_usage("auto compact parity complete.", 50_000, 200)
-        }
-        Scenario::ContextLimitThenText => final_text_sse("context limit recovery complete."),
-        Scenario::ToolLoopContextGrowth => match latest_tool_result(request) {
-            Some(_) if history_carries_compaction_summary(request) => {
-                final_text_sse("tool loop compacted before the next request.")
-            }
-            Some(_) => final_text_sse("tool loop continued without compaction."),
-            None => tool_use_sse_with_context(
-                "toolu_tool_loop_growth",
-                "read_file",
-                &[r#"{"path":"fixture.txt"}"#],
-                TOOL_LOOP_GROWTH_CONTEXT_TOKENS,
-            ),
-        },
-        Scenario::TokenCostReporting => {
-            final_text_sse_with_usage("token cost reporting parity complete.", 1_000, 500)
-        }
-        Scenario::SingleTurnText => final_text_sse("The answer is 4"),
-        Scenario::MultiTurnContext => {
-            let turn_count = request.messages.iter().filter(|m| m.role == "user").count();
-            if turn_count <= 1 {
-                final_text_sse("Hello, Alice! Nice to meet you.")
-            } else {
-                final_text_sse("Your name is Alice.")
-            }
-        }
-        Scenario::EditFileRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "edit_file roundtrip complete: {}",
-                extract_file_path(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_edit_fixture",
-                "edit_file",
-                &[r#"{"path":"fixture.txt","old_string":"alpha","new_string":"omega"}"#],
-            ),
-        },
-        Scenario::GlobSearchRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("glob_search roundtrip complete: {tool_output}"))
-            }
-            None => tool_use_sse(
-                "toolu_glob_fixture",
-                "glob_search",
-                &[r#"{"pattern":"*.txt"}"#],
-            ),
-        },
-        Scenario::WritePlanRoundtrip | Scenario::WritePlanReview => {
-            match latest_tool_result(request) {
-                Some((tool_output, _)) => {
-                    final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
-                }
-                None => tool_use_sse(
-                    "toolu_write_plan",
-                    "write_plan",
-                    &[&write_plan_fixture(scenario).to_string()],
-                ),
-            }
-        }
-        Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("todo_write roundtrip complete: {tool_output}"))
-            }
-            None => tool_use_sse(
-                "toolu_todo_write",
-                "TodoWrite",
-                &[
-                    r#"{"todos":[{"content":"Write parser","status":"in_progress","activeForm":"Writing parser"},{"content":"Run tests","status":"pending","activeForm":"Running tests"}]}"#,
-                ],
-            ),
-        },
-        Scenario::TodoWriteEmptyRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "todo_write empty roundtrip complete: {tool_output}"
-            )),
-            None => tool_use_sse("toolu_todo_write_empty", "TodoWrite", &[r#"{"todos":[]}"#]),
-        },
-        Scenario::TodoWriteLifecycleRoundtrip => {
-            // Two TodoWrite calls: first opens the list, second marks all done.
-            // The reply carries the last output so a test can assert the wipe.
-            let write_count = count_tool_uses_by_name(request, "TodoWrite");
-            match write_count {
-                0 => tool_use_sse(
-                    "toolu_todo_write_open",
-                    "TodoWrite",
-                    &[
-                        r#"{"todos":[{"content":"implement A","status":"in_progress","activeForm":"Implementing A"},{"content":"implement B","status":"pending","activeForm":"Implementing B"}]}"#,
-                    ],
-                ),
-                1 => tool_use_sse(
-                    "toolu_todo_write_done",
-                    "TodoWrite",
-                    &[
-                        r#"{"todos":[{"content":"implement A","status":"completed","activeForm":"Implementing A"},{"content":"implement B","status":"completed","activeForm":"Implementing B"}]}"#,
-                    ],
-                ),
-                _ => match latest_tool_result(request) {
-                    Some((tool_output, _)) => final_text_sse(&format!(
-                        "todo_write lifecycle roundtrip complete: {tool_output}"
-                    )),
-                    None => final_text_sse("todo_write lifecycle roundtrip complete"),
-                },
-            }
-        }
-        Scenario::SleepShortRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("sleep short roundtrip complete: {tool_output}"))
-            }
-            None => tool_use_sse("toolu_sleep_short", "Sleep", &[r#"{"duration_ms":600}"#]),
-        },
-        Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("ask_user_question answered: {tool_output}"))
-            }
-            None => tool_use_sse(
-                "toolu_ask_user_question",
-                "AskUserQuestion",
-                // Structured `questions[]` form using `question` per item (the
-                // natural alias for `prompt`). Exercises the alias so this
-                // roundtrip regresses if the item ever stops accepting it.
-                &[
-                    r#"{"questions":[{"id":"q1","question":"Which colour?","#,
-                    r#""options":[{"label":"red","value":"red"},{"label":"blue","value":"blue"}]}]}"#,
-                ],
-            ),
-        },
-        Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, is_error)) => final_text_sse(&format!(
-                "sleep over-max roundtrip complete (is_error={is_error}): {tool_output}"
-            )),
-            None => tool_use_sse(
-                "toolu_sleep_over_max",
-                "Sleep",
-                // 400_000 ms > MAX_SLEEP_DURATION_MS (300_000). The tool
-                // must reject before sleeping — that's the invariant.
-                &[r#"{"duration_ms":400000}"#],
-            ),
-        },
-        Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, is_error)) => final_text_sse(&format!(
-                "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
-            )),
-            // The user prompt (from the test harness) already contains
-            // the `<fork-boilerplate>` tag, so the parent session's
-            // history looks like a fork child. This tool_use MUST be
-            // rejected by prepare_agent_job's recursion guard before
-            // any subagent is spawned.
-            None => tool_use_sse(
-                "toolu_fork_recursion_guard",
-                "Agent",
-                &[
-                    r#"{"subagent_type":"fork","description":"nested probe","prompt":"read a.txt and report the first line"}"#,
-                ],
-            ),
-        },
-        Scenario::LlmCompactionRoundtrip => {
-            // Non-streaming compaction response — return a canned summary.
-            // The compaction path uses `send_message` (stream=false), so
-            // this arm is hit via `build_message_response`. If it ever
-            // switches to streaming, this SSE path serves as a fallback.
-            final_text_sse(CANNED_COMPACTION_SUMMARY)
-        }
-        Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!("roundtrip complete: {tool_output}")),
-            None => tool_use_sse("toolu_deferred_cron", "CronList", &[r#"{}"#]),
-        },
-        Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
-            }
-            None => tool_use_sse(
-                "toolu_unified_send",
-                "send",
-                &[&format!(
-                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test"}}"#
-                )],
-            ),
-        },
-        // A co-host agent answers a peer message by calling `send` back. The
-        // reply's recipient is fixed here because nothing outside the daemon
-        // chooses it: the agent runs in-process and this scenario is its mind.
-        Scenario::CohostReply => match current_turn_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!("cohost replied: {tool_output}")),
-            None => tool_use_sse(
-                "toolu_cohost_reply",
-                "send",
-                &[&format!(
-                    r#"{{"to":"{COHOST_REPLY_TO}","message":"{COHOST_REPLY_BODY}","summary":"reply"}}"#
-                )],
-            ),
-        },
-        // Where does a co-hosted agent's shell run? Ask it — `pwd`, then report
-        // the answer to the peer. The assertion is the test's; this only has to
-        // make the agent produce the fact.
-        Scenario::CohostShellPwd => {
-            let results = tool_results_by_name(request);
-            match (results.get("bash"), results.get("send")) {
-                (Some(_), Some((send_output, _))) => {
-                    final_text_sse(&format!("cohost shell pwd complete: {send_output}"))
-                }
-                (Some((bash_output, _)), None) => {
-                    // Built through `json!` rather than a format string: a path is
-                    // the one payload guaranteed to carry separators, and a
-                    // hand-escaped one is a mock that breaks on the platform it
-                    // was not written on.
-                    let input = json!({
-                        "to": COHOST_REPLY_TO,
-                        "message": extract_bash_stdout(bash_output),
-                        "summary": "pwd",
-                    })
-                    .to_string();
-                    tool_use_sse("toolu_cohost_pwd_send", "send", &[&input])
-                }
-                _ => tool_use_sse("toolu_cohost_pwd_bash", "bash", &[r#"{"command":"pwd"}"#]),
-            }
-        }
-        Scenario::CohostReadThenReply => {
-            let results = tool_results_by_name(request);
-            match (results.get("read_file"), results.get("send")) {
-                (Some(_), Some((send_output, _))) => {
-                    final_text_sse(&format!("cohost read-then-reply complete: {send_output}"))
-                }
-                // Read first, then answer the peer with what the workspace said.
-                (Some((read_output, _)), None) => tool_use_sse(
-                    "toolu_cohost_read_reply_send",
-                    "send",
-                    &[&format!(
-                        r#"{{"to":"{COHOST_REPLY_TO}","message":"{}","summary":"reply"}}"#,
-                        extract_read_content(read_output)
-                    )],
-                ),
-                _ => tool_use_sse(
-                    "toolu_cohost_read_reply_read",
-                    "read_file",
-                    &[r#"{"path":"fixture.txt"}"#],
-                ),
-            }
-        }
-        Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
-            }
-            // `sender` supplied, which is how a local peer gets a name of its own.
-            None => tool_use_sse(
-                "toolu_unified_send_named",
-                "send",
-                &[&format!(
-                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test","sender":"{LOCAL_PEER_SENDER}"}}"#
-                )],
-            ),
-        },
-        Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "deferred_mcp roundtrip complete: {}",
-                mcp_echo_verdict(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_deferred_mcp",
-                "mcp__parity__echo",
-                &[r#"{"text":"hello from deferred mcp"}"#],
-            ),
-        },
-        Scenario::SubagentDelegationParent => {
-            let agent_results = subagent_calc_results(request);
-            if agent_results.len() >= 3 {
-                let mut sums = agent_results;
-                sums.sort_unstable();
-                final_text_sse(&format!(
-                    "{{\"results\": [{}, {}, {}]}}",
-                    sums[0], sums[1], sums[2]
-                ))
-            } else {
-                tool_uses_sse(&[
-                    ToolUseSse {
-                        tool_id: "toolu_subagent_calc_1",
-                        tool_name: "Agent",
-                        partial_json_chunks: &[
-                            r#"{"description":"add 101+102","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
-                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 101 + 102? "#,
-                            r#"Reply with ONLY the number."}"#,
-                        ],
-                    },
-                    ToolUseSse {
-                        tool_id: "toolu_subagent_calc_2",
-                        tool_name: "Agent",
-                        partial_json_chunks: &[
-                            r#"{"description":"add 201+202","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
-                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 201 + 202? "#,
-                            r#"Reply with ONLY the number."}"#,
-                        ],
-                    },
-                    ToolUseSse {
-                        tool_id: "toolu_subagent_calc_3",
-                        tool_name: "Agent",
-                        partial_json_chunks: &[
-                            r#"{"description":"add 301+302","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
-                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 301 + 302? "#,
-                            r#"Reply with ONLY the number."}"#,
-                        ],
-                    },
-                ])
-            }
-        }
-        Scenario::SubagentCalcChild => {
-            let sum = subagent_child_sum(request);
-            final_text_sse(&sum.to_string())
-        }
+    let render: fn(&MessageRequest, Scenario) -> String = match scenario {
+        Scenario::PlanExecutionRoundtrip | Scenario::QuestionMarkdownMany => stream_plan_review,
+        Scenario::ProsePreview => stream_prose_preview,
+        Scenario::SpinnerActivity => stream_spinner_activity,
+        Scenario::ToolConcurrency => stream_tool_concurrency,
+        Scenario::TranscriptSpacing => stream_transcript_spacing,
+        Scenario::BashRenderFixture => stream_bash_render_fixture,
+        Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => stream_text,
+        Scenario::MarkdownRenderingShowcase => stream_markdown_rendering_showcase,
+        Scenario::UnicodeRenderingShowcase => stream_unicode_rendering_showcase,
+        Scenario::SyntaxHighlightShowcase => stream_syntax_highlight_showcase,
+        Scenario::CodexColorsShowcase => stream_codex_colors_showcase,
+        Scenario::CodexBashShowcase => stream_codex_bash_showcase,
+        Scenario::CodexDiffShowcase => stream_codex_diff_showcase,
+        Scenario::SyntaxHighlightLimits => stream_syntax_highlight_limits,
+        Scenario::ThinkingThenText => stream_thinking_then_text,
+        Scenario::TextThinkingTransitions => stream_text_thinking_transitions,
+        Scenario::WebSearchRoundtrip => stream_web_search_roundtrip,
+        Scenario::BrowserImageRoundtrip => stream_browser_image_roundtrip,
+        Scenario::ImageReadRoundtrip => stream_image_read_roundtrip,
+        Scenario::ReadFileRoundtrip | Scenario::SkillReadRoundtrip => stream_file_read,
+        Scenario::GrepChunkAssembly => stream_grep_chunk_assembly,
+        Scenario::WriteFileAllowed => stream_write_file_allowed,
+        Scenario::WriteFileDenied => stream_write_file_denied,
+        Scenario::MultiToolTurnRoundtrip => stream_multi_tool_turn_roundtrip,
+        Scenario::BashCompactResults => stream_bash_compact_results,
+        Scenario::StepBudget => stream_step_budget,
+        Scenario::BashStdoutRoundtrip => stream_bash_stdout_roundtrip,
+        Scenario::BashInterruptLongRunning => stream_bash_interrupt_long_running,
+        Scenario::BashPermissionPromptApproved => stream_bash_approval,
+        Scenario::BashPermissionPromptDenied => stream_bash_denial,
+        Scenario::PluginToolRoundtrip => stream_plugin_tool_roundtrip,
+        Scenario::McpToolRoundtrip => stream_mcp_tool_roundtrip,
+        Scenario::AutoCompactTriggered => stream_auto_compact_triggered,
+        Scenario::ContextLimitThenText => stream_context_limit_then_text,
+        Scenario::ToolLoopContextGrowth => stream_tool_loop_context_growth,
+        Scenario::TokenCostReporting => stream_token_cost_reporting,
+        Scenario::SingleTurnText => stream_single_turn_text,
+        Scenario::MultiTurnContext => stream_multi_turn_context,
+        Scenario::EditFileRoundtrip => stream_edit_file_roundtrip,
+        Scenario::GlobSearchRoundtrip => stream_glob_search_roundtrip,
+        Scenario::WritePlanRoundtrip | Scenario::WritePlanReview => stream_write_plan_roundtrip,
+        Scenario::TodoWriteRoundtrip => stream_todo_write_roundtrip,
+        Scenario::TodoWriteEmptyRoundtrip => stream_todo_write_empty_roundtrip,
+        Scenario::TodoWriteLifecycleRoundtrip => stream_todo_write_lifecycle_roundtrip,
+        Scenario::SleepShortRoundtrip => stream_sleep_short_roundtrip,
+        Scenario::AskUserQuestionRoundtrip => stream_ask_user_question_roundtrip,
+        Scenario::SleepOverMaxRoundtrip => stream_sleep_over_max_roundtrip,
+        Scenario::ForkSubagentRecursionGuardRoundtrip => stream_fork_guard,
+        Scenario::LlmCompactionRoundtrip => stream_llm_compaction_roundtrip,
+        Scenario::DeferredToolRoundtrip => stream_deferred_tool_roundtrip,
+        Scenario::UnifiedSendRoundtrip => stream_unified_send_roundtrip,
+        Scenario::CohostReply => stream_cohost_reply,
+        Scenario::CohostShellPwd => stream_cohost_shell_pwd,
+        Scenario::CohostReadThenReply => stream_cohost_read_then_reply,
+        Scenario::UnifiedSendFromNamedPeer => stream_unified_send_from_named_peer,
+        Scenario::DeferredMcpToolRoundtrip => stream_deferred_mcp,
+        Scenario::SubagentDelegationParent => stream_delegation,
+        Scenario::SubagentCalcChild => stream_subagent_calc_child,
         Scenario::CohostDelegate
         | Scenario::SubagentWorkflow
         | Scenario::SubagentWorkflowChild
@@ -2342,8 +1871,768 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         | Scenario::SubagentNestChild
         | Scenario::SubagentSlowChild
         | Scenario::SubagentEventsCancelTool
-        | Scenario::SubagentSleepChild => subagent_events_sse(request, scenario),
+        | Scenario::SubagentSleepChild => subagent_events_sse,
+    };
+    render(request, scenario)
+}
+
+fn stream_plan_review(request: &MessageRequest, scenario: Scenario) -> String {
+    let response = plan_fixture_response(request, scenario);
+    match &response.content[0] {
+        OutputContentBlock::ToolUse {
+            id, name, input, ..
+        } => tool_use_sse(id, name, &[&input.to_string()]),
+        OutputContentBlock::Text { text } => final_text_sse(text),
+        _ => unreachable!("plan fixture only emits text or a tool"),
     }
+}
+
+fn stream_prose_preview(_request: &MessageRequest, _scenario: Scenario) -> String {
+    markdown_showcase_sse(PROSE_PREVIEW_DOC)
+}
+
+fn stream_spinner_activity(_request: &MessageRequest, _scenario: Scenario) -> String {
+    spinner_activity_stream()
+        .into_iter()
+        .map(|(_, chunk)| chunk)
+        .collect()
+}
+
+fn stream_tool_concurrency(request: &MessageRequest, _scenario: Scenario) -> String {
+    if concurrency_batch_complete(request) {
+        final_text_sse("Concurrency batch done.")
+    } else {
+        let calls = concurrency_calls(request);
+        let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
+        let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
+        let uses: Vec<_> = calls
+            .iter()
+            .zip(&chunks)
+            .map(|(call, chunks)| ToolUseSse {
+                tool_id: &call.id,
+                tool_name: &call.name,
+                partial_json_chunks: chunks,
+            })
+            .collect();
+        let text_chunks: Vec<_> = calls
+            .iter()
+            .flat_map(|call| &call.stream_text_chunks)
+            .map(String::as_str)
+            .collect();
+        tool_uses_sse_with_blocks(
+            &uses,
+            12,
+            concurrency_prelude(&calls),
+            &text_chunks,
+            &calls[0].stream_thinking,
+        )
+    }
+}
+
+fn stream_transcript_spacing(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        None => tool_uses_sse_with_prelude(
+            &[
+                ToolUseSse {
+                    tool_id: "toolu_spacing_1",
+                    tool_name: "bash",
+                    partial_json_chunks: &[r#"{"command":"cat spacing-one.txt"}"#],
+                },
+                ToolUseSse {
+                    tool_id: "toolu_spacing_2",
+                    tool_name: "bash",
+                    partial_json_chunks: &[r#"{"command":"cat spacing-two.txt"}"#],
+                },
+            ],
+            12,
+            Some("Spacing intro.\n\n"),
+        ),
+        Some(_) => final_text_sse(SPACING_FINAL),
+    }
+}
+
+fn stream_bash_render_fixture(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        None => tool_use_sse(
+            "toolu_render_fixture",
+            "bash",
+            &[&json!({"command": "cat render-output.txt"}).to_string()],
+        ),
+        Some(_) => final_text_sse("Render fixture done."),
+    }
+}
+
+fn stream_text(_request: &MessageRequest, _scenario: Scenario) -> String {
+    streaming_text_sse()
+}
+
+fn stream_markdown_rendering_showcase(_request: &MessageRequest, _scenario: Scenario) -> String {
+    markdown_showcase_sse(MARKDOWN_SHOWCASE_DOC)
+}
+
+fn stream_unicode_rendering_showcase(_request: &MessageRequest, _scenario: Scenario) -> String {
+    markdown_showcase_sse(&format!(
+        "{UNICODE_SHOWCASE_DOC}\n\n{LIST_WRAP_DOC}\n\nLists done."
+    ))
+}
+
+fn stream_syntax_highlight_showcase(_request: &MessageRequest, _scenario: Scenario) -> String {
+    markdown_showcase_sse(SYNTAX_SHOWCASE_DOC)
+}
+
+fn stream_codex_colors_showcase(_request: &MessageRequest, _scenario: Scenario) -> String {
+    markdown_showcase_sse(CODEX_COLORS_SHOWCASE_DOC)
+}
+
+fn stream_codex_bash_showcase(request: &MessageRequest, _scenario: Scenario) -> String {
+    match codex_bash_input(request) {
+        Some((id, input)) => tool_use_sse(id, "bash", &[&input.to_string()]),
+        None => final_text_sse("Color bash done."),
+    }
+}
+
+fn stream_codex_diff_showcase(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some(_) => final_text_sse("Color diff done."),
+        None => tool_use_sse(
+            "toolu_color_diff",
+            "edit_file",
+            &[&json!({
+                "path": "colors.rs", "old_string": CODEX_DIFF_OLD, "new_string": CODEX_DIFF_NEW
+            })
+            .to_string()],
+        ),
+    }
+}
+
+fn stream_syntax_highlight_limits(_request: &MessageRequest, _scenario: Scenario) -> String {
+    markdown_showcase_sse(&syntax_limits_doc())
+}
+
+fn stream_thinking_then_text(_request: &MessageRequest, _scenario: Scenario) -> String {
+    thinking_then_text_sse(None)
+}
+
+fn stream_text_thinking_transitions(_request: &MessageRequest, _scenario: Scenario) -> String {
+    thinking_then_text_sse(Some("Boundary before.\ncard"))
+}
+
+fn stream_web_search_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((output, is_error)) => {
+            final_text_sse(&format!("search roundtrip error={is_error}: {output}"))
+        }
+        None => tool_use_sse(
+            "toolu_web_search",
+            "WebSearch",
+            &[
+                r#"{"query":"Rust official website","allowed_domains":["rust-lang.org"],"blocked_domains":["blocked.rust-lang.org"]}"#,
+            ],
+        ),
+    }
+}
+
+fn stream_browser_image_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    let results = tool_results_by_name(request);
+    if results.contains_key("Read") || results.contains_key("read_file") {
+        final_text_sse("browser image received")
+    } else if results.contains_key("bash") {
+        tool_use_sse("browser-read", "Read", &[r#"{"path":"screen.png"}"#])
+    } else {
+        tool_use_sse(
+            "browser-capture",
+            "bash",
+            &[r#"{"command":"bash capture.sh"}"#],
+        )
+    }
+}
+
+fn stream_image_read_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some(_) => final_text_sse("image roundtrip complete"),
+        None if request.messages.iter().flat_map(|m| &m.content).any(
+            |b| matches!(b, InputContentBlock::Text { text } if text.contains("IMAGE_SINGLE")),
+        ) =>
+        {
+            tool_use_sse("image-1", "Read", &[r#"{"path":"screen.png"}"#])
+        }
+        None => tool_uses_sse(&[
+            ToolUseSse {
+                tool_id: "image-1",
+                tool_name: "Read",
+                partial_json_chunks: &[r#"{"path":"screen.png"}"#],
+            },
+            ToolUseSse {
+                tool_id: "text-2",
+                tool_name: "read_file",
+                partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
+            },
+        ]),
+    }
+}
+
+fn stream_file_read(request: &MessageRequest, scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "read_file roundtrip complete: {}",
+            extract_read_content(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_read_fixture",
+            "read_file",
+            &[&read_roundtrip_input(scenario).to_string()],
+        ),
+    }
+}
+
+fn stream_grep_chunk_assembly(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "grep_search matched {} occurrences",
+            extract_num_matches(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_grep_fixture",
+            "grep_search",
+            &[
+                "{\"pattern\":\"par",
+                "ity\",\"path\":\"fixture.txt\"",
+                ",\"output_mode\":\"count\"}",
+            ],
+        ),
+    }
+}
+
+fn stream_write_file_allowed(request: &MessageRequest, _scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "write_file succeeded: {}",
+            extract_file_path(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_write_allowed",
+            "write_file",
+            &[r#"{"path":"generated/output.txt","content":"created by mock service\n"}"#],
+        ),
+    }
+}
+
+fn stream_write_file_denied(request: &MessageRequest, _scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("write_file denied as expected: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_write_denied",
+            "write_file",
+            &[r#"{"path":"generated/denied.txt","content":"should not exist\n"}"#],
+        ),
+    }
+}
+
+fn stream_multi_tool_turn_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    let tool_results = tool_results_by_name(request);
+    match (
+        tool_results.get("read_file"),
+        tool_results.get("grep_search"),
+    ) {
+        (Some((read_output, _)), Some((grep_output, _))) => final_text_sse(&format!(
+            "multi-tool roundtrip complete: {} / {} occurrences",
+            extract_read_content(read_output),
+            extract_num_matches(grep_output)
+        )),
+        _ => tool_uses_sse(&[
+            ToolUseSse {
+                tool_id: "toolu_multi_read",
+                tool_name: "read_file",
+                partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
+            },
+            ToolUseSse {
+                tool_id: "toolu_multi_grep",
+                tool_name: "grep_search",
+                partial_json_chunks: &[
+                    "{\"pattern\":\"par",
+                    "ity\",\"path\":\"fixture.txt\"",
+                    ",\"output_mode\":\"count\"}",
+                ],
+            },
+        ]),
+    }
+}
+
+fn stream_bash_compact_results(request: &MessageRequest, _scenario: Scenario) -> String {
+    match compact_bash_step(request) {
+        Some((id, name, input)) => tool_use_sse(&id, name, &[&input.to_string()]),
+        None => final_text_sse("compact bash results verified"),
+    }
+}
+
+fn stream_step_budget(request: &MessageRequest, _scenario: Scenario) -> String {
+    match step_budget_answer(request) {
+        Some(text) => final_text_sse(&text),
+        None => tool_use_sse(
+            &step_budget_tool_id(request),
+            "bash",
+            &[r#"{"command":"echo step >> steps.txt"}"#],
+        ),
+    }
+}
+
+fn stream_bash_stdout_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "bash completed: {}",
+            extract_bash_stdout(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_bash_stdout",
+            "bash",
+            &[r#"{"command":"printf 'alpha from bash'","timeout":30000}"#],
+        ),
+    }
+}
+
+fn stream_bash_interrupt_long_running(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "bash interrupt unexpectedly continued: {tool_output}"
+        )),
+        None => tool_use_sse(
+            "toolu_bash_interrupt",
+            "bash",
+            &[
+                r#"{"command":"printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
+            ],
+        ),
+    }
+}
+
+fn stream_bash_approval(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, is_error)) => {
+            if is_error {
+                final_text_sse(&format!("bash approval unexpectedly failed: {tool_output}"))
+            } else {
+                final_text_sse(&format!(
+                    "bash approved and executed: {}",
+                    extract_bash_stdout(&tool_output)
+                ))
+            }
+        }
+        None => tool_use_sse(
+            "toolu_bash_prompt_allow",
+            "bash",
+            &[r#"{"command":"printf 'approved via prompt'","timeout":30000}"#],
+        ),
+    }
+}
+
+fn stream_bash_denial(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("bash denied as expected: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_bash_prompt_deny",
+            "bash",
+            &[r#"{"command":"printf 'should not run'","timeout":30000}"#],
+        ),
+    }
+}
+
+fn stream_plugin_tool_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "plugin tool completed: {}",
+            extract_plugin_message(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_plugin_echo",
+            "plugin_echo",
+            &[r#"{"message":"hello from plugin parity"}"#],
+        ),
+    }
+}
+
+fn stream_mcp_tool_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, is_error)) => final_text_sse(&format!(
+            "mcp tool roundtrip complete (is_error={is_error}): {}",
+            mcp_echo_verdict(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_mcp_echo",
+            "mcp__parity__echo",
+            &[r#"{"text":"hello from mcp parity"}"#],
+        ),
+    }
+}
+
+fn stream_auto_compact_triggered(_request: &MessageRequest, _scenario: Scenario) -> String {
+    final_text_sse_with_usage("auto compact parity complete.", 50_000, 200)
+}
+
+fn stream_context_limit_then_text(_request: &MessageRequest, _scenario: Scenario) -> String {
+    final_text_sse("context limit recovery complete.")
+}
+
+fn stream_tool_loop_context_growth(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some(_) if history_carries_compaction_summary(request) => {
+            final_text_sse("tool loop compacted before the next request.")
+        }
+        Some(_) => final_text_sse("tool loop continued without compaction."),
+        None => tool_use_sse_with_context(
+            "toolu_tool_loop_growth",
+            "read_file",
+            &[r#"{"path":"fixture.txt"}"#],
+            TOOL_LOOP_GROWTH_CONTEXT_TOKENS,
+        ),
+    }
+}
+
+fn stream_token_cost_reporting(_request: &MessageRequest, _scenario: Scenario) -> String {
+    final_text_sse_with_usage("token cost reporting parity complete.", 1_000, 500)
+}
+
+fn stream_single_turn_text(_request: &MessageRequest, _scenario: Scenario) -> String {
+    final_text_sse("The answer is 4")
+}
+
+fn stream_multi_turn_context(request: &MessageRequest, _scenario: Scenario) -> String {
+    let turn_count = request.messages.iter().filter(|m| m.role == "user").count();
+    if turn_count <= 1 {
+        final_text_sse("Hello, Alice! Nice to meet you.")
+    } else {
+        final_text_sse("Your name is Alice.")
+    }
+}
+
+fn stream_edit_file_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "edit_file roundtrip complete: {}",
+            extract_file_path(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_edit_fixture",
+            "edit_file",
+            &[r#"{"path":"fixture.txt","old_string":"alpha","new_string":"omega"}"#],
+        ),
+    }
+}
+
+fn stream_glob_search_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("glob_search roundtrip complete: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_glob_fixture",
+            "glob_search",
+            &[r#"{"pattern":"*.txt"}"#],
+        ),
+    }
+}
+
+fn stream_write_plan_roundtrip(request: &MessageRequest, scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_write_plan",
+            "write_plan",
+            &[&write_plan_fixture(scenario).to_string()],
+        ),
+    }
+}
+
+fn stream_todo_write_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("todo_write roundtrip complete: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_todo_write",
+            "TodoWrite",
+            &[
+                r#"{"todos":[{"content":"Write parser","status":"in_progress","activeForm":"Writing parser"},{"content":"Run tests","status":"pending","activeForm":"Running tests"}]}"#,
+            ],
+        ),
+    }
+}
+
+fn stream_todo_write_empty_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "todo_write empty roundtrip complete: {tool_output}"
+        )),
+        None => tool_use_sse("toolu_todo_write_empty", "TodoWrite", &[r#"{"todos":[]}"#]),
+    }
+}
+
+fn stream_todo_write_lifecycle_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    // Two TodoWrite calls: first opens the list, second marks all done.
+    // The reply carries the last output so a test can assert the wipe.
+    let write_count = count_tool_uses_by_name(request, "TodoWrite");
+    match write_count {
+        0 => tool_use_sse(
+            "toolu_todo_write_open",
+            "TodoWrite",
+            &[
+                r#"{"todos":[{"content":"implement A","status":"in_progress","activeForm":"Implementing A"},{"content":"implement B","status":"pending","activeForm":"Implementing B"}]}"#,
+            ],
+        ),
+        1 => tool_use_sse(
+            "toolu_todo_write_done",
+            "TodoWrite",
+            &[
+                r#"{"todos":[{"content":"implement A","status":"completed","activeForm":"Implementing A"},{"content":"implement B","status":"completed","activeForm":"Implementing B"}]}"#,
+            ],
+        ),
+        _ => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "todo_write lifecycle roundtrip complete: {tool_output}"
+            )),
+            None => final_text_sse("todo_write lifecycle roundtrip complete"),
+        },
+    }
+}
+
+fn stream_sleep_short_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("sleep short roundtrip complete: {tool_output}"))
+        }
+        None => tool_use_sse("toolu_sleep_short", "Sleep", &[r#"{"duration_ms":600}"#]),
+    }
+}
+
+fn stream_ask_user_question_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("ask_user_question answered: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_ask_user_question",
+            "AskUserQuestion",
+            // Structured `questions[]` form using `question` per item (the
+            // natural alias for `prompt`). Exercises the alias so this
+            // roundtrip regresses if the item ever stops accepting it.
+            &[
+                r#"{"questions":[{"id":"q1","question":"Which colour?","#,
+                r#""options":[{"label":"red","value":"red"},{"label":"blue","value":"blue"}]}]}"#,
+            ],
+        ),
+    }
+}
+
+fn stream_sleep_over_max_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, is_error)) => final_text_sse(&format!(
+            "sleep over-max roundtrip complete (is_error={is_error}): {tool_output}"
+        )),
+        None => tool_use_sse(
+            "toolu_sleep_over_max",
+            "Sleep",
+            // 400_000 ms > MAX_SLEEP_DURATION_MS (300_000). The tool
+            // must reject before sleeping — that's the invariant.
+            &[r#"{"duration_ms":400000}"#],
+        ),
+    }
+}
+
+fn stream_fork_guard(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, is_error)) => final_text_sse(&format!(
+            "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
+        )),
+        // The user prompt (from the test harness) already contains
+        // the `<fork-boilerplate>` tag, so the parent session's
+        // history looks like a fork child. This tool_use MUST be
+        // rejected by prepare_agent_job's recursion guard before
+        // any subagent is spawned.
+        None => tool_use_sse(
+            "toolu_fork_recursion_guard",
+            "Agent",
+            &[
+                r#"{"subagent_type":"fork","description":"nested probe","prompt":"read a.txt and report the first line"}"#,
+            ],
+        ),
+    }
+}
+
+fn stream_llm_compaction_roundtrip(_request: &MessageRequest, _scenario: Scenario) -> String {
+    // Non-streaming compaction response — return a canned summary.
+    // The compaction path uses `send_message` (stream=false), so
+    // this arm is hit via `build_message_response`. If it ever
+    // switches to streaming, this SSE path serves as a fallback.
+    final_text_sse(CANNED_COMPACTION_SUMMARY)
+}
+
+fn stream_deferred_tool_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!("roundtrip complete: {tool_output}")),
+        None => tool_use_sse("toolu_deferred_cron", "CronList", &[r"{}"]),
+    }
+}
+
+fn stream_unified_send_roundtrip(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_unified_send",
+            "send",
+            &[&format!(
+                r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test"}}"#
+            )],
+        ),
+    }
+}
+
+// A co-host agent answers a peer message by calling `send` back. The
+// reply's recipient is fixed here because nothing outside the daemon
+// chooses it: the agent runs in-process and this scenario is its mind.
+fn stream_cohost_reply(request: &MessageRequest, _scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!("cohost replied: {tool_output}")),
+        None => tool_use_sse(
+            "toolu_cohost_reply",
+            "send",
+            &[&format!(
+                r#"{{"to":"{COHOST_REPLY_TO}","message":"{COHOST_REPLY_BODY}","summary":"reply"}}"#
+            )],
+        ),
+    }
+}
+
+// Where does a co-hosted agent's shell run? Ask it — `pwd`, then report
+// the answer to the peer. The assertion is the test's; this only has to
+// make the agent produce the fact.
+fn stream_cohost_shell_pwd(request: &MessageRequest, _scenario: Scenario) -> String {
+    let results = tool_results_by_name(request);
+    match (results.get("bash"), results.get("send")) {
+        (Some(_), Some((send_output, _))) => {
+            final_text_sse(&format!("cohost shell pwd complete: {send_output}"))
+        }
+        (Some((bash_output, _)), None) => {
+            // Built through `json!` rather than a format string: a path is
+            // the one payload guaranteed to carry separators, and a
+            // hand-escaped one is a mock that breaks on the platform it
+            // was not written on.
+            let input = json!({
+                "to": COHOST_REPLY_TO,
+                "message": extract_bash_stdout(bash_output),
+                "summary": "pwd",
+            })
+            .to_string();
+            tool_use_sse("toolu_cohost_pwd_send", "send", &[&input])
+        }
+        _ => tool_use_sse("toolu_cohost_pwd_bash", "bash", &[r#"{"command":"pwd"}"#]),
+    }
+}
+
+fn stream_cohost_read_then_reply(request: &MessageRequest, _scenario: Scenario) -> String {
+    let results = tool_results_by_name(request);
+    match (results.get("read_file"), results.get("send")) {
+        (Some(_), Some((send_output, _))) => {
+            final_text_sse(&format!("cohost read-then-reply complete: {send_output}"))
+        }
+        // Read first, then answer the peer with what the workspace said.
+        (Some((read_output, _)), None) => tool_use_sse(
+            "toolu_cohost_read_reply_send",
+            "send",
+            &[&format!(
+                r#"{{"to":"{COHOST_REPLY_TO}","message":"{}","summary":"reply"}}"#,
+                extract_read_content(read_output)
+            )],
+        ),
+        _ => tool_use_sse(
+            "toolu_cohost_read_reply_read",
+            "read_file",
+            &[r#"{"path":"fixture.txt"}"#],
+        ),
+    }
+}
+
+fn stream_unified_send_from_named_peer(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
+        }
+        // `sender` supplied, which is how a local peer gets a name of its own.
+        None => tool_use_sse(
+            "toolu_unified_send_named",
+            "send",
+            &[&format!(
+                r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test","sender":"{LOCAL_PEER_SENDER}"}}"#
+            )],
+        ),
+    }
+}
+
+fn stream_deferred_mcp(request: &MessageRequest, _scenario: Scenario) -> String {
+    match latest_tool_result(request) {
+        Some((tool_output, _)) => final_text_sse(&format!(
+            "deferred_mcp roundtrip complete: {}",
+            mcp_echo_verdict(&tool_output)
+        )),
+        None => tool_use_sse(
+            "toolu_deferred_mcp",
+            "mcp__parity__echo",
+            &[r#"{"text":"hello from deferred mcp"}"#],
+        ),
+    }
+}
+
+fn stream_delegation(request: &MessageRequest, _scenario: Scenario) -> String {
+    let agent_results = subagent_calc_results(request);
+    if agent_results.len() >= 3 {
+        let mut sums = agent_results;
+        sums.sort_unstable();
+        final_text_sse(&format!(
+            "{{\"results\": [{}, {}, {}]}}",
+            sums[0], sums[1], sums[2]
+        ))
+    } else {
+        tool_uses_sse(&[
+            ToolUseSse {
+                tool_id: "toolu_subagent_calc_1",
+                tool_name: "Agent",
+                partial_json_chunks: &[
+                    r#"{"description":"add 101+102","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                    r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 101 + 102? "#,
+                    r#"Reply with ONLY the number."}"#,
+                ],
+            },
+            ToolUseSse {
+                tool_id: "toolu_subagent_calc_2",
+                tool_name: "Agent",
+                partial_json_chunks: &[
+                    r#"{"description":"add 201+202","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                    r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 201 + 202? "#,
+                    r#"Reply with ONLY the number."}"#,
+                ],
+            },
+            ToolUseSse {
+                tool_id: "toolu_subagent_calc_3",
+                tool_name: "Agent",
+                partial_json_chunks: &[
+                    r#"{"description":"add 301+302","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                    r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 301 + 302? "#,
+                    r#"Reply with ONLY the number."}"#,
+                ],
+            },
+        ])
+    }
+}
+
+fn stream_subagent_calc_child(request: &MessageRequest, _scenario: Scenario) -> String {
+    let sum = subagent_child_sum(request);
+    final_text_sse(&sum.to_string())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2358,8 +2647,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             "msg_activity",
             "progress progress progress progress progress resumed",
         ),
-        Scenario::ToolConcurrency => match concurrency_batch_complete(request) {
-            false => {
+        Scenario::ToolConcurrency => {
+            if concurrency_batch_complete(request) {
+                text_message_response("msg_concurrency_done", "Concurrency batch done.")
+            } else {
                 let calls = concurrency_calls(request);
                 let uses: Vec<_> = calls
                     .iter()
@@ -2371,8 +2662,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                     .collect();
                 tool_message_response_many("msg_concurrency", &uses)
             }
-            true => text_message_response("msg_concurrency_done", "Concurrency batch done."),
-        },
+        }
         Scenario::TranscriptSpacing => match latest_tool_result(request) {
             None => {
                 let mut response = tool_message_response_many(
@@ -2644,7 +2934,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "bash",
                 json!({
                     "command": "printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
-                    "timeout": 120000
+                    "timeout": 120_000
                 }),
             ),
         },
@@ -3121,7 +3411,7 @@ fn write_plan_fixture(scenario: Scenario) -> serde_json::Value {
     } else {
         "# Plan\n1. First step\n2. Second step".to_string()
     };
-    let context = if matches!(scenario, Scenario::WritePlanReview) {
+    let framing_context = if matches!(scenario, Scenario::WritePlanReview) {
         "Review all labelled steps from ReviewStep00 through ReviewStep63."
     } else {
         "mock context"
@@ -3131,7 +3421,7 @@ fn write_plan_fixture(scenario: Scenario) -> serde_json::Value {
     } else {
         "mock acceptance"
     };
-    json!({"content": content, "context": context, "constraints": "mock constraints", "acceptance": acceptance})
+    json!({"content": content, "context": framing_context, "constraints": "mock constraints", "acceptance": acceptance})
 }
 
 fn request_id_for(scenario: Scenario) -> &'static str {
@@ -3602,21 +3892,7 @@ fn thinking_then_text_sse(intro: Option<&str>) -> String {
     );
     let index = usize::from(intro.is_some());
     if let Some(text) = intro {
-        append_sse(
-            &mut body,
-            "content_block_start",
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        );
-        append_sse(
-            &mut body,
-            "content_block_delta",
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
-        );
-        append_sse(
-            &mut body,
-            "content_block_stop",
-            json!({"type":"content_block_stop","index":0}),
-        );
+        append_text_sse(&mut body, 0, &[text]);
     }
     append_sse(
         &mut body,
@@ -3655,29 +3931,7 @@ fn thinking_then_text_sse(intro: Option<&str>) -> String {
         "content_block_stop",
         json!({"type": "content_block_stop", "index": index}),
     );
-    append_sse(
-        &mut body,
-        "content_block_start",
-        json!({
-            "type": "content_block_start",
-            "index": index + 1,
-            "content_block": {"type": "text", "text": ""}
-        }),
-    );
-    append_sse(
-        &mut body,
-        "content_block_delta",
-        json!({
-            "type": "content_block_delta",
-            "index": index + 1,
-            "delta": {"type": "text_delta", "text": "The answer follows the reasoning."}
-        }),
-    );
-    append_sse(
-        &mut body,
-        "content_block_stop",
-        json!({"type": "content_block_stop", "index": index + 1}),
-    );
+    append_text_sse(&mut body, index + 1, &["The answer follows the reasoning."]);
     append_sse(
         &mut body,
         "message_delta",
@@ -4056,9 +4310,10 @@ fn final_text_sse_with_usage(text: &str, input_tokens: u32, output_tokens: u32) 
     body
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn append_sse(buffer: &mut String, event: &str, payload: Value) {
+/// Append one JSON SSE event for the mock service and external protocol fixtures.
+pub fn append_sse(buffer: &mut String, event: &str, payload: impl std::borrow::Borrow<Value>) {
     use std::fmt::Write as _;
+    let payload = payload.borrow();
     writeln!(buffer, "event: {event}").expect("event write should succeed");
     writeln!(buffer, "data: {payload}").expect("payload write should succeed");
     buffer.push('\n');

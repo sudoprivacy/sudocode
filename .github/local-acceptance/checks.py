@@ -272,6 +272,10 @@ def run(name, root, output, base, execute):
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
             cargo("clippy", "--workspace", "--locked")
+    elif name == "native-examples":
+        print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
+              "This profile never runs example entry points.", flush=True)
+        cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
     elif name == "native-resize":
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
@@ -374,14 +378,15 @@ def execution_policy_ref():
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
-        ".github/local-acceptance/native_guard.py": "28ee4a24a9664f4ded7d850cf079df1d44d3979cf7eb08f56ae2c27a741f80e3",
+        ".github/local-acceptance/native_guard.py": "11bc15d025522a5a039f34f181d907e60129c8533b0f807e9028847208d6fbc8",
         ".github/local-acceptance/nextest_guard.py": "ee376e77ea8c79da73c54409cbd07a95a786d0e7710e406e6977967d633a7d82",
-        ".github/scripts/local_acceptance.py": "69113a32954e9b866d5f7ac1dba5f816902f48aa2fac00fca86a91e2f532f7f2",
+        ".github/scripts/local_acceptance.py": "9cb6fd6fd03ab3ae54781444beee4288209c27abc04568bf8fef3f870f9691cd",
         "e2e/local-acceptance/run.py": "0ad9d1696b04a5805dee9b4d976bd9325b6b98191c45c362fcccbf26b2609cca",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "7423d621a81e8cda663011bcabab3d4fe089647c01b25c345164155103de4266",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "d7e972cddaad4c13c80a83bffc5f9b721c02eb3e4ee011f28519a3c680767ae1",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "9deb55f9d48a134e41a26da3a876fdadb954db822517a16c690c0094c32ec1bc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
+        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -419,7 +424,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "898b0539d8510c0022a3f7073e21a532e752560125693613d2e1cdfba96980cf":
+    if actual_scope != "7645415a820531731db32b3f4c1f059cedb19d28c20499b8e858fd143e784fbe":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

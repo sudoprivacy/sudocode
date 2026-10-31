@@ -110,6 +110,14 @@ pub fn record(name: &str) {
     git("config", "core.autocrlf", "false")
     command("cargo", "generate-lockfile", "--offline")
     base = commit("Baseline individual integration targets")
+    write(package + "src/main.rs", 'fn main() { println!("product-42"); } // Source change before grouping.\n')
+    ungrouped = commit("Change native source without grouping")
+    text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"), "plan", "--base", base,
+                   "--policy-ref", base, "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
+    ungrouped_plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ACCEPTANCE_PLAN=")))
+    assert "native-workspace" in ungrouped_plan["local_checks"]
+    assert "native-examples" not in ungrouped_plan["local_checks"], text
+    base = ungrouped
 
     def metadata():
         return json.loads(command("cargo", "metadata", "--no-deps", "--locked", "--format-version=1").read_text(encoding="utf-8"))
@@ -228,6 +236,8 @@ pub fn record(name: &str) {
         costly = {"native-release", "native-services", "native-cohost", "rendering", "browser"}
         assert (checks & costly == set()) if expected else (costly - {"native-cohost"}) <= checks, (label, text)
         assert "native-workspace" in checks
+        if expected:
+            assert "native-examples" in checks, text
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)
@@ -255,7 +265,8 @@ pub fn record(name: &str) {
               "same_process_control_failed_isolation_assertion": True,
               "normal_product_sha256": original_binary, "normal_product_cargo_fresh": True,
               "original_named_driver_and_developer_target_passed": True,
-              "invalid_group_refusals": refusals, "scope_cases": scope_cases, "commands": commands,
+              "invalid_group_refusals": refusals, "scope_cases": scope_cases, "ungrouped_plan": ungrouped_plan,
+              "commands": commands,
               "scope": "Real Git commits/public planner, Cargo metadata/builds, original and grouped nextest inventories, actual per-case native child processes and independent process-state assertions. Tiny infrastructure fixtures, no product PTY/provider coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"status": "PASS", "case_count": len(grown), "invalid_groups_refused": len(refusals),

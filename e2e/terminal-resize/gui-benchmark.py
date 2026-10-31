@@ -11,6 +11,35 @@ import sys
 from benchmark import assess, digest
 
 
+def validate_sample(data, policy):
+    """Require every real interaction declared by the shared sampling policy."""
+    sampling = policy["sampling"]
+    keys = len(sampling["input_delays_ms"])
+    sample_counts = {"drag_frame_ms": sampling["drag_steps"] * sampling["drag_bursts"]}
+    for phase in ["history", "wait", "stream"]:
+        sample_counts[f"input_{phase}_parsed_ms"] = keys * sampling["parsed_bursts"]
+        sample_counts[f"input_{phase}_frame_ms"] = keys * sampling["painted_bursts"]
+    assert keys >= 20 and sample_counts["input_wait_parsed_ms"] >= 100
+    # At least forty observations leave two samples above nearest-rank P95.
+    assert isinstance(sampling["drag_bursts"], int) and sampling["drag_bursts"] >= 2
+    assert sampling["drag_steps"] >= 12 and sample_counts["drag_frame_ms"] >= 40
+    assert data["status"] == "passed" and data["idle_bytes"] == 0, "invalid browser run"
+    assert data["streaming_selection_preserved"], "missing streaming selection acceptance"
+    assert data["environment"]["sampling"] == sampling, "observer sampling differs from policy"
+    gestures = data["drag_gestures"]
+    assert len(gestures) == sampling["drag_bursts"], "missing complete drag gestures"
+    assert all(len(gesture["samples"]) == sampling["drag_steps"] for gesture in gestures)
+    assert all(gesture["selected"] == data["selected"] for gesture in gestures)
+    assert data["samples"]["drag_frame_ms"] == [value for gesture in gestures for value in gesture["samples"]]
+    assert all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+               for value in data["metrics"].values()), "invalid metric"
+    assert set(data["metrics"]) == set(policy["metrics"]), "missing/unbudgeted browser metrics"
+    assert set(data["samples"]) == set(sample_counts), "missing interaction workload"
+    for name, values in data["samples"].items():
+        assert all(math.isfinite(value) and value >= 0 for value in values)
+        assert len(values) == sample_counts[name], "missing interaction samples"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ["driver", "base", "candidate", "output"]:
@@ -20,13 +49,6 @@ def main():
         parser.error("choose an empty output directory to preserve previous evidence")
     args.output.mkdir(parents=True, exist_ok=True)
     policy = json.loads(Path(__file__).with_name("gui-policy.json").read_text())
-    sampling = policy["sampling"]
-    keys = len(sampling["input_delays_ms"])
-    sample_counts = {"drag_frame_ms": sampling["drag_steps"]}
-    for phase in ["history", "wait", "stream"]:
-        sample_counts[f"input_{phase}_parsed_ms"] = keys * sampling["parsed_bursts"]
-        sample_counts[f"input_{phase}_frame_ms"] = keys * sampling["painted_bursts"]
-    assert keys >= 20 and sample_counts["input_wait_parsed_ms"] >= 100
     report = {"version": 1, "status": "running", "policy": policy, "samples": [],
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
               "driver_sha256": digest(args.driver)}
@@ -53,19 +75,11 @@ def main():
                                     env=env, stdout=log, stderr=subprocess.STDOUT, timeout=180)
         assert result.returncode == 0, f"failed {label}: {folder / 'driver.log'}"
         data = json.loads(output.read_text())
-        assert data["status"] == "passed" and data["idle_bytes"] == 0, "invalid browser run"
-        assert data["streaming_selection_preserved"], "missing streaming selection acceptance"
+        validate_sample(data, policy)
         metadata = (data["browser"], data["xterm"], data["environment"])
         if browser_metadata is None:
             browser_metadata = metadata
         assert metadata == browser_metadata, "browser/observer changed during comparison"
-        assert all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
-                   for value in data["metrics"].values()), "invalid metric"
-        assert set(data["metrics"]) == set(policy["metrics"]), "missing/unbudgeted browser metrics"
-        assert set(data["samples"]) == set(sample_counts), "missing interaction workload"
-        for name, values in data["samples"].items():
-            assert all(math.isfinite(value) and value >= 0 for value in values)
-            assert len(values) == sample_counts[name], "missing interaction samples"
         report["samples"].append({"label": label, "path": str(output.relative_to(args.output)), "data": data})
         save()
         return data

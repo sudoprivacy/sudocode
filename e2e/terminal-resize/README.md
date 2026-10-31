@@ -93,8 +93,9 @@ and no repository secrets, including for forks. See GitHub's
 
 Ordinary integration-test edits skip unchanged release performance pairs.
 Production source/manifests, shared CLI test helpers and measurement-driver edits
-still select their measurements. Workload rounds, sample counts and budgets are
-unchanged. The existing `policy-review.cjs` and live approval diagnostics remain
+still select their measurements. Workload rounds and budgets are retained;
+painted drag repetition is strengthened as described below. The existing
+`policy-review.cjs` and live approval diagnostics remain
 historical tools; they no longer publish the required rendering gate.
 
 ## Painted terminal and hyperlink acceptance
@@ -144,13 +145,21 @@ the same geometry provider used by link and selection hit testing.
 Both browser workflows launch through `browser.cjs`. It owns one raster worker,
 keeps the existing container CPU limit, and records the actual graphics backend
 and its own source digest. A/A and A/B reject a changed observer identity.
-Workload counts, two animation frames, PNG readback and all budgets remain.
+The two animation frames, completed PNG readback and all budgets remain.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,
 then samples 20 keys with pixel evidence. Parsed P95 uses the larger independent
 burst; painted P95 retains its separate readback workload. Sampling counts and the delay schedule are
 owned by `gui-policy.json` and shared by the observer and completeness checks.
+The primary drag repeats four complete twelve-point gestures, giving 48 frame
+observations per workload. Every gesture retains its pixel, Unicode, copied-text
+and link-activation assertions. All raw observations, including readback spikes,
+remain in the report. With only twelve observations, nearest-rank P95 equals
+the maximum; 48 observations put two samples above its rank. Completeness checks
+require at least forty observations across multiple complete gestures and verify
+both each gesture and the flattened sample series. The five A/A and seven A/B
+pairs, existing input samples and candidate-only Write drag stay unchanged.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same
 deterministic inter-key delays outside timed regions, retained in the report.

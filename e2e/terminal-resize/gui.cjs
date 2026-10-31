@@ -181,8 +181,16 @@ async function run(config) {
       assert.equal(await page.evaluate(() => fixture.activated.length), beforeDrag, 'drag activated a link');
       return { selected, samples: dragSamples };
     }
-    const selection = await drag(sampling.drag_steps);
-    report.samples.drag_frame_ms = selection.samples;
+    // With twelve points, nearest-rank P95 is the gesture's maximum. Repeat
+    // complete native gestures and retain every observation, including spikes.
+    const gestures = [];
+    for (let burst = 0; burst < sampling.drag_bursts; burst++) {
+      gestures.push(await drag(sampling.drag_steps));
+    }
+    const selection = gestures[0];
+    assert(gestures.every(gesture => gesture.selected === selection.selected), 'repeated drags changed copied source');
+    report.drag_gestures = gestures;
+    report.samples.drag_frame_ms = gestures.flatMap(gesture => gesture.samples);
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
     const streamWindows = inputDelaysMs.length * (sampling.parsed_bursts + sampling.painted_bursts) + 2;
     const streamDirectory = path.dirname(config.streamWindowPlan);

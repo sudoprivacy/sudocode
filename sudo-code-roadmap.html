@@ -452,20 +452,21 @@ including 70 ignored cases. The same 2,504 executed cases passed: Cargo took
 latency. Eight/sixteen-worker stress runs failed existing UI/resume checks and
 are not the acceptance configuration. No assertion deadline or unique case is
 removed to obtain these results.</p>
-<p><strong>Qualify native grouping before activation (2026-10-31).</strong> The
-executor supports declarative integration wrappers; this contract prerequisite
-keeps the current original-target graph. Rust wrapper activation lands separately
-after installed verifiers understand its selection. A Windows prototype grouped
-128 CLI targets into eight wrappers, selecting 91 instead of 211 integration
-targets. Original per-file Cargo commands remain available and newly added ungrouped targets are selected
+<p><strong>Reduce repeated native test linking (2026-10-31).</strong> The native
+workspace opts into eight declarative integration wrappers for 128 CLI targets,
+selecting 91 instead of 211 integration targets. The selector contract was
+qualified before this Rust activation so installed verifiers agree on required
+checks. Original per-file Cargo commands remain available and newly added ungrouped targets are selected
 automatically. Self-spawning cases and named release, performance and terminal
 drivers stay standalone. Every case still runs in its own nextest process, with
 four workers, no retries and the same fail-fast cleanup. The prototype's real
 Windows run passed all 2,505 active cases with 70 ignored markers; doctests and
 Clippy also passed. Publication then stopped because the old installed selector
-required seven profiles while the new selector required three; this prerequisite
-avoids that bootstrap mismatch without authorizing missing product checks.
-It is not a cross-platform or merged-wrapper claim. The first
+required seven profiles while the new selector required three. The separately
+merged contract prerequisite resolved that bootstrap mismatch without authorizing
+missing product checks. Activation requires fresh exact-head author and
+complementary native acceptance; the prototype alone is not a cross-platform
+claim. The first
 grouped compilation/list command took 322.78 seconds. Its earlier reference used
 another helper graph and cache state, so this is not a controlled latency saving.</p>
 <p>Selection reads real Cargo metadata and accepts only canonical wrapper path

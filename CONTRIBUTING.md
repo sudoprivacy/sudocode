@@ -292,13 +292,13 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
-The native executor supports declarative opt-in integration wrappers. This
-contract prerequisite keeps the current original-target graph; the Rust wrapper
-activation lands separately after installed verifiers understand its selection.
-A Windows prototype grouped 128 CLI targets into eight wrappers, selecting 91
-instead of 211 integration targets, and passed all 2,505 active cases with 70
-ignored markers. Original per-file Cargo commands stay available, and new
-ungrouped targets are selected automatically.
+The full native workspace opts into eight declarative integration wrappers for
+128 CLI targets, selecting 91 instead of 211 integration targets. The selector
+contract was qualified before this Rust activation so installed verifiers agree
+on its required checks. A Windows prototype passed all 2,505 active cases with
+70 ignored markers; activation still requires fresh exact-head author and
+complementary native acceptance. Original per-file Cargo commands stay available,
+and new ungrouped targets are selected automatically.
 The selector checks real Cargo metadata and exact declarative wrapper bytes;
 missing, duplicated, redirected, unregistered or feature-hidden members fail.
 Wrappers retain the original helper namespaces and explicitly allow only

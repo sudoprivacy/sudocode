@@ -175,36 +175,11 @@ pub(crate) fn render_messages(
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
-    render_messages_observed(messages, term_width, renderer, |_, _| {})
-}
-
-/// Keep prompt locations as presentation metadata, never embedded terminal text.
-pub(crate) fn render_messages_with_prompts(
-    messages: &[runtime::ConversationMessage],
-    term_width: usize,
-    renderer: &crate::render::TerminalRenderer,
-) -> (String, Vec<usize>) {
-    let mut prompts = Vec::new();
-    let text = render_messages_observed(messages, term_width, renderer, |offset, msg| {
-        if msg.role == runtime::MessageRole::User {
-            prompts.push(offset);
-        }
-    });
-    (text, prompts)
-}
-
-fn render_messages_observed(
-    messages: &[runtime::ConversationMessage],
-    term_width: usize,
-    renderer: &crate::render::TerminalRenderer,
-    mut observe: impl FnMut(usize, &runtime::ConversationMessage),
-) -> String {
     let mut output = String::new();
     let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
         if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
             crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
-            observe(output.len() - rendered.trim_matches('\n').len(), msg);
         }
     }
     output
@@ -583,7 +558,7 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         }
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
             let styled = crate::render::theme()
-                .prompt_style(false)
+                .prompt_style()
                 .apply(body)
                 .to_string();
             rendered.push_str(

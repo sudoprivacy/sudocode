@@ -490,7 +490,11 @@ work on old branches when the executor is upgraded.</p>
 <p>Contract validation now runs Docker Git/signature/authorization checks before
 its Cargo fixtures, then runs the author-host native guards. Passing runs retain
 all checks. Metadata errors stop before later compilation; first-failure evidence
-and unrun work remain recorded.</p>
+and unrun work remain recorded. Replaying one preserved missing-note fault through
+the real Docker launcher refused in 62.48 seconds before any Cargo fixture or
+author-native guard. The earlier path had spent at least 205.50 seconds in its
+commands, including 97.93 seconds on author-native guards. This one-fault replay
+is not an average PR-latency claim.</p>
 <p>The protected migration policy pairs exact old and new execution hashes so
 already completed full-Cargo evidence for the same candidate can remain valid.
 The new runner-enforcement guard still executes. Real Git/SSH regressions cover

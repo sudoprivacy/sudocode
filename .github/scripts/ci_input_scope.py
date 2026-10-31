@@ -67,9 +67,11 @@ def main():
                     for path in paths)
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
+    clippy_executor = any(path in {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py",
+                                  "e2e/local-acceptance/clippy_fail_fast.py"} for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
-              "clippy_required": str(clippy).lower()}
+              "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower()}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")

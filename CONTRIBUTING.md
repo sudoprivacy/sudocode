@@ -406,6 +406,13 @@ the native suites on the combined merge-group tree. Rust-changing PRs also run
 strict all-target/all-feature Clippy on Linux; the queue runs that same strict
 check on Linux, Windows and macOS against the combined tree. The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
+The lint command stops scheduling additional crates after the first error;
+compiler jobs already running may finish before matrix cancellation. Successful
+runs retain every target, feature and `-D warnings` check. An actual three-package
+Cargo/Clippy fixture compares the old continuing command with the current CI
+command, verifies all packages/targets/features after fixing the warnings, and
+records the actual compiler priorities. It runs once on a PR only when the lint
+workflow, fixture or scope selector changes; queue/main reuse its result.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions on main are unchanged; mock transport results do not
@@ -706,7 +713,7 @@ CI gates these on every PR. Run them locally before pushing:
 ```bash
 cd rust/
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
@@ -990,7 +997,7 @@ Before opening a PR:
       plan on the author's platform and produced a valid exact-head receipt.
       Use its printed commands and local/CI responsibilities; do not infer a
       full Rust build from this checklist for documentation or SDK-only edits.
-- [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings`; the queue runs it on all three native platforms.
+- [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the queue runs it on all three native platforms.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen

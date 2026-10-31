@@ -365,6 +365,17 @@ sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
 <p>Native, SDK and installer test matrices stop peer work after the first failure.
+Strict all-target/all-feature Clippy also stops scheduling extra crates after
+its first error, allowing matrix cancellation sooner; already running compilers
+can finish. All three queue platforms and <code>-D warnings</code> remain.
+A real Cargo/Clippy fixture with three independent feature-gated warning failures
+compares continuing compilation with the current CI command, then verifies all
+three clean packages, test targets and enabled features. Actual compiler
+priorities are retained. This infrastructure check runs once on changed lint
+workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
+after a failure without reducing passing-run product or lint coverage; its small
+fixture timings are not a production PR latency claim.</p>
+<p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
 the same executor/profile/image ran every currently required check. New source

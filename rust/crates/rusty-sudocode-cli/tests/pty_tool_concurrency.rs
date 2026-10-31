@@ -170,7 +170,7 @@ fn fast_result_and_error_are_visible_before_slow_sibling_finishes() {
             s.contains("FAST_SIBLING_OUTPUT")
                 && (s.contains("No such file") || s.contains("cannot open"))
         },
-        Duration::from_secs(15),
+        common::at_least(Duration::from_secs(15)),
         "fast success and failure without waiting for slow sibling",
     );
     assert!(!sess
@@ -201,7 +201,7 @@ fn short_shells_finish_while_a_parallel_sibling_is_held() {
         let screen = common::expect_screen(
             &sess,
             |screen| markers.iter().all(|marker| screen.contains(marker)),
-            Duration::from_secs(15),
+            common::at_least(Duration::from_secs(15)),
             "all short shells complete before the held sibling is released",
         );
         assert!(!screen.contains("Concurrency batch done."));
@@ -512,7 +512,7 @@ fn cancelling_parallel_bash_stops_both_processes_and_preserves_pairs() {
     );
     // Keep writers open without a signal so readers cannot finish normally. Disappearing readers
     // proves cancellation actually stopped both subprocesses.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + common::at_least(Duration::from_secs(10));
     loop {
         let stopped = ["one.fifo", "two.fifo"]
             .iter()

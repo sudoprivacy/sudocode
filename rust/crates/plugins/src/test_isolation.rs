@@ -20,7 +20,10 @@ impl EnvLock {
     pub fn lock() -> Self {
         let guard = ENV_LOCK.lock().unwrap();
         let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let temp_home = std::env::temp_dir().join(format!("plugin-test-{count}"));
+        // nextest runs each test in its own process, where the counter restarts
+        // at zero; the pid keeps concurrent processes out of each other's home.
+        let temp_home =
+            std::env::temp_dir().join(format!("plugin-test-{}-{count}", std::process::id()));
 
         // Set up isolated environment
         std::fs::create_dir_all(&temp_home).ok();

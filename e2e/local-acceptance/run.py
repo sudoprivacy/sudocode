@@ -134,8 +134,8 @@ def scope_acceptance(directory):
                     'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
             selected = json.loads(command(sys.executable, "-c", code,
                 SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
-            assert {"native-workspace", "native-resize", "browser", "native-release"}.issubset(selected)
-            assert "rendering" not in selected, "The rendering matrix runs on main, not per PR"
+            assert {"native-workspace", "native-resize", "rendering", "browser"}.issubset(selected)
+            assert "native-release" not in selected, "Dev-only PTY helper edits must not rebuild native releases"
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
@@ -198,7 +198,7 @@ def performance_scope_acceptance(directory):
     policy = command("git", "rev-parse", "HEAD", cwd=repository)
     helper = repository / ".github/scripts/local_acceptance.py"
 
-    def expect(base, expected, *, native=True, guard=None, resize=None):
+    def expect(base, expected, *, native=True, guard=None, resize=None, release=None):
         text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
                        "--host", "windows", "--architecture", "AMD64", cwd=repository)
         plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
@@ -206,39 +206,55 @@ def performance_scope_acceptance(directory):
         names = set(plan["local_checks"])
         assert "Hosted CI preflight also runs changed Cargo/Docker/Clippy executor fixtures" in text, text
         assert names & {"rendering", "browser"} == set(expected), text
-        assert "the paired rendering matrix runs on main, not per PR" in text, text
-        assert ("The browser terminal functional smoke runs locally." in text) == bool(expected), text
+        assert "Statistical performance profiles:" in text, text
+        if not expected:
+            assert "indirect performance effects" in text, text
+        assert ("The browser terminal functional smoke runs locally." in text) == ("browser" in expected), text
         assert ("native-workspace" in names) == native, text
         if resize is not None:
             assert ("native-resize" in names) == resize, text
         if guard is not None:
             assert ("guard-contract" in names) == guard, text
+        if release is not None:
+            assert ("native-release" in names) == release, text
+            assert "RELEASE_ACCEPTANCE_SCOPE=" in text, text
         assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native else set()), text
         for job in plan["ci"]:
             assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
 
-    smoke = ["browser"]
-    # Measurement-only inputs skip native suites. The browser smoke's own
-    # harness selects it; the rendering policy alone selects nothing per PR.
-    # gui-benchmark.py retired with the browser comparison; native suites never ran it.
+    both = ["rendering", "browser"]
     measurement_inputs = ["e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
-                          "e2e/terminal-resize/gui-benchmark.py",
-                          "e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/gui-policy.json"]
-    measurement_smoke = {"e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/gui-smoke.py",
-                         "e2e/terminal-resize/gui-policy.json"}
+                          "e2e/terminal-resize/gui-benchmark.py", "e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/gui-policy.json"]
     cases = [(f"rust/crates/{crate}/src/fixture.rs", [])
-             for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host", "engine-core"]]
-    cases += [(path, smoke) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
-        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs", "rust/crates/pty-harness/src/lib.rs",
-        "rust/crates/rusty-sudocode-cli/tests/common/mod.rs", "e2e/terminal-resize/host.cjs",
-        "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
-        "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs",
-        "rust/crates/scode-benchmark-drivers/Cargo.toml", "rust/crates/scode-benchmark-drivers/future.rs"]]
-    # Dependency metadata and the rendering driver select no per-PR performance run.
+             for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host"]]
+    cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
+        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs",
+        "rust/crates/pty-harness/src/lib.rs", "rust/crates/rusty-sudocode-cli/tests/common/mod.rs",
+        "e2e/terminal-resize/host.cjs"]]
+    cases += [("rust/crates/engine-core/src/lib.rs", ["rendering"])]
     cases += [(path, []) for path in ["rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
-        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs",
-        "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs"]]
-    cases += [(path, smoke if path in measurement_smoke else []) for path in measurement_inputs]
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs"]]
+    cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
+              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"]),
+              ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", ["browser"]),
+              ("rust/crates/scode-benchmark-drivers/Cargo.toml", both),
+              ("rust/crates/scode-benchmark-drivers/future.rs", both)]
+    cases += [("e2e/terminal-resize/benchmark.py", both),
+              ("e2e/terminal-resize/performance-policy.json", ["rendering"]),
+              ("e2e/terminal-resize/gui-benchmark.py", []),
+              ("e2e/terminal-resize/gui-smoke.py", ["browser"]),
+              ("e2e/terminal-resize/gui-policy.json", ["browser"])]
+    release_inputs = {"rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "rust/crates/scode-benchmark-drivers/Cargo.toml",
+        "rust/crates/rusty-sudocode-cli/src/main.rs", "rust/crates/rusty-sudocode-cli/src/startup.rs",
+        "rust/crates/rusty-sudocode-cli/src/cli/config_ui.rs", "rust/crates/runtime/src/config.rs",
+        "rust/crates/runtime/src/config/fixture.rs", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
+        "e2e/startup/run.py"}
+    cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/main.rs",
+        "rust/crates/rusty-sudocode-cli/src/startup.rs", "rust/crates/rusty-sudocode-cli/src/cli/config_ui.rs"]]
+    cases += [(path, []) for path in ["rust/crates/runtime/src/config.rs",
+        "rust/crates/runtime/src/config/fixture.rs", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
+        "e2e/startup/run.py"]]
     for index, (path, expected) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -247,7 +263,8 @@ def performance_scope_acceptance(directory):
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"Performance input {index}", cwd=repository)
         measured_only = path in measurement_inputs
-        expect(base, expected, native=not measured_only, resize=False if measured_only else None)
+        expect(base, expected, native=not measured_only, resize=False if measured_only else None,
+               release=path in release_inputs)
     # A known measurement input cannot hide a changed SUT, shared terminal host,
     # or an unknown external input. The actual committed diff owns the scope.
     for companion in ["rust/crates/rusty-sudocode-cli/src/render.rs",
@@ -258,16 +275,16 @@ def performance_scope_acceptance(directory):
             file.write_text(file.read_text() + "mixed changed input\n" if file.exists() else "unknown input\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", "Mixed measurement and functional inputs", cwd=repository)
-        expect(base, smoke, resize=True)
+        expect(base, both, resize=True)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/src/render.rs",
             "rust/crates/runtime/src/moved.rs", cwd=repository)
     command("git", "commit", "-m", "Move UI source into another crate", cwd=repository)
-    expect(base, smoke)
+    expect(base, both)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "rm", "e2e/terminal-resize/host.cjs", cwd=repository)
     command("git", "commit", "-m", "Delete measurement input", cwd=repository)
-    expect(base, smoke)
+    expect(base, both)
     # A rename into the known set still includes its original shared input.
     host = repository / "e2e/terminal-resize/host.cjs"
     host.write_text("shared terminal host\n")
@@ -276,12 +293,32 @@ def performance_scope_acceptance(directory):
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "-f", "e2e/terminal-resize/host.cjs", measurement_inputs[0], cwd=repository)
     command("git", "commit", "-m", "Rename shared host into measurement-only path", cwd=repository)
-    expect(base, smoke, resize=True)
+    expect(base, both, resize=True)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "rm", measurement_inputs[-1], cwd=repository)
-    command("git", "commit", "-m", "Delete the browser smoke policy", cwd=repository)
-    expect(base, smoke, native=False, resize=False)
-    print("PASS: public Git planner scopes the browser smoke, retains native hosts and sees renames/deletions")
+    command("git", "commit", "-m", "Delete a statistical policy", cwd=repository)
+    expect(base, ["browser"], native=False, resize=False)
+    # Both sides of a rename and mixed input sets must retain release scope.
+    for left, right in [("rust/crates/rusty-sudocode-cli/src/startup.rs",
+                         "rust/crates/runtime/src/moved_startup.rs"),
+                        ("rust/crates/runtime/src/moved_startup.rs",
+                         "rust/crates/rusty-sudocode-cli/src/startup.rs")]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        command("git", "mv", left, right, cwd=repository)
+        command("git", "commit", "-m", "Move startup implementation across release scope", cwd=repository)
+        expect(base, both, release=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    for path in ["rust/crates/rusty-sudocode-cli/src/render.rs", "rust/crates/runtime/src/config.rs"]:
+        destination = repository / path
+        destination.write_text((destination.read_text() if destination.exists() else "") + "mixed startup change\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Mixed renderer and startup inputs", cwd=repository)
+    expect(base, both, release=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", "rust/crates/rusty-sudocode-cli/src/startup.rs", cwd=repository)
+    command("git", "commit", "-m", "Delete startup implementation", cwd=repository)
+    expect(base, both, release=True)
+    print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
     # This actual-Git fixture is required by CI preflight. Editing it alone
     # must not select product Cargo/PTY builds on all three native hosts.
     history = repository / "e2e/pr-history/run.py"

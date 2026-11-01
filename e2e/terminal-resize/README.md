@@ -72,11 +72,14 @@ resize on the short reply, CPU and peak memory on the heavy Markdown stream.
 `--profile stress` adds the 30-turn memory-growth case as an explicit diagnostic. Reports include
 raw input samples, per-turn resources, terminal traces, binary hashes, A/A noise
 and paired A/B results. A noisy or incomplete run fails. Linux reports the kernel
-RSS high-water mark; local macOS peaks are phase samples.
+RSS high-water mark; local macOS peaks are phase samples. Required core acceptance
+contains short and heavy Markdown cases (36 observations); task-specific
+foreground/background performance comparisons are outside that reduced scope.
+Short keeps its 5/7 pairs and RSS peak/after checks; heavy keeps 3/3 pairs.
 
-`.github/workflows/rendering-main.yml` runs the core matrix on main once a day,
-through the same container check that `python .github/local-acceptance/checks.py
---native-checks rendering` runs locally. It uses isolated baseline, candidate and
+The managed author-local acceptance runs the core matrix before push when CLI,
+engine-core, PTY helper/harness, rendering-driver or native observer inputs change.
+Scheduled or manual runs do not replace it. It uses isolated baseline, candidate and
 trusted-driver Cargo directories and freezes normal release binaries before driver
 compilation. Source snapshots contain only
 Git-tracked inputs. Docker gets no model keys or GitHub token. Full logs remain
@@ -87,9 +90,17 @@ commit and protected acceptance contract. See
 Edits limited to `benchmark.py`, `gui-smoke.py`, `performance-policy.json` and
 `gui-policy.json` skip the ordinary workspace/resize suites and their
 complementary CI hosts. The browser harness files select the browser smoke; the
-rendering policy is judged by the daily run on main. Rust and shared terminal-host
+rendering policy selects mandatory local paired measurements. Cargo/dependency
+metadata and unrelated crates omit this comparison, reducing indirect performance
+coverage. Rust and shared terminal-host
 changes retain their applicable native checks. The required planner prints the
 actual local and CI responsibilities from committed Git inputs.
+If rendering and browser smoke run in that order in one acceptance process, the
+browser uses the same immutable image and hash-verified normal release. This
+omits a second CLI build while retaining both browser interaction drivers.
+Browser-only runs still build the dev candidate. Reuse is bound to candidate,
+protected policy, image context and output namespace and never inferred from old
+folders. Incorrect identities/bytes are refused before native builds or the GUI.
 
 Native visual/resize contracts run on all three OSes through the author-local
 plus complementary-CI split. Budget and baseline

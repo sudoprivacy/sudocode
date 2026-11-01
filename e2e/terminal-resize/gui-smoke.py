@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ["driver", "candidate", "output"]:
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--expected-candidate-sha256", default=os.environ.get("SCODE_EXPECTED_CANDIDATE_SHA256"))
     args = parser.parse_args()
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("choose an empty output directory to preserve previous evidence")
@@ -28,8 +29,10 @@ def main():
                SCODE_GUI_REPORT=str(sample.resolve()), SCODE_TERMINAL_LOG_DIR=str(args.output.resolve()),
                SCODE_GUI_EXPECT_LINKS="1")
     report = {"version": 1, "status": "running", "candidate_sha256": digest(args.candidate),
-              "driver_sha256": digest(args.driver)}
+              "driver_sha256": digest(args.driver), "expected_candidate_sha256": args.expected_candidate_sha256}
     try:
+        assert (args.expected_candidate_sha256 is None
+                or args.expected_candidate_sha256 == report["candidate_sha256"]), "candidate differs from the validated build"
         with (args.output / "driver.log").open("w") as log:
             result = subprocess.run([str(args.driver.resolve()), "--ignored", "--exact",
                                      "browser_terminal_links_and_interaction", "--nocapture"],

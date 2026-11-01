@@ -82,6 +82,27 @@
         "**/README.md"
       ]
     },
+    "rendering": {
+      "include": [
+        "rust/crates/scode-benchmark-drivers/**",
+        "rust/crates/pty-harness/**",
+        "rust/crates/rusty-sudocode-cli/src/**",
+        "rust/crates/engine-core/src/**",
+        "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs",
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "e2e/terminal-resize/host.cjs",
+        "e2e/terminal-resize/run.cjs",
+        "e2e/terminal-resize/performance.cjs",
+        "e2e/terminal-resize/resources.cjs",
+        "e2e/terminal-resize/package.json",
+        "e2e/terminal-resize/package-lock.json"
+      ],
+      "exclude": [
+        "**/README.md"
+      ]
+    },
     "browser": {
       "include": [
         "rust/crates/scode-benchmark-drivers/**",
@@ -113,7 +134,11 @@
         "rust/.cargo/**",
         "rust/crates/*/Cargo.toml",
         "rust/crates/*/build.rs",
-        "rust/crates/*/src/**",
+        "rust/crates/rusty-sudocode-cli/src/main.rs",
+        "rust/crates/rusty-sudocode-cli/src/startup.rs",
+        "rust/crates/rusty-sudocode-cli/src/cli/**",
+        "rust/crates/runtime/src/config.rs",
+        "rust/crates/runtime/src/config/**",
         "rust/vendor/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
         "e2e/startup/**"

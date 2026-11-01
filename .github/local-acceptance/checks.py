@@ -497,14 +497,14 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "a3ed0bd2287985a15713d9341b6a079fba05b075933e5c3a7cdfdd8c7c871442",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "a1da0c8996d56e78dd7b631f4fe9f343d02515bc89b6f9df8980a6352d358ffc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "af1307c285c8fa5be1e2e0475c502bd0c790cd3e55fa7a11abf292d9d7370e09",
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "b1dd5eb1de67f6d9c44af9425e33ba3978608342fca3643e43da421f830539f3",
-        "e2e/local-acceptance/run.py": "a46f9aa78c393006e8015b380d8df536eea97b5c88e0c2fe8e90f69f13eff9c8",
+        ".github/scripts/local_acceptance.py": "1648d8fe4f74e74e86670d58f00941affb4f71430ab76ae37b4401857c0a76e4",
+        "e2e/local-acceptance/run.py": "3ed58826dea55e9ca1734af464b0cb046aff62805c082d2922c8400fdd321f8a",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
@@ -551,7 +551,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "8aafd71a00f07eee0b8beeb2b3bd2182b7a2607d1c3585634ead95d2480a4d58":
+    if actual_scope != "a952b56f180d7340b31895eb06a4edc3227303ff4b7680d475d5a8fcf8da3327":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -680,18 +680,43 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
     image_receipt = output / "image-id.txt"
-    image = container_image_tag("sudocode-local-acceptance", context_hash.hexdigest())
-    command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
-            extra={"DOCKER_BUILDKIT": "1"})
+    # Only a successful rendering call in this process can authorize reuse.
+    try:
+        invocations = container.invocations
+    except AttributeError:
+        invocations = {}
+    key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
+    previous = invocations.get(key) if name == "browser" else None
+    image = (previous["image_tag"] if previous is not None
+             else container_image_tag("sudocode-local-acceptance", context_hash.hexdigest()))
+    if previous is None:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+                extra={"DOCKER_BUILDKIT": "1"})
+    else:
+        image_receipt.write_text(previous["image_id"] + "\n", encoding="utf-8")
+        print("Browser smoke reuses this invocation's measured rendering image and release: "
+              f"{previous['image_id']}", flush=True)
     image_id = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
     identity = {
         **snapshots, "policy": protected,
         "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
+        "rendering_release_reused": previous is not None,
     }
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
+    if previous is not None:
+        binary = previous["binary"]
+        if checkout_link(binary) or hashlib.sha256(binary.read_bytes()).hexdigest() != previous["sha256"]:
+            raise RuntimeError("Measured rendering release changed before browser reuse")
+        reused = sources / "candidate-release"
+        reused.mkdir()
+        shutil.copy2(binary, reused / "scode")
+        (reused / "identity.json").write_text(json.dumps({
+            **identity, "version": 1, "sha256": previous["sha256"],
+        }, indent=2))
+        verified_candidate_release(sources)
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
@@ -713,6 +738,26 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
             raise RuntimeError("Rendering candidate binary does not match its completed measurements")
+        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id, "image_tag": image}
+        container.invocations = invocations
+
+
+def verified_candidate_release(inputs):
+    """Verify the read-only release promoted by this invocation's rendering."""
+    directory = inputs / "candidate-release"
+    if not directory.exists():
+        return None
+    binary, receipt = directory / "scode", directory / "identity.json"
+    if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
+        raise RuntimeError("Reused rendering release must contain regular files")
+    expected = json.loads((inputs / "identity.json").read_text())
+    observed = json.loads(receipt.read_text())
+    if observed.get("version") != 1 or any(observed.get(name) != expected[name]
+            for name in ["candidate", "policy", "image_id", "context_sha256"]):
+        raise RuntimeError("Reused rendering release belongs to different source, policy or image")
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
+        raise RuntimeError("Reused rendering release bytes changed")
+    return binary
 
 
 def copy_checkout_file(source, destination):
@@ -1014,9 +1059,9 @@ def compiled_drivers(log, names):
 
 
 def browser_smoke(inputs, output, command):
-    """Painted-terminal behaviour, once, against a dev build of the candidate.
+    """Painted-terminal behaviour against the measured release or a dev build.
 
-    Typing latency is judged by the rendering matrix on main; this pass checks
+    Typing latency is judged by scoped local rendering; this pass checks
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
@@ -1025,13 +1070,20 @@ def browser_smoke(inputs, output, command):
     candidate = work / "candidate"
     replace_checkout(inputs / "candidate", candidate)
     terminal = candidate / "e2e/terminal-resize"
+    reused = verified_candidate_release(inputs)
     command("npm", "ci", "--prefix", str(terminal))
     manifest, build = str(candidate / "rust/Cargo.toml"), str(targets / "candidate")
-    command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
-            "-p", "rusty-sudocode-cli", "--bin", "scode")
     binary = output / "scode-candidate"
     # Copy before the drivers build: their dev features rebuild the shared graph.
-    shutil.copy2(targets / "candidate/debug/scode", binary)
+    if reused is None:
+        command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / "candidate/debug/scode", binary)
+    else:
+        shutil.copy2(reused, binary)
+        print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
+              "only native test drivers compile here.", flush=True)
+    expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     package, prefix = benchmark_driver_targets(candidate)
     links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
     log = command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
@@ -1039,11 +1091,14 @@ def browser_smoke(inputs, output, command):
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
     command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
-            "--candidate", str(binary), "--output", str(output / "smoke"))
+            "--candidate", str(binary), "--output", str(output / "smoke"),
+            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest})
     command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
             "-p", package, "--test", viewport, "viewport_browser_interaction",
             "--", "--ignored", "--exact", "--nocapture",
             extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
+        raise RuntimeError("Browser candidate changed after validation")
 
 def main():
     parser = argparse.ArgumentParser()

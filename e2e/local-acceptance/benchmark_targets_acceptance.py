@@ -151,6 +151,7 @@ fn render_performance_workload() {
     assert!(!(mode == "invalid" && case == "heavy"), "intentional native driver failure");
     let selected = if mode == "metadata" && case == "heavy" { "metadata" }
         else if mode == "incomplete" && case == "heavy" { "incomplete" }
+        else if mode == "short-rss" && side == "candidate" && case == "short" { "regressed" }
         else if mode == "regressed" && side == "candidate" && ["long", "heavy"].contains(&case.as_str()) { "regressed" }
         else { "base" };
     let bytes = fs::read(root.join(format!("{case}-{selected}.json"))).unwrap();
@@ -171,7 +172,7 @@ fn render_performance_workload() {
     shared = load("paired_rendering_evaluator", terminal / "benchmark.py")
     policy = json.loads((terminal / "performance-policy.json").read_text())
     cases = policy["profiles"]["core"]
-    assert cases == ["short", "heavy", "foreground", "background"]
+    assert cases == ["short", "heavy"]
     assert {key: value for key, value in policy["cases"]["heavy"].items() if key != "judge"} == {
         "kind": "markdown", "bytes": 12288, "turns": 1}
     legacy_specs = {"long": {"kind": "prose", "bytes": 8192, "turns": 1},
@@ -181,7 +182,8 @@ fn render_performance_workload() {
     for spec in legacy_specs.values():
         spec["judge"] = sorted(shared.expected_metrics(spec))
     plan = {**shared.policy_plan(policy, "core"), "policy_sha256": shared.digest(terminal / "performance-policy.json")}
-    assert plan["total_samples"] == 60 and plan["unjudged_warmups"] == 0
+    assert plan["total_samples"] == 36 and plan["unjudged_warmups"] == 0
+    assert {"rss_peak_mib", "rss_after_mib"}.issubset(policy["cases"]["short"]["judge"])
     assert plan["metrics"] == {case: sorted(shared.judged_metrics(policy["cases"][case])) for case in cases}
     assert {"cpu_ms", "rss_peak_mib"} <= set(plan["metrics"]["heavy"]), "CPU and memory are judged on the heavy stream"
     for case, spec in {**policy["cases"], **legacy_specs}.items():
@@ -206,7 +208,7 @@ fn render_performance_workload() {
     arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
                  "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
     results = {}
-    for mode in ["pass", "regressed", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "invalid", "metadata", "command"]:
+    for mode in ["pass", "regressed", "short-rss", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "invalid", "metadata", "command"]:
         events = fixture / "events.txt"
         events.unlink(missing_ok=True)
         destination = output / mode
@@ -236,15 +238,15 @@ fn render_performance_workload() {
             failed = True
         report = json.loads((destination / "report.json").read_text())
         trace = events.read_text().splitlines() if events.exists() else []
-        expected_cases = cases if mode == "pass" else [] if mode == "command" else cases[:2]
+        expected_cases = cases if mode == "pass" else [] if mode == "command" else ["short"] if mode == "short-rss" else cases[:2]
         assert {line.split()[0] for line in trace} == set(expected_cases), "An unadmitted scenario ran"
         assert report["policy"] == policy and report["policy_sha256"] == shared.digest(terminal / "performance-policy.json")
         assert all((destination / row["path"]).is_file() for row in report["samples"])
-        assert report["status"] == {"pass": "passed", "regressed": "failed"}.get(mode, "invalid")
+        assert report["status"] == {"pass": "passed", "regressed": "failed", "short-rss": "failed"}.get(mode, "invalid")
         assert failed == (mode != "pass"), "A failing matrix returned success"
-        complete = cases if mode == "pass" else [] if mode == "command" else ["short"]
+        complete = cases if mode == "pass" else [] if mode in {"command", "short-rss"} else ["short"]
         assert report["completed_cases"] == complete and report["remaining_cases"] == [case for case in cases if case not in complete]
-        if mode in {"pass", "regressed"}:
+        if mode in {"pass", "regressed", "short-rss"}:
             # Replay the unmodified evaluator on exactly the combined observations.
             # It must reach the same verdict/rows as each complete scenario did.
             controls, comparisons = {case: [] for case in expected_cases}, {case: [] for case in expected_cases}
@@ -261,7 +263,7 @@ fn render_performance_workload() {
             rows, failures = shared.assess(controls, comparisons, policy, expected_cases, shared.judged_metrics)
             assert report["metrics"] == rows and report["failures"] == failures
             assert len(trace) == sum(24 if case == "short" else 12 for case in expected_cases)
-            if mode == "regressed":
+            if mode in {"regressed", "short-rss"}:
                 assert any("paired increase" in failure for failure in failures), "Relative RSS regression was lost"
         elif mode == "invalid":
             assert len(trace) == 25, "Invalid second scenario did not stop immediately"
@@ -393,6 +395,7 @@ p=argparse.ArgumentParser()
 for name in ["driver","candidate","output"]: p.add_argument("--"+name,required=True)
 a=p.parse_args()
 assert subprocess.check_output([a.candidate]).decode().strip()=="candidate:normal"
+assert os.environ["SCODE_EXPECTED_CANDIDATE_SHA256"]==hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()
 subprocess.run([a.driver,"--ignored","--exact","browser_terminal_links_and_interaction"],
     env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
 out=Path(a.output);out.mkdir()
@@ -406,7 +409,9 @@ out=Path(a.output);out.mkdir()
                 '[[bin]]\nname="scode"\npath="src/main.rs"\n'
                 '[dependencies]\nshared-support={path="support",features=["normal"]}\n'
                 '[dev-dependencies]\nshared-support={path="support",features=["dev"]}\n',
-            "rust/src/main.rs": f'fn main() {{ println!("{label}:{{}}", shared_support::flavor()); }}\n',
+            "rust/src/main.rs": f'fn main() {{ if std::env::args().nth(1).as_deref()==Some("--build-profile") {{ '
+                'println!("{}", if cfg!(debug_assertions) { "dev" } else { "release" }); } else { '
+                f'println!("{label}:{{}}", shared_support::flavor()); }} }}\n',
             "rust/support/Cargo.toml": '[package]\nname="shared-support"\nversion="0.0.1"\nedition="2021"\n'
                 '[features]\nnormal=[]\ndev=[]\n',
             "rust/support/src/lib.rs": 'pub fn flavor() -> &\'static str { if cfg!(feature="dev") { "dev" } else { "normal" } }\n',
@@ -491,6 +496,7 @@ out=Path(a.output);out.mkdir()
         checks.benchmark_locked("rendering", inputs / "candidate", stage, "fixture-base", command, output / "unused-target")
     rendering = json.loads((stage / "measurements/short/fixture.json").read_text())
     assert rendering["candidate_sha256"] == hashlib.sha256((stage / "scode-candidate").read_bytes()).hexdigest()
+    assert subprocess.check_output([str(stage / "scode-candidate"), "--build-profile"]).decode().strip() == "release"
     for index, row in enumerate(commands[before:], before):
         if "--message-format=json-render-diagnostics" in row["command"]:
             log = output / "commands" / f"{index:03d}.log"
@@ -499,6 +505,67 @@ out=Path(a.output);out.mkdir()
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
                            for row in commands if "--target-dir" in row["command"]})
     assert len(target_trees) == 4, target_trees
+    # Simulate the exact read-only promotion made by the real Docker launcher.
+    # Actual Cargo/browser dispatch and compiled native drivers remain unmodified.
+    identity = {"candidate": "fixture-head", "policy": "fixture-policy", "image_id": "sha256:" + "a" * 64,
+                "context_sha256": "b" * 64}
+    (inputs / "identity.json").write_text(json.dumps(identity))
+    promoted = inputs / "candidate-release"
+    promoted.mkdir()
+    shutil.copy2(stage / "scode-candidate", promoted / "scode")
+    (promoted / "identity.json").write_text(json.dumps({**identity, "version": 1,
+        "sha256": rendering["candidate_sha256"]}))
+    paired = output / "paired-browser"
+    paired.mkdir()
+    before = len(commands)
+    with checks.exclusive_benchmark_state(locks):
+        checks.benchmark_locked("browser", inputs / "candidate", paired, "fixture-base", command, output / "unused-target")
+    reused_commands = commands[before:]
+    assert len(reused_commands) == 4
+    assert not any("build" in row["command"] for row in reused_commands), "Browser rebuilt the promoted CLI"
+    assert subprocess.check_output([str(paired / "scode-candidate"), "--build-profile"]).decode().strip() == "release"
+    assert (paired / "scode-candidate").read_bytes() == (stage / "scode-candidate").read_bytes()
+    assert json.loads((paired / "smoke/fixture.json").read_text())["candidate_sha256"] == rendering["candidate_sha256"]
+    original_identity = (promoted / "identity.json").read_text()
+    refusals = []
+    for field in ["candidate", "policy", "image_id", "context_sha256", "sha256"]:
+        changed = json.loads(original_identity)
+        changed[field] = "wrong"
+        (promoted / "identity.json").write_text(json.dumps(changed))
+        refused_output = output / ("wrong-promotion-" + field)
+        refused_output.mkdir()
+        before = len(commands)
+        try:
+            checks.benchmark_locked("browser", inputs / "candidate", refused_output, "fixture-base", command, output / "unused-target")
+        except RuntimeError:
+            refusals.append(field)
+        else:
+            raise AssertionError("Mismatched promoted rendering identity accepted: " + field)
+        assert len(commands) == before, "An invalid promotion started npm, Cargo or a browser"
+    (promoted / "identity.json").write_text(original_identity)
+    # Real GUI smoke must reject a substituted expected hash before any driver.
+    negative = output / "wrong-expected-smoke"
+    try:
+        command(sys.executable, str(SOURCE / "e2e/terminal-resize/gui-smoke.py"),
+                "--driver", checks.compiled_drivers(driver_log, ["benchmark_hyperlinks"])["benchmark_hyperlinks"],
+                "--candidate", str(paired / "scode-candidate"),
+                "--output", str(negative), "--expected-candidate-sha256", "0" * 64)
+    except RuntimeError:
+        assert json.loads((negative / "report.json").read_text())["status"] == "failed"
+        assert not (negative / "driver.log").exists(), "Wrong binary reached the GUI driver"
+    else:
+        raise AssertionError("GUI smoke accepted a different expected candidate")
+    # The source tree and every archive/input digest must reject linked files.
+    linked_policy = output / "linked-policy.json"
+    linked_policy.symlink_to(SOURCE / "e2e/terminal-resize/performance-policy.json")
+    try:
+        command(sys.executable, str(SOURCE / "e2e/terminal-resize/benchmark.py"),
+                "--describe-policy", "--profile", "core", "--policy", str(linked_policy))
+    except RuntimeError:
+        assert "regular file, not a link" in (output / "commands" / f"{len(commands)-1:03d}.log").read_text()
+    else:
+        raise AssertionError("A linked measurement policy was accepted")
+    shutil.rmtree(promoted)
     layout = standalone_layout(command)
 
     # An older author snapshot still uses its original target. A present but
@@ -546,6 +613,8 @@ out=Path(a.output);out.mkdir()
     migration = cache_migration(output / "cache-migration", checks, command)
     matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
+              "cross_profile_normal_release_reused": True, "promotion_identity_refusals": refusals,
+              "wrong_expected_gui_binary_refused_before_driver": True, "linked_measurement_policy_refused": True,
               "target_trees": target_trees, "standalone_drivers_emit_no_cli_binary": True,
               "actual_source_driver_layout": layout,
               "legacy_candidate_supported": True, "broken_standalone_package_refused": True,

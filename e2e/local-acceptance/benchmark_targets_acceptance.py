@@ -197,7 +197,7 @@ fn browser_terminal_links_and_interaction() {
                     "cap": {"kind": "prose", "bytes": 12288, "turns": 1},
                     "markdown": {"kind": "markdown", "bytes": 2300, "turns": 1}}
     plan = {**shared.policy_plan(policy, "core"), "policy_sha256": shared.digest(terminal / "performance-policy.json")}
-    assert plan["total_samples"] == 68 and all("cpu_ms" in names and "rss_peak_mib" in names
+    assert plan["total_samples"] == 60 and plan["unjudged_warmups"] == 0 and all("cpu_ms" in names and "rss_peak_mib" in names
                                                for names in plan["metrics"].values())
     for case, spec in {**policy["cases"], **legacy_specs}.items():
         phases = ["stream", "history"] if spec["kind"] in {"foreground", "background"} else ["wait", "stream", "history"]
@@ -221,7 +221,7 @@ fn browser_terminal_links_and_interaction() {
     arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
                  "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
     results = {}
-    for mode in ["pass", "regressed", "incomplete", "missing-sample", "invalid", "metadata", "command"]:
+    for mode in ["pass", "regressed", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "invalid", "metadata", "command"]:
         events = fixture / "events.txt"
         events.unlink(missing_ok=True)
         destination = output / mode
@@ -231,11 +231,16 @@ fn browser_terminal_links_and_interaction() {
                 return command(sys.executable, "-c", "raise SystemExit(23)")
             log = command(*args, extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture),
                                        "SCODE_ACCEPTANCE_RENDER_MODE": mode})
-            if mode == "missing-sample":
+            if mode in {"missing-sample", "extra-sample", "mispaired-sample"}:
                 child_path = Path(args[args.index("--output") + 1]) / "report.json"
                 child = json.loads(child_path.read_text())
                 if child["policy"]["profiles"]["core"] == ["heavy"]:
-                    child["samples"].pop()
+                    if mode == "missing-sample":
+                        child["samples"].pop()
+                    elif mode == "extra-sample":
+                        child["samples"].append(dict(child["samples"][0]))
+                    else:
+                        child["samples"][0]["side"] = child["samples"][1]["side"]
                     child_path.write_text(json.dumps(child))
             return log
 
@@ -260,7 +265,8 @@ fn browser_terminal_links_and_interaction() {
             controls, comparisons = {case: [] for case in expected_cases}, {case: [] for case in expected_cases}
             for case in expected_cases:
                 samples = [row for row in report["samples"] if row["data"]["case"] == case]
-                assert len(samples) == (26 if case == "short" else 14)
+                assert len(samples) == (24 if case == "short" else 12)
+                assert all(row["stage"] in {"aa", "ab"} for row in samples)
                 for stage, count, collection in [("aa", 5 if case == "short" else 3, controls),
                                                   ("ab", 7 if case == "short" else 3, comparisons)]:
                     for number in range(count):
@@ -269,23 +275,26 @@ fn browser_terminal_links_and_interaction() {
                         collection[case].append((pair["base"], pair["candidate"]))
             rows, failures = shared.assess(controls, comparisons, policy, expected_cases)
             assert report["metrics"] == rows and report["failures"] == failures
-            assert len(trace) == sum(26 if case == "short" else 14 for case in expected_cases)
+            assert len(trace) == sum(24 if case == "short" else 12 for case in expected_cases)
             if mode == "regressed":
                 assert any("paired increase" in failure for failure in failures), "Relative RSS regression was lost"
         elif mode == "invalid":
-            assert len(trace) == 27, "Invalid second scenario did not stop immediately"
+            assert len(trace) == 25, "Invalid second scenario did not stop immediately"
         elif mode == "metadata":
-            assert len(trace) == 40 and "observer/platform changed" in report["failures"][0]
-        elif mode == "missing-sample":
-            assert len(trace) == 40 and "incomplete passing sample set" in report["failures"][0]
+            assert len(trace) == 36 and "observer/platform changed" in report["failures"][0]
+        elif mode in {"missing-sample", "extra-sample"}:
+            assert len(trace) == 36 and "judged observations and no extra warm-ups" in report["failures"][0]
+        elif mode == "mispaired-sample":
+            assert len(trace) == 36 and "paired sample inventory differs" in report["failures"][0]
         elif mode == "incomplete":
-            assert len(trace) == 27 and "missing/extra measurements" in report["failures"][0]
+            assert len(trace) == 25 and "missing/extra measurements" in report["failures"][0]
         else:
             assert not trace and "no completed scenario report" in report["failures"][0]
         results[mode] = {"status": report["status"], "native_invocations": len(trace),
                          "completed_cases": report["completed_cases"], "failures": report.get("failures", [])}
-    # Keep the old full-round whole-matrix control and its actual 156 native
-    # calls and original six scenarios. Constant fixture observations must reach
+    # Keep every judged pair from the old full-round six-scenario control:
+    # 144 native calls, excluding its former 12 unjudged warmups. Constant
+    # fixture observations must reach
     # the same relative RSS refusal. This does not establish equivalent product
     # coverage for one heavy Markdown workload instead of three independent ones.
     events.unlink(missing_ok=True)
@@ -303,12 +312,12 @@ fn browser_terminal_links_and_interaction() {
         failed = True
     previous = json.loads((output / "previous-schedule/report.json").read_text())
     revised = json.loads((output / "regressed/report.json").read_text())
-    assert failed and previous["status"] == "failed" and len(events.read_text().splitlines()) == 156
+    assert failed and previous["status"] == "failed" and len(events.read_text().splitlines()) == 144
     before_rss = next(row for row in previous["metrics"] if row["case"] == "long" and row["metric"] == "rss_peak_mib")
     after_rss = next(row for row in revised["metrics"] if row["case"] == "heavy" and row["metric"] == "rss_peak_mib")
     assert {k:v for k,v in before_rss.items() if k != "case"} == {k:v for k,v in after_rss.items() if k != "case"}
     assert before_rss["result"] == after_rss["result"] == "regressed"
-    results["previous_schedule"] = {"status": previous["status"], "native_invocations": 156,
+    results["full_scenario_control"] = {"status": previous["status"], "native_invocations": 144,
                                     "same_fixture_rss_decision": True}
     # The real CLI must reject weakening the known short-case sentinel before
     # admitting any process. A changed assertion alone cannot grant a pass.
@@ -324,7 +333,8 @@ fn browser_terminal_links_and_interaction() {
     else:
         raise AssertionError("The short sentinel accepted fewer than five A/A and seven A/B pairs")
     assert not events.exists(), "An undersampled policy admitted a native process"
-    results["short_sentinel"] = {"native_invocations": 26, "reduced_rounds_refused_before_execution": True}
+    results["short_sentinel"] = {"required_judged_observations": 24, "invalid_policy_native_invocations": 0,
+                                 "reduced_rounds_refused_before_execution": True}
     # Run the real browser evaluator with native fixture children. Real painted
     # browser/product acceptance remains a separate mandatory profile.
     gui_policy = json.loads((terminal / "gui-policy.json").read_text())
@@ -354,14 +364,14 @@ fn browser_terminal_links_and_interaction() {
             failed = True
         report = json.loads((destination / "report.json").read_text())
         trace = events.read_text().splitlines()
-        assert len(trace) == len(report["samples"]) == 14
+        assert len(trace) == len(report["samples"]) == 12 and report["unjudged_warmups"] == 0
         assert all(row["data"]["samples"] == gui_samples for row in report["samples"])
         assert report["status"] == ("failed" if mode == "regressed" else "passed")
         assert failed == (mode == "regressed")
         if failed:
             assert any("paired increase" in failure for failure in report["failures"])
-        assert sum(line.endswith(" candidate") for line in trace) == 4, "A/A must never run the candidate"
-        assert "ab-01-candidate candidate" in trace[10] and "ab-01-base base" in trace[11], "Missing alternating pair order"
+        assert sum(line.endswith(" candidate") for line in trace) == 3, "A/A must never run the candidate"
+        assert "ab-01-candidate candidate" in trace[8] and "ab-01-base base" in trace[9], "Missing alternating pair order"
         results["browser_" + mode] = {"status": report["status"], "native_invocations": len(trace)}
     events.unlink(missing_ok=True)
     weak_gui = output / "weak-browser-policy"
@@ -420,9 +430,11 @@ p=argparse.ArgumentParser()
 for name in ["driver","base","candidate","output"]: p.add_argument("--"+name)
 p.add_argument("--describe-policy",action="store_true")
 p.add_argument("--policy");p.add_argument("--profile");a=p.parse_args()
+pairs=[{"stage":stage,"round":number,"side":side} for stage,count in [("aa",5),("ab",7)]
+       for number in range(count) for side in (["base","candidate"] if number%2==0 else ["candidate","base"])]
 if a.describe_policy:
     assert a.profile=="core" and json.loads(Path(a.policy).read_text())["fixture"] is True
-    print(json.dumps({"cases":["short"],"samples":{"short":26},"total_samples":26,
+    print(json.dumps({"cases":["short"],"samples":{"short":24},"total_samples":24,"pairs":{"short":pairs},"unjudged_warmups":0,
         "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest()}))
     raise SystemExit(0)
 assert subprocess.check_output([a.base]).decode().strip()=="baseline:normal"
@@ -431,16 +443,16 @@ case="rendering_driver_runs_release" if a.policy else "browser_terminal_links_an
 if a.policy: assert a.profile=="core" and json.loads(Path(a.policy).read_text())=={"fixture":True,"rounds":{"calibration":5,"comparison":7},"profiles":{"core":["short"]}}
 out=Path(a.output);out.mkdir()
 samples=[]
-for index in range(26 if a.policy else 1):
+for index in range(24 if a.policy else 1):
     subprocess.run([a.driver,"--ignored","--exact",case],env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
     name=f"fixture-{index:02d}.json"
     data={"metadata":{"observer":"native-builder-fixture"}}
     (out/name).write_text(json.dumps(data))
-    samples.append({"path":name,"data":data})
+    samples.append({"path":name,"data":data,**(pairs[index] if a.policy else {})})
 (out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
 if a.policy:
     (out/"report.json").write_text(json.dumps({"policy":json.loads(Path(a.policy).read_text()),
-        "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest(),"status":"passed","samples":samples,
+        "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest(),"status":"passed","samples":samples,"unjudged_warmups":0,
         **{name+"_sha256":hashlib.sha256(Path(getattr(a,name)).read_bytes()).hexdigest() for name in ["base","candidate","driver"]},
         "harness_sha256":{"fixture":"browser-builder"}}))
 '''

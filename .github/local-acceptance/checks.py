@@ -680,18 +680,43 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
     image_receipt = output / "image-id.txt"
-    image = container_image_tag("sudocode-local-acceptance", context_hash.hexdigest())
-    command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
-            extra={"DOCKER_BUILDKIT": "1"})
+    # Only a successful rendering call in this process can authorize reuse.
+    try:
+        invocations = container.invocations
+    except AttributeError:
+        invocations = {}
+    key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
+    previous = invocations.get(key) if name == "browser" else None
+    image = (previous["image_tag"] if previous is not None
+             else container_image_tag("sudocode-local-acceptance", context_hash.hexdigest()))
+    if previous is None:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+                extra={"DOCKER_BUILDKIT": "1"})
+    else:
+        image_receipt.write_text(previous["image_id"] + "\n", encoding="utf-8")
+        print("Browser smoke reuses this invocation's measured rendering image and release: "
+              f"{previous['image_id']}", flush=True)
     image_id = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
     identity = {
         **snapshots, "policy": protected,
         "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
+        "rendering_release_reused": previous is not None,
     }
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
+    if previous is not None:
+        binary = previous["binary"]
+        if checkout_link(binary) or hashlib.sha256(binary.read_bytes()).hexdigest() != previous["sha256"]:
+            raise RuntimeError("Measured rendering release changed before browser reuse")
+        reused = sources / "candidate-release"
+        reused.mkdir()
+        shutil.copy2(binary, reused / "scode")
+        (reused / "identity.json").write_text(json.dumps({
+            **identity, "version": 1, "sha256": previous["sha256"],
+        }, indent=2))
+        verified_candidate_release(sources)
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
@@ -713,6 +738,26 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
             raise RuntimeError("Rendering candidate binary does not match its completed measurements")
+        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id, "image_tag": image}
+        container.invocations = invocations
+
+
+def verified_candidate_release(inputs):
+    """Verify the read-only release promoted by this invocation's rendering."""
+    directory = inputs / "candidate-release"
+    if not directory.exists():
+        return None
+    binary, receipt = directory / "scode", directory / "identity.json"
+    if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
+        raise RuntimeError("Reused rendering release must contain regular files")
+    expected = json.loads((inputs / "identity.json").read_text())
+    observed = json.loads(receipt.read_text())
+    if observed.get("version") != 1 or any(observed.get(name) != expected[name]
+            for name in ["candidate", "policy", "image_id", "context_sha256"]):
+        raise RuntimeError("Reused rendering release belongs to different source, policy or image")
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
+        raise RuntimeError("Reused rendering release bytes changed")
+    return binary
 
 
 def copy_checkout_file(source, destination):
@@ -1014,9 +1059,9 @@ def compiled_drivers(log, names):
 
 
 def browser_smoke(inputs, output, command):
-    """Painted-terminal behaviour, once, against a dev build of the candidate.
+    """Painted-terminal behaviour against the measured release or a dev build.
 
-    Typing latency is judged by the rendering matrix on main; this pass checks
+    Typing latency is judged by scoped local rendering; this pass checks
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
@@ -1025,13 +1070,20 @@ def browser_smoke(inputs, output, command):
     candidate = work / "candidate"
     replace_checkout(inputs / "candidate", candidate)
     terminal = candidate / "e2e/terminal-resize"
+    reused = verified_candidate_release(inputs)
     command("npm", "ci", "--prefix", str(terminal))
     manifest, build = str(candidate / "rust/Cargo.toml"), str(targets / "candidate")
-    command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
-            "-p", "rusty-sudocode-cli", "--bin", "scode")
     binary = output / "scode-candidate"
     # Copy before the drivers build: their dev features rebuild the shared graph.
-    shutil.copy2(targets / "candidate/debug/scode", binary)
+    if reused is None:
+        command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / "candidate/debug/scode", binary)
+    else:
+        shutil.copy2(reused, binary)
+        print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
+              "only native test drivers compile here.", flush=True)
+    expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     package, prefix = benchmark_driver_targets(candidate)
     links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
     log = command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
@@ -1039,11 +1091,14 @@ def browser_smoke(inputs, output, command):
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
     command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
-            "--candidate", str(binary), "--output", str(output / "smoke"))
+            "--candidate", str(binary), "--output", str(output / "smoke"),
+            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest})
     command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
             "-p", package, "--test", viewport, "viewport_browser_interaction",
             "--", "--ignored", "--exact", "--nocapture",
             extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
+        raise RuntimeError("Browser candidate changed after validation")
 
 def main():
     parser = argparse.ArgumentParser()

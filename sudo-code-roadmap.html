@@ -259,8 +259,15 @@ and the browser and viewport comparisons of "Reduce repeated measurements
 and the browser comparison of "Remove unjudged full warm-up workloads
 (2026-11-01)". Short keeps 5/7 pairs and heavy keeps 3/3: 36 judged observations
 without warm-ups. The original short-reply RSS checks remain judged.
-With no cross-profile reuse, each build still keeps its invocation-owned image
-tag.
+When rendering and browser run in one acceptance process, the browser reuses the
+immutable image and measured normal release, bound to candidate, protected
+policy, image context, output namespace and binary hash. All functional GUI and
+viewport steps still run. Browser-only invocations retain the dev build;
+paired runs check the release GUI instead of an additional dev-GUI variant.
+Invalid promotions fail before npm/Cargo/GUI, with no silent replacement build.
+Every independent build keeps its own invocation-owned image tag; old evidence
+directories cannot grant reuse. The report records expected/actual binary digests
+and whether a measured release was supplied.
 These measurement drivers back no Feature inventory row, so the coverage
 denominator is unchanged.</p>
 
@@ -948,7 +955,9 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       omit these comparisons; their indirect performance effects are outside
       this reduced scope. No scheduled/manual replacement. Pre-merge
       painted-terminal smoke: clickable links, selection during streaming,
-      viewport interaction and an idle terminal, when CLI or harness inputs change.</td>
+      viewport interaction and an idle terminal, when CLI or harness inputs change.
+      Paired runs reuse the measured normal release and immutable image; browser-only
+      runs retain the dev build. Both native browser drivers still execute.</td>
       <td>No; their drivers back no Feature inventory row.</td>
       <td><code>rendering</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>

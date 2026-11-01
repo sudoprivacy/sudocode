@@ -77,13 +77,17 @@ def workload(name,root,output,base,command,target):
     # Keep the real main(), run(), output creation and command executor. Only
     # replace the expensive product workload; it must use the supplied output.
     binary=output/'scode-candidate'
-    shutil.copy2(sys.executable,binary)
+    reused=checks.verified_candidate_release(Path('/inputs')) if name=='browser' else None
+    shutil.copy2(reused or sys.executable,binary)
+    # This private probe is later deliberately corrupted by the non-root host.
+    # Docker owns the output on Linux; retain execution while allowing that edit.
+    binary.chmod(binary.stat().st_mode | 0o002)
     log=command(str(binary),'-c','print("STAGED_NATIVE_BINARY_EXECUTED")')
     assert log.read_text().strip()=='STAGED_NATIVE_BINARY_EXECUTED','staged native Linux executable cannot run'
     report=output/'measurements/report.json'
     report.parent.mkdir(parents=True)
     report.write_text(json.dumps({'status':'passed','candidate_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}))
-    observed.update(profile_output=str(output.relative_to('/evidence')))
+    observed.update(profile_output=str(output.relative_to('/evidence')),reused_release=reused is not None)
 checks.benchmark=workload
 assert sys.argv[1]=='/inputs/runner/.github/local-acceptance/checks.py'
 sys.argv=sys.argv[1:]
@@ -113,7 +117,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-        git("add", ".")
+        git("add", "--", *files)
         git("commit", "-m", f"Fixture {label}")
         return git("rev-parse", "HEAD")
 
@@ -196,9 +200,38 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         # source enters its container, and every invocation builds its image.
         before = sum(docker_operation(row, "build") for row in commands)
         launch("browser-candidate-only", protected,
-               {"policy": "main-policy", "sources": {"candidate": "candidate-policy"}}, profile="browser")
+               {"policy": "main-policy", "sources": {"candidate": "candidate-policy"}}, profile="browser",
+               parent=output / "standalone-browser-invocation")
         assert sum(docker_operation(row, "build") for row in commands) == before + 1
         print("PASS: the browser smoke container receives only the frozen candidate snapshot", flush=True)
+        before = sum(docker_operation(row, "build") for row in commands)
+        paired = launch("browser-after-rendering", protected,
+                        {"policy": "main-policy", "sources": {"candidate": "candidate-policy"}}, profile="browser")
+        assert paired["image_id"] == first["image_id"] and paired["image_tag"] == first["image_tag"]
+        assert sum(docker_operation(row, "build") for row in commands) == before
+        observed = json.loads((output / "browser-after-rendering/observed.json").read_text())
+        assert observed["reused_release"], "The actual container consumer did not verify the promoted release"
+        promoted = output / "browser-after-rendering/inputs/candidate-release/scode"
+        original = output / "protected-policy/container/rendering/scode-candidate"
+        assert promoted.read_bytes() == original.read_bytes()
+        print("PASS: actual production dispatcher reuses the same image and canonical-layout release", flush=True)
+        original.write_bytes(original.read_bytes() + b"tampered")
+        before_run = sum(docker_operation(row, "run") for row in commands)
+        try:
+            launch("negative-changed-rendering-release", protected,
+                   {"policy": "main-policy", "sources": {"candidate": "candidate-policy"}}, profile="browser")
+        except RuntimeError as error:
+            assert "changed before browser reuse" in str(error), str(error)
+        else:
+            raise AssertionError("Modified measured release was promoted")
+        assert sum(docker_operation(row, "run") for row in commands) == before_run
+        candidate = commit("next-candidate", protected)
+        before = sum(docker_operation(row, "build") for row in commands)
+        launch("different-candidate-does-not-reuse", protected,
+               {"policy": "main-policy", "sources": {"candidate": "next-candidate"}}, profile="browser")
+        assert sum(docker_operation(row, "build") for row in commands) == before + 1
+        assert not json.loads((output / "different-candidate-does-not-reuse/observed.json").read_text())["reused_release"]
+        print("PASS: a different committed candidate cannot reuse the earlier release", flush=True)
         print("Expected negative case: the following wrong-policy container must be rejected", flush=True)
         try:
             launch("negative-wrong-policy", protected, {"policy": "candidate-policy", "sources": {
@@ -210,8 +243,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: wrong-policy container rejected by the real input probe", flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
-        result = {"status": "PASS", "cases": 5,
+        result = {"status": "PASS", "cases": 8,
             "production_main_and_dispatcher_layout": True, "browser_candidate_only": True,
+            "same_invocation_image_and_release_reused": True, "changed_release_refused_before_container": True,
+            "changed_candidate_builds_normally": True,
             "independent_same_context_build_keeps_its_own_tag": True,
             "scope": "Real production container launcher, main/dispatcher, command executor, Git commits/archives and Docker builds/runs. The native workload replaces statistical benchmarks and writes only to the output supplied by the dispatcher. Protected/candidate policies and actual ref/tag moves retain frozen inputs. Each build owns a distinct image tag; another same-context build cannot replace it. The browser smoke container receives only the candidate snapshot and executes a staged native Linux binary. A wrong-policy image is rejected inside a real container. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
     finally:

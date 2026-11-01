@@ -95,6 +95,12 @@ metadata and unrelated crates omit this comparison, reducing indirect performanc
 coverage. Rust and shared terminal-host
 changes retain their applicable native checks. The required planner prints the
 actual local and CI responsibilities from committed Git inputs.
+If rendering and browser smoke run in that order in one acceptance process, the
+browser uses the same immutable image and hash-verified normal release. This
+omits a second CLI build while retaining both browser interaction drivers.
+Browser-only runs still build the dev candidate. Reuse is bound to candidate,
+protected policy, image context and output namespace and never inferred from old
+folders. Incorrect identities/bytes are refused before native builds or the GUI.
 
 Native visual/resize contracts run on all three OSes through the author-local
 plus complementary-CI split. Budget and baseline

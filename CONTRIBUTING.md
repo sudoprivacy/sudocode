@@ -668,6 +668,14 @@ Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
 
+When Windows terminal resize acceptance is selected, both the author hook and
+complementary CI install its checksum-pinned terminal host before long native
+compilation. A failed download stops before workspace builds. The same actual
+installation command/log is retained in the later resize receipt; installer
+regressions and every selected terminal test still run. Completed resize
+checkpoints are reused without another preparation step. This changes failure
+ordering, not test coverage or deadlines.
+
 `spec/local_acceptance.json` selects required targets, and the protected runner's
 `acceptance_plan` drives both the hook and CI. Push output and CI summaries print
 the local/CI responsibilities and an `ACCEPTANCE_PLAN` JSON record. The signed

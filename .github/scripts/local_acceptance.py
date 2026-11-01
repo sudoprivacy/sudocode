@@ -1214,6 +1214,10 @@ def perform_check(args, attempt):
         receipt["resumed_from"] = resumed
     try:
         with host_acceptance_lease(attempt, head):
+            prepare = getattr(module, "prepare_native_checks", None)
+            if prepare:
+                module.run.prepared_native = prepare(
+                    [name for name in needed if name not in reusable], ROOT, output, run_command)
             for name in needed:
                 if name in reusable:
                     print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)

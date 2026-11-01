@@ -534,7 +534,18 @@ def enforcement_acceptance(*, profile_compat_only=False):
             '    return nested_python()\n'
             'def browser_only_helper():\n'
             '    return "unused browser helper v1"\n'
+            'def prepare_native_checks(names, root, output, execute):\n'
+            '    if names:\n'
+            '        execute([sys.executable, "-c", '
+            '"from pathlib import Path; import sys; Path(sys.argv[1]).write_text(\'ready\'); '
+            'failed=Path(\'input.txt\').read_text() == \'prepare-fail\'; '
+            'print(\'controlled prerequisite failure\' if failed else \'prerequisite ready\'); '
+            'raise SystemExit(23 if failed else 0)", str(output / "prepare-order")], '
+            'root, output / "prepare.log")\n'
+            '    return {}\n'
             'def run(name, root, output, base, execute):\n'
+            '    assert (output.parent / "prepare-order").is_file(), "preparation must precede checks"\n'
+            '    print("FIXTURE_PROFILE_STARTED", flush=True)\n'
             '    policy_ref, candidate_ref = run.execution_refs\n'
             '    assert policy_ref and len(policy_ref) == 40\n'
             '    assert candidate_ref and len(candidate_ref) == 40\n'
@@ -567,6 +578,14 @@ def enforcement_acceptance(*, profile_compat_only=False):
         command("git", "push", "origin", "main", cwd=work)
         command("git", "checkout", "-b", "feature", cwd=work)
         command(sys.executable, helper, "install", "--signer", "fixture", "--key", key, cwd=work)
+
+        # A failed prerequisite blocks real transport before any profile starts.
+        (work / "input.txt").write_text("prepare-fail")
+        command("git", "add", ".", cwd=work)
+        command("git", "commit", "-m", "Fail the real prerequisite", cwd=work)
+        refusal = command("git", "push", "origin", "feature", cwd=work, success=False)
+        assert "controlled prerequisite failure" in refusal and "FIXTURE_PROFILE_STARTED" not in refusal, refusal
+        assert not command("git", "ls-remote", "origin", "refs/heads/feature", cwd=work)
 
         # Failed executable commands must block the actual Git transport.
         (work / "feature.txt").write_text("feature input\n")

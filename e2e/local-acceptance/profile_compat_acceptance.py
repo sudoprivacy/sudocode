@@ -1,5 +1,6 @@
 """Exercise selected execution compatibility through real Git hooks and SSH notes."""
 
+import ast
 import base64
 import json
 from pathlib import Path
@@ -61,6 +62,14 @@ def verify_profile_compatibility(directory, work, command):
             '    return [execute(',
         )
         future_source = future_source.replace("unused browser helper v1", "unused browser helper v2")
+        # Exercise the actual production factory: an unused timing helper must
+        # not invalidate ordinary execution. Reintroducing a module-level
+        # decorator makes these real SSH/hook reuse checks fail.
+        production = (Path(__file__).resolve().parents[2] / ".github/local-acceptance/checks.py").read_text(encoding="utf-8")
+        factory = next(node for node in ast.parse(production).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "stable_performance_power")
+        start = min([factory.lineno, *[node.lineno for node in factory.decorator_list]]) - 1
+        future_source += "\n" + "\n".join(production.splitlines()[start:factory.end_lineno]) + "\n"
         assert future_source != previous_source
         checks.write_text(future_source)
         rules = json.loads(policy.read_text())
@@ -96,6 +105,10 @@ def verify_profile_compatibility(directory, work, command):
             ("selected", checks, future_source.replace("Path('input.txt')", "Path('different-input.txt')")),
             ("common", checks, "SHARED_PROFILE_REVISION = 2\n" + future_source),
             ("nested-helper", checks, future_source.replace("return sys.executable", "return sys.executable + '.changed'")),
+            ("selected-timing-helper", checks, future_source.replace(
+                "    policy_ref, candidate_ref = run.execution_refs",
+                "    with stable_performance_power(output):\n        pass\n"
+                "    policy_ref, candidate_ref = run.execution_refs")),
             ("executor", helper, helper_source.replace('    import psutil\n',
                 '    import psutil\n    print("CHANGED_EXECUTOR")\n', 1)),
             ("image", image, image_source + "\nENV SCODE_CHANGED_IMAGE=1\n"),

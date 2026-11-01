@@ -263,6 +263,17 @@ profiles and Linux/Windows keep their existing execution. These environmental
 observations are supplementary diagnostics; completed signed profiles still
 require their actual commands and current protected recipe.
 
+The timing context is created only when a profile calls it. Unused timing helper
+bodies do not invalidate ordinary native execution. Metadata preflight stages only
+its protected history checker; unrelated native fixture pins do not affect its
+recipe. Both staging paths share the same path and SHA256 verification. Exact
+protected migration pairs retain earlier successful evidence for this context
+factory and staging refactor; changed selected commands, signatures, source or
+required checks still need their normal validation.
+For local Git/SSH debugging, `python e2e/local-acceptance/run.py --profile-compat-only`
+uses the real hook and signed-note workflow and explicitly reports its limited
+scope. The mandatory default still runs the complete enforcement matrix.
+
 Typing feel is measured by the paired rendering matrix: keypress-to-echo P95
 while reading history, waiting for the model and streaming, first visible output
 and cancel on prose, paste and resize on a short reply, and CPU and peak memory on

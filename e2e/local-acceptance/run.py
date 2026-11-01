@@ -5,6 +5,7 @@ Small executable fixture commands test the enforcement path. They are never
 reported as product PTY/browser/performance acceptance.
 """
 
+import argparse
 import base64
 import json
 import os
@@ -408,12 +409,13 @@ def plan_acceptance(directory):
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
 
 
-def enforcement_acceptance():
+def enforcement_acceptance(*, profile_compat_only=False):
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
-        scope_acceptance(directory)
-        performance_scope_acceptance(directory)
-        plan_acceptance(directory)
+        if not profile_compat_only:
+            scope_acceptance(directory)
+            performance_scope_acceptance(directory)
+            plan_acceptance(directory)
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)
@@ -431,6 +433,7 @@ def enforcement_acceptance():
         (work / ".github/workflows/local-acceptance-publish.yml").write_text("# Fixture trusted publisher\n")
         (work / ".github/local-acceptance/checks.py").write_text(
             'import sys\n'
+            'from contextlib import contextmanager\n'
             'def nested_python():\n'
             '    return sys.executable\n'
             'def shared_python():\n'
@@ -497,6 +500,10 @@ def enforcement_acceptance():
 
         from profile_compat_acceptance import verify_profile_compatibility
         verify_profile_compatibility(directory, work, command)
+        if profile_compat_only:
+            print("TARGETED_PROFILE_COMPATIBILITY_ONLY: actual Git/SSH/hooks checked; "
+                  "remaining enforcement and Cargo scopes were not run. This is not full acceptance.")
+            return
         from resume_acceptance import verify_resume
         verify_resume(directory, SOURCE, command)
         from host_lease_acceptance import verify_host_lease
@@ -628,8 +635,13 @@ def enforcement_acceptance():
 def main():
     sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
-    if sys.argv[1:] == ["--fixture-child"]:
-        enforcement_acceptance()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fixture-child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--profile-compat-only", action="store_true",
+                        help="Debug real profile Git/SSH compatibility only; not full acceptance")
+    args = parser.parse_args()
+    if args.fixture_child:
+        enforcement_acceptance(profile_compat_only=args.profile_compat_only)
         return
     with tempfile.TemporaryDirectory(prefix="scode-hook-parent-") as temporary:
         parent = Path(temporary)
@@ -645,7 +657,10 @@ def main():
                        "GIT_WORK_TREE": str(parent), "GIT_INDEX_FILE": str(parent / ".git/index"),
                        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
                        "GIT_CONFIG_VALUE_0": "Inherited hook identity"}
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--fixture-child"],
+        child = [sys.executable, str(Path(__file__).resolve()), "--fixture-child"]
+        if args.profile_compat_only:
+            child.append("--profile-compat-only")
+        result = subprocess.run(child,
                                 cwd=parent, env=environment)
         assert result.returncode == 0, "Acceptance failed with a real inherited hook environment"
         assert all((parent / ".git" / name).read_bytes() == data for name, data in before.items())

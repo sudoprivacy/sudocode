@@ -7,6 +7,7 @@ use common::TestEnv;
 use pty_expect::PtySession;
 use serde_json::{json, Value};
 use std::{
+    fmt::Write as _,
     fs,
     time::{Duration, Instant},
 };
@@ -101,7 +102,16 @@ fn start_with_env(env: &TestEnv, calls: &[Value], extra: &[(&str, &str)]) -> Pty
 }
 
 fn send_calls(env: &TestEnv, session: &mut PtySession, calls: &[Value]) {
-    let batch = serde_json::to_string(calls).unwrap();
+    // JSON escapes bypass the Windows console's surrogate key-event path;
+    // the tool still receives and emits the actual Unicode fixture text.
+    let encoded = serde_json::to_string(calls).unwrap();
+    let mut batch = String::with_capacity(encoded.len());
+    for unit in encoded.encode_utf16() {
+        match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii() => batch.push(char::from(byte)),
+            _ => write!(batch, "\\u{unit:04x}").unwrap(),
+        }
+    }
     let prompt = if env.is_mock() {
         format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}")
     } else {

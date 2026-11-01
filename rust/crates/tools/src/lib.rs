@@ -13943,6 +13943,13 @@ printf 'pwsh:%s' "$1"
             .arg(&script)
             .status()
             .expect("chmod");
+        // macOS checks a newly written executable on its first launch, and under
+        // load that check can outlast the tool timeout below. Launch it once
+        // here so the timed call measures the tool, not that check.
+        std::process::Command::new(&script)
+            .args(["-Command", "warm"])
+            .output()
+            .expect("warm the stub shell");
         let original_path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{}", dir.display(), original_path));
 

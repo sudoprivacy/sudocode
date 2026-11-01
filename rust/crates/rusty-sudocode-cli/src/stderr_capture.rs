@@ -59,6 +59,12 @@ mod platform {
             Ok(())
         }
 
+        /// Observe readiness without holding the redirect mutex while waiting.
+        #[inline]
+        pub fn poll_handle(&self) -> std::io::Result<OwnedFd> {
+            self.read_file.as_fd().try_clone_to_owned()
+        }
+
         /// Non-blocking drain: returns captured text or `None`.
         pub fn drain(&self) -> Option<Vec<u8>> {
             let mut buf = [0u8; 4096];

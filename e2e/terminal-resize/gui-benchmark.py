@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from benchmark import assess, digest
+from benchmark import assess, comparison_rounds, digest
 
 
 def validate_sample(data, policy):
@@ -49,6 +49,9 @@ def main():
         parser.error("choose an empty output directory to preserve previous evidence")
     args.output.mkdir(parents=True, exist_ok=True)
     policy = json.loads(Path(__file__).with_name("gui-policy.json").read_text())
+    rounds = comparison_rounds(policy, "browser")
+    print(f"Browser paired matrix: {rounds['calibration']} A/A pairs, {rounds['comparison']} A/B pairs, "
+          "plus two warm-ups. Per-run interactions and budgets are unchanged.", flush=True)
     report = {"version": 1, "status": "running", "policy": policy, "samples": [],
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
               "driver_sha256": digest(args.driver)}
@@ -87,8 +90,8 @@ def main():
     try:
         sample(args.base, "warm-base", False)
         sample(args.candidate, "warm-candidate", True)
-        for stage, rounds, target in [("aa", 5, controls), ("ab", 7, comparisons)]:
-            for index in range(rounds):
+        for stage, count, target in [("aa", rounds["calibration"], controls), ("ab", rounds["comparison"], comparisons)]:
+            for index in range(count):
                 pair = {}
                 for side in ["base", "candidate"] if index % 2 == 0 else ["candidate", "base"]:
                     candidate = stage == "ab" and side == "candidate"

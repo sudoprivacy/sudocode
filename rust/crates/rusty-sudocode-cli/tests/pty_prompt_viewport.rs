@@ -460,7 +460,7 @@ fn run_viewport_observer_with_exit(observer: &str, enabled: bool, verify_process
     )
     .arg(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/support")
+            .join("../rusty-sudocode-cli/tests/support")
             .join(observer),
     )
     .arg(manifest)

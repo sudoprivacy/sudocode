@@ -27,11 +27,18 @@ pub(super) struct TaskSummary {
 }
 
 impl TaskSummary {
+    /// Attention states keep priority over the remaining running work.
+    pub fn animates_status(self) -> bool {
+        self.unconfirmed == 0 && self.failed == 0 && self.running + self.stopping > 0
+    }
+
     pub fn status_lines(
         self,
         width: usize,
         completed_turn: Option<u32>,
+        frame: usize,
     ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
+        let colors = theme().activity_colors(false);
         let active = self.running + self.stopping;
         let (full, short, color) = if self.unconfirmed > 0 {
             (
@@ -52,13 +59,13 @@ impl TaskSummary {
             (
                 format!("Stopping {}…", quantity(self.stopping, "background task")),
                 format!("{} stopping", self.stopping),
-                theme().activity_colors(false).label,
+                colors.logo,
             )
         } else if self.running > 0 {
             (
                 format!("{} still running", quantity(self.running, "task")),
                 format!("{} running", self.running),
-                theme().activity_colors(false).label,
+                colors.logo,
             )
         } else {
             return None;
@@ -70,27 +77,40 @@ impl TaskSummary {
         } else {
             String::new()
         };
-        let mut full = format!("{full}{suffix}");
-        if let Some(turn) = completed_turn {
-            use std::fmt::Write as _;
-            let _ = write!(full, " · turn {turn} finished");
-        }
-        let style = crossterm::style::ContentStyle {
-            foreground_color: (crate::render::ColorSupport::detect()
-                != crate::render::ColorSupport::NoColor)
-                .then_some(color),
+        let full = format!("{full}{suffix}");
+        let metadata = completed_turn
+            .map(|turn| format!(" · turn {turn} finished"))
+            .unwrap_or_default();
+        let logo = self
+            .animates_status()
+            .then(|| crate::render::activity::spinner_frame(frame));
+        let logo_width = logo.map_or(0, |logo| display_width(logo) + 1);
+        let has_color =
+            crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
+        let style = |color| crossterm::style::ContentStyle {
+            foreground_color: has_color.then_some(color),
             ..Default::default()
         };
-        let render = |label: &str| {
+        let render = |label: &str, metadata: &str| {
             let mut text = StyledText::default();
-            text.push(style, &truncate_to_width(label, width));
+            if let Some(logo) = logo {
+                text.push(
+                    style(colors.logo),
+                    &truncate_to_width(&format!("{logo} "), width),
+                );
+            }
+            text.push(
+                style(color),
+                &truncate_to_width(label, width.saturating_sub(logo_width)),
+            );
+            text.push(style(colors.metadata), metadata);
             std::sync::Arc::new(text)
         };
-        let summary = render(&short);
-        let full = if display_width(&full) > width {
+        let summary = render(&short, "");
+        let full = if logo_width + display_width(&full) + display_width(&metadata) > width {
             summary.clone()
         } else {
-            render(&full)
+            render(&full, &metadata)
         };
         Some((full, summary))
     }

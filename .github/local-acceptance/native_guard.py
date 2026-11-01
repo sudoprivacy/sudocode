@@ -59,10 +59,19 @@ def main():
         sys.executable, str(SOURCE / "e2e/local-acceptance/cohost_acceptance.py"),
         "--output", str(output / "cohost"),
     ], SOURCE, output / "cohost.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/native_cache_acceptance.py"),
+        "--output", str(output / "native-cache"),
+    ], SOURCE, output / "native-cache.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/native_lint_acceptance.py"),
+        "--output", str(output / "native-lint"),
+    ], SOURCE, output / "native-lint.log"))
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,
     }, indent=2))
-    print(f"Native policy guard passed: signed recovery, nextest, release, grouping and example enforcement; {output}")
+    print(f"Native policy guard passed: signed recovery, nextest, release, grouping, examples, "
+          f"cohost, shared-cache binding and early lint enforcement; {output}")
 
 
 if __name__ == "__main__":

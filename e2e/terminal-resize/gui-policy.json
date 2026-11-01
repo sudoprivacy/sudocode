@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "rounds": { "calibration": 3, "comparison": 3 },
   "cases": {
     "browser": {
       "kind": "browser"

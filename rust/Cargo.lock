@@ -4753,7 +4753,7 @@ dependencies = [
 
 [[package]]
 name = "scode-benchmark-drivers"
-version = "0.2.37"
+version = "0.2.38"
 dependencies = [
  "mock-anthropic-service",
  "pty-expect",

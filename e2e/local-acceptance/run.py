@@ -205,7 +205,10 @@ def performance_scope_acceptance(directory):
         "rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
         "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/host.cjs"]]
     cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
-              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"])]
+              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"]),
+              ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", ["browser"]),
+              ("rust/crates/scode-benchmark-drivers/Cargo.toml", both),
+              ("rust/crates/scode-benchmark-drivers/future.rs", both)]
     for index, (path, expected) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path

@@ -79,6 +79,9 @@ def workload(name,root,output,base,command,target):
     binary=output/'scode-candidate'
     reused=checks.verified_candidate_release(Path('/inputs')) if name=='browser' else None
     shutil.copy2(reused or sys.executable,binary)
+    # This private probe is later deliberately corrupted by the non-root host.
+    # Docker owns the output on Linux; retain execution while allowing that edit.
+    binary.chmod(binary.stat().st_mode | 0o002)
     log=command(str(binary),'-c','print("STAGED_NATIVE_BINARY_EXECUTED")')
     assert log.read_text().strip()=='STAGED_NATIVE_BINARY_EXECUTED','staged native Linux executable cannot run'
     report=output/'measurements/report.json'

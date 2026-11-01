@@ -251,8 +251,10 @@ from pre-merge to the next daily run on main, where they are bisected between
 nightly heads, and retires painted-browser latency, Chromium resource budgets
 and the viewport cost benchmarks. This supersedes the per-PR rendering matrix
 and the browser and viewport comparisons of "Reduce repeated measurements
-(2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)";
-their per-scenario rounds and four workloads remain in the daily matrix.
+(2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)",
+and the browser comparison of "Remove unjudged full warm-up workloads
+(2026-11-01)"; their per-scenario rounds, four workloads and 60 judged
+observations without warm-ups remain in the daily matrix.
 With no cross-profile reuse, each build still keeps its invocation-owned image
 tag.
 These measurement drivers back no Feature inventory row, so the coverage
@@ -396,6 +398,23 @@ measurement inputs, so those native suites and their complementary CI hosts are
 omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
 changes retain their applicable native checks. Real Git planner and PR/push/queue
 fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
+<p><strong>Remove unjudged full warm-up workloads (2026-11-01).</strong>
+Rendering now runs 60 judged observations and browser comparison runs 12. This
+removes eight rendering and two browser runs that did not enter A/A or A/B
+statistics. The retained field spent 151.84 driver seconds on those ten runs;
+this is a recorded component cost, not a measured new lifecycle saving. Every
+sample starts fresh driver/Node/SUT and browser processes, so JIT state does not
+carry between samples. All judged pair counts, interactions, metrics and budgets
+remain. Colder file caches may affect the first calibration pair; unchanged A/A
+noise checks still refuse inconclusive fields. Exact stage/round/side inventories
+reject missing, extra and duplicate/mispaired observations. Headless and painted
+viewport comparisons retain 14 runs each, for 100 total instead of 110; all 96
+judged observations remain. Rendering needs fresh evidence. An exact protected
+pair preserves browser execution for an unchanged candidate head through the
+shared helper edit; candidate-owned browser code and the relative evaluator keep
+their existing ownership. Native recipes remain unchanged. Real Cargo/native
+regression retains all 144 judged calls of the former six-scenario control and
+its RSS refusal. Original historical reports remain preserved.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -868,7 +887,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Rendering matrix and browser smoke</td>
       <td>Daily paired matrix on main: typing latency, first output, cancel,
       paste, resize, CPU and peak memory against the fixed baseline; short keeps
-      5/7 paired rounds and the other scenarios 3/3. Pre-merge
+      5/7 paired rounds and the other scenarios 3/3, 60 judged observations
+      without warm-ups. Pre-merge
       painted-terminal smoke: clickable links, selection during streaming,
       viewport interaction and an idle terminal, when CLI or harness inputs change.</td>
       <td>No; their drivers back no Feature inventory row.</td>

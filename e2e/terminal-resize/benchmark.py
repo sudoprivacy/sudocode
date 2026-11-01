@@ -52,6 +52,14 @@ def judged_metrics(spec):
     return judged
 
 
+def paired_samples(rounds):
+    """Describe every judged observation, retaining alternating binary order."""
+    return [{"stage": stage, "round": number, "side": side}
+            for stage, key in [("aa", "calibration"), ("ab", "comparison")]
+            for number in range(rounds[key])
+            for side in (["base", "candidate"] if number % 2 == 0 else ["candidate", "base"])]
+
+
 def policy_plan(policy, profile):
     """Validate and describe the same workload before building or executing it."""
     assert policy["version"] == 1
@@ -62,10 +70,11 @@ def policy_plan(policy, profile):
     rounds = {case: comparison_rounds(policy, case) for case in cases}
     metrics = {case: sorted(judged_metrics(policy["cases"][case])) for case in cases}
     assert all(set(names) <= policy["metrics"].keys() for names in metrics.values())
-    samples = {case: 2 + 2 * (value["calibration"] + value["comparison"])
-               for case, value in rounds.items()}
+    pairs = {case: paired_samples(value) for case, value in rounds.items()}
+    samples = {case: len(value) for case, value in pairs.items()}
     return {"version": 1, "profile": profile, "cases": cases, "rounds": rounds,
-            "metrics": metrics, "samples": samples, "total_samples": sum(samples.values())}
+            "metrics": metrics, "pairs": pairs, "unjudged_warmups": 0,
+            "samples": samples, "total_samples": sum(samples.values())}
 
 
 def validate(sample, case, policy):
@@ -162,14 +171,14 @@ def main():
     if not all([args.driver, args.base, args.candidate, args.output]):
         parser.error("measurement requires --driver, --base, --candidate and --output")
     cases, rounds_by_case = plan["cases"], plan["rounds"]
-    print("Rendering paired rounds (plus two warm-ups per case): " + json.dumps(rounds_by_case), flush=True)
+    print("Rendering paired rounds, with no extra unjudged workloads: " + json.dumps(rounds_by_case), flush=True)
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output directory is not empty; choose a fresh path to preserve earlier evidence")
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"version": 1, "profile": args.profile, "preview": args.preview,
               "policy_sha256": digest(args.policy), "policy": policy,
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
-              "driver_sha256": digest(args.driver), "samples": [], "status": "running"}
+              "driver_sha256": digest(args.driver), "samples": [], "status": "running", "unjudged_warmups": 0}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name))
                                 for name in ["benchmark.py", "host.cjs", "run.cjs", "performance.cjs", "resources.cjs"]}
     controls, comparisons = {case: [] for case in cases}, {case: [] for case in cases}
@@ -207,10 +216,8 @@ def main():
         return value
 
     try:
-        # Finish compilation before invocation. Warm both binaries before collecting pairs.
-        for case in cases:
-            sample(args.base, case, "warm", 0, "base")
-            sample(args.candidate, case, "warm", 0, "candidate")
+        # Every observation starts a fresh driver/Node/SUT. Begin with the
+        # existing calibration pairs instead of repeating full unjudged runs.
         for stage, key, collection in [
             ("aa", "calibration", controls),
             ("ab", "comparison", comparisons),
@@ -231,6 +238,10 @@ def main():
                     report.update(status="noisy", failures=noise_failures, metrics=report["calibration"])
                     break
         if report["status"] == "running":
+            for case in cases:
+                observed = [{key: row[key] for key in ["stage", "round", "side"]}
+                            for row in report["samples"] if row["data"]["case"] == case]
+                assert observed == plan["pairs"][case], "missing/duplicate/unjudged paired observations"
             report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases, judged_metrics)
             report["status"] = "failed" if report["failures"] else "passed"
     except (AssertionError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:

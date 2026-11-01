@@ -280,9 +280,10 @@ and cancel on prose, paste and resize on a short reply, and CPU and peak memory 
 a 12 KB Markdown stream. It drives the actual release binary through a headless
 terminal, which isolates scode's own cost, and compares it with the fixed baseline
 in `e2e/terminal-resize/performance-policy.json`. Each scenario names the metrics
-it is judged on; the driver records them all. Each scenario keeps two warm-ups;
-the short reply keeps five A/A and seven alternating A/B pairs, the check that
-caught a real RSS regression, and the others use three and three. A failed, noisy
+it is judged on; the driver records them all. No scenario runs an unjudged
+warm-up; the short reply keeps five A/A and seven alternating A/B pairs, the check
+that caught a real RSS regression, and the others use three and three: 60 judged
+observations. A failed, noisy
 or invalid scenario stops the matrix. Drivers build in the binary-free
 `scode-benchmark-drivers` package, so measuring compiles no extra CLI binary. The matrix runs once a day on main
 (`.github/workflows/rendering-main.yml`), so a regression surfaces within a day
@@ -316,6 +317,17 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
+
+Default SSE response archives reuse at most one finished deflate state across
+captures. Active captures retain separate states; a finished state releases its
+file, session budget and attachment lease before reuse. Compression level, gzip
+bytes, CRC, per-session limits and context separation stay unchanged. Real PTY
+acceptance checks six consecutive distinct responses and earlier-file integrity.
+The conditional PR codec check also writes 42 actual files, including six
+concurrent captures, independently decodes them and compares quota failure
+prefixes with the previous flate2 encoder. It adds no live-provider coverage.
+These comparisons have no scheduled or manual cloud replacement.
+
 Documentation-only changes run preflight. Local
 preflight checks actual conflicts against its supplied base and fetched
 `origin/main` before product builds and benchmark leases. It prints the exact

@@ -784,6 +784,8 @@ script remains available for diagnosis and earns no additional coverage credit.<
       are verified before normal Cargo builds. The original authorization/restart
       case still runs against the current co-host outside the cache, with unchanged
       optimization profiles and assertions. Command logs and timings are retained.
+      Outer and nested Cargo calls share the real test package metadata to avoid
+      repeated native dependency rebuilds caused by inherited environment changes.
       Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
       <td>Coverage unchanged; cached compiler outputs never replace the real
       journey or authorize reuse of a passing result. Infrastructure fixtures add

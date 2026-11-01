@@ -65,9 +65,15 @@ def run(output):
     write("rust/plugin/Cargo.toml", '[package]\nname="nexus-search-plugin"\nversion="0.0.0"\nedition="2021"\n'
           '[lib]\ncrate-type=["cdylib"]\n')
     write("rust/plugin/src/lib.rs", '#[no_mangle] pub extern "C" fn fixture_value() -> u32 { 42 }\n')
+    write("rust/plugin/build.rs", 'fn main() {\n'
+          'assert_eq!(std::env::var("CARGO_PKG_NAME").unwrap(),"nexus-search-plugin");\n'
+          'for key in ["CARGO_MANIFEST_DIR","CARGO_PKG_NAME","CARGO_PKG_VERSION_MAJOR",'
+          '"CARGO_PKG_VERSION_MINOR","CARGO_PKG_VERSION_PATCH","CARGO_PKG_VERSION_PRE"] {\n'
+          'println!("cargo:rerun-if-env-changed={key}");\n}\n}\n')
     write("rust/cluster/Cargo.toml", '[package]\nname="nexus-cluster"\nversion="0.0.0"\nedition="2021"\n')
     write("rust/cluster/src/lib.rs", 'pub fn value() -> u32 { 42 }\n')
     write("rust/cluster/tests/user_runtime.rs", '#[test] fn ' + cache.CASE + '() {\n'
+          'assert!(std::process::Command::new(env!("CARGO")).args(["build","-p","nexus-search-plugin"]).status().unwrap().success());\n'
           'assert_eq!(nexus_cluster::value(),42);\n'
           'let output=std::process::Command::new(std::env::var("NEXUS_SEARCH_USER_RUNTIME_BINARY").unwrap()).output().unwrap();\n'
           'assert!(output.status.success());\n'
@@ -117,6 +123,9 @@ def run(output):
              for name in before}
     assert all(before[name][0] == after[name][0] and before[name][1] // 10**9 == after[name][1] // 10**9 for name in before)
     invoke("test", "warm-test")
+    invoke("build", "after-nested-build")
+    after_nested = json.loads((output / "after-nested-build/commands.json").read_text())
+    assert all(row["compiler_artifacts"] and all(item["fresh"] for item in row["compiler_artifacts"]) for row in after_nested), after_nested
     original = source / "rust/cluster/src/lib.rs"
     old, stamp = original.read_bytes(), original.stat()
     original.write_bytes(old.replace(b"42", b"43"))
@@ -147,6 +156,7 @@ def run(output):
               "same_mtime_source_tamper_refused": True, "untracked_source_refused": True,
               "wrong_current_runtime_refused": True, "codegen_change_changes_cache_key": True, "commands": records,
               "changed_pin_changes_key_and_refuses_old_checkout": True,
+              "nested_cargo_preserves_native_metadata_fingerprints": True,
               "scope": "Real Git/Cargo/tar/native infrastructure fixture; no production VFS journey coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"PASS: pinned-source archive, normal warm Cargo and current runtime refusal; {output}", flush=True)

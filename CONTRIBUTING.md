@@ -226,6 +226,11 @@ runs the original search authorization/restart case against the current
 checkout's co-host, outside this cache. The fixed driver and plugin retain their
 original optimization profiles. Cache hits never substitute a previous test
 result. The required command prints builds and stores timings and failure logs.
+Outer builds use the cluster package metadata that Cargo supplies to the test's
+nested plugin build. This prevents native dependencies such as ring from
+rebuilding solely because inherited Cargo package variables flip between unset
+and test values. Each build script still receives its own package metadata;
+compiler flags and optimization profiles remain unchanged.
 Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runtime
 refusal; they add no product journey credit. The actual cache footprint and
 cold/warm product timings must be measured before claiming a lifecycle saving.

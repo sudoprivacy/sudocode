@@ -29,8 +29,38 @@ def capture(*args, cwd):
 
 def environment(source):
     """Keep external fixture artifacts separate from the candidate's build graph."""
-    return {**os.environ, "CARGO_HOME": str(source / ".ci-cache/cargo"),
-            "CARGO_TARGET_DIR": str(source / ".ci-cache/target"), "CARGO_INCREMENTAL": "0"}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("CARGO_PKG_") and key not in {"CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_MANIFEST_LINKS"}}
+    env.update(CARGO_HOME=str(source / ".ci-cache/cargo"),
+               CARGO_TARGET_DIR=str(source / ".ci-cache/target"), CARGO_INCREMENTAL="0")
+    metadata = json.loads(subprocess.check_output([
+        "cargo", "metadata", "--locked", "--no-deps", "--format-version=1",
+        "--manifest-path", str(source / "Cargo.toml"),
+    ], cwd=source, env=env))
+    packages = [item for item in metadata["packages"] if item["name"] == "nexus-cluster"]
+    if len(packages) != 1:
+        raise RuntimeError("VFS compiler environment requires exactly one nexus-cluster package")
+    package = packages[0]
+    version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?(?:\+.+)?", package["version"])
+    if version is None:
+        raise RuntimeError("VFS cluster package version is not a supported Cargo semver")
+    # The original user_runtime case invokes Cargo again from inside its test
+    # process. ring records these inherited package variables as fingerprint
+    # inputs: unset outer values and Cargo's test values otherwise invalidate
+    # the same native dependency repeatedly. Match that real runtime metadata.
+    # Cargo still supplies each build script with its OWN package metadata.
+    env.update(CARGO_MANIFEST_DIR=str(Path(package["manifest_path"]).parent),
+               CARGO_MANIFEST_PATH=package["manifest_path"], CARGO_PKG_VERSION=package["version"],
+               CARGO_PKG_VERSION_MAJOR=version[1], CARGO_PKG_VERSION_MINOR=version[2],
+               CARGO_PKG_VERSION_PATCH=version[3], CARGO_PKG_VERSION_PRE=version[4] or "",
+               CARGO_PKG_NAME=package["name"], CARGO_PKG_AUTHORS=":".join(package["authors"]))
+    for name, field in [("DESCRIPTION", "description"), ("HOMEPAGE", "homepage"), ("REPOSITORY", "repository"),
+                        ("LICENSE", "license"), ("LICENSE_FILE", "license_file"), ("README", "readme"),
+                        ("RUST_VERSION", "rust_version")]:
+        env["CARGO_PKG_" + name] = package.get(field) or ""
+    if package.get("links"):
+        env["CARGO_MANIFEST_LINKS"] = package["links"]
+    return env
 
 
 def cache_key(root):

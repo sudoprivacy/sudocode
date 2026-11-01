@@ -226,6 +226,10 @@ runs the original search authorization/restart case against the current
 checkout's co-host, outside this cache. The fixed driver and plugin retain their
 original optimization profiles. Cache hits never substitute a previous test
 result. The required command prints builds and stores timings and failure logs.
+The main publisher alone performs explicit prewarming. Consumers invoke normal
+`cargo test`, which compiles its driver and runs the original case's plugin build.
+The required job refuses a redundant pre-test build directory; this avoids extra
+switches between the plugin's semantic and default-off dependency variants.
 Outer builds use the cluster package metadata that Cargo supplies to the test's
 nested plugin build. This prevents native dependencies such as ring from
 rebuilding solely because inherited Cargo package variables flip between unset
@@ -245,6 +249,19 @@ Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
 fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
+
+On macOS, the rendering profile and the release startup measurement require
+external AC power with low-power mode disabled. One shared native probe reads
+the power source and Foundation's active low-power mode before and after the
+timing window and once per second while it runs. Unknown settings, a detected
+power change or a failed probe refuse
+the profile, preserving `host-power.json` and any original command failure.
+Shorter changes between observations may escape this periodic check; the probe
+does not prove a fixed CPU clock or thermal state. It never changes system
+settings, budgets, sample counts or automatic retry policy. Functional-only
+profiles and Linux/Windows keep their existing execution. These environmental
+observations are supplementary diagnostics; completed signed profiles still
+require their actual commands and current protected recipe.
 
 Typing feel is measured by the paired rendering matrix: keypress-to-echo P95
 while reading history, waiting for the model and streaming, first visible output
@@ -323,6 +340,12 @@ Cargo; no provider coverage is inferred from deterministic fixture results.
 Lint now denies warnings before long native builds and PTY execution. Selected
 CLI-only changes lint those targets; a full workspace change lints all targets
 with the native mailbox feature graph. The queue additionally checks all features.
+The isolated-test selector compares the common ancestor with the candidate HEAD.
+Complementary CI can supply a newer main revision; files changed only on main do
+not widen that test-only PR into a full workspace run. Actual branch changes to
+production code, shared helpers, unknown inputs, deletions and renames retain the
+full scope. Real divergent Git branches drive selected and full Cargo/nextest
+commands and verify the native processes that actually ran.
 This moves ordinary source/test lint failures earlier without another full test run.
 The full native workspace opts into eight declarative integration wrappers for
 128 CLI targets, selecting 91 instead of 211 integration targets. The selector
@@ -548,6 +571,15 @@ Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
 records the actual compiler priorities. It runs once on a PR only when the lint
 workflow, fixture or scope selector changes; queue/main reuse its result.
+In the queue, independent failure-only callers stop unfinished jobs in the same
+Rust CI run after either Clippy or real daemon acceptance fails. Each caller
+waits only for its own failing dependency. The shared cancellation job has the
+Actions write permission and runs no checkout or candidate executable. Successful
+runs allocate no cancellation runner. The original failed step remains visible;
+the command prints how to inspect it and rerun failed work after repair. A live
+GitHub fixture exercises both failure directions and the uncancelled success
+path on a disposable branch. These are CI execution checks and add no product
+journey coverage.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions remain available through explicit acceptance;

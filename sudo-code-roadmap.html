@@ -242,16 +242,17 @@ and rendering matrix (84 min) were 70% of it, and a dependency-only change
 selected both. Typing feel is now judged by the rendering matrix once a day on
 main (<code>.github/workflows/rendering-main.yml</code>): keypress-to-echo P95
 while reading history, waiting and streaming, plus first output, cancel, paste
-and resize, with CPU and peak memory on the 12 KB Markdown stream. Four scenarios
-replace six; each names the metrics it is judged on. The pre-merge
+and resize, with CPU and peak memory on the 12 KB Markdown stream. Each of the
+four scenarios names the metrics it is judged on. The pre-merge
 <code>browser</code> profile is a functional smoke of clickable links, selection
 during streaming, viewport interaction and an idle terminal, selected by CLI
 and browser-harness inputs. This deliberately moves performance regressions
 from pre-merge to the next daily run on main, where they are bisected between
 nightly heads, and retires painted-browser latency, Chromium resource budgets
-and the viewport cost benchmarks, superseding the browser and viewport rounds
-and six-scenario matrix of "Reduce repeated measurements (2026-10-31)"; its
-per-scenario rounds remain.
+and the viewport cost benchmarks. This supersedes the per-PR rendering matrix
+and the browser and viewport comparisons of "Reduce repeated measurements
+(2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)";
+their per-scenario rounds and four workloads remain in the daily matrix.
 These measurement drivers back no Feature inventory row, so the coverage
 denominator is unchanged.</p>
 
@@ -366,6 +367,29 @@ is not established. Required output prints pair counts; both changed recipes
 need fresh execution. Real native infrastructure canaries verify counts,
 alternating sides, regression refusals and minimum-round refusals without claiming
 product performance coverage. Actual production latency savings remain unmeasured.</p>
+<p><strong>Consolidate mandatory rendering workloads (2026-11-01).</strong>
+The required matrix adopts the 12 KiB Markdown workload proposed in
+<a href="https://github.com/sudoprivacy/sudocode/pull/1196">#1196</a>.
+It replaces independent 8 KiB prose, 12 KiB prose and short Markdown scenarios;
+short prose, foreground tools and background tools stay separate. The four
+scenarios run 68 samples instead of 96. Every affected PR still runs mandatory
+local rendering acceptance. All remaining metric judgements, interaction counts,
+baselines and budgets remain. This reduces workload coverage: regressions
+specific to the removed plain-text sizes or short Markdown can escape the
+combined case. The benchmark CLI validates and describes the plan before builds;
+the host refuses changed policy hashes and incomplete passing sample counts.
+Real native fixtures retain the original 156-process control and reject relative
+RSS regression, missing CPU metrics and missing samples. Fixture verdicts do not
+establish equivalent product coverage or production speedup. Browser and both
+viewport comparisons keep 14 runs each: 110 repeated runs in total, down from
+138 after the earlier round reduction and 234 originally. Changes limited to
+<code>benchmark.py</code>, <code>gui-benchmark.py</code> and their two measurement
+policy JSON files retain both statistical profiles and the native benchmark
+builder guard. Ordinary workspace/resize suites do not execute these explicit
+measurement inputs, so those native suites and their complementary CI hosts are
+omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
+changes retain their applicable native checks. Real Git planner and PR/push/queue
+fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -495,6 +519,15 @@ priorities are retained. This infrastructure check runs once on changed lint
 workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
 after a failure without reducing passing-run product or lint coverage; its small
 fixture timings are not a production PR latency claim.</p>
+<p><strong>Stop independent Rust CI peers after a known failure
+(2026-11-01).</strong> Queue Clippy and daemon failures independently invoke one
+shared cancellation job. It stops only its own workflow run, preserves the
+original failed step and prints inspection and repair commands. The Actions
+write token stays in a job without a candidate checkout. Successful runs skip
+both callers and allocate no cancellation runner. A real GitHub fixture tests
+both failure directions and a clean run; its controlled timings do not establish
+production lifecycle savings. Passing-run coverage, budgets and assertions stay
+unchanged.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -515,6 +548,18 @@ profiles remain; no test target is deleted.</p>
 <p>Shared PTY helper inputs retain native terminal resize acceptance at both
 the CLI <code>tests/common</code> path and the shared test-crate path. This
 preserves the native guard when reducing repeated helper compilation.</p>
+<p><strong>Keep native test scope on the PR branch (2026-11-01).</strong>
+The selector compares the common ancestor with the candidate HEAD. A newer main
+revision supplied by complementary CI cannot add reverse differences from
+unrelated main commits to an isolated test PR. In the observed #1205 Windows run,
+a one-test-file PR was expanded by 12 main-only paths into 2,512 cases and
+1,026.641 seconds of workspace acceptance despite a complete dependency-cache
+hit. Real divergent Git branches now drive the selected Cargo test and a full
+nextest control, checking actual native process markers. Actual branch source,
+shared helpers, unknown inputs, deletion, renaming into production and coincident
+main/branch source edits retain full scope. Test assertions, ignored cases,
+complement platforms and budgets remain unchanged. These executor fixtures add
+no product journey coverage; cloud savings require a subsequent real run.</p>
 <p>Deterministic workspace cases use checksum-pinned nextest with four global
 workers, preserving test targets and ignored markers. It stops scheduling after
 the first failure, lets running cases clean up, disables retries and refuses an
@@ -705,6 +750,18 @@ Before/after performance comparisons use isolated build directories and retain
 binary and harness hashes. A failed A/A noise calibration is inconclusive,
 not a performance pass. These resource checks do not add feature-coverage credit.</p>
 
+<p>macOS rendering and release startup timing windows require external
+AC power with Foundation reporting low-power mode disabled. One shared native
+probe records the state before/after and once per second; unknown state, probe
+errors and observed power changes refuse the profile without changing system
+settings or rerunning it. Original failures and supplementary
+<code>host-power.json</code> observations remain. Changes shorter than the poll
+interval may escape detection; fixed clock/thermal conditions are not proved.
+Linux/Windows and functional-only profiles keep their existing execution.
+Native process fixtures cover admission, transient changes, probe failures and
+preservation of the original command error. They earn no product journey credit;
+performance budgets, workloads and sample counts remain unchanged.</p>
+
 <p>The mandatory local browser profile runs the viewport browser interaction once
 as a functional check. The viewport on/off cost script
 (<code>scripts/benchmark_prompt_viewport.py</code>) and the source-before/after
@@ -722,7 +779,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       either the raw stream or a VT100-rendered view. Catches what a
       real user sees: REPL UX, signals, tab completion, ANSI redraw,
       cursor placement. Native grouping preserves individual case processes,
-      assertions and ignored markers; it reduces linked executables.</td>
+      assertions and ignored markers; it reduces linked executables. Isolated
+      test edits compare the PR common ancestor with its HEAD, excluding
+      main-only changes from native target selection. Actual branch source,
+      shared/unknown inputs, deletion and renames retain full workspace scope.</td>
       <td><strong>Yes — this is the coverage measure.</strong></td>
       <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
     </tr>
@@ -735,7 +795,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       packages and exercise original targets for older candidates; no unused
       CLI binary is built with standalone drivers. Actual Cargo metadata protects
       unique opt-in targets and shared sources; real Git events require this
-      guard when the driver package changes.</td>
+      guard when the driver package changes. A real GitHub fixture also verifies
+      cancellation of independent Rust CI peers in both failure directions,
+      retention of the original failed step, and no cancellation runner on
+      successful runs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>
@@ -804,6 +867,9 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       optimization profiles and assertions. Command logs and timings are retained.
       Outer and nested Cargo calls share the real test package metadata to avoid
       repeated native dependency rebuilds caused by inherited environment changes.
+      Main alone explicitly prewarms compiler outputs. Consumers use normal
+      <code>cargo test</code> to compile and execute the original case; the required
+      command refuses an extra pre-test build that switches plugin variants.
       Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
       <td>Coverage unchanged; cached compiler outputs never replace the real
       journey or authorize reuse of a passing result. Infrastructure fixtures add

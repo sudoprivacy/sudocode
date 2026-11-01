@@ -52,6 +52,22 @@ def judged_metrics(spec):
     return judged
 
 
+def policy_plan(policy, profile):
+    """Validate and describe the same workload before building or executing it."""
+    assert policy["version"] == 1
+    assert policy["sampling"]["input"] == 60 and policy["sampling"]["resize"] >= 40
+    assert policy["sampling"]["resize"] % 2 == 0 and policy["sampling"]["cancel"] >= 20
+    cases = policy["profiles"][profile]
+    assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
+    rounds = {case: comparison_rounds(policy, case) for case in cases}
+    metrics = {case: sorted(judged_metrics(policy["cases"][case])) for case in cases}
+    assert all(set(names) <= policy["metrics"].keys() for names in metrics.values())
+    samples = {case: 2 + 2 * (value["calibration"] + value["comparison"])
+               for case, value in rounds.items()}
+    return {"version": 1, "profile": profile, "cases": cases, "rounds": rounds,
+            "metrics": metrics, "samples": samples, "total_samples": sum(samples.values())}
+
+
 def validate(sample, case, policy):
     assert sample["version"] == 1 and sample["status"] == "complete", "incomplete workload"
     assert sample["case"] == case and sample["spec"] == policy["cases"][case], "changed workload"
@@ -128,25 +144,25 @@ def assess(controls, comparisons, policy, cases, metrics_for_case=expected_metri
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--driver", type=Path, required=True, help="compiled pty_render_performance test")
-    parser.add_argument("--base", type=Path, required=True)
-    parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--driver", type=Path, help="compiled pty_render_performance test")
+    parser.add_argument("--base", type=Path)
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--describe-policy", action="store_true",
+                        help="validate and print the matrix without starting a workload")
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("performance-policy.json"))
     parser.add_argument("--profile", choices=["core", "stress"], default="core")
     parser.add_argument("--preview", choices=["0", "1"], default="0")
     args = parser.parse_args()
     policy = json.loads(args.policy.read_text())
-    assert policy["version"] == 1
-    assert policy["sampling"]["input"] == 60 and policy["sampling"]["resize"] >= 40
-    assert policy["sampling"]["resize"] % 2 == 0 and policy["sampling"]["cancel"] >= 20
-    cases = policy["profiles"][args.profile]
-    assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
-    rounds_by_case = {case: comparison_rounds(policy, case) for case in cases}
+    plan = {**policy_plan(policy, args.profile), "policy_sha256": digest(args.policy)}
+    if args.describe_policy:
+        print(json.dumps(plan))
+        return 0
+    if not all([args.driver, args.base, args.candidate, args.output]):
+        parser.error("measurement requires --driver, --base, --candidate and --output")
+    cases, rounds_by_case = plan["cases"], plan["rounds"]
     print("Rendering paired rounds (plus two warm-ups per case): " + json.dumps(rounds_by_case), flush=True)
-    for case in cases:
-        assert expected_metrics(policy["cases"][case]) <= policy["metrics"].keys()
-        judged_metrics(policy["cases"][case])
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output directory is not empty; choose a fresh path to preserve earlier evidence")
     args.output.mkdir(parents=True, exist_ok=True)

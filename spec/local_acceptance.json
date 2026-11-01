@@ -45,6 +45,10 @@
       "exclude": [
         "e2e/local-acceptance/**",
         "e2e/pr-history/run.py",
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui-policy.json",
         "**/README.md"
       ]
     },
@@ -69,6 +73,10 @@
         "rust/Cargo.lock"
       ],
       "exclude": [
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui-policy.json",
         "**/README.md"
       ]
     },

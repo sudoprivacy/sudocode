@@ -84,6 +84,13 @@ local; the signed Git note carries command and log digests bound to the exact
 commit and protected acceptance contract. See
 [mandatory local acceptance](../../CONTRIBUTING.md#mandatory-local-acceptance-and-complementary-ci).
 
+Edits limited to `benchmark.py`, `gui-smoke.py`, `performance-policy.json` and
+`gui-policy.json` skip the ordinary workspace/resize suites and their
+complementary CI hosts. The browser harness files select the browser smoke; the
+rendering policy is judged by the daily run on main. Rust and shared terminal-host
+changes retain their applicable native checks. The required planner prints the
+actual local and CI responsibilities from committed Git inputs.
+
 Native visual/resize contracts run on all three OSes through the author-local
 plus complementary-CI split. Budget and baseline
 changes require maintainer review and retain original failed/noisy evidence.

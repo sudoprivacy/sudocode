@@ -150,7 +150,9 @@ fn render_performance_workload() {
     let mode = env::var("SCODE_ACCEPTANCE_RENDER_MODE").unwrap();
     assert!(!(mode == "invalid" && case == "heavy"), "intentional native driver failure");
     let selected = if mode == "metadata" && case == "heavy" { "metadata" }
-        else if mode == "regressed" && side == "candidate" && case == "heavy" { "regressed" } else { "base" };
+        else if mode == "incomplete" && case == "heavy" { "incomplete" }
+        else if mode == "regressed" && side == "candidate" && ["long", "heavy"].contains(&case.as_str()) { "regressed" }
+        else { "base" };
     let bytes = fs::read(root.join(format!("{case}-{selected}.json"))).unwrap();
     fs::write(report, bytes).unwrap();
 }
@@ -170,8 +172,19 @@ fn render_performance_workload() {
     policy = json.loads((terminal / "performance-policy.json").read_text())
     cases = policy["profiles"]["core"]
     assert cases == ["short", "heavy", "foreground", "background"]
-    for case in cases:
-        spec = policy["cases"][case]
+    assert {key: value for key, value in policy["cases"]["heavy"].items() if key != "judge"} == {
+        "kind": "markdown", "bytes": 12288, "turns": 1}
+    legacy_specs = {"long": {"kind": "prose", "bytes": 8192, "turns": 1},
+                    "cap": {"kind": "prose", "bytes": 12288, "turns": 1},
+                    "markdown": {"kind": "markdown", "bytes": 2300, "turns": 1}}
+    # The six-scenario control judged every measured metric.
+    for spec in legacy_specs.values():
+        spec["judge"] = sorted(shared.expected_metrics(spec))
+    plan = {**shared.policy_plan(policy, "core"), "policy_sha256": shared.digest(terminal / "performance-policy.json")}
+    assert plan["total_samples"] == 68
+    assert plan["metrics"] == {case: sorted(shared.judged_metrics(policy["cases"][case])) for case in cases}
+    assert {"cpu_ms", "rss_peak_mib"} <= set(plan["metrics"]["heavy"]), "CPU and memory are judged on the heavy stream"
+    for case, spec in {**policy["cases"], **legacy_specs}.items():
         phases = ["stream", "history"] if spec["kind"] in {"foreground", "background"} else ["wait", "stream", "history"]
         value = {"version": 1, "status": "complete", "case": case, "spec": spec, "preview": "0",
                  "contracts": policy["contracts"], "turns": [{}] * spec["turns"],
@@ -187,10 +200,13 @@ fn render_performance_workload() {
         value["metrics"]["rss_peak_mib"] = 10
         value["metadata"] = {"observer": "different-native-fixture-process"}
         (fixture / f"{case}-metadata.json").write_text(json.dumps(value))
+        value["metadata"] = {"observer": "native-fixture-process"}
+        del value["metrics"]["cpu_ms"]
+        (fixture / f"{case}-incomplete.json").write_text(json.dumps(value))
     arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
                  "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
     results = {}
-    for mode in ["pass", "regressed", "invalid", "metadata", "command"]:
+    for mode in ["pass", "regressed", "incomplete", "missing-sample", "invalid", "metadata", "command"]:
         events = fixture / "events.txt"
         events.unlink(missing_ok=True)
         destination = output / mode
@@ -198,12 +214,19 @@ fn render_performance_workload() {
         def measured(*args):
             if mode == "command":
                 return command(sys.executable, "-c", "raise SystemExit(23)")
-            return command(*args, extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture),
-                                        "SCODE_ACCEPTANCE_RENDER_MODE": mode})
+            log = command(*args, extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture),
+                                       "SCODE_ACCEPTANCE_RENDER_MODE": mode})
+            if mode == "missing-sample":
+                child_path = Path(args[args.index("--output") + 1]) / "report.json"
+                child = json.loads(child_path.read_text())
+                if child["policy"]["profiles"]["core"] == ["heavy"]:
+                    child["samples"].pop()
+                    child_path.write_text(json.dumps(child))
+            return log
 
         failed = False
         try:
-            checks.rendering_cases(terminal, arguments, destination, measured)
+            checks.rendering_cases(terminal, arguments, destination, measured, plan)
         except RuntimeError:
             failed = True
         report = json.loads((destination / "report.json").read_text())
@@ -238,17 +261,25 @@ fn render_performance_workload() {
             assert len(trace) == 27, "Invalid second scenario did not stop immediately"
         elif mode == "metadata":
             assert len(trace) == 40 and "observer/platform changed" in report["failures"][0]
+        elif mode == "missing-sample":
+            assert len(trace) == 40 and "incomplete passing sample set" in report["failures"][0]
+        elif mode == "incomplete":
+            assert len(trace) == 27 and "missing/extra measurements" in report["failures"][0]
         else:
             assert not trace and "no completed scenario report" in report["failures"][0]
         results[mode] = {"status": report["status"], "native_invocations": len(trace),
                          "completed_cases": report["completed_cases"], "failures": report.get("failures", [])}
-    # Keep the old full-round whole-matrix control: 26 actual native calls per
-    # scenario. Constant fixture observations must reach the same RSS refusal;
-    # this does not claim equal statistical sensitivity with fewer real samples.
+    # Keep the old full-round whole-matrix control and its actual 156 native
+    # calls and original six scenarios. Constant fixture observations must reach
+    # the same relative RSS refusal. This does not establish equivalent product
+    # coverage for one heavy Markdown workload instead of three independent ones.
     events.unlink(missing_ok=True)
     failed = False
     legacy_policy = output / "legacy-policy.json"
-    legacy_policy.write_text(json.dumps(dict(policy, rounds={"calibration": 5, "comparison": 7}, case_rounds={})))
+    legacy_cases = ["short", "long", "cap", "markdown", "foreground", "background"]
+    legacy_policy.write_text(json.dumps(dict(policy, rounds={"calibration": 5, "comparison": 7}, case_rounds={},
+        cases={name: value for name, value in {**policy["cases"], **legacy_specs}.items() if name != "heavy"},
+        profiles={"core": legacy_cases, "stress": [*legacy_cases, "repeated"]})))
     try:
         command(*arguments, "--output", str(output / "previous-schedule"),
                 "--policy", str(legacy_policy), "--profile", "core",
@@ -257,11 +288,13 @@ fn render_performance_workload() {
         failed = True
     previous = json.loads((output / "previous-schedule/report.json").read_text())
     revised = json.loads((output / "regressed/report.json").read_text())
-    assert failed and previous["status"] == "failed" and len(events.read_text().splitlines()) == 26 * len(cases)
-    assert [row for row in previous["metrics"] if row["case"] in cases[:2]] == revised["metrics"]
-    assert previous["failures"] == revised["failures"], "The schedule changed the decision for identical observations"
-    results["previous_schedule"] = {"status": previous["status"], "native_invocations": 26 * len(cases),
-                                    "same_observed_verdict_and_rows": True}
+    assert failed and previous["status"] == "failed" and len(events.read_text().splitlines()) == 156
+    before_rss = next(row for row in previous["metrics"] if row["case"] == "long" and row["metric"] == "rss_peak_mib")
+    after_rss = next(row for row in revised["metrics"] if row["case"] == "heavy" and row["metric"] == "rss_peak_mib")
+    assert {k:v for k,v in before_rss.items() if k != "case"} == {k:v for k,v in after_rss.items() if k != "case"}
+    assert before_rss["result"] == after_rss["result"] == "regressed"
+    results["previous_schedule"] = {"status": previous["status"], "native_invocations": 156,
+                                    "same_fixture_rss_decision": True}
     # The real CLI must reject weakening the known short-case sentinel before
     # admitting any process. A changed assertion alone cannot grant a pass.
     events.unlink(missing_ok=True)
@@ -315,19 +348,31 @@ fn {name}() {{
 from pathlib import Path
 import subprocess
 p=argparse.ArgumentParser()
-for name in ["driver","base","candidate","output"]: p.add_argument("--"+name,required=True)
+for name in ["driver","base","candidate","output"]: p.add_argument("--"+name)
+p.add_argument("--describe-policy",action="store_true")
 p.add_argument("--policy");p.add_argument("--profile");a=p.parse_args()
+if a.describe_policy:
+    assert a.profile=="core" and json.loads(Path(a.policy).read_text())["fixture"] is True
+    print(json.dumps({"cases":["short"],"samples":{"short":26},"total_samples":26,
+        "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest()}))
+    raise SystemExit(0)
 assert subprocess.check_output([a.base]).decode().strip()=="baseline:normal"
 assert subprocess.check_output([a.candidate]).decode().strip()=="candidate:normal"
 case="rendering_driver_runs_release"
 assert a.profile=="core" and json.loads(Path(a.policy).read_text())=={"fixture":True,"rounds":{"calibration":5,"comparison":7},"profiles":{"core":["short"]}}
-subprocess.run([a.driver,"--ignored","--exact",case],env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
 out=Path(a.output);out.mkdir()
+samples=[]
+for index in range(26):
+    subprocess.run([a.driver,"--ignored","--exact",case],env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
+    name=f"fixture-{index:02d}.json"
+    data={"metadata":{"observer":"native-builder-fixture"}}
+    (out/name).write_text(json.dumps(data))
+    samples.append({"path":name,"data":data})
 (out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
 (out/"report.json").write_text(json.dumps({"policy":json.loads(Path(a.policy).read_text()),
-        "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest(),"status":"passed","samples":[],
-        **{name+"_sha256":hashlib.sha256(Path(getattr(a,name)).read_bytes()).hexdigest() for name in ["base","candidate","driver"]},
-        "harness_sha256":{"fixture":"browser-builder"}}))
+    "policy_sha256":hashlib.sha256(Path(a.policy).read_bytes()).hexdigest(),"status":"passed","samples":samples,
+    **{name+"_sha256":hashlib.sha256(Path(getattr(a,name)).read_bytes()).hexdigest() for name in ["base","candidate","driver"]},
+    "harness_sha256":{"fixture":"rendering-builder"}}))
 '''
     smoke = '''import argparse,hashlib,json,os
 from pathlib import Path
@@ -403,6 +448,27 @@ out=Path(a.output);out.mkdir()
     builds = [row["command"] for row in smoke_commands if "build" in row["command"]]
     assert len(builds) == 1 and builds[0][builds[0].index("--manifest-path") + 1].endswith("/browser/candidate/rust/Cargo.toml")
 
+    trusted_policy = inputs / "trusted/e2e/terminal-resize/performance-policy.json"
+    original_policy = trusted_policy.read_bytes()
+    trusted_policy.write_text('{"fixture":false}\n')
+    invalid_plan_output = output / "invalid-plan"
+    invalid_plan_output.mkdir()
+    before = len(commands)
+    try:
+        with checks.exclusive_benchmark_state(locks):
+            checks.benchmark_locked("rendering", inputs / "candidate", invalid_plan_output,
+                                    "fixture-base", command, output / "unused-target")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("An invalid rendering plan reached its builders")
+    finally:
+        trusted_policy.write_bytes(original_policy)
+    refused = commands[before:]
+    assert len(refused) == 1 and "--describe-policy" in refused[0]["command"] and refused[0]["exit_code"] != 0
+    assert not any("cargo" in row["command"] or "npm" in row["command"] for row in refused)
+    assert not (invalid_plan_output / "scode-candidate").exists()
+
     # The rendering matrix builds the fixed baseline and candidate in release.
     # The trusted CLI stays a compile_error tripwire: compiling the driver must
     # never build that unused binary.
@@ -472,6 +538,7 @@ out=Path(a.output);out.mkdir()
               "actual_source_driver_layout": layout,
               "legacy_candidate_supported": True, "broken_standalone_package_refused": True,
               "expected_broken_package_failure": {"record": str(refusal_path), **refusal},
+              "invalid_render_plan_refused_before_build": True,
               "rendering_matrix": matrix, "cache_migration": migration,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production rendering and browser smoke executors, Cargo and npm; distinct baseline/candidate and native integration drivers, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}

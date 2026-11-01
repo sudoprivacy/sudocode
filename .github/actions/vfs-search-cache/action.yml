@@ -20,8 +20,10 @@ runs:
         # A warm main publisher needs neither a download nor another build.
         # Queue consumers always restore and ask Cargo to build normally.
         lookup-only: ${{ inputs.publish == 'true' }}
-    - name: Verify pinned source and ask Cargo to build normally
-      if: inputs.publish != 'true' || steps.restore.outputs.cache-hit != 'true'
+    - name: Build compiler inputs for a missing main cache
+      # The consumer's ordinary cargo test verifies source and builds the driver.
+      # A separate build here switches plugin feature variants unnecessarily.
+      if: inputs.publish == 'true' && steps.restore.outputs.cache-hit != 'true'
       shell: bash
       run: python3 .github/scripts/vfs_search_cache.py build --output "${{ runner.temp }}/vfs-search-build"
     - name: Publish missing fixed compiler inputs from main

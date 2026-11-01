@@ -21,6 +21,26 @@ def load(name, path):
     return module
 
 
+def consumer_workflow_script():
+    """Execute the required job's actual shell interface in native fixtures."""
+    lines = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8").splitlines()
+    name = "      - name: Search authorization and restart under the confined co-host owner"
+    starts = [index for index, line in enumerate(lines) if line == name]
+    assert len(starts) == 1
+    start = starts[0] + 1
+    while lines[start] != "        run: |":
+        assert not lines[start].startswith("      - ")
+        start += 1
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    script = "set -eu\n" + "\n".join(body) + "\n"
+    assert "${{" not in script, "Use the real runner environment in the executable consumer interface"
+    return script
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     parent = load("fixture_environment", SOURCE / "e2e/local-acceptance/run.py")
@@ -122,7 +142,22 @@ def run(output):
     after = {name: (hashlib.sha256((source / name).read_bytes()).hexdigest(), (source / name).stat().st_mtime_ns)
              for name in before}
     assert all(before[name][0] == after[name][0] and before[name][1] // 10**9 == after[name][1] // 10**9 for name in before)
-    invoke("test", "warm-test")
+    # Run the actual CI shell block, rather than a parallel description of its
+    # guard. A producer directory must refuse before a test helper can start.
+    consumer = consumer_workflow_script()
+    helper_copy = root / ".github/scripts/vfs_search_cache.py"
+    helper_copy.parent.mkdir(parents=True)
+    shutil.copyfile(entry, helper_copy)
+    consumer_temp = output / "workflow-consumer"
+    command("bash", "-c", consumer,
+            extra={"RUNNER_TEMP": str(consumer_temp), "NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime)})
+    assert "1 passed; 0 failed" in (consumer_temp / "vfs-search-journey/00.log").read_text()
+    forbidden_temp = output / "workflow-redundant-build"
+    (forbidden_temp / "vfs-search-build").mkdir(parents=True)
+    refused = command("bash", "-c", consumer, success=False,
+                      extra={"RUNNER_TEMP": str(forbidden_temp), "NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime)})
+    assert "redundant pre-test build" in refused.read_text()
+    assert not (forbidden_temp / "vfs-search-journey").exists()
     invoke("build", "after-nested-build")
     after_nested = json.loads((output / "after-nested-build/commands.json").read_text())
     assert all(row["compiler_artifacts"] and all(item["fresh"] for item in row["compiler_artifacts"]) for row in after_nested), after_nested
@@ -157,6 +192,8 @@ def run(output):
               "wrong_current_runtime_refused": True, "codegen_change_changes_cache_key": True, "commands": records,
               "changed_pin_changes_key_and_refuses_old_checkout": True,
               "nested_cargo_preserves_native_metadata_fingerprints": True,
+              "actual_required_workflow_runs_the_native_case": True,
+              "actual_required_workflow_refuses_redundant_build_before_test": True,
               "scope": "Real Git/Cargo/tar/native infrastructure fixture; no production VFS journey coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"PASS: pinned-source archive, normal warm Cargo and current runtime refusal; {output}", flush=True)

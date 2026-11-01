@@ -528,7 +528,7 @@ def selected(policy, paths, *, base=None, head=None):
             and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
-                             else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
+                             else [p for p in paths if p not in opt_in] if name == "browser"
                              else paths)))]
 
 
@@ -588,9 +588,9 @@ def acceptance_plan(policy, names, author):
 def report_plan(plan):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
-    performance = [name for name in ["rendering", "browser"] if name in plan["local_checks"]]
-    lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
-                 "none selected; indirect performance effects outside the selected inputs are not measured."))
+    lines.append("Performance: the paired rendering matrix runs on main, not per PR. "
+                 + ("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]
+                    else "No browser terminal input changed."))
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")

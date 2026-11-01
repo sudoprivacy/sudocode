@@ -337,9 +337,10 @@ out=Path(a.output);out.mkdir()
     evidence.mkdir()
     locks = output / "locks"
     locks.mkdir()
+    before = len(commands)
     with checks.exclusive_benchmark_state(locks):
         checks.benchmark_locked("browser", inputs / "candidate", evidence, "fixture-base", command, output / "unused-target")
-    smoke_commands = list(commands)
+    smoke_commands = commands[before:]
     assert len(smoke_commands) == 5, "A browser smoke build/driver/run stage was omitted"
     drivers = [row["command"] for row in smoke_commands if "--no-run" in row["command"]]
     assert len(drivers) == 1 and {"pty_hyperlinks", "pty_prompt_viewport"} <= set(drivers[0]), drivers

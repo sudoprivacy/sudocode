@@ -317,6 +317,13 @@ replaces statistical product measurements. Missing or mismatched output fails
 without promoting old raw results into a signed profile.
 This removes a duplicate build even when another workline churns the cache. It
 does not shorten a successful measurement matrix or prove production speedup.
+Every Docker build keeps its own randomly named image tag alongside the exact
+image ID. Rendering and browser retain that same owned reference; another
+invocation building identical cached layers cannot replace it with a different
+BuildKit attestation/index. Contract and performance images use one tag allocator.
+The real Docker regression builds the same context in another invocation before
+launching the original browser and executing its retained native binary. Budgets,
+samples, source bindings and failure handling remain unchanged.
 Performance drivers compile in the binary-free `scode-benchmark-drivers` package,
 referencing the original CLI test sources. They launch only the explicitly
 selected, copied release through `SCODE_TEST_BIN`. Distinct, opt-in target names

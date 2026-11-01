@@ -295,6 +295,10 @@ Docker builds the candidate once in the dev profile and runs it in pinned
 Chromium/xterm: Markdown links stay clickable, native selection survives
 streaming, the prompt viewport scrolls and selects, and an idle terminal receives
 no output.
+Every Docker build keeps its own randomly named image tag alongside the exact
+image ID, so another invocation building identical cached layers cannot replace
+it with a different BuildKit attestation/index. Contract and performance images
+use one tag allocator.
 
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
 Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation

@@ -174,6 +174,16 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     try:
         first = launch("protected-policy", protected, {"policy": "main-policy", "sources": {
             "candidate": "candidate-policy", "baseline": "baseline", "trusted": "main-policy"}})
+        # Another author can build the exact same context while the rendering
+        # container is running. BuildKit exports a fresh attestation/index even
+        # on a cache hit; a shared tag could then name a different image.
+        independent = launch("same-context-independent-builder", protected,
+                             {"policy": "main-policy", "sources": {"candidate": "candidate-policy"}},
+                             profile="browser", parent=output / "independent-invocation")
+        assert independent["image_tag"] != first["image_tag"], "Independent builds share a mutable image reference"
+        owned = execute(["docker", "image", "inspect", "--format", "{{.Id}}", first["image_tag"]]).read_text().strip()
+        assert owned == first["image_id"], "Another same-context build replaced the original image reference"
+        print("PASS: another real same-context build keeps its own tag and preserves the original image", flush=True)
         second = launch("candidate-policy-ref-and-tag-change", candidate, {"policy": "candidate-policy", "sources": {
             "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}},
             swap_image=first["image_id"])
@@ -200,9 +210,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: wrong-policy container rejected by the real input probe", flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
-        result = {"status": "PASS", "cases": 4,
+        result = {"status": "PASS", "cases": 5,
             "production_main_and_dispatcher_layout": True, "browser_candidate_only": True,
-            "scope": "Real production container launcher, main/dispatcher, command executor, Git commits/archives and Docker builds/runs. The native workload replaces statistical benchmarks and writes only to the output supplied by the dispatcher. Protected/candidate policies and actual ref/tag moves retain frozen inputs. The browser smoke container receives only the candidate snapshot and executes a staged native Linux binary. A wrong-policy image is rejected inside a real container. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
+            "independent_same_context_build_keeps_its_own_tag": True,
+            "scope": "Real production container launcher, main/dispatcher, command executor, Git commits/archives and Docker builds/runs. The native workload replaces statistical benchmarks and writes only to the output supplied by the dispatcher. Protected/candidate policies and actual ref/tag moves retain frozen inputs. Each build owns a distinct image tag; another same-context build cannot replace it. The browser smoke container receives only the candidate snapshot and executes a staged native Linux binary. A wrong-policy image is rejected inside a real container. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
     finally:
         (output / "commands.json").write_text(json.dumps(commands, indent=2))
         # All tags and IDs below were produced by this UUID-labelled fixture.

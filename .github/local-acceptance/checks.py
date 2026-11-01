@@ -570,6 +570,13 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     return policy_root / ".github/local-acceptance/native_guard.py"
 
 
+def container_image_tag(repository, digest):
+    """Keep each build's image reference owned until its caller finishes using it."""
+    import uuid
+
+    return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
+
+
 def contract_container(root, output, command):
     """Keep the full decision matrix local without serial Windows Git startup costs."""
     try:
@@ -598,8 +605,9 @@ def contract_container(root, output, command):
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
     image_receipt = output / "guard-image-id.txt"
+    image_tag = container_image_tag("sudocode-contract-guard", inputs_hash.hexdigest())
     command("docker", "build", "--iidfile", str(image_receipt), "--tag",
-            "sudocode-contract-guard:" + inputs_hash.hexdigest()[:24], str(context),
+            image_tag, str(context),
             extra={"DOCKER_BUILDKIT": "1"})
     image = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
@@ -607,7 +615,7 @@ def contract_container(root, output, command):
     inputs = output / "guard-inputs"
     snapshot(root, candidate, inputs)
     (output / "guard-provenance.json").write_text(json.dumps({
-        "candidate": candidate, "policy": protected, "image_id": image,
+        "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
         "context_sha256": inputs_hash.hexdigest()}, indent=2))
     # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
@@ -669,8 +677,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
-    image = f"sudocode-local-acceptance:{context_hash.hexdigest()[:24]}"
     image_receipt = output / "image-id.txt"
+    image = container_image_tag("sudocode-local-acceptance", context_hash.hexdigest())
     command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
             extra={"DOCKER_BUILDKIT": "1"})
     image_id = image_receipt.read_text().strip()

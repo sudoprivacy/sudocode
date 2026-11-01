@@ -253,6 +253,8 @@ and the viewport cost benchmarks. This supersedes the per-PR rendering matrix
 and the browser and viewport comparisons of "Reduce repeated measurements
 (2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)";
 their per-scenario rounds and four workloads remain in the daily matrix.
+With no cross-profile reuse, each build still keeps its invocation-owned image
+tag.
 These measurement drivers back no Feature inventory row, so the coverage
 denominator is unchanged.</p>
 
@@ -309,7 +311,11 @@ GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
 workline's source into the shared cache between profiles, then verifies that
 browser uses the original normal release without another normal candidate build.
 Actual Docker acceptance checks frozen images, the invocation boundary and five
-tampered release identities/bytes. This removes duplicate compilation without
+tampered release identities/bytes. Each build also retains an invocation-owned
+image tag, allocated by the same helper for contract and performance images.
+An actual same-context build is interleaved before the original browser launch
+to verify that another BuildKit index does not replace the retained reference.
+This removes duplicate compilation without
 reducing measurement coverage; production elapsed savings remain unmeasured.
 The host and container entrypoint now share the canonical
 <code>container/&lt;profile&gt;</code> output layout. Docker regression uses the

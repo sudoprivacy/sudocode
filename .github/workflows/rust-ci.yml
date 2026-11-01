@@ -150,6 +150,7 @@ jobs:
         env:
           PIN_RESULT: ${{ needs.one-nexus-vfs-pin.result }}
           DAEMON_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
           COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
           CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
           A2A_RESULT: ${{ needs.a2a-live.result }}
@@ -157,12 +158,18 @@ jobs:
         run: |
           set -eu
           test "$PIN_RESULT" = success
-          case "$COHOST_REQUIRED" in
-            true|false) ;;
-            *) echo "::error::Missing co-host input decision"; exit 1 ;;
-          esac
-          if [ "$COHOST_REQUIRED" = true ] && [ "$DAEMON_REQUIRED" != true ]; then
-            echo "::error::Co-host acceptance requires the actual daemon job"
+          for selected in "$A2A_REQUIRED" "$COHOST_REQUIRED"; do
+            case "$selected" in
+              true|false) ;;
+              *) echo "::error::Missing CLI A2A or co-host input decision"; exit 1 ;;
+            esac
+          done
+          selected_daemon=false
+          if [ "$A2A_REQUIRED" = true ] || [ "$COHOST_REQUIRED" = true ]; then
+            selected_daemon=true
+          fi
+          if [ "$DAEMON_REQUIRED" != "$selected_daemon" ]; then
+            echo "::error::Daemon job selection must equal CLI A2A or co-host selection"
             exit 1
           fi
           require_result() {
@@ -199,17 +206,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Explain selected daemon acceptance
         env:
+          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
           COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
         run: |
-          case "$COHOST_REQUIRED" in
-            true)
-              echo "CLI daemon journeys and co-host/search acceptance are required by changed inputs."
-              ;;
-            false)
-              echo "CLI daemon journeys remain required. CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
-              ;;
-            *) echo "::error::Missing co-host input decision; no daemon build started"; exit 1 ;;
-          esac
+          for selected in "$A2A_REQUIRED" "$COHOST_REQUIRED"; do
+            case "$selected" in
+              true|false) ;;
+              *) echo "::error::Missing CLI A2A or co-host input decision; no daemon build started"; exit 1 ;;
+            esac
+          done
+          echo "DAEMON_ACCEPTANCE_SCOPE: CLI_A2A=$A2A_REQUIRED cohost_search=$COHOST_REQUIRED"
+          if [ "$A2A_REQUIRED" = false ]; then
+            echo "Fixed VFS cache helpers changed; independent CLI A2A journeys are skipped. Current co-host, search authorization/restart and driver feature checks remain required."
+          fi
+          if [ "$COHOST_REQUIRED" = false ]; then
+            echo "CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -234,15 +246,17 @@ jobs:
       # nexus-vfs's own CI. Adding runners would multiply the daemon-boot flake
       # surface for signal already covered.
       - name: Install native durability fault injector
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: |
           if ! command -v strace >/dev/null; then
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends strace
           fi
       - name: A2A round-trip against the pinned daemon
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run.sh
       - name: Retain native syscall fault evidence
-        if: failure()
+        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: native-session-durability
@@ -259,6 +273,7 @@ jobs:
       # cross-machine topology minus the network, which is the part nexus-vfs's
       # federation CI already owns.
       - name: Cross-node A2A against two nodes
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-cross-node.sh
 
       # The steps above prove DELIVERY and assert nothing about identity — and
@@ -273,6 +288,7 @@ jobs:
       # with the credential store bound, which is the only one the property can be
       # claimed in.
       - name: Auth-on A2A — the node decides who a message is from
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-auth-on.sh
 
       # Everything above is an agent that TALKS TO a daemon. This one runs
@@ -344,6 +360,7 @@ jobs:
       commit: ${{ steps.pin.outputs.commit }}
       live_required: ${{ steps.scope.outputs.live_required }}
       daemon_required: ${{ steps.scope.outputs.daemon_required }}
+      a2a_required: ${{ steps.scope.outputs.a2a_required }}
       cohost_required: ${{ steps.scope.outputs.cohost_required }}
       clippy_required: ${{ steps.scope.outputs.clippy_required }}
     defaults:

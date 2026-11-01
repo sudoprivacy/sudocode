@@ -46,9 +46,16 @@ def workflow_scope(output, environment):
                  "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
-    for name in ["A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
+    assert "      a2a_required: ${{ steps.scope.outputs.a2a_required }}" in lines
+    for name in ["Install native durability fault injector", "A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
                  "Auth-on A2A — the node decides who a message is from"]:
-        assert not any(line.startswith("        if:") for line in step(name)), name
+        assert [line for line in step(name) if line.startswith("        if:")] == [
+            "        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'"], name
+    assert "        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(
+        "Retain native syscall fault evidence")
+    for name in ["Explain selected daemon acceptance", "Require native daemon acceptance and zero workspace warnings"]:
+        assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(name)
+        assert "          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}" in step(name)
 
     def script(name):
         block = step(name)
@@ -66,20 +73,26 @@ def workflow_scope(output, environment):
     for name, source in scripts.items():
         (output / f"{name}.sh").write_text(source, encoding="utf-8")
     cases = [
-        ("explain", "true", "true", "success", True),
-        ("explain", "false", "true", "success", True),
-        ("explain", "", "true", "success", False),
-        ("required", "true", "true", "success", True),
-        ("required", "false", "true", "success", True),
-        ("required", "false", "false", "skipped", True),
-        ("required", "true", "false", "skipped", False),
-        ("required", "", "true", "success", False),
-        ("required", "false", "true", "skipped", False),
-        ("required", "true", "true", "failure", False),
+        ("explain", "true", "true", "true", "success", True),
+        ("explain", "false", "true", "true", "success", True),
+        ("explain", "true", "false", "true", "success", True),
+        ("explain", "", "true", "true", "success", False),
+        ("explain", "true", "", "true", "success", False),
+        ("required", "true", "true", "true", "success", True),
+        ("required", "false", "true", "true", "success", True),
+        ("required", "true", "false", "true", "success", True),
+        ("required", "false", "false", "false", "skipped", True),
+        ("required", "true", "false", "false", "skipped", False),
+        ("required", "false", "true", "false", "skipped", False),
+        ("required", "false", "false", "true", "success", False),
+        ("required", "", "true", "true", "success", False),
+        ("required", "true", "", "true", "success", False),
+        ("required", "false", "true", "true", "skipped", False),
+        ("required", "true", "true", "true", "failure", False),
     ]
     records = []
-    for index, (name, cohost, daemon, actual, succeeds) in enumerate(cases):
-        values = {"COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
+    for index, (name, a2a, cohost, daemon, actual, succeeds) in enumerate(cases):
+        values = {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
                   "PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped"}
         result = subprocess.run([bash, "-c", scripts[name]], env={**environment, **values}, capture_output=True)
         log = output / f"{index:02}.log"
@@ -91,7 +104,7 @@ def workflow_scope(output, environment):
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
     return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
-            "CLI_daemon_journeys_unconditional_inside_required_job": True}
+            "CLI_and_cohost_steps_bound_to_independent_selectors": True}
 
 
 def run(output):
@@ -242,6 +255,7 @@ def run(output):
                                    GITHUB_OUTPUT=str(result_path))
                 result = json.loads(command(sys.executable, repository / ".github/scripts/ci_input_scope.py"))
                 assert result["daemon_required"] == str(daemon).lower(), result
+                assert result["a2a_required"] == str(daemon).lower(), result
                 assert result["cohost_required"] == str(cohost_required).lower(), result
                 emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
                 assert emitted["cohost_required"] == result["cohost_required"], emitted

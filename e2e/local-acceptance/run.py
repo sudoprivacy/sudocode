@@ -56,7 +56,7 @@ def scope_acceptance(directory):
     command("git", "commit", "-m", "base", cwd=repository)
 
     def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False,
-                     gzip_codec=False, cohost=None, vfs_cache=False):
+                     gzip_codec=False, cohost=None, vfs_cache=False, a2a=None):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -67,6 +67,7 @@ def scope_acceptance(directory):
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert f"live_required={str(live).lower()}" in output.read_text()
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+        assert f"a2a_required={str(daemon if a2a is None else a2a).lower()}" in output.read_text()
         assert f"cohost_required={str(daemon if cohost is None else cohost).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
         assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
@@ -152,7 +153,24 @@ def scope_acceptance(directory):
                 "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
                 ".github/workflows/rust-ci.yml", ".github/scripts/vfs_search_cache.py",
                 ".github/actions/vfs-search-cache/action.yml", ".github/workflows/ci-vfs-search-cache.yml",
-                "e2e/local-acceptance/vfs_search_cache_acceptance.py"})
+                "e2e/local-acceptance/vfs_search_cache_acceptance.py"}, a2a=daemon and path not in {
+                ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/action.yml",
+                ".github/workflows/ci-vfs-search-cache.yml"})
+    # Mixed edits and moves must retain A2A: only a cache-only diff omits it.
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    (repository / ".github/scripts/vfs_search_cache.py").write_text("changed cache helper\n")
+    (repository / "rust/crates/api/src/lib.rs").write_text("changed product source\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "mixed cache and product inputs", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True,
+                 vfs_cache=True)
+    base = head
+    command("git", "mv", ".github/scripts/vfs_search_cache.py", "rust/crates/api/src/moved.py", cwd=repository)
+    command("git", "commit", "-m", "cache helper moves into product source", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True,
+                 vfs_cache=True)
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",

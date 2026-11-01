@@ -281,7 +281,11 @@ jobs:
         env:
           NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
         run: |
-          python3 .github/scripts/vfs_search_cache.py test --output "${{ runner.temp }}/vfs-search-journey"
+          if [ -e "$RUNNER_TEMP/vfs-search-build" ]; then
+            echo "::error::The VFS consumer ran a redundant pre-test build. Keep fixed-driver prewarming in the main publisher; normal cargo test builds and executes this case."
+            exit 1
+          fi
+          python3 .github/scripts/vfs_search_cache.py test --output "$RUNNER_TEMP/vfs-search-journey"
 
       - name: Retain fixed-driver build and current-runtime evidence
         if: always() && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'

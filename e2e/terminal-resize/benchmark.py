@@ -17,7 +17,10 @@ def quantile(values, fraction):
 
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"Measurement input must be a regular file, not a link: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def comparison_rounds(policy, case):

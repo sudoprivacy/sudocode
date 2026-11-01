@@ -298,12 +298,24 @@ No new scheduled/manual replacement or extra feature-coverage credit is added.
 
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
-Docker builds the candidate once in the dev profile and runs it in pinned
+Docker runs the candidate in pinned
 Chromium/xterm: Markdown links stay clickable, native selection survives
 streaming, the prompt viewport scrolls and selects, and an idle terminal receives
 no output. Measurement-only inputs (`benchmark.py`, `performance-policy.json`,
 `gui-smoke.py`, `gui-policy.json` and the retired `gui-benchmark.py`) do not select
 the native workspace or resize suites, which never execute them.
+When rendering precedes browser smoke in the same acceptance process, browser
+reuses its immutable Docker image and copied normal release. The key binds the
+output namespace, candidate, protected policy and image context; the consumer
+checks source/policy/image identity and binary SHA256 before npm or Cargo starts.
+Other candidates, policies and invocations use their own builds. Browser-only
+acceptance keeps its normal dev build. Native browser drivers and every existing
+interaction still run. When reused, GUI behaviour is checked on the production
+release configuration; that run no longer adds a separate dev-GUI variant.
+The GUI report records its expected and actual candidate digest, and the wrapper
+checks the candidate again after viewport interaction. Corrupt or mismatched
+promotions fail without starting a replacement build. Reports explicitly record
+whether rendering supplied the release; previous output folders cannot grant reuse.
 Every Docker build keeps its own randomly named image tag alongside the exact
 image ID, so another invocation building identical cached layers cannot replace
 it with a different BuildKit attestation/index. Contract and performance images

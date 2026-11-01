@@ -1043,10 +1043,11 @@ fn spawn_with_workspace(
     // sync REPL asks the clipboard at every bracketed paste. A path with no
     // image is an empty clipboard. Image paste tests name their own image in
     // `env_vars`, which overrides this.
+    let no_image = workspace.root.join("no-clipboard-image");
     write!(
         cmd,
         " SUDOCODE_CLIPBOARD_IMAGE={}",
-        shell_quote(&workspace.root.join("no-clipboard-image").display().to_string())
+        shell_quote(&no_image.display().to_string())
     )
     .unwrap();
     for (k, v) in env_vars {

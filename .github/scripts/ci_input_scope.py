@@ -134,7 +134,9 @@ def main():
                        ".github/workflows/rust-ci.yml"}
     benchmark = any(path in executor_inputs | {"e2e/local-acceptance/benchmark_targets_acceptance.py",
                                               "e2e/terminal-resize/benchmark.py",
-                                              "e2e/terminal-resize/performance-policy.json"}
+                                              "e2e/terminal-resize/performance-policy.json",
+                                              "e2e/terminal-resize/gui-benchmark.py",
+                                              "e2e/terminal-resize/gui-policy.json"}
                     or path.startswith("rust/crates/scode-benchmark-drivers/")
                     for path in paths)
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}

@@ -273,6 +273,15 @@ does not establish that those effects are impossible. A change known to affect
 the performance workloads must include the corresponding measurement scenario.
 Selected measurements keep their baselines, per-run assertions and budgets.
 Paired rounds are listed below.
+Changes limited to `e2e/terminal-resize/benchmark.py`, `gui-benchmark.py`,
+`performance-policy.json` and `gui-policy.json` select both statistical profiles
+and the native benchmark-builder regression in CI. These files feed the explicit
+statistical drivers; ordinary workspace and resize suites do not execute them.
+Those unrelated native suites and their complementary CI hosts are therefore
+omitted for these four inputs. Rust, shared terminal hosts, unknown external
+inputs and mixed changes keep their applicable native suites. Real committed-Git
+planner and PR/push/queue fixtures cover this boundary, including deletion and
+renaming a shared host into a measurement-only path.
 Rendering and browser use the same canonical candidate checkout and Cargo
 outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries

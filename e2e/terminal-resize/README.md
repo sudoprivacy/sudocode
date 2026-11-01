@@ -81,6 +81,13 @@ local; the signed Git note carries command and log digests bound to the exact
 commit and protected acceptance contract. See
 [mandatory local acceptance](../../CONTRIBUTING.md#mandatory-local-acceptance-and-complementary-ci).
 
+Edits limited to `benchmark.py`, `gui-benchmark.py`, `performance-policy.json`
+and `gui-policy.json` run both statistical profiles and the native builder
+regression. Ordinary workspace/resize suites and their complementary CI hosts
+are omitted for these measurement-only inputs. Rust and shared terminal-host
+changes retain their applicable native checks. The required planner prints the
+actual local and CI responsibilities from committed Git inputs.
+
 The old hosted rendering/browser jobs, periodic stress run and manual dispatch
 replacement are removed. Native visual/resize contracts still run on all three
 OSes through the author-local plus complementary-CI split. Budget and baseline

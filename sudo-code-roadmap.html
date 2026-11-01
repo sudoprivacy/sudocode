@@ -362,7 +362,14 @@ Real native fixtures retain the original 156-process control and reject relative
 RSS regression, missing CPU metrics and missing samples. Fixture verdicts do not
 establish equivalent product coverage or production speedup. Browser and both
 viewport comparisons keep 14 runs each: 110 repeated runs in total, down from
-138 after the earlier round reduction and 234 originally.</p>
+138 after the earlier round reduction and 234 originally. Changes limited to
+<code>benchmark.py</code>, <code>gui-benchmark.py</code> and their two measurement
+policy JSON files retain both statistical profiles and the native benchmark
+builder guard. Ordinary workspace/resize suites do not execute these explicit
+measurement inputs, so those native suites and their complementary CI hosts are
+omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
+changes retain their applicable native checks. Real Git planner and PR/push/queue
+fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -769,7 +776,11 @@ script remains available for diagnosis and earns no additional coverage credit.<
       of 234. Short retains its full 5/7 paired rounds; the other comparisons
       use 3/3. Lower repeat coverage can miss intermittent regressions and
       environmental noise. Budgets and per-run interactions stay intact;
-      the separate 60-sample painted interaction check remains.</td>
+      the separate 60-sample painted interaction check remains. Edits limited to
+      the two statistical entrypoints and their two policy JSON files retain
+      these measurements and the native builder guard while omitting unrelated
+      workspace/resize suites and their complementary CI hosts. Mixed Rust,
+      shared terminal-host and unknown inputs retain native checks.</td>
       <td>No additional journey credit from repeated measurements.</td>
       <td><code>benchmark.py</code> / <code>gui-benchmark.py</code> /
       <code>benchmark_prompt_viewport.py</code></td>

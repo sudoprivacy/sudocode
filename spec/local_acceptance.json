@@ -44,6 +44,7 @@
       ],
       "exclude": [
         "e2e/local-acceptance/**",
+        "e2e/nexus-a2a/**",
         "e2e/pr-history/run.py",
         "e2e/terminal-resize/benchmark.py",
         "e2e/terminal-resize/performance-policy.json",

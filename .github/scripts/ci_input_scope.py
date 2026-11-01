@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Select expensive provider/daemon acceptance from actual changed Git inputs."""
 
+import ast
+import builtins
 import fnmatch
 import json
 import os
@@ -8,12 +10,75 @@ from pathlib import Path
 import posixpath
 import re
 import subprocess
+import symtable
 
 from local_acceptance import POLICY, SIGNERS, production_build_paths
 
 
 def git(*args):
     return subprocess.check_output(["git", *args]).decode().strip()
+
+
+def mailbox_executor_changed(base, head):
+    """Bind the shared nextest helpers, retaining unknown module dependencies."""
+    path = ".github/local-acceptance/checks.py"
+    helpers = {"nextest_binary", "nextest_options"}
+
+    def identity(ref):
+        source = git("show", f"{ref}:{path}")
+        tree = ast.parse(source)
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        if not helpers <= functions.keys():
+            raise ValueError("Missing shared nextest helper")
+        pathlib_path = any(isinstance(node, ast.ImportFrom) and node.module == "pathlib"
+                           and any(alias.name == "Path" and not alias.asname for alias in node.names)
+                           for node in tree.body)
+        imports = set()
+        context = []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                if any(not isinstance(decorator, ast.Name) or decorator.id != "contextmanager"
+                       for decorator in node.decorator_list):
+                    raise ValueError("Unknown import-time decorator execution")
+                for default in [*node.args.defaults, *node.args.kw_defaults]:
+                    if default is not None:
+                        if (pathlib_path and isinstance(default, ast.Call)
+                                and isinstance(default.func, ast.Name) and default.func.id == "Path"
+                                and len(default.args) == 1 and not default.keywords
+                                and isinstance(default.args[0], ast.Constant) and isinstance(default.args[0].value, str)):
+                            continue
+                        ast.literal_eval(default)
+                if node.returns or any(argument.annotation for argument in
+                                       [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]):
+                    raise ValueError("Unknown import-time annotation execution")
+            if isinstance(node, ast.Import):
+                imports.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports.update(alias.asname or alias.name for alias in node.names)
+            if not isinstance(node, ast.FunctionDef) and not (
+                    isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                context.append(ast.dump(node, include_attributes=False))
+        symbols = symtable.symtable(source, path, "exec")
+        for name in helpers:
+            function = functions[name]
+            if function.decorator_list or function.args.defaults or function.args.kw_defaults:
+                raise ValueError("Unknown helper decorator/default execution")
+            table = symbols.lookup(name).get_namespace()
+            globals_used = set()
+            pending = [table]
+            while pending:
+                current = pending.pop()
+                globals_used.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
+                pending.extend(current.get_children())
+            if not globals_used <= imports | set(dir(builtins)):
+                raise ValueError("Shared helper now depends on another module global")
+        return context, {name: ast.dump(functions[name], include_attributes=False) for name in helpers}
+
+    try:
+        return identity(base) != identity(head)
+    except (ValueError, SyntaxError, TypeError, KeyError, AttributeError, subprocess.CalledProcessError):
+        return True
 
 
 def independent_cli_sources(*refs):
@@ -117,6 +182,9 @@ def main():
             daemon_paths = [path for path in normal_inputs
                             if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
                             and any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs)]
+            executor_path = ".github/local-acceptance/checks.py"
+            if executor_path in normal_inputs and mailbox_executor_changed(base, head):
+                daemon_paths.append(executor_path)
             # These helpers only prepare the separate fixed search driver.
             # They cannot change the CLI, its pinned daemon or A2A harness.
             a2a = any(path not in {".github/scripts/vfs_search_cache.py",
@@ -129,7 +197,7 @@ def main():
             cli_sources = [path for path in normal_inputs if path.startswith("rust/crates/rusty-sudocode-cli/src/")]
             if cli_sources and independent_cli_sources(base, head):
                 ignored_cohost_cli_sources = cli_sources
-            cohost = any(path not in ignored_cohost_cli_sources for path in daemon_paths)
+            cohost = any(path not in ignored_cohost_cli_sources and path != executor_path for path in daemon_paths)
             daemon = a2a or cohost
     executor_inputs = {".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile",
                        ".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",

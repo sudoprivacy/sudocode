@@ -222,6 +222,23 @@ retain those journeys, including mixed edits and moves across that boundary.
 The mandatory output reports both decisions and refuses a missing decision
 or a daemon-job selection that differs from their union. No case, assertion,
 lease wait or timeout is shortened within a selected journey.
+Seven independent runtime reader/stall/receiver-seat fault cases share the
+existing pinned nextest runner, with at most four workers and zero retries.
+Every case keeps its original real daemon, isolated agent, lease clock,
+assertions and deadlines. The batch checks its complete ignored-test inventory
+before execution and requires seven successful JUnit results afterward.
+The first failure cancels this independent batch, retaining failure and cancelled
+results; the outer harness still closes its private daemon. Daemon
+restart and SIGSTOP stay serial, outside the batch. Real native control
+processes verify overlap, failure and missing/non-ignored-case refusal;
+they add no product coverage. The same seven real daemon cases still run in CI.
+Changes confined to the A2A shell/Python harness leave the native Rust workspace
+unchanged. They skip its Cargo/PTY product reruns on the author and complementary
+hosts; the Linux queue still executes the changed real-daemon harness. Author
+acceptance still requires realistic testing of the changed behavior. The native
+workspace does not launch these scripts or provision their daemon. Mixed Rust
+changes and moves into Rust retain the full native workspace assignment. The
+required hook and CI plan print `A2A_HARNESS_SCOPE` when this reduction applies.
 
 The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
 outputs. An independent main-push publisher saves only a missing exact key;

@@ -1035,7 +1035,12 @@ def benchmark_locked(name, root, output, base, command, target):
     drivers = compiled_drivers(log, [driver])
     args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
             "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
-    rendering_cases(terminal, args, output / "measurements", command, render_plan)
+    expected_driver = hashlib.sha256(Path(drivers[driver]).read_bytes()).hexdigest()
+
+    def measured_command(*args):
+        return command(*args, extra={"SCODE_EXPECTED_DRIVER_SHA256": expected_driver})
+
+    rendering_cases(terminal, args, output / "measurements", measured_command, render_plan)
 
 
 def benchmark_driver_targets(source):
@@ -1065,14 +1070,18 @@ def browser_smoke(inputs, output, command):
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
-    work, targets = benchmark_storage("browser")
+    reused = verified_candidate_release(inputs)
+    work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
-    candidate = work / "candidate"
+    # Rendering has finished with this mutable checkout. Synchronize the actual
+    # candidate, then let normal Cargo dependency tracking validate every input.
+    candidate = work / ("trusted" if reused is not None else "candidate")
     replace_checkout(inputs / "candidate", candidate)
     terminal = candidate / "e2e/terminal-resize"
-    reused = verified_candidate_release(inputs)
     command("npm", "ci", "--prefix", str(terminal))
-    manifest, build = str(candidate / "rust/Cargo.toml"), str(targets / "candidate")
+    manifest = str(candidate / "rust/Cargo.toml")
+    build = str(targets / ("driver" if reused is not None else "candidate"))
+    profile = ["--release"] if reused is not None else []
     binary = output / "scode-candidate"
     # Copy before the drivers build: their dev features rebuild the shared graph.
     if reused is None:
@@ -1082,18 +1091,19 @@ def browser_smoke(inputs, output, command):
     else:
         shutil.copy2(reused, binary)
         print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
-              "only native test drivers compile here.", flush=True)
+              "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
     expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     package, prefix = benchmark_driver_targets(candidate)
     links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
-    log = command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
+    log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
                   "-p", package, "--test", links, "--test", viewport,
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
     command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
             "--candidate", str(binary), "--output", str(output / "smoke"),
-            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest})
-    command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
+            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
+                   "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
+    command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
             "-p", package, "--test", viewport, "viewport_browser_interaction",
             "--", "--ignored", "--exact", "--nocapture",
             extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})

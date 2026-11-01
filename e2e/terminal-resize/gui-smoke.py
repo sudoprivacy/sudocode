@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from benchmark import digest
+from benchmark import digest, verify_digest
 
 
 def main():
@@ -29,10 +29,11 @@ def main():
                SCODE_GUI_REPORT=str(sample.resolve()), SCODE_TERMINAL_LOG_DIR=str(args.output.resolve()),
                SCODE_GUI_EXPECT_LINKS="1")
     report = {"version": 1, "status": "running", "candidate_sha256": digest(args.candidate),
-              "driver_sha256": digest(args.driver), "expected_candidate_sha256": args.expected_candidate_sha256}
+              "driver_sha256": digest(args.driver), "expected_candidate_sha256": args.expected_candidate_sha256,
+              "expected_driver_sha256": os.environ.get("SCODE_EXPECTED_DRIVER_SHA256")}
     try:
-        assert (args.expected_candidate_sha256 is None
-                or args.expected_candidate_sha256 == report["candidate_sha256"]), "candidate differs from the validated build"
+        verify_digest(report["candidate_sha256"], args.expected_candidate_sha256, "candidate")
+        verify_digest(report["driver_sha256"], report["expected_driver_sha256"], "driver")
         with (args.output / "driver.log").open("w") as log:
             result = subprocess.run([str(args.driver.resolve()), "--ignored", "--exact",
                                      "browser_terminal_links_and_interaction", "--nocapture"],

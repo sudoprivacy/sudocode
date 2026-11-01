@@ -993,7 +993,14 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Fixed VFS search compiler reuse</td>
       <td>The Linux queue restores a pinned checkout with isolated Cargo inputs
       and outputs; only main pushes publish missing exact keys. Compiler, runner
-      image, recipe, paths and codegen settings bind the key. Tracked source bytes
+      image, recipe, paths and codegen settings bind the key.
+      A fallback may share dependencies across source pins only under the same
+      compiler context. The old Git tree and saved identity are verified before
+      fetching the required pin with hooks disabled. Old workspace outputs are
+      cleaned, and the new tree is verified before normal compilation. An exact
+      current-pin legacy key is accepted for format migration. A missing main key
+      downloads compatible inputs before prewarming; queue consumers never publish.
+      Refusal messages name the actual restored cache key for recovery. Source bytes
       are verified before normal Cargo builds. The original authorization/restart
       case still runs against the current co-host outside the cache, with unchanged
       optimization profiles and assertions. Command logs and timings are retained.

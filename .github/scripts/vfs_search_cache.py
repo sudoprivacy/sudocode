@@ -7,11 +7,15 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 
 
 UPSTREAM = "https://github.com/nexi-lab/nexus-vfs"
 CASE = "signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes"
+# The previous producer used these same compiler commands and environment.
+# Only its exact current-pin key is eligible for the one-time format migration.
+LEGACY_RECIPE = "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879"
 
 
 def pin(root):
@@ -63,7 +67,7 @@ def environment(source):
     return env
 
 
-def cache_key(root):
+def compiler_inputs(root):
     source = root / ".native-vfs"
     # Include all explicit codegen overrides, not the candidate revision: the
     # driver source is pinned, whereas its runtime is supplied anew by the job.
@@ -76,14 +80,32 @@ def cache_key(root):
                               if key in names or key.startswith(prefixes)},
               "cargo_configs": {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                                 for path in (root / ".cargo/config.toml", root / ".cargo/config") if path.is_file()}}
-    digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
-    return "vfs-search-v1-" + digest, inputs
+    return inputs
+
+
+def compiler_context(inputs):
+    """Share only dependency artifacts across source pins, never test outcomes."""
+    return hashlib.sha256(json.dumps({name: value for name, value in inputs.items() if name != "pin"},
+                                    sort_keys=True).encode()).hexdigest()
+
+
+def cache_key(root):
+    inputs = compiler_inputs(root)
+    return f"vfs-search-v2-{compiler_context(inputs)}-{inputs['pin']}", inputs
+
+
+def restore_keys(inputs):
+    legacy = {**inputs, "recipe": LEGACY_RECIPE}
+    exact_legacy = hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
+    return ["vfs-search-v1-" + exact_legacy, "vfs-search-v2-" + compiler_context(inputs) + "-"]
 
 
 def verify(source, revision):
     """Check tracked bytes, including same-mtime edits, before using a restore."""
     if source.is_symlink() or not (source / ".git").is_dir() or (source / ".git").is_symlink():
         raise RuntimeError("VFS cache must contain its own checkout, without linked source or Git roots")
+    if (source / ".git/config").is_symlink():
+        raise RuntimeError("VFS cache Git configuration must be a regular file")
     # Cached Git configuration is never an authority for credentials or hooks.
     (source / ".git/config").write_text("[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\n")
     if capture("git", "rev-parse", "HEAD", cwd=source).decode().strip() != revision:
@@ -124,6 +146,46 @@ def verify(source, revision):
     return len(tracked)
 
 
+def verify_identity(root, source, current, revision):
+    """Only an exact-pin legacy restore can omit the new compiler binding."""
+    identity = source / ".ci-cache/source-identity.json"
+    if identity.is_symlink():
+        raise RuntimeError("VFS compiler-input identity must be a regular file")
+    if not identity.exists():
+        if current != revision:
+            raise RuntimeError("A different VFS pin requires a bound compiler-input identity")
+        return identity
+    if not identity.is_file():
+        raise RuntimeError("VFS compiler-input identity must be a regular file")
+    previous = json.loads(identity.read_text())
+    expected = compiler_context(compiler_inputs(root))
+    if (previous.get("version") != 2 or previous.get("compiler_context") != expected
+            or previous.get("pin") != current):
+        raise RuntimeError("Restored VFS compiler context differs; no cached source was executed")
+    return identity
+
+
+def update_pin(source, current, revision):
+    """Keep external dependencies while rebuilding the fixed workspace at its new pin."""
+    verify(source, current)
+    # Never run hooks supplied by the restored checkout. The new source still
+    # comes from the configured public upstream and must match its exact pin.
+    with tempfile.TemporaryDirectory(prefix="vfs-cache-hooks-") as hooks:
+        git = ["git", "-C", str(source), "-c", f"core.hooksPath={hooks}"]
+        subprocess.run([*git, "fetch", "--depth=1", UPSTREAM, revision], check=True)
+        if capture("git", "rev-parse", "FETCH_HEAD", cwd=source).decode().strip() != revision:
+            raise RuntimeError("Fetched VFS source differs from the required revision")
+        # A restored timestamp can be newer than this host's clock. Discard all
+        # old workspace outputs, while retaining registry/Git dependency outputs.
+        subprocess.run(["cargo", "clean", "--workspace", "--locked", "--offline",
+                        "--manifest-path", str(source / "Cargo.toml")],
+                       cwd=source, env=environment(source), check=True)
+        subprocess.run([*git, "checkout", "--detach", "FETCH_HEAD"], check=True)
+    verify(source, revision)
+    print(f"VFS source pin updated {current} -> {revision}; old workspace artifacts removed. "
+          "Normal Cargo rebuilds changed inputs and the current-runtime test still runs.", flush=True)
+
+
 def prepare(root):
     source = root / ".native-vfs"
     revision = pin(root)
@@ -133,13 +195,25 @@ def prepare(root):
         subprocess.run(["git", "-C", str(source), "fetch", "--depth=1", UPSTREAM, revision], check=True)
         subprocess.run(["git", "-C", str(source), "-c", "core.autocrlf=false", "checkout", "--detach", "FETCH_HEAD"], check=True)
     try:
+        current = capture("git", "rev-parse", "HEAD", cwd=source).decode().strip()
+        identity = verify_identity(root, source, current, revision)
+        if current != revision:
+            update_pin(source, current, revision)
         count = verify(source, revision)
-    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        if identity.is_symlink():
+            raise RuntimeError("VFS compiler-input identity must be a regular file")
+        identity.parent.mkdir(parents=True, exist_ok=True)
+        identity.write_text(json.dumps({"version": 2, "pin": revision,
+            "compiler_context": compiler_context(compiler_inputs(root))}, indent=2) + "\n")
+    except (RuntimeError, OSError, ValueError, TypeError, AttributeError, subprocess.CalledProcessError) as error:
         recovery = "Preserve the failed evidence and reacquire the private .native-vfs checkout."
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            key, _ = cache_key(root)
-            recovery = (f"Remove only cache key {key} from refs/heads/main with `gh cache delete {key} "
-                        "--ref refs/heads/main --repo sudoprivacy/sudocode`, then rerun this failed job.")
+            matched = os.environ.get("SCODE_VFS_RESTORED_CACHE_KEY", "")
+            if re.fullmatch(r"vfs-search-v[12]-[a-f0-9]{64}(?:-[a-f0-9]{40})?", matched):
+                recovery = (f"Remove only restored cache key {matched} from refs/heads/main with `gh cache delete {matched} "
+                            "--ref refs/heads/main --repo sudoprivacy/sudocode`, then rerun this failed job.")
+            else:
+                recovery = "No restored cache key was identified. " + recovery
         raise RuntimeError(f"VFS cache refused before Cargo: {error}. {recovery}") from error
     print(f"VFS compiler cache: verified {count} tracked files at {revision}. "
           "Normal Cargo builds and the current co-host journey remain required.", flush=True)
@@ -200,10 +274,13 @@ def main():
     root = args.root.resolve()
     if args.command == "key":
         key, inputs = cache_key(root)
-        print(json.dumps({"key": key, "inputs": inputs}), flush=True)
+        fallbacks = restore_keys(inputs)
+        print(json.dumps({"key": key, "inputs": inputs, "restore_keys": fallbacks}), flush=True)
         if os.environ.get("GITHUB_OUTPUT"):
             with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
                 stream.write(f"key={key}\n")
+                stream.write("restore_keys<<VFS_CACHE_RESTORE_KEYS\n" + "\n".join(fallbacks)
+                             + "\nVFS_CACHE_RESTORE_KEYS\n")
     else:
         if args.output is None:
             parser.error("build/test requires --output for retained command evidence")

@@ -264,6 +264,13 @@ immutable image and measured normal release, bound to candidate, protected
 policy, image context, output namespace and binary hash. All functional GUI and
 viewport steps still run. Browser-only invocations retain the dev build;
 paired runs check the release GUI instead of an additional dev-GUI variant.
+Paired browser drivers share rendering's leased release Cargo cache. Its mutable
+checkout is synchronized to the exact candidate before normal Cargo builds;
+changed driver/dependency inputs rebuild. No prior test outcome substitutes for
+the current interactions. Standalone browser drivers keep their dev profile and
+cache. This changes the paired test driver's optimization profile, with product
+configuration, steps and assertions unchanged. Both native harnesses verify
+the expected driver hash before execution.
 Invalid promotions fail before npm/Cargo/GUI, with no silent replacement build.
 Every independent build keeps its own invocation-owned image tag; old evidence
 directories cannot grant reuse. The report records expected/actual binary digests
@@ -957,7 +964,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       painted-terminal smoke: clickable links, selection during streaming,
       viewport interaction and an idle terminal, when CLI or harness inputs change.
       Paired runs reuse the measured normal release and immutable image; browser-only
-      runs retain the dev build. Both native browser drivers still execute.</td>
+      runs retain the dev build. Paired drivers share the leased release Cargo cache,
+      synchronized to the candidate and rebuilt normally; standalone drivers retain
+      the dev profile/cache. Both drivers still execute, and native harnesses refuse
+      an unexpected driver digest before execution.</td>
       <td>No; their drivers back no Feature inventory row.</td>
       <td><code>rendering</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>

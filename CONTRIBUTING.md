@@ -312,6 +312,13 @@ Other candidates, policies and invocations use their own builds. Browser-only
 acceptance keeps its normal dev build. Native browser drivers and every existing
 interaction still run. When reused, GUI behaviour is checked on the production
 release configuration; that run no longer adds a separate dev-GUI variant.
+Paired browser drivers use the rendering driver's leased release Cargo cache.
+Before Cargo runs, its mutable checkout is synchronized to the exact candidate,
+replacing the earlier policy snapshot. Normal Cargo builds both browser drivers
+and rebuilds changed inputs; no earlier test result is reused. Standalone browser
+drivers keep their dev profile and separate cache. This changes only the paired
+test driver's optimization profile; the product, steps and assertions stay fixed.
+Both measurement harnesses verify the expected driver digest before execution.
 The GUI report records its expected and actual candidate digest, and the wrapper
 checks the candidate again after viewport interaction. Corrupt or mismatched
 promotions fail without starting a replacement build. Reports explicitly record

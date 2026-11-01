@@ -354,6 +354,7 @@ fn {name}() {{
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "candidate:normal");
     assert_eq!(shared_support::flavor(), "dev");
+    assert_eq!("{origin}", "{expected}", "driver must use its actual candidate/policy source");
 }}
 '''
     measurement = '''import argparse,hashlib,json,os
@@ -396,6 +397,7 @@ for name in ["driver","candidate","output"]: p.add_argument("--"+name,required=T
 a=p.parse_args()
 assert subprocess.check_output([a.candidate]).decode().strip()=="candidate:normal"
 assert os.environ["SCODE_EXPECTED_CANDIDATE_SHA256"]==hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()
+assert os.environ["SCODE_EXPECTED_DRIVER_SHA256"]==hashlib.sha256(Path(a.driver).read_bytes()).hexdigest()
 subprocess.run([a.driver,"--ignored","--exact","browser_terminal_links_and_interaction"],
     env={**os.environ,"SCODE_TEST_BIN":a.candidate},check=True)
 out=Path(a.output);out.mkdir()
@@ -420,9 +422,9 @@ out=Path(a.output);out.mkdir()
                 '[dev-dependencies]\nshared-support={path="../../support",features=["normal","dev"]}\n'
                 + ''.join(f'[[test]]\nname="benchmark_{name}"\npath="../../tests/pty_{name}.rs"\ntest=false\n'
                           for name in ["hyperlinks", "prompt_viewport", "render_performance"]),
-            "rust/tests/pty_hyperlinks.rs": driver.format(name="browser_terminal_links_and_interaction"),
-            "rust/tests/pty_prompt_viewport.rs": driver.format(name="viewport_browser_interaction"),
-            "rust/tests/pty_render_performance.rs": driver.format(name="rendering_driver_runs_release"),
+            "rust/tests/pty_hyperlinks.rs": driver.format(name="browser_terminal_links_and_interaction", origin=label, expected="candidate"),
+            "rust/tests/pty_prompt_viewport.rs": driver.format(name="viewport_browser_interaction", origin=label, expected="candidate"),
+            "rust/tests/pty_render_performance.rs": driver.format(name="rendering_driver_runs_release", origin=label, expected="trusted"),
             "e2e/terminal-resize/package.json": '{"name":"browser-builder-acceptance","version":"1.0.0"}\n',
             "e2e/terminal-resize/package-lock.json": '{"name":"browser-builder-acceptance","version":"1.0.0",'
                 '"lockfileVersion":3,"packages":{"":{"name":"browser-builder-acceptance","version":"1.0.0"}}}\n',
@@ -500,6 +502,7 @@ out=Path(a.output);out.mkdir()
     for index, row in enumerate(commands[before:], before):
         if "--message-format=json-render-diagnostics" in row["command"]:
             log = output / "commands" / f"{index:03d}.log"
+            render_driver_log = log
             records = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
             assert not any(item.get("target", {}).get("name") == "scode" for item in records), log
     target_trees = sorted({row["command"][row["command"].index("--target-dir") + 1]
@@ -526,6 +529,45 @@ out=Path(a.output);out.mkdir()
     assert subprocess.check_output([str(paired / "scode-candidate"), "--build-profile"]).decode().strip() == "release"
     assert (paired / "scode-candidate").read_bytes() == (stage / "scode-candidate").read_bytes()
     assert json.loads((paired / "smoke/fixture.json").read_text())["candidate_sha256"] == rendering["candidate_sha256"]
+    driver_build = reused_commands[1]["command"]
+    assert "--release" in driver_build and "--release" in reused_commands[3]["command"]
+    assert driver_build[driver_build.index("--target-dir") + 1] == str(output / "state/target/rendering/driver")
+    paired_driver_log = output / "commands" / f"{before + 1:03d}.log"
+    artifacts = [json.loads(line) for line in paired_driver_log.read_text().splitlines() if line.startswith("{")]
+    support = [row for row in artifacts if row.get("reason") == "compiler-artifact" and row["target"]["name"] == "shared_support"]
+    assert len(support) == 1 and support[0]["fresh"], "Browser repeated the unchanged rendering driver dependency build"
+    assert not any(row.get("target", {}).get("name") == "scode" for row in artifacts)
+    # A changed candidate driver must reach Cargo instead of executing an older binary.
+    source_driver = inputs / "candidate/rust/tests/pty_hyperlinks.rs"
+    driver_source = source_driver.read_bytes()
+    source_driver.write_bytes(driver_source + b'\ncompile_error!("changed candidate driver reached Cargo");\n')
+    changed_driver_output = output / "changed-candidate-driver"
+    changed_driver_output.mkdir()
+    try:
+        with checks.exclusive_benchmark_state(locks):
+            checks.benchmark_locked("browser", inputs / "candidate", changed_driver_output, "fixture-base", command, output / "unused-target")
+    except RuntimeError:
+        assert "changed candidate driver reached Cargo" in (output / "commands" / f"{len(commands)-1:03d}.log").read_text()
+        assert not (changed_driver_output / "smoke").exists()
+    else:
+        raise AssertionError("Browser ran a cached driver after its candidate source broke")
+    finally:
+        source_driver.write_bytes(driver_source)
+    support_source = inputs / "candidate/rust/support/src/lib.rs"
+    original_support = support_source.read_bytes()
+    support_source.write_bytes(original_support.replace(b'{ "dev" }', b'{ "changed" }'))
+    changed_dependency_output = output / "changed-candidate-dependency"
+    changed_dependency_output.mkdir()
+    try:
+        with checks.exclusive_benchmark_state(locks):
+            checks.benchmark_locked("browser", inputs / "candidate", changed_dependency_output, "fixture-base", command, output / "unused-target")
+    except RuntimeError:
+        assert 'left: "changed"' in (output / "commands" / f"{len(commands)-1:03d}.log").read_text()
+        assert not (changed_dependency_output / "smoke/fixture.json").exists()
+    else:
+        raise AssertionError("Browser driver retained an outdated candidate dependency")
+    finally:
+        support_source.write_bytes(original_support)
     original_identity = (promoted / "identity.json").read_text()
     refusals = []
     for field in ["candidate", "policy", "image_id", "context_sha256", "sha256"]:
@@ -555,6 +597,22 @@ out=Path(a.output);out.mkdir()
         assert not (negative / "driver.log").exists(), "Wrong binary reached the GUI driver"
     else:
         raise AssertionError("GUI smoke accepted a different expected candidate")
+    # Both real harnesses must refuse a substituted driver before native execution.
+    for harness in ["gui-smoke", "benchmark"]:
+        refused_output = output / ("wrong-driver-" + harness)
+        native_driver = checks.compiled_drivers(paired_driver_log, ["benchmark_hyperlinks"])["benchmark_hyperlinks"]
+        args = [sys.executable, str(SOURCE / f"e2e/terminal-resize/{harness}.py"),
+                "--driver", native_driver, "--candidate", str(paired / "scode-candidate"), "--output", str(refused_output)]
+        if harness == "benchmark":
+            args += ["--base", str(stage / "scode-baseline")]
+        try:
+            command(*args, extra={"SCODE_EXPECTED_DRIVER_SHA256": "0" * 64})
+        except RuntimeError:
+            refused = json.loads((refused_output / "report.json").read_text())
+            assert "driver differs from the validated build" in refused["failures"]
+            assert not list(refused_output.rglob("driver.log"))
+        else:
+            raise AssertionError("A substituted native driver reached " + harness)
     # The source tree and every archive/input digest must reject linked files.
     linked_policy = output / "linked-policy.json"
     linked_policy.symlink_to(SOURCE / "e2e/terminal-resize/performance-policy.json")
@@ -614,6 +672,8 @@ out=Path(a.output);out.mkdir()
     matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
               "cross_profile_normal_release_reused": True, "promotion_identity_refusals": refusals,
+              "paired_driver_dependencies_cargo_fresh": True, "candidate_driver_and_dependency_changes_exercised": True,
+              "wrong_driver_digest_refused_before_native_measurement_and_gui": True,
               "wrong_expected_gui_binary_refused_before_driver": True, "linked_measurement_policy_refused": True,
               "target_trees": target_trees, "standalone_drivers_emit_no_cli_binary": True,
               "actual_source_driver_layout": layout,

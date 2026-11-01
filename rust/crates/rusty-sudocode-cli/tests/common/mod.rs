@@ -1039,17 +1039,6 @@ fn spawn_with_workspace(
     // want async mode set SUDOCODE_INTERRUPT_QUEUE_MODE explicitly in
     // `env_vars`, which appears later and overrides this default.
     cmd.push_str(" SUDOCODE_INTERRUPT_QUEUE_MODE=off");
-    // A paste must never attach whatever image the host clipboard holds: the
-    // sync REPL asks the clipboard at every bracketed paste. A path with no
-    // image is an empty clipboard. Image paste tests name their own image in
-    // `env_vars`, which overrides this.
-    let no_image = workspace.root.join("no-clipboard-image");
-    write!(
-        cmd,
-        " SUDOCODE_CLIPBOARD_IMAGE={}",
-        shell_quote(&no_image.display().to_string())
-    )
-    .unwrap();
     for (k, v) in env_vars {
         write!(cmd, " {}={}", k, shell_quote(v)).unwrap();
     }

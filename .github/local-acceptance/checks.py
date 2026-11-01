@@ -100,6 +100,19 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
+def workspace_nextest_options(output, grouped):
+    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+    options = nextest_options(output)
+    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+        options[options.index('--test-threads') + 1] = '8'
+    print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
+          + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
+          'counts, legacy/isolated/other profiles retain four.',
+          flush=True)
+    return options
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
     # Complementary CI can pass newer main; exclude changes outside this branch.
@@ -409,8 +422,10 @@ def run(name, root, output, base, execute):
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox",
-                         *workspace_integration_test_targets(targets))
+            command(str(nextest_binary(output)), "nextest", "run",
+                    *workspace_nextest_options(output, bool(targets)),
+                    "--workspace", "--locked", "--features", "engine-acp/mailbox",
+                    *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
     elif name == "native-examples":
@@ -545,7 +560,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "9617bfa80849fd50d678ddc221df118297da8aab007e77ca6ad8b6624d5f3637",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "4119e4c3425c3250e4c5cf8740dd12044ab27baa8aa1829157fd2c84b301e6a9",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",

@@ -643,16 +643,17 @@ shared helpers, unknown inputs, deletion, renaming into production and coinciden
 main/branch source edits retain full scope. Test assertions, ignored cases,
 complement platforms and budgets remain unchanged. These executor fixtures add
 no product journey coverage; cloud savings require a subsequent real run.</p>
-<p>Deterministic workspace cases use checksum-pinned nextest with four global
-workers, preserving test targets and ignored markers. It stops scheduling after
+<p>Deterministic workspace cases use checksum-pinned nextest, preserving test
+targets and ignored markers. The initial rollout used four global workers.
+It stops scheduling after
 the first failure, lets running cases clean up, disables retries and refuses an
 empty selection. Cargo retains doctests; live-provider commands remain unchanged.
 A Windows comparison matched all 2,574 declared cases across 230 binaries,
 including 70 ignored cases. The same 2,504 executed cases passed: Cargo took
 892.09 seconds, nextest took 456.33 seconds, and a four-CPU nextest run took
 490.18 seconds. These single local trials measure execution, not cloud PR
-latency. Eight/sixteen-worker stress runs failed existing UI/resume checks and
-are not the acceptance configuration. No assertion deadline or unique case is
+latency. Earlier eight/sixteen-worker stress runs on four logical CPUs failed
+existing UI/resume checks; small hosts retain four workers. No assertion deadline or unique case is
 removed to obtain these results.</p>
 <p><strong>Reduce repeated native test linking (2026-10-31).</strong> The native
 workspace opts into eight declarative integration wrappers for 128 CLI targets,
@@ -661,7 +662,7 @@ qualified before this Rust activation so installed verifiers agree on required
 checks. Original per-file Cargo commands remain available and newly added ungrouped targets are selected
 automatically. Self-spawning cases and named release, performance and terminal
 drivers stay standalone. Every case still runs in its own nextest process, with
-four workers, no retries and the same fail-fast cleanup. The prototype's real
+the configured worker limit, no retries and the same fail-fast cleanup. The prototype's real
 Windows run passed all 2,505 active cases with 70 ignored markers; doctests and
 Clippy also passed. Publication then stopped because the old installed selector
 required seven profiles while the new selector required three. The separately
@@ -694,6 +695,21 @@ marker, queue all-target/all-feature Clippy, vendored Mermaid checks and workspa
 doctests remain. Real native controls poison library and binary units, observe
 the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
+<p><strong>Bound grouped workspace concurrency (2026-11-02).</strong> Complete
+grouped native suites default to eight test processes on hosts with at least
+eight logical CPUs. Smaller/unknown hosts, older ungrouped workspaces, isolated
+targets and other profiles retain four. An explicit
+<code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
+still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
+A matched Windows run on 20 logical CPUs reused identical native binaries and
+case identities: all 1,089 integration cases passed with 69 ignored markers,
+424.5 seconds at four workers and 244.7 seconds at eight, 42.4% less test execution
+time. Actual ConPTY echo P95 was 0.58/0.74 ms. This warm single-host trial excludes
+compilation and proves neither cross-hardware nor whole-PR savings. A prior run
+with one leaked ACP child was refused; the test now awaits its existing shutdown
+helper. Real native process guards observe overlap and explicit four-worker
+limits. Cases, assertions, retries, deadlines and budgets remain unchanged;
+the guards add no e2e coverage credit.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in
@@ -923,7 +939,9 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Grouping fixtures use small native programs. Benchmark builder
+      identity. Grouping fixtures use small native programs and verify actual
+      eight-worker overlap on large hosts and explicit four-worker limits.
+      Smaller/unknown hosts retain four by default. Benchmark builder
       fixtures also inspect real Cargo artifacts, reject broken standalone driver
       packages and exercise original targets for older candidates; no unused
       CLI binary is built with standalone drivers. Actual Cargo metadata protects

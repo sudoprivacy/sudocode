@@ -433,8 +433,20 @@ Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner with four
-global test workers. The runner lives in a private acceptance cache; it does not
+Deterministic workspace cases use the checksum-pinned nextest runner. Full
+grouped workspaces default to eight test workers on hosts with at least eight
+logical CPUs; smaller/unknown hosts, older ungrouped sources, isolated targets
+and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
+pool explicitly. Compiler jobs stay at one locally, with only compiler workers
+at BelowNormal priority; test processes stay Normal. A matched Windows run on
+20 logical CPUs passed the same 1,089 integration cases and 69 ignored markers:
+four workers took 424.5 seconds, eight took 244.7 seconds. Real ConPTY echo P95
+was 0.58/0.74 ms. This warm, single-host execution comparison excludes compilation
+and does not establish whole-PR or cross-hardware savings. A test that previously
+left its ACP child holding output pipes now awaits its existing shutdown helper.
+Native guards run actual case processes, observe overlap and enforce an explicit
+four-worker limit; they add no product journey coverage.
+The runner lives in a private acceptance cache; it does not
 replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on

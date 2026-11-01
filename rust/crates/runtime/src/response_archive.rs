@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
 use telemetry::{ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder};
 
 use crate::fs_backend::FsLock;
 use crate::json::JsonValue;
 use crate::{ConfigError, FsBackend, Session};
+
+mod gzip;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseRecordingConfig {
@@ -232,8 +233,8 @@ impl ResponseArchive for SessionResponseArchive {
             used: Arc::clone(&self.used),
             limit: self.config.max_session_bytes,
         };
-        let recording = SessionResponseRecorder {
-            encoder: Some(GzEncoder::new(output, Compression::fast())),
+        let mut recording = SessionResponseRecorder {
+            encoder: None,
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
             metadata_path,
@@ -249,6 +250,9 @@ impl ResponseArchive for SessionResponseArchive {
             writer.check().map_err(io::Error::other)?;
             recording.write_metadata("recording", false)?;
         }
+        // Keep the compressor's large buffer out of the initial metadata I/O.
+        // Slow storage must not retain one for every pending capture.
+        recording.encoder = Some(gzip::Encoder::new(output)?);
         Ok(Box::new(recording))
     }
 }
@@ -264,17 +268,21 @@ struct ArchiveWriter {
 impl Write for ArchiveWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.writer.check().map_err(io::Error::other)?;
-        let mut used = self
-            .used
-            .lock()
-            .map_err(|_| io::Error::other("response budget poisoned"))?;
-        let current = used.unwrap_or(0);
-        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if current.saturating_add(length) > self.limit {
-            return Err(io::Error::other("session_response_budget_exhausted"));
+        {
+            let mut used = self
+                .used
+                .lock()
+                .map_err(|_| io::Error::other("response budget poisoned"))?;
+            let current = used.unwrap_or(0);
+            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if current.saturating_add(length) > self.limit {
+                return Err(io::Error::other("session_response_budget_exhausted"));
+            }
+            // Reserve before I/O: an error may have committed these bytes.
+            // Independent response files share this budget, not their I/O.
+            *used = Some(current.saturating_add(length));
         }
         self.fs.append(&self.path.to_string_lossy(), bytes)?;
-        *used = Some(current.saturating_add(length));
         Ok(bytes.len())
     }
 
@@ -284,7 +292,7 @@ impl Write for ArchiveWriter {
 }
 
 struct SessionResponseRecorder {
-    encoder: Option<GzEncoder<ArchiveWriter>>,
+    encoder: Option<gzip::Encoder>,
     fs: Arc<dyn FsBackend>,
     writer: Arc<ResponseArchiveWriter>,
     metadata_path: PathBuf,
@@ -359,7 +367,7 @@ impl ResponseRecorder for SessionResponseRecorder {
             .encoder
             .take()
             .is_some_and(|encoder| match encoder.finish() {
-                Ok(_) => true,
+                Ok(()) => true,
                 Err(error) => {
                     self.error = Some(error.to_string());
                     false

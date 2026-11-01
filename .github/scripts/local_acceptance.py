@@ -9,6 +9,7 @@ No candidate code is executed by the GitHub verification job.
 import argparse
 import ast
 import base64
+import contextlib
 import copy
 import fnmatch
 import hashlib
@@ -40,6 +41,7 @@ NAMESPACE = "sudocode-local-acceptance"
 AUTHORIZATION_CONTEXT = "Acceptance contract authorization"
 CONTRACT_UPDATE_COMMAND = ('python "$(git rev-parse --path-format=absolute --git-common-dir)/'
                            'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin')
+HOST_LEASE_ENV = "SUDOCODE_ACCEPTANCE_HOST_LEASE"
 ROOT = Path(__file__).resolve().parents[2]
 MSVC_ENV = None
 
@@ -586,9 +588,16 @@ def acceptance_plan(policy, names, author):
 def report_plan(plan):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
-    performance = [name for name in ["rendering", "browser"] if name in plan["local_checks"]]
+    performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; indirect performance effects outside the selected inputs are not measured."))
+    release = "native-release" in plan["local_checks"] or any("native-release" in job["checks"] for job in plan["ci"])
+    lines.append("Native release build/startup: " + ("selected on the author and complementary native hosts." if release else
+                 "not selected; native optimized stream/resume behavior and the 100 ms startup budget are outside this run's scope.")
+                 + " Trigger scope: Cargo/build/vendor inputs, CLI entry/startup/parser, runtime config, stream-capture test or startup harness. "
+                   "Ordinary functional checks and selected Linux release rendering keep their own scopes.")
+    lines.append("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]
+                 else "No browser terminal input changed.")
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")
@@ -597,6 +606,8 @@ def report_plan(plan):
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
+          "ordinary_source_optimized_native_coverage_reduced": True}, separators=(",", ":")), flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write("## Acceptance responsibilities\n\n" + "\n".join("- " + line for line in lines) + "\n")
@@ -864,17 +875,28 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
             compatible = False
     if not compatible:
         required_policy = value("rev-parse", policy_ref)
+        # CI diagnostics can outlive another protected-main update. Preserve
+        # explicit experimental/candidate snapshots, but refresh mainline rules.
+        mainline = git("merge-base", "--is-ancestor", required_policy, "origin/main", check=False).returncode == 0
+        recovery_policy = "origin/main" if mainline else required_policy
+        recovery_base = "origin/main" if mainline else base
         print("LOCAL_ACCEPTANCE_RECOVERY=" + json.dumps({
             "version": 1, "run_on": "original author native host",
             "ci_proof_host_is_not_the_author_test_host": True,
             "runner": "<git-common-dir>/local-acceptance-hooks/local_acceptance.py",
-            "args": ["check", "--head", head, "--base", base,
-                     "--policy-ref", required_policy, "--publish", "--remote", "origin"],
-            "next": "Publish refreshed signed evidence, then rerun the acceptance workflow",
+            "observed_required_policy": required_policy,
+            "policy_source": "current protected main" if mainline else "requested immutable snapshot",
+            "prepare": [["git", "fetch", "--no-tags", "origin",
+                         "+refs/heads/main:refs/remotes/origin/main"]] if mainline else [],
+            "args": ["check", "--head", head, "--base", recovery_base,
+                     "--policy-ref", recovery_policy, "--publish", "--remote", "origin"],
+            "next": "On the original author host, run prepare first, then runner with args; "
+                    "publish refreshed signed evidence and rerun the acceptance workflow",
         }), file=sys.stderr, flush=True)
         raise RuntimeError(
             f"Acceptance commands changed; refresh/publish on the AUTHOR native host "
-            f"for required policy {required_policy}, then rerun CI")
+            f"using {'freshly fetched protected main' if mainline else 'the requested snapshot'} "
+            f"(observed policy {required_policy}); follow LOCAL_ACCEPTANCE_RECOVERY, then rerun CI")
     check_contract_changes(head, base, policy_ref)
     if not completed_only and not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
@@ -1035,6 +1057,69 @@ def previous_local_output(head, base):
     return None
 
 
+def try_host_lock(descriptor):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def host_acceptance_lease(attempt, head):
+    """Run one acceptance at a time on this host.
+
+    Concurrent suites contend for CPU, memory and temporary paths, which turns
+    timing budgets into failures that cost whole profile reruns. The operating
+    system releases the lock when its holder exits, including after a crash or
+    a memory kill. Processes started under the holder inherit HOST_LEASE_ENV and
+    are already serialized, so nested fixture checks do not wait for their parent.
+    """
+    if os.environ.get(HOST_LEASE_ENV):
+        yield
+        return
+    directory = Path.home() / ".nexus/local-acceptance"
+    directory.mkdir(parents=True, exist_ok=True)
+    lock, holder = directory / "host.lock", directory / "host-lease.json"
+    started = time.monotonic()
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        reported = None
+        while not try_host_lock(descriptor):
+            if reported is None or time.monotonic() - reported >= 600:
+                try:
+                    current = holder.read_text(encoding="utf-8").strip()
+                except OSError:
+                    current = "an unrecorded process"
+                print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
+                      "One acceptance runs per host; this one starts when that holder exits.", flush=True)
+                reported = time.monotonic()
+            time.sleep(5)
+        attempt["host_lease_wait_seconds"] = round(time.monotonic() - started, 3)
+        holder.write_bytes(canonical({"pid": os.getpid(), "head": head, "root": str(ROOT),
+                                      "acquired_at": time.time()}))
+        print(f"Acquired this host's local acceptance lease after {attempt['host_lease_wait_seconds']:.3f}s",
+              flush=True)
+        os.environ[HOST_LEASE_ENV] = str(os.getpid())
+        try:
+            yield
+        finally:
+            os.environ.pop(HOST_LEASE_ENV, None)
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
+
+
 def check(args):
     """Record failed and successful local attempts, including time before CI."""
     started = time.monotonic()
@@ -1120,19 +1205,20 @@ def perform_check(args, attempt):
     if resumed is not None:
         receipt["resumed_from"] = resumed
     try:
-        for name in needed:
-            if name in reusable:
-                print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
-                results[name] = reusable[name]
-            else:
-                print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-                results[name] = module.run(name, ROOT, output / name, base, run_command)
-            timing["checks_finished_at"] = time.time()
-            save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
-            print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-                  "If this process exits, resume with: "
-                  f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
-                  f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+        with host_acceptance_lease(attempt, head):
+            for name in needed:
+                if name in reusable:
+                    print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+                    results[name] = reusable[name]
+                else:
+                    print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+                    results[name] = module.run(name, ROOT, output / name, base, run_command)
+                timing["checks_finished_at"] = time.time()
+                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+                print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
+                      "If this process exits, resume with: "
+                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()

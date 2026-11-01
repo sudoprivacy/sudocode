@@ -45,6 +45,11 @@
       "exclude": [
         "e2e/local-acceptance/**",
         "e2e/pr-history/run.py",
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui-benchmark.py",
+        "e2e/terminal-resize/gui-policy.json",
         "**/README.md"
       ]
     },
@@ -69,24 +74,30 @@
         "rust/Cargo.lock"
       ],
       "exclude": [
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui-benchmark.py",
+        "e2e/terminal-resize/gui-policy.json",
         "**/README.md"
       ]
     },
     "rendering": {
       "include": [
-        "rust/Cargo.toml",
-        "rust/Cargo.lock",
-        "rust/.cargo/**",
-        "rust/crates/*/Cargo.toml",
-        "rust/crates/*/build.rs",
-        "rust/vendor/**",
+        "rust/crates/scode-benchmark-drivers/**",
         "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs",
-        "rust/crates/rusty-sudocode-cli/Cargo.toml",
-        "e2e/terminal-resize/**"
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/performance-policy.json",
+        "e2e/terminal-resize/host.cjs",
+        "e2e/terminal-resize/run.cjs",
+        "e2e/terminal-resize/performance.cjs",
+        "e2e/terminal-resize/resources.cjs",
+        "e2e/terminal-resize/package.json",
+        "e2e/terminal-resize/package-lock.json"
       ],
       "exclude": [
         "**/README.md"
@@ -94,19 +105,23 @@
     },
     "browser": {
       "include": [
-        "rust/Cargo.toml",
-        "rust/Cargo.lock",
-        "rust/.cargo/**",
-        "rust/crates/*/Cargo.toml",
-        "rust/crates/*/build.rs",
-        "rust/vendor/**",
+        "rust/crates/scode-benchmark-drivers/**",
         "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
-        "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
-        "rust/crates/rusty-sudocode-cli/Cargo.toml",
-        "e2e/terminal-resize/**"
+        "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs",
+        "rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport_browser.cjs",
+        "e2e/terminal-resize/benchmark.py",
+        "e2e/terminal-resize/browser.cjs",
+        "e2e/terminal-resize/gui-policy.json",
+        "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui.cjs",
+        "e2e/terminal-resize/gui.html",
+        "e2e/terminal-resize/host.cjs",
+        "e2e/terminal-resize/package-lock.json",
+        "e2e/terminal-resize/package.json",
+        "e2e/terminal-resize/resources.cjs"
       ],
       "exclude": [
         "**/README.md"
@@ -119,7 +134,11 @@
         "rust/.cargo/**",
         "rust/crates/*/Cargo.toml",
         "rust/crates/*/build.rs",
-        "rust/crates/*/src/**",
+        "rust/crates/rusty-sudocode-cli/src/main.rs",
+        "rust/crates/rusty-sudocode-cli/src/startup.rs",
+        "rust/crates/rusty-sudocode-cli/src/cli/**",
+        "rust/crates/runtime/src/config.rs",
+        "rust/crates/runtime/src/config/**",
         "rust/vendor/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
         "e2e/startup/**"
@@ -230,6 +249,9 @@
       ],
       "fcbc3320610f2d9c3fbee2104d9c4d55453153dbe3cfd405a30bfef2fb3e45ec": [
         "91166b0dcb0cc621fea5e42f4b57ac09574d50c96ba053551a0d052b7be590a3"
+      ],
+      "badc6716dff15176970b5c75049c47229a5cf72890776a0370d29f76b1ba73ff": [
+        "cf811ae904e392fa406fe1eb1565d425146549e4a63534243db04ce8c0db55da"
       ]
     },
     "native-sdk": {
@@ -257,6 +279,9 @@
         "abc7e540b45073a8e6eef18f2f685f92464857ea6dea3b9f2a63e12b6cc0444f",
         "d8588f96aface167bb4b2667c1db11e1a336ec3574c4778db689e8ab2395dc84",
         "f798288f2d7c428f4c8d0894486b8f7e5f3db8fca4ac2429037018af0fcc2ce0"
+      ],
+      "9847a1f38ef66cea49a95b2cdda41517421d22a82873eb0b3dd28b28e2b0a9a3": [
+        "fee2d5c994720ce6d5a908fd978cac9489d89338dc7bc3307e520ddf70f76c09"
       ]
     },
     "native-workspace": {
@@ -284,6 +309,9 @@
         "80ac0dbf2628c12fb66761cbb082552ca2a9d2913e06f1e5e694ac10b84c107d",
         "92ba77aea0190aa57fa97a996a3afc001baa8e106001ac5052d2273512dfb01d",
         "d7e204b09f93b8b674a5cfeedb5a28b0f0b8458e9ecb465732d84bc2f8d58682"
+      ],
+      "94e3c5de81c05a5a6e75cb578951e5c899ee1bf3debb17ad7faaf3b2beb79d8b": [
+        "f472abe9a16ff17a73c332a811533075ba8fd2614c40e33110eea2ccc6edf7d4"
       ]
     },
     "native-resize": {
@@ -311,40 +339,9 @@
         "6954bb00e6ca2a62bde989e271d28f6355e157485ce8b05f6e9bcb5a215ac5a5",
         "7b56c8b766ac7a14c83578e8a13572e3862ee252690ba6bd56229b2c3a9bc736",
         "b8fb09c42fdff03c8665a7950adc62b2c6d338c4eca574b8350a19bb95ef2d00"
-      ]
-    },
-    "rendering": {
-      "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86": [
-        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f"
       ],
-      "10482a55554c2c4991d375c5cf6fd1ce4264093e1890b2dbd2e678aab36de46f": [
-        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f",
-        "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86"
-      ],
-      "63ff1ac041a33ecda073abe9c6ffb6fc98f8231a54cb120eb8d8102386a3ce57": [
-        "52bc5afc8283f093336d7af424e6fa87ef5940383419f6f536471abb38736fba"
-      ],
-      "96caaa559acf085c9dbf7a1b41ef1883e8011630e21262d88055c8186de0c291": [
-        "3759557b05ffc0fff6c42da4e7ceb35d753a99f6fc0f081bc3bbe2928d03ccc9"
-      ]
-    },
-    "browser": {
-      "dd4ccd49af7f90b27590176d5a1df76b6220597930f3089d7310b705ea1f50e1": [
-        "52bc5afc8283f093336d7af424e6fa87ef5940383419f6f536471abb38736fba",
-        "63ff1ac041a33ecda073abe9c6ffb6fc98f8231a54cb120eb8d8102386a3ce57"
-      ],
-      "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86": [
-        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f"
-      ],
-      "10482a55554c2c4991d375c5cf6fd1ce4264093e1890b2dbd2e678aab36de46f": [
-        "51598f5e3f301d8d0ee7580e72e46295fce805c40298867fd83059f432095e7f",
-        "7b6ee070f80c79fec856f55cf9ad7eaa793457096b137013a5366864da698c86"
-      ],
-      "63ff1ac041a33ecda073abe9c6ffb6fc98f8231a54cb120eb8d8102386a3ce57": [
-        "52bc5afc8283f093336d7af424e6fa87ef5940383419f6f536471abb38736fba"
-      ],
-      "96caaa559acf085c9dbf7a1b41ef1883e8011630e21262d88055c8186de0c291": [
-        "3759557b05ffc0fff6c42da4e7ceb35d753a99f6fc0f081bc3bbe2928d03ccc9"
+      "3d96e8cc458a63a04b71b478803351ac702e761ea0221c5778e950203b07d628": [
+        "f9f205793fc28ff28fed102ee21aab06547ee22490583d1cc174cb7011af2d95"
       ]
     },
     "native-release": {
@@ -362,6 +359,9 @@
         "675e6ed7c936ea55908b23950c92500413a957818fe06ad5f7ce9be614f2aa7d",
         "721552f607973e95051a77e11d803038be6f860c6516283afa975a9af4b2a3e7",
         "850ce58521ea0b9f2079da64db3e775154796bac5ca5ac030462a2d22af46bd1"
+      ],
+      "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7": [
+        "d2d09b6970bf5912efd51956f2e2203f6342550f419c7ba0eea36ddc4e732af0"
       ]
     },
     "native-services": {
@@ -389,6 +389,9 @@
         "6805472b7bc8e96764b07984f0c1d746ecd6b4b19b6bfa0720a9397f18d36b8c",
         "d32a837988e05a828139dd4f16a0edcb70598e193df2c2e5c0f8fde860156e57",
         "efd0cb2dc42b04e1f11f15241533d8ab1bf4061cb5071afe08e91dde17d74cd4"
+      ],
+      "980804492e6b89d40312845745caa676a98b1612032696451bca170cb637da46": [
+        "f1b4ee7ea91f76fb799f6cf7f665b5b80f2b13f2f9b9aa63483943c114867a1d"
       ]
     },
     "native-cohost": {
@@ -416,6 +419,19 @@
         "a8f0f6b079a6ac94603973a4b4d6014bf37fae890e9234468dde4a0389cf9552",
         "adb35afb6523ee6da14e5f9a812533eb58795d819b6fcb19b9da89c48f780df7",
         "f2b09243d30b81372614c84fa0120a454e49af81cbb590b802912ba2cbdbde88"
+      ],
+      "283d8d8df2f3ee8b398eac056553212e04cf0ad8bb1a6f76f462dd6d72a87735": [
+        "28ad98707d4b0234aeaa5e5bbd3af5b15f3874f816d6bbce4f290833706d4e0c"
+      ]
+    },
+    "native-examples": {
+      "3399a40b60a995c0bca4590b0bf0738b47e0a3645db526eb9e09d1d3f7b91a2c": [
+        "3e2952e4d3035258882712b2f1bdd6d0d45c33d6e4e55ea948f1230bc1c66d43"
+      ]
+    },
+    "guard-contract": {
+      "b340dbc03dd83d78a36f34a231ec6fb26912742456d9a16be64cb8237e253df5": [
+        "6d2fe632823799fa526d60a811e9010877803928c80f4093ad1806c3873bb9be"
       ]
     }
   },
@@ -428,6 +444,9 @@
         "80ac0dbf2628c12fb66761cbb082552ca2a9d2913e06f1e5e694ac10b84c107d",
         "92ba77aea0190aa57fa97a996a3afc001baa8e106001ac5052d2273512dfb01d",
         "d7e204b09f93b8b674a5cfeedb5a28b0f0b8458e9ecb465732d84bc2f8d58682"
+      ],
+      "969129fc4378e1ebb2acf8fd289078077d10b9ce3cd7e6606888ca01a102db6e": [
+        "94e3c5de81c05a5a6e75cb578951e5c899ee1bf3debb17ad7faaf3b2beb79d8b"
       ]
     }
   }

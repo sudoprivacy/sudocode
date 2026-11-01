@@ -443,7 +443,7 @@ fn run_viewport_observer(observer: &str, enabled: bool) {
     )
     .arg(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/support")
+            .join("../rusty-sudocode-cli/tests/support")
             .join(observer),
     )
     .arg(manifest)

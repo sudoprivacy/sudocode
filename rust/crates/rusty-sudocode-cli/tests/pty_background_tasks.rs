@@ -53,6 +53,10 @@ fn expect_parent_complete(session: &PtySession, before: &str) {
 }
 
 fn spawn_for_calls(env: &TestEnv, calls: &[Value]) -> PtySession {
+    spawn_for_calls_with_env(env, calls, &[])
+}
+
+fn spawn_for_calls_with_env(env: &TestEnv, calls: &[Value], extra: &[(&str, &str)]) -> PtySession {
     // The declared workflow is the source of truth for the offered tool pool.
     // A POSIX Bash fixture must not silently become a PowerShell task on Windows.
     let allowed = calls
@@ -62,6 +66,8 @@ fn spawn_for_calls(env: &TestEnv, calls: &[Value]) -> PtySession {
         .into_iter()
         .collect::<Vec<_>>()
         .join(",");
+    let mut vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+    vars.extend_from_slice(extra);
     env.spawn_with_env(
         &[
             "--permission-mode",
@@ -69,12 +75,16 @@ fn spawn_for_calls(env: &TestEnv, calls: &[Value]) -> PtySession {
             "--allowedTools",
             &allowed,
         ],
-        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+        &vars,
     )
 }
 
 fn start(env: &TestEnv, calls: &[Value]) -> PtySession {
-    let mut session = spawn_for_calls(env, calls);
+    start_with_env(env, calls, &[])
+}
+
+fn start_with_env(env: &TestEnv, calls: &[Value], extra: &[(&str, &str)]) -> PtySession {
+    let mut session = spawn_for_calls_with_env(env, calls, extra);
     session.resize(40, 100).unwrap();
     expect_input_ready(&session, Duration::from_secs(30), "ready");
     let before = common::turn_status_marker(&session);
@@ -177,22 +187,109 @@ fn background_shell_footer_and_details_keep_output_after_parent_finishes() {
     close(session);
 }
 
-#[test]
-fn background_status_is_static_and_results_do_not_displace_turn_statistics() {
+fn assert_background_activity(session: &PtySession, view: &str, background: &str, no_color: bool) {
+    let status = |view: &str| {
+        view.lines()
+            .find(|line| line.contains("1 task still running · turn "))
+            .unwrap()
+            .to_string()
+    };
+    let first = status(view);
+    let logo: String = first.chars().take(4).collect();
+    assert!(logo
+        .chars()
+        .all(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch)));
+    let changed = common::expect_screen_rows(
+        session,
+        |view| {
+            view.lines().any(|line| {
+                line.contains("1 task still running · turn ") && !line.starts_with(&logo)
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "background logo animates after the foreground finishes",
+    );
+    assert_eq!(
+        first.chars().skip(4).collect::<String>(),
+        status(&changed).chars().skip(4).collect::<String>(),
+        "only the fixed-width icon changes; the task conclusion and turn stay still"
+    );
+    session.render(|screen| {
+        let raw = screen.raw();
+        let (row, line) = raw
+            .rows(0, raw.size().1)
+            .enumerate()
+            .find(|(_, line)| line.contains("1 task still running · turn "))
+            .unwrap();
+        let (activity, metadata) = if no_color {
+            ("Default", "Default")
+        } else if background == "0;15" {
+            ("Idx(94)", "Idx(241)")
+        } else {
+            ("Idx(214)", "Idx(247)")
+        };
+        // ConPTY may retain the preceding style on invisible separator spaces.
+        // Assert every visible metadata glyph, including the separator itself.
+        let metadata_start = line.find("· turn ").unwrap();
+        let metadata_cells = line[metadata_start..]
+            .char_indices()
+            .filter(|(_, ch)| !ch.is_whitespace())
+            .map(|(offset, _)| {
+                (
+                    unicode_width::UnicodeWidthStr::width(&line[..metadata_start + offset]),
+                    metadata,
+                )
+            });
+        for (column, color) in [(0, activity), (5, activity)]
+            .into_iter()
+            .chain(metadata_cells)
+        {
+            let cell = raw
+                .cell(row.try_into().unwrap(), column.try_into().unwrap())
+                .unwrap();
+            assert_eq!(
+                format!("{:?}", cell.fgcolor()),
+                color,
+                "status cell at row {row}, column {column}: {:?}; line {line:?}; nearby cells {:?}",
+                cell.contents(),
+                (column.saturating_sub(3)..(column + 20).min(usize::from(raw.size().1)))
+                    .map(|column| {
+                        let cell = raw
+                            .cell(row.try_into().unwrap(), column.try_into().unwrap())
+                            .unwrap();
+                        (column, cell.contents(), format!("{:?}", cell.fgcolor()))
+                    })
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                !cell.dim() && !cell.bold(),
+                "theme spans have normal font weight"
+            );
+        }
+    });
+}
+
+fn background_status_theme(background: &str, no_color: bool) {
     let (env, _release) = task_env("background-status-conclusion");
-    let mut session = start(
+    let mut session = start_with_env(
         &env,
         &[shell(
             "status",
             "while [ ! -f release ]; do sleep 0.1; done; echo STATUS_RESULT_READY",
             "Status conclusion fixture",
         )],
+        &[
+            ("COLORFGBG", background),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
     );
     let view = common::expect_screen_rows_settled(
         &session,
         |view| {
             view.lines().any(|line| {
-                line.starts_with("1 task still running · turn ")
+                line.contains("1 task still running · turn ")
                     && line.trim_end().ends_with(" finished")
             }) && view
                 .lines()
@@ -201,16 +298,7 @@ fn background_status_is_static_and_results_do_not_displace_turn_statistics() {
         common::LIVE_TURN_BUDGET,
         "foreground conclusion and task footer have distinct content",
     );
-    std::thread::sleep(Duration::from_millis(400));
-    assert_eq!(
-        session.render(|s| s
-            .raw()
-            .rows(0, s.raw().size().1)
-            .collect::<Vec<_>>()
-            .join("\n")),
-        view,
-        "background overview does not animate or advance a clock"
-    );
+    assert_background_activity(&session, &view, background, no_color);
     session.send("后台-draft").unwrap();
     common::expect_input_line(
         &session,
@@ -221,7 +309,10 @@ fn background_status_is_static_and_results_do_not_displace_turn_statistics() {
     session.resize(12, 32).unwrap();
     common::expect_screen_rows(
         &session,
-        |view| view.lines().any(|line| line.trim() == "1 running"),
+        |view| {
+            view.lines()
+                .any(|line| line.trim_end().ends_with(" 1 running"))
+        },
         common::DEFAULT_TIMEOUT,
         "compact status preserves the task conclusion",
     );
@@ -259,6 +350,21 @@ fn background_status_is_static_and_results_do_not_displace_turn_statistics() {
     open(&mut session);
     screen(&session, "STATUS_RESULT_READY");
     close(session);
+}
+
+#[test]
+fn dark_background_status_animates_and_results_preserve_turn_statistics() {
+    background_status_theme("15;0", false);
+}
+
+#[test]
+fn light_background_status_animates_and_results_preserve_turn_statistics() {
+    background_status_theme("0;15", false);
+}
+
+#[test]
+fn no_color_background_status_animates_and_results_preserve_turn_statistics() {
+    background_status_theme("15;0", true);
 }
 
 #[test]

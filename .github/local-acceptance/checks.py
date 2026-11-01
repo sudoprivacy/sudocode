@@ -388,12 +388,12 @@ def native_guard_files():
         "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "62793773de094c8691ae078ded6cef2097aa433ae6943b79a3e84410da0529a3",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "73dfd768ad17e625859514b159c8cb9cb6d9fe9b6efa014f03b3577cab673132",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "8214da300cdfb0f2ccc5d6ccc7de8459948e2b09a02cf0bd0161eeda58a0a96e",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "26f5044afdc527caa984399af4ef5724b7cb2b49156bbc6a95c3d23239c6ff4b",
-        "e2e/local-acceptance/run.py": "a133dfc4ab0b1a301840b3db20e4c7d5b0e40a95f4644dfef291b5b5fcbedf31",
+        "e2e/local-acceptance/run.py": "d605301cc665c3bbc763031566fb284da61ce9c5fbd71bbd30e6cdd9de58554d",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
@@ -430,7 +430,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "60ee84d57f41a7fcfa0a056bac0f1524db68e9595e7e60914c0bbd3d1d63a00b":
+    if actual_scope != "ca6e3b4a34ed4b71c0527cb31c4524125cf0749bfb8cc6ce47682ab8c87fe63c":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -833,6 +833,17 @@ def rendering_cases(terminal, arguments, output, command):
     save()
 
 
+def benchmark_driver_package(source):
+    """Older candidate snapshots retain their original CLI test targets."""
+    if (source / "rust/crates/scode-benchmark-drivers/Cargo.toml").is_file():
+        print("Benchmark drivers use scode-benchmark-drivers and the copied normal release; "
+              "Cargo does not rebuild an unused CLI binary for these targets.", flush=True)
+        return "scode-benchmark-drivers"
+    print("This source predates the standalone benchmark driver package; "
+          "using its original CLI test targets with the same copied release and observers.", flush=True)
+    return "rusty-sudocode-cli"
+
+
 def benchmark_locked(name, root, output, base, command, target):
     # Run the declared workload and paired sampling policy. Moving execution
     # hosts does not change budgets or per-run interaction assertions.
@@ -855,7 +866,6 @@ def benchmark_locked(name, root, output, base, command, target):
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
-    driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
     reused = verified_candidate_release(inputs) if name == "browser" else None
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
         if label == "candidate" and reused is not None:
@@ -870,8 +880,11 @@ def benchmark_locked(name, root, output, base, command, target):
     # Share artifacts only with the same canonical source checkout. The copied
     # production binaries above stay fixed when dev features build the drivers.
     driver_target = targets / "driver" if name == "rendering" else build_targets["candidate"]
+    driver_package = benchmark_driver_package(driver_source)
+    driver_prefix = "benchmark" if driver_package == "scode-benchmark-drivers" else "pty"
+    driver_name = f"{driver_prefix}_" + ("render_performance" if name == "rendering" else "hyperlinks")
     log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
-                  "--target-dir", str(driver_target), "-p", "rusty-sudocode-cli", "--test", driver_name,
+                  "--target-dir", str(driver_target), "-p", driver_package, "--test", driver_name,
                   "--no-run", "--message-format=json-render-diagnostics")
     messages = []
     for line in log.read_text(errors="replace").splitlines():
@@ -893,18 +906,19 @@ def benchmark_locked(name, root, output, base, command, target):
         # must not silently drop its headless/browser CPU and painting checks.
         manifest = str(candidate / "rust/Cargo.toml")
         viewport_target = str(build_targets["candidate"])
+        viewport_name = f"{driver_prefix}_prompt_viewport"
         viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
                         "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
         log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,
-                      "--target-dir", viewport_target, "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport",
+                      "--target-dir", viewport_target, "-p", driver_package, "--test", viewport_name,
                       "--no-run", "--message-format=json-render-diagnostics", extra=viewport_env)
         records = [json.loads(line) for line in log.read_text(errors="replace").splitlines() if line.startswith("{")]
         drivers = [row["executable"] for row in records if row.get("reason") == "compiler-artifact"
-                   and row.get("target", {}).get("name") == "pty_prompt_viewport" and row.get("executable")]
+                   and row.get("target", {}).get("name") == viewport_name and row.get("executable")]
         if len(drivers) != 1:
             raise RuntimeError("Missing viewport measurement driver")
         command("cargo", "test", "--release", "--locked", "--manifest-path", manifest, "--target-dir", viewport_target,
-                "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport", "viewport_browser_interaction",
+                "-p", driver_package, "--test", viewport_name, "viewport_browser_interaction",
                 "--", "--ignored", "--exact", "--nocapture", extra=viewport_env)
         for observer in ["headless", "browser"]:
             arguments = [sys.executable, str(candidate / "scripts/benchmark_prompt_viewport.py"),

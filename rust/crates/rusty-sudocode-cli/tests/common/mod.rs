@@ -649,9 +649,14 @@ fn expect_turn_complete_before(
 
 /// Locate the compiled CLI, or a release artifact selected for live acceptance.
 #[must_use]
+#[inline]
 pub fn scode_bin() -> PathBuf {
     std::env::var_os("SCODE_TEST_BIN")
-        .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_scode")), PathBuf::from)
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_scode").map(PathBuf::from))
+        .expect(
+            "standalone benchmark drivers require SCODE_TEST_BIN pointing to the measured release",
+        )
 }
 
 /// A throwaway config home under `parent`, seeded from the real one, for a

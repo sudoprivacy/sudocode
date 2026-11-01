@@ -74,6 +74,7 @@
     },
     "rendering": {
       "include": [
+        "rust/crates/scode-benchmark-drivers/**",
         "rust/Cargo.toml",
         "rust/Cargo.lock",
         "rust/.cargo/**",
@@ -94,6 +95,7 @@
     },
     "browser": {
       "include": [
+        "rust/crates/scode-benchmark-drivers/**",
         "rust/Cargo.toml",
         "rust/Cargo.lock",
         "rust/.cargo/**",
@@ -105,6 +107,7 @@
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
+        "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs",
         "rust/crates/rusty-sudocode-cli/Cargo.toml",
         "e2e/terminal-resize/**"
       ],

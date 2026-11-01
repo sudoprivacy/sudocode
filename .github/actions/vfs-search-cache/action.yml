@@ -17,9 +17,28 @@ runs:
       with:
         path: .native-vfs
         key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.restore_keys }}
         # A warm main publisher needs neither a download nor another build.
         # Queue consumers always restore and ask Cargo to build normally.
         lookup-only: ${{ inputs.publish == 'true' }}
+    - name: Restore compatible compiler inputs for a missing main key
+      id: compatible_restore
+      if: inputs.publish == 'true' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: .native-vfs
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.restore_keys }}
+    - name: Report restored compiler input key
+      shell: bash
+      env:
+        RESTORED_KEY: ${{ steps.compatible_restore.outputs.cache-matched-key || (inputs.publish != 'true' && steps.restore.outputs.cache-matched-key) || '' }}
+      run: |
+        if [[ -n "$RESTORED_KEY" && ! "$RESTORED_KEY" =~ ^vfs-search-v[12]-[a-f0-9]{64}(-[a-f0-9]{40})?$ ]]; then
+          echo "::error::Unexpected VFS compiler cache key; no source or compiler started"
+          exit 1
+        fi
+        printf 'SCODE_VFS_RESTORED_CACHE_KEY=%s\n' "$RESTORED_KEY" >> "$GITHUB_ENV"
     - name: Build compiler inputs for a missing main cache
       # The consumer's ordinary cargo test verifies source and builds the driver.
       # A separate build here switches plugin feature variants unnecessarily.

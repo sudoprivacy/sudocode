@@ -219,8 +219,19 @@ are still exercised against real daemons. Scope guards add no journey coverage.
 The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
 outputs. An independent main-push publisher saves only a missing exact key;
 queue jobs only restore. The key binds the lockfile revision, compiler, runner
-image, build recipe, canonical path and explicit codegen settings. Source bytes
-are checked against the pinned Git tree before use, including same-mtime edits
+image, build recipe, canonical path and explicit codegen settings.
+An exact key includes the fixed source revision. A compatible fallback excludes
+only that revision and retains every compiler/environment binding. Before
+switching a restored source pin, the helper verifies its old Git tree and saved
+compiler identity, fetches the required revision with checkout hooks disabled,
+cleans old workspace outputs, and verifies the new Git tree. Registry and Git
+dependency artifacts remain available to normal Cargo. An old producer's exact
+current-pin key is recognized for the one-time cache format migration; unrelated
+legacy keys are excluded. A missing main key restores compatible inputs before
+prewarming, even when the initial lookup did not download a cache.
+The required interface reports the actual restored key. Refusal messages identify
+that key for recovery rather than telling an agent to delete a missing new key.
+Source bytes are checked against the pinned Git tree before use, including same-mtime edits
 and unexpected files. Every invocation still asks Cargo to build normally and
 runs the original search authorization/restart case against the current
 checkout's co-host, outside this cache. The fixed driver and plugin retain their

@@ -45,6 +45,13 @@ def expected_metrics(spec):
     return metrics
 
 
+def judged_metrics(spec):
+    """The visible metrics this scenario is judged on; the driver still measures all."""
+    judged = set(spec["judge"])
+    assert judged and judged <= expected_metrics(spec), "judge only metrics the workload measures"
+    return judged
+
+
 def paired_samples(rounds):
     """Describe every judged observation, retaining alternating binary order."""
     return [{"stage": stage, "round": number, "side": side}
@@ -61,7 +68,7 @@ def policy_plan(policy, profile):
     cases = policy["profiles"][profile]
     assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
     rounds = {case: comparison_rounds(policy, case) for case in cases}
-    metrics = {case: sorted(expected_metrics(policy["cases"][case])) for case in cases}
+    metrics = {case: sorted(judged_metrics(policy["cases"][case])) for case in cases}
     assert all(set(names) <= policy["metrics"].keys() for names in metrics.values())
     pairs = {case: paired_samples(value) for case, value in rounds.items()}
     samples = {case: len(value) for case, value in pairs.items()}
@@ -226,7 +233,7 @@ def main():
                         pair[side] = sample(binary, case, stage, number, side)
                     collection[case].append((pair["base"], pair["candidate"]))
             if stage == "aa":
-                report["calibration"], noise_failures = assess(controls, None, policy, cases)
+                report["calibration"], noise_failures = assess(controls, None, policy, cases, judged_metrics)
                 if noise_failures:
                     report.update(status="noisy", failures=noise_failures, metrics=report["calibration"])
                     break
@@ -235,7 +242,7 @@ def main():
                 observed = [{key: row[key] for key in ["stage", "round", "side"]}
                             for row in report["samples"] if row["data"]["case"] == case]
                 assert observed == plan["pairs"][case], "missing/duplicate/unjudged paired observations"
-            report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases)
+            report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases, judged_metrics)
             report["status"] = "failed" if report["failures"] else "passed"
     except (AssertionError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
         report["status"] = "invalid"

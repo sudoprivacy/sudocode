@@ -250,7 +250,7 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
-On macOS, rendering/browser profiles and the release startup measurement require
+On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads
 the power source and Foundation's active low-power mode before and after the
 timing window and once per second while it runs. Unknown settings, a detected
@@ -274,69 +274,35 @@ For local Git/SSH debugging, `python e2e/local-acceptance/run.py --profile-compa
 uses the real hook and signed-note workflow and explicitly reports its limited
 scope. The mandatory default still runs the complete enforcement matrix.
 
-Rendering A/A and A/B, painted browser performance and viewport resource checks
-run automatically in local Docker when CLI, engine-core, shared PTY helpers,
-measurement sources or Rust build/dependency inputs change. Other crates' source
-changes keep their selected native functional checks but skip these statistical
-performance comparisons. This deliberately reduces performance coverage for
-indirect effects from API, runtime, tools, ACP and service implementations; it
-does not establish that those effects are impossible. A change known to affect
-the performance workloads must include the corresponding measurement scenario.
-Selected measurements keep their baselines, per-run assertions and budgets.
-Paired rounds are listed below.
-Changes limited to `e2e/terminal-resize/benchmark.py`, `gui-benchmark.py`,
-`performance-policy.json` and `gui-policy.json` select both statistical profiles
-and the native benchmark-builder regression in CI. These files feed the explicit
-statistical drivers; ordinary workspace and resize suites do not execute them.
-Those unrelated native suites and their complementary CI hosts are therefore
-omitted for these four inputs. Rust, shared terminal hosts, unknown external
-inputs and mixed changes keep their applicable native suites. Real committed-Git
-planner and PR/push/queue fixtures cover this boundary, including deletion and
-renaming a shared host into a measurement-only path.
-Rendering and browser use the same canonical candidate checkout and Cargo
-outputs under the existing exclusive benchmark lease. Each baseline and the
-trusted rendering driver keep separate outputs. Copied normal release binaries
-stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
-cross-profile candidate reuse, exact binary identity and unchanged observer stages.
-When rendering and browser run in the same acceptance process for the same
-candidate, protected policy and Docker context, browser reuses rendering's exact
-immutable image and saved normal release. The retained image ID and binary hash
-live in that process only; previous output directories and mutable image tags
-cannot authorize reuse. The release enters browser through read-only inputs and
-is checked against its source, policy, image and SHA256 before use. Changed
-inputs or a fresh process use the ordinary build path; corrupted retained files
-fail explicitly. Browser baseline builds, dev-feature drivers, paired GUI samples
-and viewport observers still run. Real Cargo acceptance compiles another source
-into the shared cache between profiles and verifies the original normal release
-is preserved without another normal candidate build. Actual Docker acceptance
-exercises the frozen image, invocation boundary and five tampered identities/bytes.
-The host and container entrypoint share the canonical `container/<profile>`
-output layout. The Docker fixture calls the actual entrypoint and dispatcher,
-then retains the resulting native binary for browser reuse; a fixture workload
-replaces statistical product measurements. Missing or mismatched output fails
-without promoting old raw results into a signed profile.
-This removes a duplicate build even when another workline churns the cache. It
-does not shorten a successful measurement matrix or prove production speedup.
+Typing feel is measured by the paired rendering matrix: keypress-to-echo P95
+while reading history, waiting for the model and streaming, first visible output
+and cancel on prose, paste and resize on a short reply, and CPU and peak memory on
+a 12 KB Markdown stream. It drives the actual release binary through a headless
+terminal, which isolates scode's own cost, and compares it with the fixed baseline
+in `e2e/terminal-resize/performance-policy.json`. Each scenario names the metrics
+it is judged on; the driver records them all. No scenario runs an unjudged
+warm-up; the short reply keeps five A/A and seven alternating A/B pairs, the check
+that caught a real RSS regression, and the others use three and three: 60 judged
+observations. A failed, noisy
+or invalid scenario stops the matrix. Drivers build in the binary-free
+`scode-benchmark-drivers` package, so measuring compiles no extra CLI binary. The matrix runs once a day on main
+(`.github/workflows/rendering-main.yml`), so a regression surfaces within a day
+and is bisected between nightly heads. Run it on demand with
+`python .github/local-acceptance/checks.py --native-checks rendering --base origin/main --output DIR`.
+
+The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
+PTY helpers, the browser drivers and the browser terminal harness select it. Local
+Docker builds the candidate once in the dev profile and runs it in pinned
+Chromium/xterm: Markdown links stay clickable, native selection survives
+streaming, the prompt viewport scrolls and selects, and an idle terminal receives
+no output. Measurement-only inputs (`benchmark.py`, `performance-policy.json`,
+`gui-smoke.py`, `gui-policy.json` and the retired `gui-benchmark.py`) do not select
+the native workspace or resize suites, which never execute them.
 Every Docker build keeps its own randomly named image tag alongside the exact
-image ID. Rendering and browser retain that same owned reference; another
-invocation building identical cached layers cannot replace it with a different
-BuildKit attestation/index. Contract and performance images use one tag allocator.
-The real Docker regression builds the same context in another invocation before
-launching the original browser and executing its retained native binary. Budgets,
-samples, source bindings and failure handling remain unchanged.
-Performance drivers compile in the binary-free `scode-benchmark-drivers` package,
-referencing the original CLI test sources. They launch only the explicitly
-selected, copied release through `SCODE_TEST_BIN`. Distinct, opt-in target names
-keep ordinary workspace acceptance from running those cases twice. Older author
-snapshots use their original CLI targets; a present but broken standalone package
-fails instead of falling back. Cargo artifact records and a deliberately broken
-unused CLI prove the production builder omits that extra binary, while retaining
-normal/dev feature separation, actual driver execution and all observers. These
-infrastructure fixtures add no product journey coverage. Per-run assertions,
-sampling policy, baselines and budgets stay unchanged.
-The guard also reads actual Cargo metadata to require unique opt-in test targets
-that reference the original sources. Changes inside the driver package select
-this guard in CI; real Git event fixtures check that selection.
+image ID, so another invocation building identical cached layers cannot replace
+it with a different BuildKit attestation/index. Contract and performance images
+use one tag allocator.
+
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
 Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
 copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories
@@ -353,52 +319,6 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
-Rendering completes and judges one scenario at a time. Four scenarios keep
-their per-run interaction counts and every metric budget. The short scenario keeps
-five A/A and seven alternating A/B pairs, preserving the full check that caught
-a real RSS regression. The other scenarios use three A/A and three A/B pairs.
-A 12 KiB Markdown workload replaces the independent 8 KiB prose, 12 KiB prose
-and 2,300-byte Markdown workloads, adopting the consolidation proposed in #1196.
-Short prose, foreground tools and background tools remain separate. The required
-core matrix runs 60 judged observations; the previous 68 included eight extra
-unjudged warm-up workloads. The earlier consolidation reduced workload coverage:
-regressions specific to the removed plain-text sizes or short Markdown can escape
-the combined workload. No metric is filtered from the remaining cases.
-Browser comparison uses
-three A/A and three A/B pairs: 12 judged observations; its two extra full warm-ups
-are also removed in current candidate snapshots. Older candidate-owned browser
-runners can retain their legacy warm-ups with the same judged pairs. Each driver
-starts a fresh Node/SUT; browser observations also start a fresh browser, so
-process JIT state never carries between them. The same A/A checks
-still refuse noisy calibration; colder file caches may affect the first pair.
-Headless and painted viewport comparisons inherit the same 3/3 rounds: each also
-runs 14 instead of 26 samples, retaining their warm-ups. Repeated comparisons total
-100 instead of the original 234 (57.3% fewer). All 96 judged observations from the
-previous 110-run matrix remain; the separate 60-sample painted interaction check remains.
-Per-run parsed/painted interactions and budgets stay intact.
-This reduces repeat coverage and precision: intermittent regressions and
-environmental noise have fewer chances to appear. A preserved actual viewport
-A/A calibration refuses CPU noise with five pairs but not its first three;
-that original record remains noisy. Equivalent statistical sensitivity and
-whole-lifecycle savings are not established by these sample counts.
-The repeated-turn stress scenario retains five A/A and seven A/B pairs.
-A failed/noisy/invalid scenario stops the matrix and releases the lease; later
-scenarios remain unrun. The mandatory command prints the declared pair counts,
-active scenario and evidence path. `measurements/report.json` combines the original
-case reports, with original policy and binary/observer hashes, completed scenarios
-and remaining work. The actual benchmark CLI validates and describes the plan
-before npm or Cargo starts; the host checks its policy hash and complete sample
-count and exact stage/round/side inventory before accepting a passing report. Real Cargo/native-process acceptance exercises
-full success, relative RSS regression, broken drivers and changed observers with
-the unchanged paired evaluator, and rejects missing CPU metrics or passing
-reports with missing, extra or duplicated/mispaired samples. It does not claim product performance coverage.
-The changed rendering recipe requires fresh execution. Browser execution remains
-candidate-owned for the same head; an exact protected recipe pair preserves its
-unchanged completed work through the shared rendering-helper edit. Native profile
-recipes remain unchanged. Actual native fixture processes verify the 60/12 schedules,
-alternating sides, the full short check and rejection of relative RSS/browser
-regressions and policies below their minimum rounds. These fixtures add no
-product performance coverage credit.
 
 Completed guard and browser receipts for the same source head can survive the
 private Docker image-tag ownership fix through exact protected recipe pairs.
@@ -421,8 +341,9 @@ acceptance checks six consecutive distinct responses and earlier-file integrity.
 The conditional PR codec check also writes 42 actual files, including six
 concurrent captures, independently decodes them and compares quota failure
 prefixes with the previous flate2 encoder. It adds no live-provider coverage.
-These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
-ordinary test-only changes do not rebuild an unchanged performance pair. Local
+These comparisons have no scheduled or manual cloud replacement.
+
+Documentation-only changes run preflight. Local
 preflight checks actual conflicts against its supplied base and fetched
 `origin/main` before product builds and benchmark leases. It prints the exact
 paths and recovery step without changing the checkout or index. Clean branches
@@ -1003,8 +924,8 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
-Renderer changes must pass the mandatory local rendering/browser profiles and
-the required `Local acceptance` status. See the shared
+Renderer changes pass the browser smoke in the required `Local acceptance`
+status, and the daily rendering matrix on main judges their typing latency. See the shared
 [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.

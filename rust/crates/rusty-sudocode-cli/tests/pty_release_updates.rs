@@ -139,10 +139,6 @@ fn payload_archive(bytes: &[u8]) -> (String, Vec<u8>) {
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 fn spawn_installed(
     env: &common::TestEnv,
     installed: &std::path::Path,
@@ -150,17 +146,36 @@ fn spawn_installed(
     args: &[&str],
 ) -> pty_expect::PtySession {
     let record = env.workspace_root().join("restart arguments.txt");
-    let command = format!(
-        "{} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR SUDO_CODE_CONFIG_HOME={} SCODE_MIRROR={} SCODE_CHECK_UPDATES=1 SCODE_UPDATE_RECORD={} {} {}",
-        if cfg!(windows) { "MSYS2_ARG_CONV_EXCL='*'" } else { "" },
-        shell_quote(&env.config_home().to_string_lossy()), shell_quote(mirror),
-        shell_quote(&record.to_string_lossy()), shell_quote(&installed.to_string_lossy()),
-        args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>().join(" ")
+    env.spawn_executable_with_env(
+        installed,
+        args,
+        &[
+            ("SCODE_MIRROR", mirror),
+            ("SCODE_CHECK_UPDATES", "1"),
+            ("SCODE_UPDATE_RECORD", &record.to_string_lossy()),
+        ],
+    )
+}
+
+fn prepare_installed(env: &common::TestEnv, installed: &std::path::Path) {
+    std::fs::copy(common::scode_bin(), installed).unwrap();
+    // Validate each staged executable once before the interactive workflow.
+    // macOS can spend >10s loading a fresh debug copy before main (sampled at
+    // _dyld_start), even though --version itself takes milliseconds. Process
+    // launch has a separate e2e/startup benchmark; this journey checks updating
+    // a working installation, with unchanged prompt/download/restart budgets.
+    let version = std::process::Command::new(installed)
+        .arg("--version")
+        .current_dir(env.workspace_root())
+        .env("SUDO_CODE_CONFIG_HOME", env.config_home())
+        .env_remove("SCODE_GLOBAL_CONFIG_DIR")
+        .env_remove("SCODE_PROJECT_CONFIG_DIR")
+        .output()
+        .expect("run the staged executable's version command");
+    assert!(
+        version.status.success() && version.stdout.starts_with(b"scode "),
+        "staged executable did not report its version: {version:?}"
     );
-    let mut child =
-        pty_expect::PtySession::spawn(&common::resolve_sh(), &["-c", &command]).unwrap();
-    child.set_default_timeout(common::DEFAULT_TIMEOUT);
-    child
 }
 
 #[test]
@@ -174,13 +189,15 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
         "installed scode"
     };
     let installed = root.join(exe_name);
-    std::fs::copy(common::scode_bin(), &installed).unwrap();
+    prepare_installed(&env, &installed);
     let source = root.join("replacement.rs");
     std::fs::write(
         &source,
         r#"fn main() {
         let args = std::env::args().skip(1).collect::<Vec<_>>().join("|");
-        std::fs::write(std::env::var("SCODE_UPDATE_RECORD").unwrap(), args).unwrap();
+        let record = std::path::PathBuf::from(std::env::var("SCODE_UPDATE_RECORD").unwrap());
+        std::fs::write(&record, args).unwrap();
+        std::fs::write(record.with_extension("cwd"), std::env::current_dir().unwrap().to_string_lossy().as_bytes()).unwrap();
         println!("updated scode fixture");
     }"#,
     )
@@ -239,6 +256,13 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
     assert_eq!(child.expect_eof().unwrap(), 0);
     assert_eq!(std::fs::read(&installed).unwrap(), payload);
     assert_eq!(std::fs::read_to_string(&record).unwrap(), "--model|sonnet");
+    assert_eq!(
+        std::path::PathBuf::from(std::fs::read_to_string(record.with_extension("cwd")).unwrap())
+            .canonicalize()
+            .unwrap(),
+        root.canonicalize().unwrap(),
+        "the installed CLI and its replacement must run in the fixture workspace"
+    );
     assert_eq!(mirror.requests.load(Ordering::SeqCst), 2);
 }
 
@@ -248,7 +272,7 @@ fn a_bad_checksum_preserves_the_installed_executable() {
     let installed = env
         .workspace_root()
         .join(if cfg!(windows) { "scode.exe" } else { "scode" });
-    std::fs::copy(common::scode_bin(), &installed).unwrap();
+    prepare_installed(&env, &installed);
     let original = std::fs::read(&installed).unwrap();
     let (name, archive) = payload_archive(b"tampered release bytes");
     let mirror = Mirror::with_files(

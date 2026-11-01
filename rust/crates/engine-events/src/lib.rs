@@ -220,23 +220,37 @@ pub enum CompletionReceipt {
     Retry,
 }
 
-/// The engine's lifecycle state, surfaced to renderers via
-/// [`EngineEvent::State`].
+/// The request which owns the foreground input surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputReason {
+    Permission,
+    Question,
+}
+
+/// Foreground operation state, independent of renderer and storage backend.
+/// Background tasks retain their own session-owned registry and lifecycle.
 ///
-/// [`EngineState::AwaitingInput`] is the trigger the kernel
-/// `AgentState::AwaitingInput` primitive was built to receive: the engine
-/// enters it the instant it emits a [`EngineEvent::PermissionRequest`] or
-/// [`EngineEvent::QuestionRequest`], and returns to [`EngineState::Running`]
-/// once the matching answer command arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The engine enters [`Self::AwaitingInput`] when it emits a permission or
+/// question request, and returns to [`Self::Running`] when that prompt releases
+/// input. Independent tools can continue while the prompt owns input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "waiting_for", rename_all = "snake_case")]
 pub enum EngineState {
-    /// No turn in flight; waiting for the next [`EngineCommand::Prompt`].
+    /// No foreground operation in flight; background tasks may still run.
     Idle,
-    /// A turn is executing (model streaming, tools running).
+    /// A turn, management operation or direct tool call is executing.
     Running,
-    /// A turn is blocked on the renderer answering a permission or question
-    /// request.
-    AwaitingInput,
+    /// A prompt owns input. Other tools and provider streaming may continue.
+    AwaitingInput(InputReason),
+}
+
+/// A selected engine instance's current facts, independent of its host or PID.
+/// This observation neither proves global presence nor grants tool control.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeStatus {
+    pub foreground: EngineState,
+    pub background: runtime::background_tasks::BackgroundTaskSummary,
 }
 
 /// End-of-turn aggregate — absorbs `runtime::TurnSummary` minus the message
@@ -437,6 +451,11 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    /// Read current runtime metadata without starting or interrupting a turn.
+    /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
+    RuntimeStatus {
+        request_id: u64,
+    },
     Input {
         id: u64,
         action: InputAction,

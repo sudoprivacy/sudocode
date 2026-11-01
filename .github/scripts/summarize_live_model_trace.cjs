@@ -2,11 +2,13 @@
 // The artifact uses an explicit field list; request bodies and arbitrary
 // headers stay out of it. Run after both successful and failed live tests.
 const fs = require('node:fs');
+const crypto = require('node:crypto');
+const path = require('node:path');
 
 const [input, output] = process.argv.slice(2);
 if (!input || !output) throw new Error('Usage: summarize_live_model_trace.cjs INPUT OUTPUT');
 const { clean, writeEvidence, providerFailure } = require('./live_model_evidence.cjs');
-const report = { traceFiles: 0, malformedLines: 0, requests: [] };
+const report = { traceFiles: 0, malformedLines: 0, malformedRecords: [], requests: [] };
 const responses = new Map();
 const refusals = new Map();
 const usages = new Map();
@@ -16,10 +18,21 @@ const progress = new Map();
 for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
   if (!fs.existsSync(file)) continue;
   report.traceFiles++;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+  for (const [index, line] of fs.readFileSync(file, 'utf8').split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     let event;
-    try { event = JSON.parse(line); } catch { report.malformedLines++; continue; }
+    try { event = JSON.parse(line); } catch {
+      report.malformedLines++;
+      if (report.malformedRecords.length < 20) {
+        // Retain a bounded structural fingerprint, never a fragment of a
+        // malformed body/header or JSON.parse's potentially sensitive snippet.
+        report.malformedRecords.push({
+          file: path.basename(file), line: index + 1, bytes: Buffer.byteLength(line),
+          sha256: crypto.createHash('sha256').update(line).digest('hex'),
+        });
+      }
+      continue;
+    }
     const data = event.attributes ?? {};
     if (event.event === 'response_debug') {
       const ids = {};
@@ -116,3 +129,7 @@ for (const request of report.requests) {
 }
 writeEvidence(output, report);
 console.log(`Live model evidence: ${report.requests.length} requests, ${report.malformedLines} malformed lines`);
+if (report.malformedLines) {
+  console.error('Live model evidence is incomplete; malformed record fingerprints were preserved.');
+  process.exitCode = 1;
+}

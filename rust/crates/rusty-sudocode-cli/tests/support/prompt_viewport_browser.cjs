@@ -106,14 +106,18 @@ websocket.on('connection', socket => {
       return { start: window.fixture.point(where), end: window.fixture.point(where, 'end') };
     }, label);
     await page.evaluate(() => window.fixture.frame());
-    // Shift forces selection in mouse-reporting mode; in native mode it
-    // extends an existing selection instead of beginning a new one.
-    if (config.enabled) await page.keyboard.down('Shift');
+    // Follow the browser host's actual mouse mode and native platform binding.
+    const selection = await page.evaluate(() => ({
+      modifier: window.fixture.selectionModifier(), platform: navigator.platform,
+      mouseTrackingMode: window.fixture.terminal.modes.mouseTrackingMode,
+    }));
+    report.selection_input = selection;
+    if (selection.modifier) await page.keyboard.down(selection.modifier);
     await page.mouse.move(target.start.x, target.start.y);
     await page.mouse.down();
     await page.mouse.move(target.end.x, target.end.y, { steps: 12 });
     await page.mouse.up();
-    if (config.enabled) await page.keyboard.up('Shift');
+    if (selection.modifier) await page.keyboard.up(selection.modifier);
     assert.equal(await page.evaluate(() => window.fixture.terminal.getSelection()), label);
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await page.waitForFunction(() => window.fixture.viewport().includes('Σ'));

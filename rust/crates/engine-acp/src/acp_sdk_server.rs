@@ -280,6 +280,12 @@ pub(crate) struct ResumeToolsRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct ResumeToolsResponse {}
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeStatusRequest {
+    pub session_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Custom extension: _sudocode/a2a/* (direct A2A requests)
 // ---------------------------------------------------------------------------
@@ -287,6 +293,7 @@ pub(crate) struct ResumeToolsResponse {}
 // Served from the catch-all dispatch rather than as typed handlers: every typed
 // handler nests the server's type one level deeper, and the chain is already at
 // the depth the compiler lays out by default in every crate that runs it.
+const RUNTIME_STATUS_METHOD: &str = "_sudocode/session/status";
 const DIRECT_SEND_METHOD: &str = "_sudocode/a2a/send";
 const DIRECT_AGENT_LIST_METHOD: &str = "_sudocode/a2a/agent_list";
 
@@ -1110,6 +1117,7 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
@@ -1579,7 +1587,7 @@ pub trait HostedSessionFactory: Send + Sync {
         None
     }
     fn close(&self) {}
-    fn state_changed(&self, _state: engine_core::EngineState, _reason: Option<String>) {}
+    fn state_changed(&self, _state: engine_core::EngineState) {}
     fn open(
         &self,
         requested_id: Option<&str>,
@@ -2296,6 +2304,23 @@ pub(crate) fn answer_permission(
 }
 
 /// The session, tool and tool input a direct A2A request asks for.
+/// Observe one engine through its command lane without acquiring a turn
+/// listener or the session lock, including while input or tools are pending.
+async fn read_runtime_status(
+    registry: Arc<SessionRegistry>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    let request: RuntimeStatusRequest = serde_json::from_value(params)
+        .map_err(|error| Error::invalid_params().data(error.to_string()))?;
+    let driver = registry
+        .driver(&request.session_id)
+        .ok_or_else(|| Error::invalid_params().data("Unknown session"))?;
+    driver
+        .runtime_status()
+        .await
+        .map_err(|error| Error::internal_error().data(error))
+}
+
 fn direct_a2a_call(
     message: agent_client_protocol::UntypedMessage,
 ) -> Result<(String, &'static str, serde_json::Value), DirectToolError> {
@@ -3456,11 +3481,23 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
-        // --- catch-all: direct A2A requests, then unhandled methods ---
+        // Extensions share the existing dispatch to keep the SDK handler type bounded.
         .on_receive_dispatch(
             {
                 let registry = Arc::clone(&registry);
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
+                    Dispatch::Request(message, responder)
+                        if message.method() == RUNTIME_STATUS_METHOD =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let (_, params) = message.into_parts();
+                        cx.spawn(async move {
+                            responder
+                                .respond_with_result(read_runtime_status(registry, params).await)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
                     Dispatch::Request(message, responder)
                         if crate::input_control::InputRequest::matches_method(message.method()) =>
                     {

@@ -178,21 +178,23 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
         .send(envelope("chatty-peer", "pinned-receiver", "first"))
         .expect("send first");
 
-    // The poller records the stall after the consumer has refused, so wait for
-    // the record itself; the moment of the refusal is too early to read it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let tail_before = loop {
-        let tail = runtime::mailbox::delivery_events()
+    let recorded_tail = || {
+        runtime::mailbox::delivery_events()
             .into_iter()
             .filter(|e| e.peer == "chatty-peer")
             .filter_map(|e| e.tail)
-            .max();
-        if let Some(tail) = tail {
+            .max()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // The consumer runs before the tail records its refusal. A counter inside
+    // that callback cannot establish that the delivery record is visible.
+    let tail_before = loop {
+        if let Some(tail) = recorded_tail() {
             break tail;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "a stall was recorded for the first message"
+            "no stall was recorded for the first message"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
@@ -210,12 +212,7 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
     let mut tail_after = tail_before;
     while tail_after <= tail_before && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        tail_after = runtime::mailbox::delivery_events()
-            .into_iter()
-            .filter(|e| e.peer == "chatty-peer")
-            .filter_map(|e| e.tail)
-            .max()
-            .unwrap_or(tail_before);
+        tail_after = recorded_tail().unwrap_or(tail_before);
     }
     abort.abort();
     let _ = poller.join();

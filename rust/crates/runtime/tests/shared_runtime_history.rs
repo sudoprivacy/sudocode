@@ -1,7 +1,7 @@
 //! Actual runtime turns, a native child tool, concurrent resume and cold replay.
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,8 +16,6 @@ use runtime::{
     StaticToolExecutor, SystemPrompt, ToolError,
 };
 
-const CASE: &str = "runtime_resume_inherits_completed_turn_while_native_tool_runs";
-const CHILD: &str = "SCODE_SHARED_RUNTIME_CHILD";
 const RECEIPT: &str = "NEXUS_RUNTIME_HISTORY_RECEIPT";
 const WAIT: Duration = Duration::from_secs(30);
 const PREFIX_TURNS: usize = 36;
@@ -25,6 +23,9 @@ type Requests = Arc<Mutex<Vec<Vec<ConversationMessage>>>>;
 
 #[path = "common/live_nexus.rs"]
 mod live_nexus;
+
+#[path = "common/native_tool.rs"]
+mod native_tool;
 
 fn backend(nexus: bool) -> Arc<dyn FsBackend> {
     if !nexus {
@@ -437,13 +438,6 @@ impl Drop for RunningTurn {
 
 #[test]
 fn runtime_resume_inherits_completed_turn_while_native_tool_runs() {
-    if let Some(root) = std::env::var_os(CHILD) {
-        let root = PathBuf::from(root);
-        std::fs::write(root.join("tool-pid"), std::process::id().to_string()).unwrap();
-        wait_for(&root.join("release"));
-        std::fs::write(root.join("actual-result"), "A_ACTUAL_NATIVE_TOOL_RESULT").unwrap();
-        return;
-    }
     exercise_runtime_history(false, false);
 }
 
@@ -661,16 +655,16 @@ fn start_native_tool_turn(root: &Path, path: &Path, nexus: bool) -> RunningTurn 
         let _workspace = WorkspaceRootScope::enter(&thread_root);
         let child_root = thread_root.clone();
         let tools = StaticToolExecutor::new().register("bash", move |_| {
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", CASE, "--nocapture"])
-                .env(CHILD, &child_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .map_err(|error| ToolError::new(error.to_string()))?
-                .wait()
-                .map_err(|error| ToolError::new(error.to_string()))?;
+            let status = native_tool::NativeTool::spawn(
+                &child_root.join("tool-pid"),
+                &child_root.join("release"),
+                &child_root.join("actual-result"),
+                "A_ACTUAL_NATIVE_TOOL_RESULT",
+                WAIT,
+            )
+            .map_err(|error| ToolError::new(error.to_string()))?
+            .wait()
+            .map_err(|error| ToolError::new(error.to_string()))?;
             if !status.success() {
                 return Err(ToolError::new("native tool child failed"));
             }

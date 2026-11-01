@@ -2472,11 +2472,6 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
             let read = editor.borrow_mut().read_line()?;
             match read {
                 input::ReadOutcome::Submit(input) => {
-                    // Clear the pre-printed bottom sep + footer. After
-                    // readline, cursor is at the start of the bottom sep
-                    // line. \x1b[J clears from cursor to end of screen.
-                    print!("\x1b[J");
-                    let _ = io::stdout().flush();
                     let trimmed = input.trim().to_string();
                     // An empty line only comes back while peer messages wait: the
                     // user handing the prompt back so they run, at the loop's top.

@@ -5636,7 +5636,6 @@ fn prepare_agent_job(
     let output_dir = agent_store_dir(fs.as_ref())?;
     fs.create_dir_all(&output_dir.to_string_lossy())
         .map_err(|error| error.to_string())?;
-    sweep_orphaned_tmp_files(&output_dir, fs.as_ref());
     let output_file = store_path(&output_dir, &format!("{agent_id}.md"), fs.as_ref());
     let manifest_file = store_path(&output_dir, &format!("{agent_id}.json"), fs.as_ref());
 
@@ -6594,35 +6593,11 @@ fn agent_permission_policy(mode: PermissionMode) -> PermissionPolicy {
         })
 }
 
-/// Best-effort removal of `*.tmp` files left behind by a previous crash between
-/// `fs::write` and `fs::rename` in `write_agent_manifest`. Called once per agent
-/// launch so the directory stays clean without a separate startup sweep.
-fn sweep_orphaned_tmp_files(dir: &std::path::Path, fs: &dyn FsBackend) {
-    let Ok(entries) = fs.readdir(&dir.to_string_lossy()) else {
-        return;
-    };
-    for entry in entries {
-        if entry.is_dir
-            || std::path::Path::new(&entry.name).extension() != Some(std::ffi::OsStr::new("tmp"))
-        {
-            continue;
-        }
-        let _ = fs.delete(&store_path(dir, &entry.name, fs).to_string_lossy());
-    }
-}
-
 fn write_agent_manifest(manifest: &AgentOutput, fs: &dyn FsBackend) -> Result<(), String> {
     let mut normalized = manifest.clone();
     normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
     let json = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
-    // Write to a temp file then rename for atomic visibility — prevents a reader
-    // seeing a partially-written file during truncate-then-write. Both halves go
-    // through `fs`: a rename is only atomic within one filesystem, and these two
-    // paths are in whichever one the store is rooted on.
-    let tmp_path = format!("{}.tmp", normalized.manifest_file);
-    fs.write(&tmp_path, json.as_bytes())
-        .map_err(|e| e.to_string())?;
-    fs.rename(&tmp_path, &normalized.manifest_file)
+    fs.write_atomic(&normalized.manifest_file, json.as_bytes())
         .map_err(|e| e.to_string())
 }
 
@@ -9845,10 +9820,9 @@ mod tests {
         extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
         normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
-        push_output_block, run_ask_user_question_v2, search_tool_specs, sweep_orphaned_tmp_files,
-        AgentInput, AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
-        GlobalToolRegistry, LaneEventName, LaneFailureClass, SearchableToolSpec,
-        SubagentToolExecutor,
+        push_output_block, run_ask_user_question_v2, search_tool_specs, AgentInput, AgentJob,
+        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        LaneEventName, LaneFailureClass, SearchableToolSpec, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -13351,24 +13325,6 @@ mod tests {
         );
 
         std::env::remove_var("SUDOCODE_AGENT_STORE");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn sweep_orphaned_tmp_files_removes_tmp_and_leaves_json() {
-        let dir = temp_path("agent-sweep-tmp");
-        std::fs::create_dir_all(&dir).expect("create dir");
-
-        let tmp_path = dir.join("agent-123.json.tmp");
-        let json_path = dir.join("agent-123.json");
-        std::fs::write(&tmp_path, b"partial").expect("write tmp");
-        std::fs::write(&json_path, b"{}").expect("write json");
-
-        sweep_orphaned_tmp_files(&dir, runtime::host_fs());
-
-        assert!(!tmp_path.exists(), ".tmp file should be removed");
-        assert!(json_path.exists(), ".json file should be kept");
-
         let _ = std::fs::remove_dir_all(dir);
     }
 

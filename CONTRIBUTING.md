@@ -219,8 +219,19 @@ are still exercised against real daemons. Scope guards add no journey coverage.
 The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
 outputs. An independent main-push publisher saves only a missing exact key;
 queue jobs only restore. The key binds the lockfile revision, compiler, runner
-image, build recipe, canonical path and explicit codegen settings. Source bytes
-are checked against the pinned Git tree before use, including same-mtime edits
+image, build recipe, canonical path and explicit codegen settings.
+An exact key includes the fixed source revision. A compatible fallback excludes
+only that revision and retains every compiler/environment binding. Before
+switching a restored source pin, the helper verifies its old Git tree and saved
+compiler identity, fetches the required revision with checkout hooks disabled,
+cleans old workspace outputs, and verifies the new Git tree. Registry and Git
+dependency artifacts remain available to normal Cargo. An old producer's exact
+current-pin key is recognized for the one-time cache format migration; unrelated
+legacy keys are excluded. A missing main key restores compatible inputs before
+prewarming, even when the initial lookup did not download a cache.
+The required interface reports the actual restored key. Refusal messages identify
+that key for recovery rather than telling an agent to delete a missing new key.
+Source bytes are checked against the pinned Git tree before use, including same-mtime edits
 and unexpected files. Every invocation still asks Cargo to build normally and
 runs the original search authorization/restart case against the current
 checkout's co-host, outside this cache. The fixed driver and plugin retain their
@@ -312,6 +323,13 @@ Other candidates, policies and invocations use their own builds. Browser-only
 acceptance keeps its normal dev build. Native browser drivers and every existing
 interaction still run. When reused, GUI behaviour is checked on the production
 release configuration; that run no longer adds a separate dev-GUI variant.
+Paired browser drivers use the rendering driver's leased release Cargo cache.
+Before Cargo runs, its mutable checkout is synchronized to the exact candidate,
+replacing the earlier policy snapshot. Normal Cargo builds both browser drivers
+and rebuilds changed inputs; no earlier test result is reused. Standalone browser
+drivers keep their dev profile and separate cache. This changes only the paired
+test driver's optimization profile; the product, steps and assertions stay fixed.
+Both measurement harnesses verify the expected driver digest before execution.
 The GUI report records its expected and actual candidate digest, and the wrapper
 checks the candidate again after viewport interaction. Corrupt or mismatched
 promotions fail without starting a replacement build. Reports explicitly record

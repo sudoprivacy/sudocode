@@ -23,6 +23,12 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def verify_digest(actual, expected, label):
+    """Refuse substituted build outputs before starting a native workload."""
+    if expected is not None and actual != expected:
+        raise ValueError(f"{label} differs from the validated build")
+
+
 def comparison_rounds(policy, case):
     """Keep paired sampling explicit, including the full short RSS sentinel."""
     overrides = policy.get("case_rounds", {})
@@ -181,7 +187,8 @@ def main():
     report = {"version": 1, "profile": args.profile, "preview": args.preview,
               "policy_sha256": digest(args.policy), "policy": policy,
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
-              "driver_sha256": digest(args.driver), "samples": [], "status": "running", "unjudged_warmups": 0}
+              "driver_sha256": digest(args.driver), "expected_driver_sha256": os.environ.get("SCODE_EXPECTED_DRIVER_SHA256"),
+              "samples": [], "status": "running", "unjudged_warmups": 0}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name))
                                 for name in ["benchmark.py", "host.cjs", "run.cjs", "performance.cjs", "resources.cjs"]}
     controls, comparisons = {case: [] for case in cases}, {case: [] for case in cases}
@@ -219,6 +226,7 @@ def main():
         return value
 
     try:
+        verify_digest(report["driver_sha256"], report["expected_driver_sha256"], "driver")
         # Every observation starts a fresh driver/Node/SUT. Begin with the
         # existing calibration pairs instead of repeating full unjudged runs.
         for stage, key, collection in [

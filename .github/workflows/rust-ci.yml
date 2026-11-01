@@ -767,6 +767,13 @@ jobs:
         shell: bash
         run: |
           python ../.github/scripts/live_model_acceptance.py --suite pty --execute --output "${{ runner.temp }}/live-acceptance/pty"
+      - name: Deliver offline Nexus mail through Windows ConPTY and a real model
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: .
+        env:
+          SCODE_LIVE_MODEL: *live_model
+        run: bash e2e/nexus-a2a/run-live-offline.sh
       - name: Summarize live model routing evidence
         if: always()
         working-directory: .

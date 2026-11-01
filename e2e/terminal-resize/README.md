@@ -98,6 +98,11 @@ actual local and CI responsibilities from committed Git inputs.
 If rendering and browser smoke run in that order in one acceptance process, the
 browser uses the same immutable image and hash-verified normal release. This
 omits a second CLI build while retaining both browser interaction drivers.
+Paired browser drivers also share the rendering driver's release Cargo cache
+under the existing benchmark lease. The mutable checkout is first synchronized
+to the exact candidate, then normal Cargo compiles both browser drivers and
+rebuilds changed inputs. Browser-only drivers keep their dev build and cache.
+Expected driver hashes are checked before either harness starts a native process.
 Browser-only runs still build the dev candidate. Reuse is bound to candidate,
 protected policy, image context and output namespace and never inferred from old
 folders. Incorrect identities/bytes are refused before native builds or the GUI.

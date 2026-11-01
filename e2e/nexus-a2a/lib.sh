@@ -187,9 +187,10 @@ grpcurl_bin() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) exe=".exe" ;;
   esac
-  local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/grpcurl${exe}"
+  local version="1.9.4" os suffix
+  # Keep downloads versioned so an older cached client cannot survive an update.
+  local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/${version}/grpcurl${exe}"
   if [ -x "$cache" ]; then printf '%s' "$cache"; return; fi
-  local version="1.9.3" os suffix
   case "$(uname -s)" in
     Linux) os=linux; suffix=tar.gz ;;
     Darwin) os=osx; suffix=tar.gz ;;

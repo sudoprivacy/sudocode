@@ -499,8 +499,9 @@ def native_guard_files():
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "af1307c285c8fa5be1e2e0475c502bd0c790cd3e55fa7a11abf292d9d7370e09",
-        ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
-        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
+        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
+        ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "1648d8fe4f74e74e86670d58f00941affb4f71430ab76ae37b4401857c0a76e4",
@@ -1035,7 +1036,12 @@ def benchmark_locked(name, root, output, base, command, target):
     drivers = compiled_drivers(log, [driver])
     args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
             "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
-    rendering_cases(terminal, args, output / "measurements", command, render_plan)
+    expected_driver = hashlib.sha256(Path(drivers[driver]).read_bytes()).hexdigest()
+
+    def measured_command(*args):
+        return command(*args, extra={"SCODE_EXPECTED_DRIVER_SHA256": expected_driver})
+
+    rendering_cases(terminal, args, output / "measurements", measured_command, render_plan)
 
 
 def benchmark_driver_targets(source):
@@ -1065,14 +1071,18 @@ def browser_smoke(inputs, output, command):
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
-    work, targets = benchmark_storage("browser")
+    reused = verified_candidate_release(inputs)
+    work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
-    candidate = work / "candidate"
+    # Rendering has finished with this mutable checkout. Synchronize the actual
+    # candidate, then let normal Cargo dependency tracking validate every input.
+    candidate = work / ("trusted" if reused is not None else "candidate")
     replace_checkout(inputs / "candidate", candidate)
     terminal = candidate / "e2e/terminal-resize"
-    reused = verified_candidate_release(inputs)
     command("npm", "ci", "--prefix", str(terminal))
-    manifest, build = str(candidate / "rust/Cargo.toml"), str(targets / "candidate")
+    manifest = str(candidate / "rust/Cargo.toml")
+    build = str(targets / ("driver" if reused is not None else "candidate"))
+    profile = ["--release"] if reused is not None else []
     binary = output / "scode-candidate"
     # Copy before the drivers build: their dev features rebuild the shared graph.
     if reused is None:
@@ -1082,18 +1092,19 @@ def browser_smoke(inputs, output, command):
     else:
         shutil.copy2(reused, binary)
         print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
-              "only native test drivers compile here.", flush=True)
+              "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
     expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     package, prefix = benchmark_driver_targets(candidate)
     links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
-    log = command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
+    log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
                   "-p", package, "--test", links, "--test", viewport,
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
     command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
             "--candidate", str(binary), "--output", str(output / "smoke"),
-            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest})
-    command("cargo", "test", "--locked", "--manifest-path", manifest, "--target-dir", build,
+            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
+                   "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
+    command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
             "-p", package, "--test", viewport, "viewport_browser_interaction",
             "--", "--ignored", "--exact", "--nocapture",
             extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})

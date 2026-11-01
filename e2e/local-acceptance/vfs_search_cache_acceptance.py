@@ -1,11 +1,13 @@
 """Exercise fixed-driver caching through real Git, Cargo, tar and native processes."""
 
 import argparse
+import ctypes
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -39,6 +41,19 @@ def consumer_workflow_script():
     script = "set -eu\n" + "\n".join(body) + "\n"
     assert "${{" not in script, "Use the real runner environment in the executable consumer interface"
     return script
+
+
+def restored_key_workflow_script():
+    lines = (SOURCE / ".github/actions/vfs-search-cache/action.yml").read_text().splitlines()
+    start = lines.index("    - name: Report restored compiler input key") + 1
+    while lines[start] != "      run: |":
+        start += 1
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line.startswith("        "):
+            break
+        body.append(line[8:])
+    return "set -eu\n" + "\n".join(body) + "\n"
 
 
 def run(output):
@@ -76,6 +91,17 @@ def run(output):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
+    dependency = root / "immutable-dependency"
+    dependency.mkdir()
+    command("git", "init", "--initial-branch=main", str(dependency))
+    command("git", "config", "user.name", "Immutable dependency fixture", cwd=dependency)
+    command("git", "config", "user.email", "dependency@example.invalid", cwd=dependency)
+    (dependency / "Cargo.toml").write_text('[package]\nname="stable-driver-support"\nversion="0.0.1"\nedition="2021"\n')
+    (dependency / "src").mkdir()
+    (dependency / "src/lib.rs").write_text('pub fn value() -> u32 { 42 }\n')
+    command("git", "add", ".", cwd=dependency)
+    command("git", "commit", "-m", "Immutable compiled dependency", cwd=dependency)
+    dependency_revision = command("git", "rev-parse", "HEAD", cwd=dependency).read_text().strip()
     command("git", "init", "--initial-branch=main", str(source))
     command("git", "config", "user.name", "VFS cache fixture", cwd=source)
     command("git", "config", "user.email", "cache@example.invalid", cwd=source)
@@ -90,15 +116,17 @@ def run(output):
           'for key in ["CARGO_MANIFEST_DIR","CARGO_PKG_NAME","CARGO_PKG_VERSION_MAJOR",'
           '"CARGO_PKG_VERSION_MINOR","CARGO_PKG_VERSION_PATCH","CARGO_PKG_VERSION_PRE"] {\n'
           'println!("cargo:rerun-if-env-changed={key}");\n}\n}\n')
-    write("rust/cluster/Cargo.toml", '[package]\nname="nexus-cluster"\nversion="0.0.0"\nedition="2021"\n')
-    write("rust/cluster/src/lib.rs", 'pub fn value() -> u32 { 42 }\n')
+    write("rust/cluster/Cargo.toml", '[package]\nname="nexus-cluster"\nversion="0.0.0"\nedition="2021"\n'
+          f'[dependencies]\nstable-driver-support={{git="{dependency.as_uri()}",rev="{dependency_revision}"}}\n')
+    write("rust/cluster/src/lib.rs", 'pub fn value() -> u32 { stable_driver_support::value() }\n')
     write("rust/cluster/tests/user_runtime.rs", '#[test] fn ' + cache.CASE + '() {\n'
           'assert!(std::process::Command::new(env!("CARGO")).args(["build","-p","nexus-search-plugin"]).status().unwrap().success());\n'
           'assert_eq!(nexus_cluster::value(),42);\n'
           'let output=std::process::Command::new(std::env::var("NEXUS_SEARCH_USER_RUNTIME_BINARY").unwrap()).output().unwrap();\n'
           'assert!(output.status.success());\n'
           'assert_eq!(String::from_utf8(output.stdout).unwrap().trim(),"runtime-42");\n}\n')
-    command("cargo", "generate-lockfile", "--offline", "--manifest-path", str(source / "Cargo.toml"))
+    command("cargo", "generate-lockfile", "--manifest-path", str(source / "Cargo.toml"),
+            extra={"CARGO_NET_OFFLINE": "false"})
     command("git", "add", ".", cwd=source)
     command("git", "commit", "-m", "Pinned native driver fixture", cwd=source)
     revision = command("git", "rev-parse", "HEAD", cwd=source).read_text().strip()
@@ -112,17 +140,37 @@ def run(output):
         path.write_text(f'fn main() {{ println!("runtime-{value}"); }}\n')
         command("rustc", "--edition=2021", str(path), "-o", str(runtime))
 
-    def invoke(name, label, success=True):
+    def invoke(name, label, success=True, extra=None):
         return command(sys.executable, str(entry), name, "--root", str(root), "--output", str(output / label),
-                       success=success, extra={"NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime)})
+                       success=success, extra={"NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime), **(extra or {})})
 
     key = json.loads(command(sys.executable, str(entry), "key", "--root", str(root)).read_text())["key"]
+    # Captured from the real #1088 Linux consumer. Preserve the exact legacy
+    # producer format, not just a second implementation of the new prefix.
+    captured = {"pin": "4fd2005d9cdb4ec3aa72983429a4417dbb753ddb",
+        "root": "/home/runner/work/sudocode/sudocode/.native-vfs", "recipe": cache.LEGACY_RECIPE,
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\n"
+                 "commit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+        "environment": {"CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
+                        "ImageVersion": "20261026.354.1", "ImageOS": "ubuntu24"}, "cargo_configs": {}}
+    assert cache.restore_keys(captured)[0] == "vfs-search-v1-436b0e2c2bbf3e9c3b62998dc222b1aa194fea5cbf6e5f1b11053344f2947fe1"
+    github_env = root / "github-env"
+    export = restored_key_workflow_script()
+    command("bash", "-c", export, extra={"RESTORED_KEY": key, "GITHUB_ENV": str(github_env)})
+    assert github_env.read_text() == f"SCODE_VFS_RESTORED_CACHE_KEY={key}\n"
+    refused = command("bash", "-c", export, success=False,
+                      extra={"RESTORED_KEY": "invalid\nOTHER_VARIABLE=bad", "GITHUB_ENV": str(github_env)})
+    assert "Unexpected VFS compiler cache key" in refused.read_text()
+    assert github_env.read_text() == f"SCODE_VFS_RESTORED_CACHE_KEY={key}\n"
     changed = json.loads(command(sys.executable, str(entry), "key", "--root", str(root),
                                  extra={"CARGO_PROFILE_DEV_OPT_LEVEL": "0"}).read_text())["key"]
     assert key != changed
     runtime_value(42)
     invoke("build", "cold-build")
     invoke("test", "cold-test")
+    refused = invoke("build", "same-pin-wrong-context", success=False,
+                     extra={"CARGO_PROFILE_DEV_OPT_LEVEL": "0"})
+    assert "Restored VFS compiler context differs" in refused.read_text()
     debug = source / ".ci-cache/target/debug"
     outputs = [debug / "libnexus_search_plugin.so"] + [path for path in (debug / "deps").glob("user_runtime-*")
                                                      if path.is_file() and path.suffix == ""]
@@ -161,9 +209,21 @@ def run(output):
     invoke("build", "after-nested-build")
     after_nested = json.loads((output / "after-nested-build/commands.json").read_text())
     assert all(row["compiler_artifacts"] and all(item["fresh"] for item in row["compiler_artifacts"]) for row in after_nested), after_nested
+    configuration = source / ".git/config"
+    configuration_bytes = configuration.read_bytes()
+    outside_config = root / "outside-config"
+    outside_config.write_bytes(configuration_bytes + b"# preserve this external file\n")
+    outside_bytes = outside_config.read_bytes()
+    configuration.unlink()
+    configuration.symlink_to(outside_config)
+    refused = invoke("build", "linked-git-config", success=False)
+    assert "Git configuration must be a regular file" in refused.read_text()
+    assert outside_config.read_bytes() == outside_bytes
+    configuration.unlink()
+    configuration.write_bytes(configuration_bytes)
     original = source / "rust/cluster/src/lib.rs"
     old, stamp = original.read_bytes(), original.stat()
-    original.write_bytes(old.replace(b"42", b"43"))
+    original.write_bytes(old.replace(b"value() }", b"value() + 1 }"))
     os.utime(original, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     refused = invoke("build", "tampered-build", success=False)
     assert "source bytes differ" in refused.read_text()
@@ -177,12 +237,67 @@ def run(output):
     runtime_value(43)
     refused = invoke("test", "wrong-runtime", success=False)
     assert "runtime-43" in refused.read_text()
+    # A real source update must preserve only the immutable dependency graph.
+    # The actual production helper fetches through a private local Git remote.
+    upstream = root / "fixed-upstream.git"
+    command("git", "clone", "--bare", str(source), str(upstream))
+    author = root / "fixed-author"
+    command("git", "clone", str(upstream), str(author))
+    command("git", "config", "user.name", "Fixed source update", cwd=author)
+    command("git", "config", "user.email", "update@example.invalid", cwd=author)
+    for relative in ["rust/plugin/src/lib.rs", "rust/cluster/tests/user_runtime.rs"]:
+        path = author / relative
+        path.write_text(path.read_text().replace("42", "43"))
+    path = author / "rust/cluster/src/lib.rs"
+    path.write_text(path.read_text().replace("value() }", "value() + 1 }"))
+    command("git", "add", ".", cwd=author)
+    command("git", "commit", "-m", "New fixed driver and plugin behaviour", cwd=author)
+    next_revision = command("git", "rev-parse", "HEAD", cwd=author).read_text().strip()
+    command("git", "push", "origin", "HEAD:main", cwd=author)
     lock = root / "rust/Cargo.lock"
-    lock.write_text(lock.read_text().replace(revision, "f" * 40))
+    lock.write_text(lock.read_text().replace(revision, next_revision))
     changed_pin = json.loads(command(sys.executable, str(entry), "key", "--root", str(root)).read_text())["key"]
     assert changed_pin != key
-    refused = invoke("build", "wrong-pin", success=False)
-    assert "revision differs from the current lockfile" in refused.read_text()
+    assert changed_pin.rsplit("-", 1)[0] == key.rsplit("-", 1)[0], "Pin updates lost the compatible dependency prefix"
+    migration = root / "migration.py"
+    migration.write_text('import importlib.util\n'
+        f's=importlib.util.spec_from_file_location("production_cache",{str(entry)!r})\n'
+        'm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n'
+        f'm.UPSTREAM={str(upstream)!r}\nm.main()\n')
+    identity = source / ".ci-cache/source-identity.json"
+    identity_bytes = identity.read_bytes()
+    identity.write_text("{broken")
+    refused = invoke("build", "malformed-identity", success=False,
+                     extra={"GITHUB_ACTIONS": "true", "SCODE_VFS_RESTORED_CACHE_KEY": key})
+    assert f"gh cache delete {key} --ref refs/heads/main" in refused.read_text()
+    assert f"gh cache delete {changed_pin}" not in refused.read_text()
+    identity.unlink()
+    refused = invoke("build", "unbound-pin", success=False)
+    assert "requires a bound compiler-input identity" in refused.read_text()
+    assert command("git", "rev-parse", "HEAD", cwd=source).read_text().strip() == revision
+    identity.write_bytes(identity_bytes)
+    refused = command(sys.executable, str(migration), "build", "--root", str(root), "--output", str(output / "wrong-context"),
+                      success=False, extra={"CARGO_PROFILE_DEV_OPT_LEVEL": "0"})
+    assert "Restored VFS compiler context differs" in refused.read_text()
+    hook_marker = root / "restored-hook-ran"
+    hook = source / ".git/hooks/post-checkout"
+    hook.write_text(f'#!/bin/sh\necho hook > {shlex.quote(str(hook_marker))}\n')
+    hook.chmod(0o755)
+    command(sys.executable, str(migration), "build", "--root", str(root), "--output", str(output / "new-pin-build"))
+    assert not hook_marker.exists(), "A restored checkout hook executed during source migration"
+    assert command("git", "rev-parse", "HEAD", cwd=source).read_text().strip() == next_revision
+    new_build = json.loads((output / "new-pin-build/commands.json").read_text())
+    dependency_artifacts = [item for row in new_build for item in row["compiler_artifacts"] if item["name"] == "stable_driver_support"]
+    assert dependency_artifacts and all(item["fresh"] for item in dependency_artifacts)
+    assert any(not item["fresh"] for row in new_build for item in row["compiler_artifacts"] if item["name"] == "user_runtime")
+    invoke("test", "new-pin-current-runtime")
+    library = ctypes.CDLL(str(debug / "libnexus_search_plugin.so"))
+    library.fixture_value.restype = ctypes.c_uint32
+    assert library.fixture_value() == 43, "Restored plugin retained its previous ABI behaviour"
+    lock.write_text(lock.read_text().replace(next_revision, "f" * 40))
+    refused = command(sys.executable, str(migration), "build", "--root", str(root), "--output", str(output / "wrong-pin"), success=False)
+    assert "VFS cache refused before Cargo" in refused.read_text()
+    assert command("git", "rev-parse", "HEAD", cwd=source).read_text().strip() == next_revision
     for index, row in enumerate(records):
         path = output / "commands" / f"{index:03d}.log"
         assert hashlib.sha256(path.read_bytes()).hexdigest() == row["log_sha256"]
@@ -190,7 +305,12 @@ def run(output):
               "normal_build_reuses_restored_native_bytes": True, "current_runtime_journey_runs_again": True,
               "same_mtime_source_tamper_refused": True, "untracked_source_refused": True,
               "wrong_current_runtime_refused": True, "codegen_change_changes_cache_key": True, "commands": records,
-              "changed_pin_changes_key_and_refuses_old_checkout": True,
+              "changed_pin_rebuilds_current_driver_with_fresh_immutable_dependencies": True,
+              "unbound_or_incompatible_pin_restore_refused": True, "restored_checkout_hooks_never_execute": True,
+              "missing_upstream_revision_refused_without_source_replacement": True,
+              "legacy_real_CI_key_preserved": True, "actual_restore_export_and_exact_key_recovery_verified": True,
+              "new_pin_native_plugin_abi_verified": True,
+              "same_pin_compiler_mismatch_and_linked_git_config_refused": True,
               "nested_cargo_preserves_native_metadata_fingerprints": True,
               "actual_required_workflow_runs_the_native_case": True,
               "actual_required_workflow_refuses_redundant_build_before_test": True,

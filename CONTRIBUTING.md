@@ -226,6 +226,10 @@ runs the original search authorization/restart case against the current
 checkout's co-host, outside this cache. The fixed driver and plugin retain their
 original optimization profiles. Cache hits never substitute a previous test
 result. The required command prints builds and stores timings and failure logs.
+The main publisher alone performs explicit prewarming. Consumers invoke normal
+`cargo test`, which compiles its driver and runs the original case's plugin build.
+The required job refuses a redundant pre-test build directory; this avoids extra
+switches between the plugin's semantic and default-off dependency variants.
 Outer builds use the cluster package metadata that Cargo supplies to the test's
 nested plugin build. This prevents native dependencies such as ring from
 rebuilding solely because inherited Cargo package variables flip between unset

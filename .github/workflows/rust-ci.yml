@@ -254,7 +254,17 @@ jobs:
           fi
       - name: A2A round-trip against the pinned daemon
         if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+        env:
+          NEXUS_A2A_FAULT_OUTPUT: ${{ runner.temp }}/mailbox-faults
         run: e2e/nexus-a2a/run.sh
+      - name: Retain mailbox fault inventory and exact case results
+        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailbox-fault-cases
+          path: ${{ runner.temp }}/mailbox-faults
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain native syscall fault evidence
         if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         uses: actions/upload-artifact@v4

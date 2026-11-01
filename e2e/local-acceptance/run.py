@@ -99,7 +99,7 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/build.rs", True, True, True),
              ("rust/crates/pty-harness/src/lib.rs", True, True, True),
              ("e2e/shared-services/check.py", False, True, False),
-             (".github/local-acceptance/checks.py", False, False, False),
+             (".github/local-acceptance/checks.py", False, True, False),
              (".github/scripts/local_acceptance.py", False, False, False),
              ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False),
              ("e2e/terminal-resize/benchmark.py", False, False, False),
@@ -153,9 +153,37 @@ def scope_acceptance(directory):
                 "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
                 ".github/workflows/rust-ci.yml", ".github/scripts/vfs_search_cache.py",
                 ".github/actions/vfs-search-cache/action.yml", ".github/workflows/ci-vfs-search-cache.yml",
-                "e2e/local-acceptance/vfs_search_cache_acceptance.py"}, a2a=daemon and path not in {
+                "e2e/local-acceptance/vfs_search_cache_acceptance.py"},
+                cohost=False if path == ".github/local-acceptance/checks.py" else None,
+                a2a=daemon and path not in {
                 ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/action.yml",
                 ".github/workflows/ci-vfs-search-cache.yml"})
+    # The batch imports only the shared nextest helpers. Unrelated function
+    # bodies stay outside its scope; unknown helper globals remain required.
+    checks = repository / ".github/local-acceptance/checks.py"
+    small_module = ('def nextest_binary(output):\n    return output\n'
+                    'def nextest_options(output):\n    return []\n'
+                    'def unrelated():\n    return 1\n')
+    checks.write_text(small_module)
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "baseline nextest execution dependencies", cwd=repository)
+    for label, before, after, required in [
+        ("unrelated body", small_module, small_module.replace("return 1", "return 2"), False),
+        ("executor option", small_module, small_module.replace("return []", "return [1]"), True),
+        ("module assignment", small_module, small_module + "extra = 1\n", True),
+        ("unknown helper global", small_module.replace("return output", "return unrelated()"),
+         small_module.replace("return output", "return unrelated()").replace("return 1", "return 2"), True),
+    ]:
+        checks.write_text(before)
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "--allow-empty", "-m", label + " baseline", cwd=repository)
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        checks.write_text(after)
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", label, cwd=repository)
+        head = command("git", "rev-parse", "HEAD", cwd=repository)
+        expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, False, required, False,
+                     benchmark=True, container=True, gzip_codec=True, cohost=False, a2a=required)
     # Mixed edits and moves must retain A2A: only a cache-only diff omits it.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     (repository / ".github/scripts/vfs_search_cache.py").write_text("changed cache helper\n")

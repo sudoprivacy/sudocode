@@ -274,24 +274,24 @@ jobs:
 
       - name: Checkout the VFS contract used by the co-host
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: nexi-lab/nexus-vfs
-          ref: ${{ needs.one-nexus-vfs-pin.outputs.commit }}
-          path: .native-vfs
+        uses: ./.github/actions/vfs-search-cache
 
       - name: Search authorization and restart under the confined co-host owner
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
           NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
         run: |
-          test -x "$NEXUS_SEARCH_USER_RUNTIME_BINARY"
-          cargo build --locked --manifest-path .native-vfs/Cargo.toml -p nexus-search-plugin
-          stat -c 'Search fixture plugin bytes: %s' "$CARGO_TARGET_DIR/debug/libnexus_search_plugin.so"
-          cargo test --locked --manifest-path .native-vfs/Cargo.toml \
-            -p nexus-cluster --all-features --test user_runtime \
-            signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes -- --nocapture
+          python3 .github/scripts/vfs_search_cache.py test --output "${{ runner.temp }}/vfs-search-journey"
+
+      - name: Retain fixed-driver build and current-runtime evidence
+        if: always() && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfs-search-commands
+          path: |
+            ${{ runner.temp }}/vfs-search-build
+            ${{ runner.temp }}/vfs-search-journey
+          if-no-files-found: error
 
       # The one feature combination nothing else builds. `driver-ai` forwards to
       # nexus-cluster so a co-host can carry `llm_mount` — the co-host has to be a
@@ -507,6 +507,16 @@ jobs:
       - name: Verify response gzip bytes, concurrent files and quota failures
         if: github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
         run: python3 e2e/response-gzip/run.py --output "$RUNNER_TEMP/response-gzip"
+      - name: Verify fixed-driver restoration and current runtime refusal
+        if: github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
+        run: python3 e2e/local-acceptance/vfs_search_cache_acceptance.py --output "$RUNNER_TEMP/vfs-search-cache-fixture"
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
+        with:
+          name: vfs-search-cache-fixture
+          path: ${{ runner.temp }}/vfs-search-cache-fixture
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
         with:

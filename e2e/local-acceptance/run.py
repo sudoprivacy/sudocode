@@ -55,7 +55,7 @@ def scope_acceptance(directory):
     command("git", "commit", "-m", "base", cwd=repository)
 
     def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False,
-                     gzip_codec=False, cohost=None):
+                     gzip_codec=False, cohost=None, vfs_cache=False):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -72,6 +72,7 @@ def scope_acceptance(directory):
         assert f"container_required={str(container).lower()}" in output.read_text()
         assert f"clippy_executor_required={str(clippy_executor).lower()}" in output.read_text()
         assert f"gzip_codec_required={str(gzip_codec).lower()}" in output.read_text()
+        assert f"vfs_cache_required={str(vfs_cache).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -103,7 +104,11 @@ def scope_acceptance(directory):
              ("e2e/local-acceptance/clippy_fail_fast.py", False, False, False),
              ("rust/crates/runtime/src/response_archive.rs", True, True, True),
              ("rust/crates/runtime/src/response_archive/gzip.rs", True, True, True),
-             ("e2e/response-gzip/main.rs", False, False, False)]
+             ("e2e/response-gzip/main.rs", False, False, False),
+             (".github/scripts/vfs_search_cache.py", False, True, False),
+             (".github/actions/vfs-search-cache/action.yml", False, True, False),
+             (".github/workflows/ci-vfs-search-cache.yml", False, True, False),
+             ("e2e/local-acceptance/vfs_search_cache_acceptance.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -137,7 +142,10 @@ def scope_acceptance(directory):
                 ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
-                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"})
+                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
+                ".github/workflows/rust-ci.yml", ".github/scripts/vfs_search_cache.py",
+                ".github/actions/vfs-search-cache/action.yml", ".github/workflows/ci-vfs-search-cache.yml",
+                "e2e/local-acceptance/vfs_search_cache_acceptance.py"})
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -573,6 +581,8 @@ def enforcement_acceptance():
         # Passing runs retain every native build, cache and policy guard below.
         print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
                       "--output", directory / "dependency-scope", cwd=SOURCE))
+        print(command(sys.executable, str(Path(__file__).with_name("vfs_search_cache_acceptance.py")),
+                      "--output", directory / "vfs-search-cache", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
 

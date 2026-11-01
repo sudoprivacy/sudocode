@@ -777,6 +777,24 @@ script remains available for diagnosis and earns no additional coverage credit.<
       <code>dependency_scope_acceptance.py</code></td>
     </tr>
     <tr>
+      <td>Fixed VFS search compiler reuse</td>
+      <td>The Linux queue restores a pinned checkout with isolated Cargo inputs
+      and outputs; only main pushes publish missing exact keys. Compiler, runner
+      image, recipe, paths and codegen settings bind the key. Tracked source bytes
+      are verified before normal Cargo builds. The original authorization/restart
+      case still runs against the current co-host outside the cache, with unchanged
+      optimization profiles and assertions. Command logs and timings are retained.
+      Outer and nested Cargo calls share the real test package metadata to avoid
+      repeated native dependency rebuilds caused by inherited environment changes.
+      Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
+      <td>Coverage unchanged; cached compiler outputs never replace the real
+      journey or authorize reuse of a passing result. Infrastructure fixtures add
+      no product journey credit. Cache footprint and cold/warm product measurements
+      are required before a lifecycle speedup claim.</td>
+      <td><code>vfs_search_cache.py</code> / <code>ci-vfs-search-cache.yml</code> /
+      <code>vfs_search_cache_acceptance.py</code></td>
+    </tr>
+    <tr>
       <td>Mock parity harness</td>
       <td>Fast, in-process. Scripts a mock Anthropic backend and
       asserts on the byte stream <code>scode</code> produces. Catches

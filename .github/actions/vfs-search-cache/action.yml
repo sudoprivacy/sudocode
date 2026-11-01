@@ -1,0 +1,32 @@
+name: Fixed VFS search compiler inputs
+description: Restore or build pinned drivers; never cache the candidate or a test result
+inputs:
+  publish:
+    description: Save a missing key only on a protected main push
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Resolve fixed VFS compiler identity
+      id: identity
+      shell: bash
+      run: python3 .github/scripts/vfs_search_cache.py key
+    - name: Resolve the exact fixed checkout and compiler outputs
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: .native-vfs
+        key: ${{ steps.identity.outputs.key }}
+        # A warm main publisher needs neither a download nor another build.
+        # Queue consumers always restore and ask Cargo to build normally.
+        lookup-only: ${{ inputs.publish == 'true' }}
+    - name: Verify pinned source and ask Cargo to build normally
+      if: inputs.publish != 'true' || steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: python3 .github/scripts/vfs_search_cache.py build --output "${{ runner.temp }}/vfs-search-build"
+    - name: Publish missing fixed compiler inputs from main
+      if: inputs.publish == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .native-vfs
+        key: ${{ steps.identity.outputs.key }}

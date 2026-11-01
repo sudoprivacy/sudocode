@@ -116,6 +116,25 @@ jobs:
       - name: Run workspace clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  stop-after-clippy-failure:
+    # Start as soon as this matrix fails; waiting for the daemon defeats this.
+    if: always() && github.event_name == 'merge_group' && needs.clippy-workspace.result == 'failure'
+    needs: clippy-workspace
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Workspace Clippy
+
+  stop-after-daemon-failure:
+    if: always() && github.event_name == 'merge_group' && needs.a2a-live.result == 'failure'
+    needs: a2a-live
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Real daemon acceptance
+
   integrated-acceptance:
     # A required job must fail when a dependency fails or is unexpectedly
     # skipped; GitHub treats a skipped required job as successful.
@@ -508,6 +527,7 @@ jobs:
         run: |
           rustup component add clippy
           python3 e2e/local-acceptance/clippy_fail_fast.py --output "$RUNNER_TEMP/clippy-fail-fast"
+          python3 e2e/local-acceptance/failed_ci_live.py --check-wiring
       - name: Verify response gzip bytes, concurrent files and quota failures
         if: github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
         run: python3 e2e/response-gzip/run.py --output "$RUNNER_TEMP/response-gzip"

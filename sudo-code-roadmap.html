@@ -236,6 +236,30 @@ refusal of a missing stamp; it adds no product journey coverage. Actual product
 builds qualify the migration on the author and complementary native hosts.
 Elapsed savings remain unmeasured until those builds finish.</p>
 
+<p><strong>Performance placement (2026-11-01).</strong> A full macOS acceptance
+measured 5.5 hours of command time; the statistical browser comparison (145 min)
+and rendering matrix (84 min) were 70% of it, and a dependency-only change
+selected both. Typing feel is now judged by the rendering matrix once a day on
+main (<code>.github/workflows/rendering-main.yml</code>): keypress-to-echo P95
+while reading history, waiting and streaming, plus first output, cancel, paste
+and resize, with CPU and peak memory on the 12 KB Markdown stream. Each of the
+four scenarios names the metrics it is judged on. The pre-merge
+<code>browser</code> profile is a functional smoke of clickable links, selection
+during streaming, viewport interaction and an idle terminal, selected by CLI
+and browser-harness inputs. This deliberately moves performance regressions
+from pre-merge to the next daily run on main, where they are bisected between
+nightly heads, and retires painted-browser latency, Chromium resource budgets
+and the viewport cost benchmarks. This supersedes the per-PR rendering matrix
+and the browser and viewport comparisons of "Reduce repeated measurements
+(2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)",
+and the browser comparison of "Remove unjudged full warm-up workloads
+(2026-11-01)"; their per-scenario rounds, four workloads and 60 judged
+observations without warm-ups remain in the daily matrix.
+With no cross-profile reuse, each build still keeps its invocation-owned image
+tag.
+These measurement drivers back no Feature inventory row, so the coverage
+denominator is unchanged.</p>
+
 <p>A managed Git pre-push hook selects checks from changed inputs and blocks a
 push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
 diff base, native host, command exit codes and local log hashes. Full logs stay
@@ -289,7 +313,11 @@ GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
 workline's source into the shared cache between profiles, then verifies that
 browser uses the original normal release without another normal candidate build.
 Actual Docker acceptance checks frozen images, the invocation boundary and five
-tampered release identities/bytes. This removes duplicate compilation without
+tampered release identities/bytes. Each build also retains an invocation-owned
+image tag, allocated by the same helper for contract and performance images.
+An actual same-context build is interleaved before the original browser launch
+to verify that another BuildKit index does not replace the retained reference.
+This removes duplicate compilation without
 reducing measurement coverage; production elapsed savings remain unmeasured.
 The host and container entrypoint now share the canonical
 <code>container/&lt;profile&gt;</code> output layout. Docker regression uses the
@@ -347,6 +375,57 @@ is not established. Required output prints pair counts; both changed recipes
 need fresh execution. Real native infrastructure canaries verify counts,
 alternating sides, regression refusals and minimum-round refusals without claiming
 product performance coverage. Actual production latency savings remain unmeasured.</p>
+<p><strong>Consolidate mandatory rendering workloads (2026-11-01).</strong>
+The required matrix adopts the 12 KiB Markdown workload proposed in
+<a href="https://github.com/sudoprivacy/sudocode/pull/1196">#1196</a>.
+It replaces independent 8 KiB prose, 12 KiB prose and short Markdown scenarios;
+short prose, foreground tools and background tools stay separate. The four
+scenarios run 68 samples instead of 96. Every affected PR still runs mandatory
+local rendering acceptance. All remaining metric judgements, interaction counts,
+baselines and budgets remain. This reduces workload coverage: regressions
+specific to the removed plain-text sizes or short Markdown can escape the
+combined case. The benchmark CLI validates and describes the plan before builds;
+the host refuses changed policy hashes and incomplete passing sample counts.
+Real native fixtures retain the original 156-process control and reject relative
+RSS regression, missing CPU metrics and missing samples. Fixture verdicts do not
+establish equivalent product coverage or production speedup. Browser and both
+viewport comparisons keep 14 runs each: 110 repeated runs in total, down from
+138 after the earlier round reduction and 234 originally. Changes limited to
+<code>benchmark.py</code>, <code>gui-benchmark.py</code> and their two measurement
+policy JSON files retain both statistical profiles and the native benchmark
+builder guard. Ordinary workspace/resize suites do not execute these explicit
+measurement inputs, so those native suites and their complementary CI hosts are
+omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
+changes retain their applicable native checks. Real Git planner and PR/push/queue
+fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
+<p><strong>Remove unjudged full warm-up workloads (2026-11-01).</strong>
+Rendering now runs 60 judged observations and browser comparison runs 12. This
+removes eight rendering and two browser runs that did not enter A/A or A/B
+statistics. The retained field spent 151.84 driver seconds on those ten runs;
+this is a recorded component cost, not a measured new lifecycle saving. Every
+sample starts fresh driver/Node/SUT and browser processes, so JIT state does not
+carry between samples. All judged pair counts, interactions, metrics and budgets
+remain. Colder file caches may affect the first calibration pair; unchanged A/A
+noise checks still refuse inconclusive fields. Exact stage/round/side inventories
+reject missing, extra and duplicate/mispaired observations. Headless and painted
+viewport comparisons retain 14 runs each, for 100 total instead of 110; all 96
+judged observations remain. Rendering needs fresh evidence. An exact protected
+pair preserves browser execution for an unchanged candidate head through the
+shared helper edit; candidate-owned browser code and the relative evaluator keep
+their existing ownership. Native recipes remain unchanged. Real Cargo/native
+regression retains all 144 judged calls of the former six-scenario control and
+its RSS refusal. Original historical reports remain preserved.</p>
+<p><strong>Retain completed checks across image reference ownership (2026-11-01).</strong>
+Exact protected recipe pairs preserve completed guard and browser evidence for
+the same candidate head after private Docker image tags replaced a shared alias.
+Passed assertions, browser observers and statistical budgets are unchanged.
+Browser pairs include the previously approved equivalent wrapper transitions.
+Rendering's changed warm-up conditions still require fresh execution. A live
+saved-profile diagnostic verifies real SSH signatures and original log hashes,
+resumes only the approved profiles, and refuses a different head, changed logs
+or signature, missing execution and an unapproved rendering profile. It never
+signs, publishes or relabels old results. These checks add no product journey
+coverage; lifecycle benefit depends on an author having compatible completed work.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -476,6 +555,15 @@ priorities are retained. This infrastructure check runs once on changed lint
 workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
 after a failure without reducing passing-run product or lint coverage; its small
 fixture timings are not a production PR latency claim.</p>
+<p><strong>Stop independent Rust CI peers after a known failure
+(2026-11-01).</strong> Queue Clippy and daemon failures independently invoke one
+shared cancellation job. It stops only its own workflow run, preserves the
+original failed step and prints inspection and repair commands. The Actions
+write token stays in a job without a candidate checkout. Successful runs skip
+both callers and allocate no cancellation runner. A real GitHub fixture tests
+both failure directions and a clean run; its controlled timings do not establish
+production lifecycle savings. Passing-run coverage, budgets and assertions stay
+unchanged.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -496,6 +584,18 @@ profiles remain; no test target is deleted.</p>
 <p>Shared PTY helper inputs retain native terminal resize acceptance at both
 the CLI <code>tests/common</code> path and the shared test-crate path. This
 preserves the native guard when reducing repeated helper compilation.</p>
+<p><strong>Keep native test scope on the PR branch (2026-11-01).</strong>
+The selector compares the common ancestor with the candidate HEAD. A newer main
+revision supplied by complementary CI cannot add reverse differences from
+unrelated main commits to an isolated test PR. In the observed #1205 Windows run,
+a one-test-file PR was expanded by 12 main-only paths into 2,512 cases and
+1,026.641 seconds of workspace acceptance despite a complete dependency-cache
+hit. Real divergent Git branches now drive the selected Cargo test and a full
+nextest control, checking actual native process markers. Actual branch source,
+shared helpers, unknown inputs, deletion, renaming into production and coincident
+main/branch source edits retain full scope. Test assertions, ignored cases,
+complement platforms and budgets remain unchanged. These executor fixtures add
+no product journey coverage; cloud savings require a subsequent real run.</p>
 <p>Deterministic workspace cases use checksum-pinned nextest with four global
 workers, preserving test targets and ignored markers. It stops scheduling after
 the first failure, lets running cases clean up, disables retries and refuses an
@@ -533,6 +633,20 @@ regression compares exact case/ignore inventories, checks independent native
 process state, executes original developer and named driver commands, rejects
 invalid wrappers, and verifies a Cargo-fresh, byte-identical normal product.
 This infrastructure fixture adds no product feature coverage.</p>
+<p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
+lint shares the validated test-group inventory with nextest, checking covered
+modules through their wrappers once: 91 instead of 211 integration targets in
+the current workspace, 56.9% fewer. Library/bin test configurations, enabled
+ungrouped tests, examples and benches remain selected. Ungrouped sources retain
+<code>--all-targets</code>; disabled standalone tests keep their original exclusion.
+The merge queue retains original-target, all-feature Clippy. Per-host lint no
+longer checks differences specific to each original test crate's identity;
+that configuration remains checked in the queue. Real Cargo/Clippy regression
+compares actual target inventories and injected diagnostics in ordinary and
+test-only library/bin code, grouped/ignored tests, shared helpers, examples and
+benches, including the disabled-target boundary. Product cases, assertions and
+deadlines are unchanged; this fixture adds no product journey coverage.
+No production latency saving is claimed before comparable measurements.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the
@@ -573,6 +687,14 @@ The new runner-enforcement guard still executes. Real Git/SSH regressions cover
 current and legacy signed receipts, unchanged notes, changed assertions and new
 required checks. Later recipe changes cannot inherit an obsolete pair. Reuse
 appears in mandatory hook and CI output; no product coverage is removed.</p>
+<p>Obsolete-recipe refusals include a machine-readable author-host recovery
+record. For protected-main policies it fetches main before resolving the current
+policy, preventing old CI diagnostics from publishing obsolete evidence after
+another main update. Explicit experimental snapshots remain pinned; each check
+still freezes its resolved source and policy. Real Git/SSH regression captures
+the diagnostic, advances main with another required process, then follows that
+original recovery record, publishes and independently verifies the fresh receipt.
+No required check or signature verification is removed.</p>
 <p>Local acceptance freezes candidate, PR base and authorized policy commits at
 invocation start. Docker snapshots and image context follow that fixed policy;
 the run uses the actual build's immutable image ID. Each invocation saves
@@ -686,9 +808,36 @@ Before/after performance comparisons use isolated build directories and retain
 binary and harness hashes. A failed A/A noise calibration is inconclusive,
 not a performance pass. These resource checks do not add feature-coverage credit.</p>
 
-<p>The automatic viewport on/off headless and browser budget checks run in the
-mandatory local browser profile. The existing source-before/after measurement
-script remains available for diagnosis and earns no additional coverage credit.</p>
+<p>macOS rendering and release startup timing windows require external
+AC power with Foundation reporting low-power mode disabled. One shared native
+probe records the state before/after and once per second; unknown state, probe
+errors and observed power changes refuse the profile without changing system
+settings or rerunning it. Original failures and supplementary
+<code>host-power.json</code> observations remain. Changes shorter than the poll
+interval may escape detection; fixed clock/thermal conditions are not proved.
+Linux/Windows and functional-only profiles keep their existing execution.
+Native process fixtures cover admission, transient changes, probe failures and
+preservation of the original command error. They earn no product journey credit;
+performance budgets, workloads and sample counts remain unchanged.</p>
+<p>The power monitoring context is created only when called, so unused timing
+helper bodies do not invalidate ordinary native evidence. Metadata preflight
+stages its history checker independently of unrelated native fixture pins; both
+paths share the original path and SHA256 verification. Exact protected recipe
+pairs preserve already completed execution through this refactor. Changed used
+helpers, timing rules, source, signatures and required checks retain their normal
+refusals. Real SSH/hook regression copies the production factory, proves an unused
+helper does not repeat the actual process, and refuses reuse when the selected
+profile calls that helper. The existing eleven native power scenarios still run.
+The original failure and earlier signed notes remain preserved.</p>
+<p>A Git/SSH-only debug entrypoint prints its limited scope and omits unrelated
+Cargo fixtures during local investigation. Mandatory acceptance keeps the full
+default matrix; this debug mode neither signs full source acceptance nor adds
+product journey coverage.</p>
+
+<p>The mandatory local browser profile runs the viewport browser interaction once
+as a functional check. The viewport on/off cost script
+(<code>scripts/benchmark_prompt_viewport.py</code>) and the source-before/after
+measurement script remain available for diagnosis and earn no coverage credit.</p>
 
 <table>
   <thead>
@@ -702,7 +851,10 @@ script remains available for diagnosis and earns no additional coverage credit.<
       either the raw stream or a VT100-rendered view. Catches what a
       real user sees: REPL UX, signals, tab completion, ANSI redraw,
       cursor placement. Native grouping preserves individual case processes,
-      assertions and ignored markers; it reduces linked executables.</td>
+      assertions and ignored markers; it reduces linked executables. Isolated
+      test edits compare the PR common ancestor with its HEAD, excluding
+      main-only changes from native target selection. Actual branch source,
+      shared/unknown inputs, deletion and renames retain full workspace scope.</td>
       <td><strong>Yes — this is the coverage measure.</strong></td>
       <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
     </tr>
@@ -715,21 +867,19 @@ script remains available for diagnosis and earns no additional coverage credit.<
       packages and exercise original targets for older candidates; no unused
       CLI binary is built with standalone drivers. Actual Cargo metadata protects
       unique opt-in targets and shared sources; real Git events require this
-      guard when the driver package changes.</td>
+      guard when the driver package changes. A real GitHub fixture also verifies
+      cancellation of independent Rust CI peers in both failure directions,
+      retention of the original failed step, and no cancellation runner on
+      successful runs. Captured recovery instructions fetch current protected
+      main, execute a newly required real process and publish SSH-signed evidence
+      that an independent verifier fetches and validates. A copied production
+      timing factory preserves real signed hook execution while unused; selected
+      helper changes still require fresh evidence. Every pinned native input is
+      checked through real Git: unrelated pins leave metadata preflight unchanged,
+      while history-checker changes invalidate it. A real old-checkout preflight
+      runs against the changed protected native policy.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
-    </tr>
-    <tr>
-      <td>Paired rendering/browser/viewport measurements</td>
-      <td>Six rendering scenarios remain: 96 runs. Browser, headless viewport
-      and painted viewport comparisons each run 14 samples; total 138 instead
-      of 234. Short retains its full 5/7 paired rounds; the other comparisons
-      use 3/3. Lower repeat coverage can miss intermittent regressions and
-      environmental noise. Budgets and per-run interactions stay intact;
-      the separate 60-sample painted interaction check remains.</td>
-      <td>No additional journey credit from repeated measurements.</td>
-      <td><code>benchmark.py</code> / <code>gui-benchmark.py</code> /
-      <code>benchmark_prompt_viewport.py</code></td>
     </tr>
     <tr>
       <td>SSE archive compressor reuse</td>
@@ -757,6 +907,17 @@ script remains available for diagnosis and earns no additional coverage credit.<
       five-platform release tags; optimized-only regressions can reach main.</td>
       <td>No; build and startup checks add no product PTY journey credit.</td>
       <td><code>native-cohost</code> / <code>release-nexusd-cohost.yml</code></td>
+    </tr>
+    <tr>
+      <td>Rendering matrix and browser smoke</td>
+      <td>Daily paired matrix on main: typing latency, first output, cancel,
+      paste, resize, CPU and peak memory against the fixed baseline; short keeps
+      5/7 paired rounds and the other scenarios 3/3, 60 judged observations
+      without warm-ups. Pre-merge
+      painted-terminal smoke: clickable links, selection during streaming,
+      viewport interaction and an idle terminal, when CLI or harness inputs change.</td>
+      <td>No; their drivers back no Feature inventory row.</td>
+      <td><code>rendering-main.yml</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>
     <tr>
       <td>Queue daemon and co-host scope</td>

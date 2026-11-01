@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -17,6 +18,16 @@ PRODUCT = {"native-release", "native-services", "native-cohost"}
 def workflow_scope(output, environment):
     """Execute the actual workflow guards and bind their conditional steps."""
     output.mkdir()
+    bash = shutil.which("bash", path=environment.get("PATH"))
+    if os.name == "nt":
+        # CreateProcess can resolve a bare bash against the parent's PATH,
+        # selecting WSL even when the explicit child environment lists Git first.
+        git = shutil.which("git", path=environment.get("PATH"))
+        candidates = [Path(git).resolve().parent / "bash.exe",
+                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
+        bash = next((str(path) for path in candidates if path.is_file()), None)
+    if not bash:
+        raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     lines = workflow.splitlines()
 
@@ -70,10 +81,11 @@ def workflow_scope(output, environment):
     for index, (name, cohost, daemon, actual, succeeds) in enumerate(cases):
         values = {"COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
                   "PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped"}
-        result = subprocess.run(["bash", "-c", scripts[name]], env={**environment, **values},
-                                capture_output=True, text=True, encoding="utf-8")
+        result = subprocess.run([bash, "-c", scripts[name]], env={**environment, **values}, capture_output=True)
         log = output / f"{index:02}.log"
-        log.write_text(result.stdout + result.stderr, encoding="utf-8")
+        # Native setup failures can use a different encoding. Retain their raw
+        # output so a decoder exception never hides the actual command result.
+        log.write_bytes(result.stdout + result.stderr)
         assert (result.returncode == 0) == succeeds, (values, result.stdout, result.stderr)
         records.append({"script": name, "values": values, "exit_code": result.returncode,
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
@@ -199,9 +211,15 @@ def run(output):
         names = set(plan["local_checks"])
         assert names & PRODUCT == set(expected), (label, text)
         assert "native-workspace" in names, (label, text)
-        assert {"rendering", "browser"} <= names, (label, text)
+        # Dependency metadata selects no per-PR performance run. CLI source and
+        # the benchmark driver package select the browser smoke.
+        changed = command("git", "diff", "--name-only", "--no-renames", diff_base, "HEAD").splitlines()
+        smoke = {"browser"} if any(path.startswith(("rust/crates/rusty-sudocode-cli/src/",
+                                                    "rust/crates/scode-benchmark-drivers/"))
+                                   for path in changed) else set()
+        assert {"rendering", "browser"} & names == smoke, (label, text)
         cases.append({"label": label, "base": diff_base, "head": command("git", "rev-parse", "HEAD"),
-                      "product_checks": sorted(names & PRODUCT), "native_tests_and_performance_retained": True})
+                      "product_checks": sorted(names & PRODUCT), "native_tests_retained": True})
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 

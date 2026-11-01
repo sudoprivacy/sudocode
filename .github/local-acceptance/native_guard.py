@@ -37,6 +37,10 @@ def main():
         sys.executable, str(SOURCE / "e2e/local-acceptance/resume_acceptance.py"), "--host-smoke",
     ], SOURCE, output / "resume-smoke.log"))
     commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/power_acceptance.py"),
+        "--output", str(output / "power"),
+    ], SOURCE, output / "power.log"))
+    commands.append(helper.run_command([
         sys.executable, str(SOURCE / ".github/local-acceptance/nextest_guard.py"),
         "--repository", str(repository), "--output", str(output / "nextest-executor"),
         "--executable", str(args.executable), "--source-receipt", str(args.source_receipt),
@@ -70,7 +74,7 @@ def main():
     (output / "receipt.json").write_text(json.dumps({
         "repository": str(repository), "commands": commands,
     }, indent=2))
-    print(f"Native policy guard passed: signed recovery, nextest, release, grouping, examples, "
+    print(f"Native policy guard passed: signed recovery, power admission, nextest, release, grouping, examples, "
           f"cohost, shared-cache binding and early lint enforcement; {output}")
 
 

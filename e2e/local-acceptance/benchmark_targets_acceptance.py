@@ -151,6 +151,7 @@ fn render_performance_workload() {
     assert!(!(mode == "invalid" && case == "heavy"), "intentional native driver failure");
     let selected = if mode == "metadata" && case == "heavy" { "metadata" }
         else if mode == "incomplete" && case == "heavy" { "incomplete" }
+        else if mode == "short-rss" && side == "candidate" && case == "short" { "regressed" }
         else if mode == "regressed" && side == "candidate" && ["long", "heavy"].contains(&case.as_str()) { "regressed" }
         else { "base" };
     let bytes = fs::read(root.join(format!("{case}-{selected}.json"))).unwrap();
@@ -171,7 +172,7 @@ fn render_performance_workload() {
     shared = load("paired_rendering_evaluator", terminal / "benchmark.py")
     policy = json.loads((terminal / "performance-policy.json").read_text())
     cases = policy["profiles"]["core"]
-    assert cases == ["short", "heavy", "foreground", "background"]
+    assert cases == ["short", "heavy"]
     assert {key: value for key, value in policy["cases"]["heavy"].items() if key != "judge"} == {
         "kind": "markdown", "bytes": 12288, "turns": 1}
     legacy_specs = {"long": {"kind": "prose", "bytes": 8192, "turns": 1},
@@ -181,7 +182,8 @@ fn render_performance_workload() {
     for spec in legacy_specs.values():
         spec["judge"] = sorted(shared.expected_metrics(spec))
     plan = {**shared.policy_plan(policy, "core"), "policy_sha256": shared.digest(terminal / "performance-policy.json")}
-    assert plan["total_samples"] == 60 and plan["unjudged_warmups"] == 0
+    assert plan["total_samples"] == 36 and plan["unjudged_warmups"] == 0
+    assert {"rss_peak_mib", "rss_after_mib"}.issubset(policy["cases"]["short"]["judge"])
     assert plan["metrics"] == {case: sorted(shared.judged_metrics(policy["cases"][case])) for case in cases}
     assert {"cpu_ms", "rss_peak_mib"} <= set(plan["metrics"]["heavy"]), "CPU and memory are judged on the heavy stream"
     for case, spec in {**policy["cases"], **legacy_specs}.items():
@@ -206,7 +208,7 @@ fn render_performance_workload() {
     arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
                  "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
     results = {}
-    for mode in ["pass", "regressed", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "invalid", "metadata", "command"]:
+    for mode in ["pass", "regressed", "short-rss", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "invalid", "metadata", "command"]:
         events = fixture / "events.txt"
         events.unlink(missing_ok=True)
         destination = output / mode
@@ -236,15 +238,15 @@ fn render_performance_workload() {
             failed = True
         report = json.loads((destination / "report.json").read_text())
         trace = events.read_text().splitlines() if events.exists() else []
-        expected_cases = cases if mode == "pass" else [] if mode == "command" else cases[:2]
+        expected_cases = cases if mode == "pass" else [] if mode == "command" else ["short"] if mode == "short-rss" else cases[:2]
         assert {line.split()[0] for line in trace} == set(expected_cases), "An unadmitted scenario ran"
         assert report["policy"] == policy and report["policy_sha256"] == shared.digest(terminal / "performance-policy.json")
         assert all((destination / row["path"]).is_file() for row in report["samples"])
-        assert report["status"] == {"pass": "passed", "regressed": "failed"}.get(mode, "invalid")
+        assert report["status"] == {"pass": "passed", "regressed": "failed", "short-rss": "failed"}.get(mode, "invalid")
         assert failed == (mode != "pass"), "A failing matrix returned success"
-        complete = cases if mode == "pass" else [] if mode == "command" else ["short"]
+        complete = cases if mode == "pass" else [] if mode in {"command", "short-rss"} else ["short"]
         assert report["completed_cases"] == complete and report["remaining_cases"] == [case for case in cases if case not in complete]
-        if mode in {"pass", "regressed"}:
+        if mode in {"pass", "regressed", "short-rss"}:
             # Replay the unmodified evaluator on exactly the combined observations.
             # It must reach the same verdict/rows as each complete scenario did.
             controls, comparisons = {case: [] for case in expected_cases}, {case: [] for case in expected_cases}
@@ -261,7 +263,7 @@ fn render_performance_workload() {
             rows, failures = shared.assess(controls, comparisons, policy, expected_cases, shared.judged_metrics)
             assert report["metrics"] == rows and report["failures"] == failures
             assert len(trace) == sum(24 if case == "short" else 12 for case in expected_cases)
-            if mode == "regressed":
+            if mode in {"regressed", "short-rss"}:
                 assert any("paired increase" in failure for failure in failures), "Relative RSS regression was lost"
         elif mode == "invalid":
             assert len(trace) == 25, "Invalid second scenario did not stop immediately"

@@ -276,19 +276,25 @@ scope. The mandatory default still runs the complete enforcement matrix.
 
 Typing feel is measured by the paired rendering matrix: keypress-to-echo P95
 while reading history, waiting for the model and streaming, first visible output
-and cancel on prose, paste and resize on a short reply, and CPU and peak memory on
-a 12 KB Markdown stream. It drives the actual release binary through a headless
+and cancel on prose, paste and resize on a short reply, short-reply RSS peak/after
+limits, and CPU and peak memory on a 12 KB Markdown stream. It drives the actual release binary through a headless
 terminal, which isolates scode's own cost, and compares it with the fixed baseline
 in `e2e/terminal-resize/performance-policy.json`. Each scenario names the metrics
 it is judged on; the driver records them all. No scenario runs an unjudged
 warm-up; the short reply keeps five A/A and seven alternating A/B pairs, the check
-that caught a real RSS regression, and the others use three and three: 60 judged
+that caught a real RSS regression, and the heavy case uses three and three: 36 judged
 observations. A failed, noisy
 or invalid scenario stops the matrix. Drivers build in the binary-free
-`scode-benchmark-drivers` package, so measuring compiles no extra CLI binary. The matrix runs once a day on main
-(`.github/workflows/rendering-main.yml`), so a regression surfaces within a day
-and is bisected between nightly heads. Run it on demand with
-`python .github/local-acceptance/checks.py --native-checks rendering --base origin/main --output DIR`.
+`scode-benchmark-drivers` package, so measuring compiles no extra CLI binary.
+The matrix is mandatory on the author's local Docker before push for CLI,
+engine-core, PTY harness/helper, rendering-driver and named native observer inputs.
+It has no scheduled or manual replacement. Cargo/dependency metadata and unrelated
+crate source no longer select it; their indirect performance effects are outside
+this reduced scope. The browser functional smoke remains separate. Required plan
+output and signed evidence attribute both checks to the exact PR head.
+Foreground/background task-specific performance comparisons are removed from
+required acceptance; their functional PTY cases retain the native suite's scope.
+No new scheduled/manual replacement or extra feature-coverage credit is added.
 
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
@@ -445,6 +451,19 @@ Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
 feature graph; release-only dev-dependency compilation is no longer repeated.
 The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
+This profile runs for Cargo manifests/lock/config, build scripts, vendored inputs,
+the CLI entry point, startup/parser modules, runtime configuration, the dedicated
+stream-capture test and startup harness. Other business/source and shared PTY
+helper changes skip the additional native optimized builds on the author and
+complementary hosts. Their applicable native functional, resize and service
+checks remain; selected Docker rendering still builds and measures a real Linux
+release. This reduces coverage: optimized-only Windows/macOS behavior and their
+startup budget are not checked on every ordinary source PR. Release tags retain
+their existing platform builds; this change does not add full release-artifact
+journey acceptance there. `RELEASE_ACCEPTANCE_SCOPE` and the mandatory plan state
+this boundary. Real committed Git plans cover retained/omitted inputs, mixed
+edits, renames and deletions; Cargo/native controls retain the selected release
+artifact and driver identity assertions.
 An actual Cargo/native-process fixture checks driver reuse, the release binary's
 identity and rejection of a substituted debug binary. The test driver and its
 in-process fixture helpers now execute in the test profile; the product process
@@ -925,7 +944,7 @@ selecting an optimization; the macOS measurements do not establish that cause.
 ### Other acceptance checks
 
 Renderer changes pass the browser smoke in the required `Local acceptance`
-status, and the daily rendering matrix on main judges their typing latency. See the shared
+status, and scoped mandatory local rendering judges their typing latency. See the shared
 [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.

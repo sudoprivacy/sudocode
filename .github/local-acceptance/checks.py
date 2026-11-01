@@ -497,14 +497,14 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "a3ed0bd2287985a15713d9341b6a079fba05b075933e5c3a7cdfdd8c7c871442",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "a1da0c8996d56e78dd7b631f4fe9f343d02515bc89b6f9df8980a6352d358ffc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "af1307c285c8fa5be1e2e0475c502bd0c790cd3e55fa7a11abf292d9d7370e09",
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "b1dd5eb1de67f6d9c44af9425e33ba3978608342fca3643e43da421f830539f3",
-        "e2e/local-acceptance/run.py": "a46f9aa78c393006e8015b380d8df536eea97b5c88e0c2fe8e90f69f13eff9c8",
+        ".github/scripts/local_acceptance.py": "1648d8fe4f74e74e86670d58f00941affb4f71430ab76ae37b4401857c0a76e4",
+        "e2e/local-acceptance/run.py": "3ed58826dea55e9ca1734af464b0cb046aff62805c082d2922c8400fdd321f8a",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
@@ -551,7 +551,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "8aafd71a00f07eee0b8beeb2b3bd2182b7a2607d1c3585634ead95d2480a4d58":
+    if actual_scope != "a952b56f180d7340b31895eb06a4edc3227303ff4b7680d475d5a8fcf8da3327":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

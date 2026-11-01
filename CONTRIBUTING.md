@@ -295,7 +295,9 @@ PTY helpers, the browser drivers and the browser terminal harness select it. Loc
 Docker builds the candidate once in the dev profile and runs it in pinned
 Chromium/xterm: Markdown links stay clickable, native selection survives
 streaming, the prompt viewport scrolls and selects, and an idle terminal receives
-no output.
+no output. Measurement-only inputs (`benchmark.py`, `performance-policy.json`,
+`gui-smoke.py`, `gui-policy.json` and the retired `gui-benchmark.py`) do not select
+the native workspace or resize suites, which never execute them.
 Every Docker build keeps its own randomly named image tag alongside the exact
 image ID, so another invocation building identical cached layers cannot replace
 it with a different BuildKit attestation/index. Contract and performance images

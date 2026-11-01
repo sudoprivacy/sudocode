@@ -504,7 +504,7 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "b1dd5eb1de67f6d9c44af9425e33ba3978608342fca3643e43da421f830539f3",
-        "e2e/local-acceptance/run.py": "d3b94b13e8a35fac76c7a24e60a20e56f72eee411828c4d55362f33bbe299e24",
+        "e2e/local-acceptance/run.py": "a46f9aa78c393006e8015b380d8df536eea97b5c88e0c2fe8e90f69f13eff9c8",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
@@ -551,7 +551,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "1c4f7096ec4300cee0553b4e61723acc18d8a514d046ea945cbc4f771e8a2547":
+    if actual_scope != "8aafd71a00f07eee0b8beeb2b3bd2182b7a2607d1c3585634ead95d2480a4d58":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

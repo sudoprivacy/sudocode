@@ -220,7 +220,9 @@ def performance_scope_acceptance(directory):
     smoke = ["browser"]
     # Measurement-only inputs skip native suites. The browser smoke's own
     # harness selects it; the rendering policy alone selects nothing per PR.
+    # gui-benchmark.py retired with the browser comparison; native suites never ran it.
     measurement_inputs = ["e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
+                          "e2e/terminal-resize/gui-benchmark.py",
                           "e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/gui-policy.json"]
     measurement_smoke = {"e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/gui-smoke.py",
                          "e2e/terminal-resize/gui-policy.json"}

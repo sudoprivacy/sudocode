@@ -48,6 +48,7 @@
         "e2e/terminal-resize/benchmark.py",
         "e2e/terminal-resize/performance-policy.json",
         "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui-benchmark.py",
         "e2e/terminal-resize/gui-policy.json",
         "**/README.md"
       ]
@@ -76,6 +77,7 @@
         "e2e/terminal-resize/benchmark.py",
         "e2e/terminal-resize/performance-policy.json",
         "e2e/terminal-resize/gui-smoke.py",
+        "e2e/terminal-resize/gui-benchmark.py",
         "e2e/terminal-resize/gui-policy.json",
         "**/README.md"
       ]

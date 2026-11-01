@@ -26,7 +26,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Write-Output "::warning::$env:FAILED_JOB failed. Stop unfinished peers of this exact workflow run. The original failed job remains the diagnosis."
           Write-Output "Inspect: gh run view $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --log-failed"
-          Write-Output "After repairing the failure: gh run rerun $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --failed"
+          Write-Output 'For a source fix: push the repaired commit and enqueue the PR again. A rerun uses the original commit.'
+          Write-Output "For an unchanged-source infrastructure retry, include cancelled peers: gh run rerun $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY"
           gh api --method POST "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/cancel" --silent
           if ($LASTEXITCODE -ne 0) {
             Write-Output '::error::GitHub refused cancellation; the original failed job and unfinished peers retain their actual results. Inspect the API error above.'

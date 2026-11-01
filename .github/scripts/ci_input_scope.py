@@ -138,7 +138,9 @@ def main():
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
     clippy_executor = any(path in {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py",
-                                  "e2e/local-acceptance/clippy_fail_fast.py"} for path in paths)
+                                  "e2e/local-acceptance/clippy_fail_fast.py",
+                                  ".github/workflows/ci-cancel-failed-run.yml",
+                                  "e2e/local-acceptance/failed_ci_live.py"} for path in paths)
     gzip_codec = any(path.startswith("e2e/response-gzip/")
                      or path in executor_inputs | {"rust/crates/runtime/src/response_archive.rs",
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}

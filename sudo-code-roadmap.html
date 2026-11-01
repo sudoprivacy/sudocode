@@ -686,6 +686,18 @@ Before/after performance comparisons use isolated build directories and retain
 binary and harness hashes. A failed A/A noise calibration is inconclusive,
 not a performance pass. These resource checks do not add feature-coverage credit.</p>
 
+<p>macOS rendering/browser and release startup timing windows require external
+AC power with Foundation reporting low-power mode disabled. One shared native
+probe records the state before/after and once per second; unknown state, probe
+errors and observed power changes refuse the profile without changing system
+settings or rerunning it. Original failures and supplementary
+<code>host-power.json</code> observations remain. Changes shorter than the poll
+interval may escape detection; fixed clock/thermal conditions are not proved.
+Linux/Windows and functional-only profiles keep their existing execution.
+Native process fixtures cover admission, transient changes, probe failures and
+preservation of the original command error. They earn no product journey credit;
+performance budgets, workloads and sample counts remain unchanged.</p>
+
 <p>The automatic viewport on/off headless and browser budget checks run in the
 mandatory local browser profile. The existing source-before/after measurement
 script remains available for diagnosis and earns no additional coverage credit.</p>

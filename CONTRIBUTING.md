@@ -318,6 +318,19 @@ The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
 
+Completed guard and browser receipts for the same source head can survive the
+private Docker image-tag ownership fix through exact protected recipe pairs.
+The image reference change retains the caller's image; it changes no completed
+assertion or statistical budget. Browser pairs also retain the already approved
+equivalent wrapper changes. Rendering's changed warm-up conditions still require
+fresh execution. Different heads, altered logs/signatures, missing profiles and
+changed selected criteria keep their existing refusal behavior.
+For a live check against genuine saved author evidence, use
+`python e2e/local-acceptance/saved_profiles_acceptance.py --saved PATH --policy-ref origin/main --profiles browser --refuse-profiles rendering --output FRESH_PATH`
+when testing this historical browser-only migration. The diagnostic exercises
+production resume and tamper controls; it does not sign, publish or authorize a
+source change. Its input must be a complete acceptance directory with original logs.
+
 Default SSE response archives reuse at most one finished deflate state across
 captures. Active captures retain separate states; a finished state releases its
 file, session budget and attachment lease before reuse. Compression level, gzip

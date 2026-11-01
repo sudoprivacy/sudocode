@@ -401,6 +401,11 @@
       "3399a40b60a995c0bca4590b0bf0738b47e0a3645db526eb9e09d1d3f7b91a2c": [
         "3e2952e4d3035258882712b2f1bdd6d0d45c33d6e4e55ea948f1230bc1c66d43"
       ]
+    },
+    "guard-contract": {
+      "b340dbc03dd83d78a36f34a231ec6fb26912742456d9a16be64cb8237e253df5": [
+        "6d2fe632823799fa526d60a811e9010877803928c80f4093ad1806c3873bb9be"
+      ]
     }
   },
   "equivalent_profile_commands_without_test_groups": {

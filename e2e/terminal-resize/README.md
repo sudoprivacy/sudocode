@@ -172,13 +172,17 @@ outside that resource scope. Raw per-process samples make that distinction
 inspectable; these values must not be compared to scode's standalone RSS budget.
 
 `gui-benchmark.py` uses the core gate's paired evaluator: three A/A calibration
-pairs followed by three alternating A/B pairs and two warm-ups (14 runs).
+pairs followed by three alternating A/B pairs (12 judged observations).
+Rendering and browser omit the extra full unjudged warm-up workloads. Each
+observation launches fresh processes; no JIT state persists between runs. The
+first calibration pair can see colder file caches, and the unchanged A/A noise
+checks still apply. Stage/round/side inventories reject missing or duplicate pairs.
 Each run keeps its existing gestures, observation counts and budgets. Fewer
 repetitions reduce precision and the chance of exposing intermittent regressions;
 equivalent statistical sensitivity is not established. The core rendering matrix
-uses 68 runs across short prose, 12 KiB Markdown, foreground tools and background
+uses 60 judged observations across short prose, 12 KiB Markdown, foreground tools and background
 tools. Short retains five A/A and seven A/B pairs; the other three use three A/A
-and three A/B pairs, with two warm-ups per scenario. The large Markdown case
+and three A/B pairs. The large Markdown case
 replaces independent 8 KiB prose, 12 KiB prose and short Markdown scenarios;
 size-specific plain-text and short-Markdown regressions have less coverage.
 Every remaining metric is judged. The repeated-turn stress scenario retains five/seven pairs.

@@ -866,17 +866,28 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
             compatible = False
     if not compatible:
         required_policy = value("rev-parse", policy_ref)
+        # CI diagnostics can outlive another protected-main update. Preserve
+        # explicit experimental/candidate snapshots, but refresh mainline rules.
+        mainline = git("merge-base", "--is-ancestor", required_policy, "origin/main", check=False).returncode == 0
+        recovery_policy = "origin/main" if mainline else required_policy
+        recovery_base = "origin/main" if mainline else base
         print("LOCAL_ACCEPTANCE_RECOVERY=" + json.dumps({
             "version": 1, "run_on": "original author native host",
             "ci_proof_host_is_not_the_author_test_host": True,
             "runner": "<git-common-dir>/local-acceptance-hooks/local_acceptance.py",
-            "args": ["check", "--head", head, "--base", base,
-                     "--policy-ref", required_policy, "--publish", "--remote", "origin"],
-            "next": "Publish refreshed signed evidence, then rerun the acceptance workflow",
+            "observed_required_policy": required_policy,
+            "policy_source": "current protected main" if mainline else "requested immutable snapshot",
+            "prepare": [["git", "fetch", "--no-tags", "origin",
+                         "+refs/heads/main:refs/remotes/origin/main"]] if mainline else [],
+            "args": ["check", "--head", head, "--base", recovery_base,
+                     "--policy-ref", recovery_policy, "--publish", "--remote", "origin"],
+            "next": "On the original author host, run prepare first, then runner with args; "
+                    "publish refreshed signed evidence and rerun the acceptance workflow",
         }), file=sys.stderr, flush=True)
         raise RuntimeError(
             f"Acceptance commands changed; refresh/publish on the AUTHOR native host "
-            f"for required policy {required_policy}, then rerun CI")
+            f"using {'freshly fetched protected main' if mainline else 'the requested snapshot'} "
+            f"(observed policy {required_policy}); follow LOCAL_ACCEPTANCE_RECOVERY, then rerun CI")
     check_contract_changes(head, base, policy_ref)
     if not completed_only and not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")

@@ -217,68 +217,71 @@ def performance_power_state():
     return {"source": sources[0], "low_power_mode": performance_low_power_mode()}
 
 
-@contextmanager
 def stable_performance_power(output):
-    """Refuse unqualified macOS timing windows; keep every observation for diagnosis."""
-    if platform.system() != "Darwin":
-        yield
-        return
-    import threading
+    """Create the timing context only when a profile actually uses it."""
+    @contextmanager
+    def monitor_window():
+        """Refuse unqualified macOS timing windows; keep every observation for diagnosis."""
+        if platform.system() != "Darwin":
+            yield
+            return
+        import threading
 
-    evidence = output / "host-power.json"
-    observations, failures = [], []
-    stopped = threading.Event()
+        evidence = output / "host-power.json"
+        observations, failures = [], []
+        stopped = threading.Event()
 
-    def sample():
-        row = {"at": time.time()}
-        try:
-            row.update(performance_power_state())
-            if row["source"] != "AC Power" or row["low_power_mode"]:
-                failures.append("Timing acceptance requires external AC power with low-power mode disabled")
-        except Exception as error:
-            row["error"] = str(error)
-            failures.append(str(error))
-        observations.append(row)
-        staged = evidence.with_suffix(".json.stage")
-        staged.write_text(json.dumps({
-            "kind": "native-performance-power-observations", "poll_interval_seconds": 1,
-            "observations": observations, "invalid": bool(failures),
-        }, indent=2) + "\n")
-        staged.replace(evidence)
-
-    def require_stable():
-        if failures:
-            raise RuntimeError(f"{failures[0]}. Power evidence: {evidence}. "
-                               "No settings were changed; preserve this attempt and connect AC power before a new run.")
-
-    sample()
-    require_stable()
-    print(f"Performance host: external AC, low-power mode disabled; monitoring each second: {evidence}", flush=True)
-
-    def monitor():
-        while not stopped.wait(1):
+        def sample():
+            row = {"at": time.time()}
             try:
-                sample()
+                row.update(performance_power_state())
+                if row["source"] != "AC Power" or row["low_power_mode"]:
+                    failures.append("Timing acceptance requires external AC power with low-power mode disabled")
             except Exception as error:
-                failures.append(f"Cannot retain native power observations: {error}")
-                return
+                row["error"] = str(error)
+                failures.append(str(error))
+            observations.append(row)
+            staged = evidence.with_suffix(".json.stage")
+            staged.write_text(json.dumps({
+                "kind": "native-performance-power-observations", "poll_interval_seconds": 1,
+                "observations": observations, "invalid": bool(failures),
+            }, indent=2) + "\n")
+            staged.replace(evidence)
 
-    worker = threading.Thread(target=monitor, name="acceptance-power", daemon=True)
-    worker.start()
-    try:
-        yield
-    except BaseException:
-        # Preserve the original command failure; the sidecar still records any
-        # power problem. A failed command can never become a passing profile.
-        raise
-    else:
-        stopped.set()
-        worker.join()
+        def require_stable():
+            if failures:
+                raise RuntimeError(f"{failures[0]}. Power evidence: {evidence}. "
+                                   "No settings were changed; preserve this attempt and connect AC power before a new run.")
+
         sample()
         require_stable()
-    finally:
-        stopped.set()
-        worker.join()
+        print(f"Performance host: external AC, low-power mode disabled; monitoring each second: {evidence}", flush=True)
+
+        def monitor():
+            while not stopped.wait(1):
+                try:
+                    sample()
+                except Exception as error:
+                    failures.append(f"Cannot retain native power observations: {error}")
+                    return
+
+        worker = threading.Thread(target=monitor, name="acceptance-power", daemon=True)
+        worker.start()
+        try:
+            yield
+        except BaseException:
+            # Preserve the original command failure; the sidecar still records any
+            # power problem. A failed command can never become a passing profile.
+            raise
+        else:
+            stopped.set()
+            worker.join()
+            sample()
+            require_stable()
+        finally:
+            stopped.set()
+            worker.join()
+    return monitor_window()
 
 
 def run(name, root, output, base, execute):
@@ -302,7 +305,7 @@ def run(name, root, output, base, execute):
 
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
-        entry = stage_profile_executor(root, execution_policy_ref(), name, output / "history-policy")
+        entry = stage_preflight_executor(root, execution_policy_ref(), output / "history-policy")
         print("History preflight uses the protected policy checker; the author branch stays unchanged.", flush=True)
         command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
@@ -468,9 +471,15 @@ def execution_policy_ref():
     return policy_ref or "origin/main"
 
 
+def preflight_guard_files():
+    """Keep the history checker independent of unrelated native fixture pins."""
+    return {".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7"}
+
+
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        **preflight_guard_files(),
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
         "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
@@ -479,17 +488,16 @@ def native_guard_files():
         "e2e/local-acceptance/native_lint_acceptance.py": "94229d3b06f0944ad23f31e73e9355d7b5ba48d1dc8258aa07fc8c23172ca593",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "9d1c112503785ebd9236e5318923f238e9f0b2b117865dd9c3d345664e06496c",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "c2bdb2a4ae04f93c81434b7b7552ff62f807090354bdcd8392686ed44ed0b8e7",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "4e16f5a3d87d38b87519d7f8840d09a1868c333435e4eee86ce6920e39bf0e72",
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
-        ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "26f5044afdc527caa984399af4ef5724b7cb2b49156bbc6a95c3d23239c6ff4b",
-        "e2e/local-acceptance/run.py": "b28d2554f9a6f9479cab2b4a6743cdb6324f8560238d5852e059e453f33c3216",
+        ".github/scripts/local_acceptance.py": "db72835d665b6239ff44bcd3b52ff512b28131f16234afaa3e7d2aba6d3a649b",
+        "e2e/local-acceptance/run.py": "a0e6a6bce0e3a01cff310a34395ec4c9c87067b1b8b4a21b2d82128ef8ff6da5",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
@@ -499,13 +507,8 @@ def native_guard_files():
     }
 
 
-def stage_profile_executor(root, policy_ref, name, policy_root):
-    """Materialize one hash-bound native tool set without changing the candidate."""
-    files = native_guard_files()
-    if name == "preflight":
-        files = {".github/scripts/check_pr_history.py": files[".github/scripts/check_pr_history.py"]}
-    elif name != "guard-contract":
-        raise RuntimeError(f"No policy-owned native executor for {name}")
+def stage_executor_files(root, policy_ref, files, policy_root):
+    """Copy the selected protected bytes with one shared path and SHA256 check."""
     for relative, expected in files.items():
         destination = (policy_root / relative).resolve()
         if not destination.is_relative_to(policy_root.resolve()):
@@ -517,8 +520,22 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
                                "Update its protected pin before running acceptance.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents)
+
+
+def stage_preflight_executor(root, policy_ref, policy_root):
+    """Stage only the protected history checker for metadata preflight."""
+    files = preflight_guard_files()
+    stage_executor_files(root, policy_ref, files, policy_root)
+    return policy_root / next(iter(files))
+
+
+def stage_profile_executor(root, policy_ref, name, policy_root):
+    """Materialize one hash-bound native tool set without changing the candidate."""
     if name == "preflight":
-        return policy_root / ".github/scripts/check_pr_history.py"
+        return stage_preflight_executor(root, policy_ref, policy_root)
+    if name != "guard-contract":
+        raise RuntimeError(f"No policy-owned native executor for {name}")
+    stage_executor_files(root, policy_ref, native_guard_files(), policy_root)
     # The grouping fixture needs actual protected selection rules. Bind only
     # those fields: approval maps contain these recipe hashes and cannot be
     # included in their own input digest. Signer data is not used by the planner.
@@ -540,12 +557,19 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "d2d09b6970bf5912efd51956f2e2203f6342550f419c7ba0eea36ddc4e732af0"
+    expected = "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
     return policy_root / ".github/local-acceptance/native_guard.py"
+
+
+def container_image_tag(repository, digest):
+    """Keep each build's image reference owned until its caller finishes using it."""
+    import uuid
+
+    return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
 
 
 def contract_container(root, output, command):
@@ -576,8 +600,9 @@ def contract_container(root, output, command):
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
     image_receipt = output / "guard-image-id.txt"
+    image_tag = container_image_tag("sudocode-contract-guard", inputs_hash.hexdigest())
     command("docker", "build", "--iidfile", str(image_receipt), "--tag",
-            "sudocode-contract-guard:" + inputs_hash.hexdigest()[:24], str(context),
+            image_tag, str(context),
             extra={"DOCKER_BUILDKIT": "1"})
     image = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
@@ -585,7 +610,7 @@ def contract_container(root, output, command):
     inputs = output / "guard-inputs"
     snapshot(root, candidate, inputs)
     (output / "guard-provenance.json").write_text(json.dumps({
-        "candidate": candidate, "policy": protected, "image_id": image,
+        "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
         "context_sha256": inputs_hash.hexdigest()}, indent=2))
     # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
@@ -642,7 +667,6 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
-    image = f"sudocode-local-acceptance:{context_hash.hexdigest()[:24]}"
     image_receipt = output / "image-id.txt"
     # This map exists only in the current trusted runner process. Never infer
     # provenance from a previous output directory or a shared mutable cache.
@@ -652,6 +676,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         invocations = {}
     key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
     previous = invocations.get(key) if name == "browser" else None
+    image = (previous["image_tag"] if previous is not None
+             else container_image_tag("sudocode-local-acceptance", context_hash.hexdigest()))
     if previous is None:
         command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
                 extra={"DOCKER_BUILDKIT": "1"})
@@ -697,7 +723,7 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
             raise RuntimeError("Rendering candidate binary does not match its completed measurements")
-        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id}
+        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id, "image_tag": image}
         container.invocations = invocations
 
 
@@ -861,7 +887,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
     policy_path = terminal / "performance-policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["profiles"]["core"]
-    if (plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    if (plan.get("unjudged_warmups") != 0
+            or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
         raise RuntimeError("Rendering policy changed after its pre-build validation")
     if not cases or len(cases) != len(set(cases)) or any(
@@ -872,7 +899,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
               "status": "running", "samples": [], "metrics": [], "calibration": [],
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
-              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"]}
+              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
+              "unjudged_warmups": 0}
     metadata = None
 
     def save():
@@ -888,7 +916,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
         report["active_case"] = case
         save()
         print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
-              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; two warm-ups. "
+              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; no unjudged warm-ups. "
               f"Complete paired result: {output / case / 'report.json'}. "
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
@@ -903,7 +931,12 @@ def rendering_cases(terminal, arguments, output, command, plan):
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
                     if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
-                        raise RuntimeError(f"Rendering scenario {case} returned an incomplete passing sample set")
+                        raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
+                                           f"required {plan['samples'][case]} judged observations and no extra warm-ups")
+                    if succeeded and child["status"] == "passed":
+                        observed = [{key: row[key] for key in ["stage", "round", "side"]} for row in child["samples"]]
+                        if observed != plan["pairs"][case]:
+                            raise RuntimeError(f"Rendering scenario {case} paired sample inventory differs from its declared rounds")
                     for key in ["base_sha256", "candidate_sha256", "driver_sha256", "harness_sha256"]:
                         if key in report and report[key] != child[key]:
                             raise RuntimeError(f"Rendering {key} changed between scenarios")

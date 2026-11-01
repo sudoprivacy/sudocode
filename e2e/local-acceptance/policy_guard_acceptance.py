@@ -175,7 +175,22 @@ def main():
         changed = commit("Bind reviewed native guard bytes in the protected profile")
         after = authority.reachable_profile_commands_hashes(changed, names)
         affected = {name for name in names if before[name] != after[name]}
-        assert affected == {"guard-contract", "preflight"}, (relative, affected)
+        expected_affected = {"guard-contract"}
+        if relative in profiles.preflight_guard_files():
+            expected_affected.add("preflight")
+        assert affected == expected_affected, (relative, affected)
+        if relative == ".github/local-acceptance/native_guard.py":
+            # Follow the actual preflight path against the changed policy while
+            # the candidate still has its incompatible old history checker.
+            git("switch", "--detach", old)
+            profiles.run.execution_refs = (changed, old)
+            history = profiles.run("preflight", candidate, output / "changed-guard-preflight",
+                                   old, authority.run_command)
+            assert all(row["exit_code"] == 0 for row in history)
+            staged = output / "changed-guard-preflight/history-policy/.github/scripts/check_pr_history.py"
+            assert staged.read_bytes() == contents[".github/scripts/check_pr_history.py"]
+            assert git("rev-parse", "HEAD") == old and not git("status", "--porcelain")
+            git("switch", "--detach", changed)
         fingerprint_results.append({"file": relative, "affected": sorted(affected), "unpinned_bytes_refused": True})
         try:
             authority.check_contract_changes(changed, protected, protected)

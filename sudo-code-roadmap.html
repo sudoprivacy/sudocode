@@ -289,7 +289,11 @@ GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
 workline's source into the shared cache between profiles, then verifies that
 browser uses the original normal release without another normal candidate build.
 Actual Docker acceptance checks frozen images, the invocation boundary and five
-tampered release identities/bytes. This removes duplicate compilation without
+tampered release identities/bytes. Each build also retains an invocation-owned
+image tag, allocated by the same helper for contract and performance images.
+An actual same-context build is interleaved before the original browser launch
+to verify that another BuildKit index does not replace the retained reference.
+This removes duplicate compilation without
 reducing measurement coverage; production elapsed savings remain unmeasured.
 The host and container entrypoint now share the canonical
 <code>container/&lt;profile&gt;</code> output layout. Docker regression uses the
@@ -370,6 +374,34 @@ measurement inputs, so those native suites and their complementary CI hosts are
 omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
 changes retain their applicable native checks. Real Git planner and PR/push/queue
 fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
+<p><strong>Remove unjudged full warm-up workloads (2026-11-01).</strong>
+Rendering now runs 60 judged observations and browser comparison runs 12. This
+removes eight rendering and two browser runs that did not enter A/A or A/B
+statistics. The retained field spent 151.84 driver seconds on those ten runs;
+this is a recorded component cost, not a measured new lifecycle saving. Every
+sample starts fresh driver/Node/SUT and browser processes, so JIT state does not
+carry between samples. All judged pair counts, interactions, metrics and budgets
+remain. Colder file caches may affect the first calibration pair; unchanged A/A
+noise checks still refuse inconclusive fields. Exact stage/round/side inventories
+reject missing, extra and duplicate/mispaired observations. Headless and painted
+viewport comparisons retain 14 runs each, for 100 total instead of 110; all 96
+judged observations remain. Rendering needs fresh evidence. An exact protected
+pair preserves browser execution for an unchanged candidate head through the
+shared helper edit; candidate-owned browser code and the relative evaluator keep
+their existing ownership. Native recipes remain unchanged. Real Cargo/native
+regression retains all 144 judged calls of the former six-scenario control and
+its RSS refusal. Original historical reports remain preserved.</p>
+<p><strong>Retain completed checks across image reference ownership (2026-11-01).</strong>
+Exact protected recipe pairs preserve completed guard and browser evidence for
+the same candidate head after private Docker image tags replaced a shared alias.
+Passed assertions, browser observers and statistical budgets are unchanged.
+Browser pairs include the previously approved equivalent wrapper transitions.
+Rendering's changed warm-up conditions still require fresh execution. A live
+saved-profile diagnostic verifies real SSH signatures and original log hashes,
+resumes only the approved profiles, and refuses a different head, changed logs
+or signature, missing execution and an unapproved rendering profile. It never
+signs, publishes or relabels old results. These checks add no product journey
+coverage; lifecycle benefit depends on an author having compatible completed work.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -617,6 +649,14 @@ The new runner-enforcement guard still executes. Real Git/SSH regressions cover
 current and legacy signed receipts, unchanged notes, changed assertions and new
 required checks. Later recipe changes cannot inherit an obsolete pair. Reuse
 appears in mandatory hook and CI output; no product coverage is removed.</p>
+<p>Obsolete-recipe refusals include a machine-readable author-host recovery
+record. For protected-main policies it fetches main before resolving the current
+policy, preventing old CI diagnostics from publishing obsolete evidence after
+another main update. Explicit experimental snapshots remain pinned; each check
+still freezes its resolved source and policy. Real Git/SSH regression captures
+the diagnostic, advances main with another required process, then follows that
+original recovery record, publishes and independently verifies the fresh receipt.
+No required check or signature verification is removed.</p>
 <p>Local acceptance freezes candidate, PR base and authorized policy commits at
 invocation start. Docker snapshots and image context follow that fixed policy;
 the run uses the actual build's immutable image ID. Each invocation saves
@@ -741,6 +781,20 @@ Linux/Windows and functional-only profiles keep their existing execution.
 Native process fixtures cover admission, transient changes, probe failures and
 preservation of the original command error. They earn no product journey credit;
 performance budgets, workloads and sample counts remain unchanged.</p>
+<p>The power monitoring context is created only when called, so unused timing
+helper bodies do not invalidate ordinary native evidence. Metadata preflight
+stages its history checker independently of unrelated native fixture pins; both
+paths share the original path and SHA256 verification. Exact protected recipe
+pairs preserve already completed execution through this refactor. Changed used
+helpers, timing rules, source, signatures and required checks retain their normal
+refusals. Real SSH/hook regression copies the production factory, proves an unused
+helper does not repeat the actual process, and refuses reuse when the selected
+profile calls that helper. The existing eleven native power scenarios still run.
+The original failure and earlier signed notes remain preserved.</p>
+<p>A Git/SSH-only debug entrypoint prints its limited scope and omits unrelated
+Cargo fixtures during local investigation. Mandatory acceptance keeps the full
+default matrix; this debug mode neither signs full source acceptance nor adds
+product journey coverage.</p>
 
 <p>The automatic viewport on/off headless and browser budget checks run in the
 mandatory local browser profile. The existing source-before/after measurement
@@ -777,25 +831,36 @@ script remains available for diagnosis and earns no additional coverage credit.<
       guard when the driver package changes. A real GitHub fixture also verifies
       cancellation of independent Rust CI peers in both failure directions,
       retention of the original failed step, and no cancellation runner on
-      successful runs.</td>
+      successful runs. Captured recovery instructions fetch current protected
+      main, execute a newly required real process and publish SSH-signed evidence
+      that an independent verifier fetches and validates. A copied production
+      timing factory preserves real signed hook execution while unused; selected
+      helper changes still require fresh evidence. Every pinned native input is
+      checked through real Git: unrelated pins leave metadata preflight unchanged,
+      while history-checker changes invalidate it. A real old-checkout preflight
+      runs against the changed protected native policy.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>
     <tr>
       <td>Paired rendering/browser/viewport measurements</td>
-      <td>Four rendering scenarios run 68 samples. A 12 KiB Markdown stream
+      <td>Four rendering scenarios run 60 judged observations. A 12 KiB Markdown stream
       replaces separate long prose, boundary prose and short Markdown cases,
       reducing independent size/content coverage. All remaining metrics are
-      judged. Browser, headless viewport
-      and painted viewport comparisons each run 14 samples; total 110 instead
+      judged. Browser comparison runs 12; headless viewport
+      and painted viewport comparisons each retain 14 samples; total 100 instead
       of 234. Short retains its full 5/7 paired rounds; the other comparisons
       use 3/3. Lower repeat coverage can miss intermittent regressions and
-      environmental noise. Budgets and per-run interactions stay intact;
+      environmental noise. Ten full unjudged warm-ups are removed; all 96 judged
+      observations from the preceding 110-run matrix remain. Colder file caches
+      may affect the first pair, with unchanged A/A noise refusal. Budgets and per-run interactions stay intact;
       the separate 60-sample painted interaction check remains. Edits limited to
       the two statistical entrypoints and their two policy JSON files retain
       these measurements and the native builder guard while omitting unrelated
       workspace/resize suites and their complementary CI hosts. Mixed Rust,
-      shared terminal-host and unknown inputs retain native checks.</td>
+      shared terminal-host and unknown inputs retain native checks. Exact protected
+      pairs retain completed browser evidence for the same head through operational
+      image-reference changes; changed rendering criteria remain fresh.</td>
       <td>No additional journey credit from repeated measurements.</td>
       <td><code>benchmark.py</code> / <code>gui-benchmark.py</code> /
       <code>benchmark_prompt_viewport.py</code></td>

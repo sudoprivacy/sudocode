@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from benchmark import assess, comparison_rounds, digest
+from benchmark import assess, comparison_rounds, digest, paired_samples
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
     policy = json.loads(Path(__file__).with_name("gui-policy.json").read_text())
     rounds = comparison_rounds(policy, "browser")
     print(f"Browser paired matrix: {rounds['calibration']} A/A pairs, {rounds['comparison']} A/B pairs, "
-          "plus two warm-ups. Per-run interactions and budgets are unchanged.", flush=True)
+          "without extra unjudged workloads. Per-run interactions and budgets are unchanged.", flush=True)
     sampling = policy["sampling"]
     keys = len(sampling["input_delays_ms"])
     sample_counts = {"drag_frame_ms": sampling["drag_steps"]}
@@ -32,7 +32,7 @@ def main():
     assert keys >= 20 and sample_counts["input_wait_parsed_ms"] >= 100
     report = {"version": 1, "status": "running", "policy": policy, "samples": [],
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
-              "driver_sha256": digest(args.driver)}
+              "driver_sha256": digest(args.driver), "unjudged_warmups": 0}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name)) for name in
                                 ["gui-benchmark.py", "gui.cjs", "gui.html", "host.cjs", "resources.cjs", "benchmark.py"]}
     controls, comparisons = {"browser": []}, {"browser": []}
@@ -74,8 +74,6 @@ def main():
         return data
 
     try:
-        sample(args.base, "warm-base", False)
-        sample(args.candidate, "warm-candidate", True)
         for stage, count, target in [("aa", rounds["calibration"], controls), ("ab", rounds["comparison"], comparisons)]:
             for index in range(count):
                 pair = {}
@@ -92,6 +90,8 @@ def main():
                 report["status"] = "noisy" if stage == "aa" else "failed"
                 break
         else:
+            expected = [f"{row['stage']}-{row['round']:02d}-{row['side']}" for row in paired_samples(rounds)]
+            assert [row["label"] for row in report["samples"]] == expected, "missing/duplicate/unjudged browser pairs"
             assert digest(args.base) == report["base_sha256"], "baseline changed during measurement"
             assert digest(args.candidate) == report["candidate_sha256"], "candidate changed during measurement"
             assert digest(args.driver) == report["driver_sha256"], "driver changed during measurement"

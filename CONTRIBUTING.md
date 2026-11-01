@@ -263,6 +263,17 @@ profiles and Linux/Windows keep their existing execution. These environmental
 observations are supplementary diagnostics; completed signed profiles still
 require their actual commands and current protected recipe.
 
+The timing context is created only when a profile calls it. Unused timing helper
+bodies do not invalidate ordinary native execution. Metadata preflight stages only
+its protected history checker; unrelated native fixture pins do not affect its
+recipe. Both staging paths share the same path and SHA256 verification. Exact
+protected migration pairs retain earlier successful evidence for this context
+factory and staging refactor; changed selected commands, signatures, source or
+required checks still need their normal validation.
+For local Git/SSH debugging, `python e2e/local-acceptance/run.py --profile-compat-only`
+uses the real hook and signed-note workflow and explicitly reports its limited
+scope. The mandatory default still runs the complete enforcement matrix.
+
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when CLI, engine-core, shared PTY helpers,
 measurement sources or Rust build/dependency inputs change. Other crates' source
@@ -306,6 +317,13 @@ replaces statistical product measurements. Missing or mismatched output fails
 without promoting old raw results into a signed profile.
 This removes a duplicate build even when another workline churns the cache. It
 does not shorten a successful measurement matrix or prove production speedup.
+Every Docker build keeps its own randomly named image tag alongside the exact
+image ID. Rendering and browser retain that same owned reference; another
+invocation building identical cached layers cannot replace it with a different
+BuildKit attestation/index. Contract and performance images use one tag allocator.
+The real Docker regression builds the same context in another invocation before
+launching the original browser and executing its retained native binary. Budgets,
+samples, source bindings and failure handling remain unchanged.
 Performance drivers compile in the binary-free `scode-benchmark-drivers` package,
 referencing the original CLI test sources. They launch only the explicitly
 selected, copied release through `SCODE_TEST_BIN`. Distinct, opt-in target names
@@ -336,20 +354,27 @@ The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
 Rendering completes and judges one scenario at a time. Four scenarios keep
-two warm-ups, per-run interaction counts and every metric budget. The short scenario keeps
+their per-run interaction counts and every metric budget. The short scenario keeps
 five A/A and seven alternating A/B pairs, preserving the full check that caught
 a real RSS regression. The other scenarios use three A/A and three A/B pairs.
 A 12 KiB Markdown workload replaces the independent 8 KiB prose, 12 KiB prose
 and 2,300-byte Markdown workloads, adopting the consolidation proposed in #1196.
 Short prose, foreground tools and background tools remain separate. The required
-core matrix runs 68 native samples instead of 96. This reduces workload coverage:
+core matrix runs 60 judged observations; the previous 68 included eight extra
+unjudged warm-up workloads. The earlier consolidation reduced workload coverage:
 regressions specific to the removed plain-text sizes or short Markdown can escape
 the combined workload. No metric is filtered from the remaining cases.
 Browser comparison uses
-three A/A and three A/B pairs plus two warm-ups: 14 runs instead of 26.
+three A/A and three A/B pairs: 12 judged observations; its two extra full warm-ups
+are also removed in current candidate snapshots. Older candidate-owned browser
+runners can retain their legacy warm-ups with the same judged pairs. Each driver
+starts a fresh Node/SUT; browser observations also start a fresh browser, so
+process JIT state never carries between them. The same A/A checks
+still refuse noisy calibration; colder file caches may affect the first pair.
 Headless and painted viewport comparisons inherit the same 3/3 rounds: each also
-runs 14 instead of 26 samples. Repeated comparisons total 110 instead of the
-original 234 (53.0% fewer); the separate 60-sample painted interaction check remains.
+runs 14 instead of 26 samples, retaining their warm-ups. Repeated comparisons total
+100 instead of the original 234 (57.3% fewer). All 96 judged observations from the
+previous 110-run matrix remain; the separate 60-sample painted interaction check remains.
 Per-run parsed/painted interactions and budgets stay intact.
 This reduces repeat coverage and precision: intermittent regressions and
 environmental noise have fewer chances to appear. A preserved actual viewport
@@ -363,16 +388,30 @@ active scenario and evidence path. `measurements/report.json` combines the origi
 case reports, with original policy and binary/observer hashes, completed scenarios
 and remaining work. The actual benchmark CLI validates and describes the plan
 before npm or Cargo starts; the host checks its policy hash and complete sample
-count before accepting a passing report. Real Cargo/native-process acceptance exercises
+count and exact stage/round/side inventory before accepting a passing report. Real Cargo/native-process acceptance exercises
 full success, relative RSS regression, broken drivers and changed observers with
 the unchanged paired evaluator, and rejects missing CPU metrics or passing
-reports with missing samples. It does not claim product performance coverage.
-Both changed performance recipes require new execution; earlier full-matrix
-results cannot authorize the reduced sampling policy. Native profile recipes
-remain unchanged. Actual native fixture processes verify the 68/14 schedules,
+reports with missing, extra or duplicated/mispaired samples. It does not claim product performance coverage.
+The changed rendering recipe requires fresh execution. Browser execution remains
+candidate-owned for the same head; an exact protected recipe pair preserves its
+unchanged completed work through the shared rendering-helper edit. Native profile
+recipes remain unchanged. Actual native fixture processes verify the 60/12 schedules,
 alternating sides, the full short check and rejection of relative RSS/browser
 regressions and policies below their minimum rounds. These fixtures add no
 product performance coverage credit.
+
+Completed guard and browser receipts for the same source head can survive the
+private Docker image-tag ownership fix through exact protected recipe pairs.
+The image reference change retains the caller's image; it changes no completed
+assertion or statistical budget. Browser pairs also retain the already approved
+equivalent wrapper changes. Rendering's changed warm-up conditions still require
+fresh execution. Different heads, altered logs/signatures, missing profiles and
+changed selected criteria keep their existing refusal behavior.
+For a live check against genuine saved author evidence, use
+`python e2e/local-acceptance/saved_profiles_acceptance.py --saved PATH --policy-ref origin/main --profiles browser --refuse-profiles rendering --output FRESH_PATH`
+when testing this historical browser-only migration. The diagnostic exercises
+production resume and tamper controls; it does not sign, publish or authorize a
+source change. Its input must be a complete acceptance directory with original logs.
 
 Default SSE response archives reuse at most one finished deflate state across
 captures. Active captures retain separate states; a finished state releases its
@@ -531,6 +570,12 @@ abrupt process exit can therefore retain earlier completed profiles without
 running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
 host; custom output directories can use the printed `check --resume-from` command.
+When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
+record includes preparation commands and the author-host runner arguments.
+Run preparation first: mainline recovery fetches protected main before resolving
+its current policy, so an old CI diagnostic cannot pin an obsolete recipe.
+Explicit experimental policy snapshots remain pinned. The check freezes the
+resolved commits at startup and still requires every newly selected profile.
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
 Earlier `checkpoint/` records remain readable. An incomplete unadvertised generation

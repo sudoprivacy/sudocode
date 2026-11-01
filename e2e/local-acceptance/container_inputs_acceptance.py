@@ -187,6 +187,20 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     try:
         first = launch("protected-policy", protected, {"policy": "main-policy", "sources": {
             "candidate": "candidate-policy", "baseline": "baseline", "trusted": "main-policy"}})
+        # Another author can build the exact same context while the rendering
+        # container is running. BuildKit exports a fresh attestation/index even
+        # on a cache hit; sharing its tag can discard the first index before the
+        # original invocation starts its browser container.
+        browser_expected = {"policy": "main-policy", "reuse": False, "sources": {
+            "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "main-policy"}}
+        independent = launch("same-context-independent-builder", protected, browser_expected,
+                             profile="browser", parent=output / "independent-invocation")
+        retained = launch("browser-after-independent-build", protected,
+                          {**browser_expected, "reuse": True}, profile="browser")
+        assert retained["image_id"] == first["image_id"]
+        assert retained["image_tag"] == first["image_tag"], "Reuse lost the original image's owned reference"
+        assert independent["image_tag"] != first["image_tag"], "Independent builds share a mutable image reference"
+        print("PASS: another real same-context build preserves the original image and executable for browser reuse", flush=True)
         second = launch("candidate-policy-ref-and-tag-change", candidate, {"policy": "candidate-policy", "sources": {
             "candidate": "candidate-policy", "baseline": "main-policy", "trusted": "candidate-policy"}},
             swap_image=first["image_id"])
@@ -231,9 +245,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: wrong-policy container rejected by the real input probe", flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
-        result = {"status": "PASS", "cases": 10,
+        result = {"status": "PASS", "cases": 12,
             "production_main_and_dispatcher_layout": True,
             "same_invocation_image_and_binary_reused": True, "fresh_invocation_does_not_reuse": True,
+            "independent_same_context_build_preserves_original_image": True,
             "changed_identity_and_bytes_refused": True,
             "scope": "Real production container launcher, main/dispatcher, command executor, Git commits/archives and Docker builds/runs. The native workload replaces statistical benchmarks and writes only to the output supplied by the dispatcher. Protected/candidate policies and actual ref/tag moves retain frozen inputs. Same-invocation browser reuses the exact image and executes a retained native Linux binary after host staging; another invocation builds normally. Five corrupted release identities/bytes and a wrong-policy image are rejected inside real containers. Probe executable is the image's Python binary; actual Cargo/source/feature identity is covered by benchmark_targets_acceptance.py. No product benchmark coverage."}
     finally:

@@ -57,9 +57,11 @@ enum ResponseKind {
     ResponsesSlow,
     FiniteHeartbeat,
     SignedCapture,
+    CaptureDistinct,
     GeminiCapture,
     CapturePaced,
     CaptureBurst,
+    CaptureIdleGaps,
     SplicedAttempts,
     RetryUsageComplete,
 }
@@ -109,6 +111,7 @@ struct StreamProvider {
     requests: Arc<AtomicUsize>,
     terminal_connection_state: Arc<AtomicUsize>,
     bodies: Arc<Mutex<Vec<Value>>>,
+    capture_release: Arc<AtomicUsize>,
     disconnect: Option<Arc<BodyDisconnect>>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -166,6 +169,8 @@ impl StreamProvider {
         let count = requests.clone();
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let captured = bodies.clone();
+        let capture_release = Arc::new(AtomicUsize::new(0));
+        let release = Arc::clone(&capture_release);
         let wire_disconnect = disconnect.clone();
         let worker = thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
@@ -210,7 +215,14 @@ impl StreamProvider {
                     0
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + missing);
-                write_stream_response(&mut socket, kind, &response, &terminal_state, &stop);
+                write_stream_response(
+                    &mut socket,
+                    kind,
+                    &response,
+                    &terminal_state,
+                    &stop,
+                    &release,
+                );
             }
         });
         Self {
@@ -219,6 +231,7 @@ impl StreamProvider {
             requests,
             terminal_connection_state,
             bodies,
+            capture_release,
             disconnect,
             worker: Some(worker),
         }
@@ -473,6 +486,66 @@ fn raw_stream_capture_preserves_signed_content_through_resume() {
 }
 
 #[test]
+fn raw_stream_capture_rearms_after_idle_batches() {
+    let env = TestEnv::new_mock("raw-stream-idle-batches");
+    let provider = StreamProvider::new(ResponseKind::CaptureIdleGaps);
+    configure_peer(&env, &provider, ResponseKind::CaptureIdleGaps);
+    let mut cli = env.spawn(&[]);
+    common::expect_input_line_cleared(&cli, env.timeout(), "idle capture prompt");
+    let marker = common::turn_status_marker(&cli);
+    cli.send("Report the stream result\r").unwrap();
+    let (_, directory) = capture_session_paths(&env);
+    let mut previous = 0;
+    for part in 0..2 {
+        common::expect_screen(
+            &cli,
+            |_| {
+                std::fs::read_dir(&directory).is_ok_and(|entries| {
+                    entries.filter_map(Result::ok).any(|entry| {
+                        entry.path().extension().is_some_and(|ext| ext == "gz")
+                            && entry.metadata().is_ok_and(|meta| meta.len() > previous)
+                    })
+                })
+            },
+            env.timeout(),
+            "response batch reached real gzip file",
+        );
+        let body = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+            .unwrap();
+        previous = std::fs::metadata(body).unwrap().len();
+        // The server withholds all further bytes beyond the 20 ms batch interval.
+        thread::sleep(Duration::from_millis(150));
+        provider.capture_release.store(part + 1, Ordering::SeqCst);
+    }
+    common::expect_turn_complete_after(&cli, &marker, env.timeout(), "rearmed response complete");
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let body = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .unwrap();
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(
+        decoded,
+        padded_capture_body("CAPTURE_REARM_SENTINEL", 16).as_bytes()
+    );
+    let metadata: Value = serde_json::from_slice(
+        &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(metadata["gzip_complete"], true);
+    assert_eq!(metadata["saved_all_observed_bytes"], true);
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn raw_stream_capture_can_be_disabled_or_budget_limited() {
     for configuration in [json!({"enabled":false}), json!({"maxSessionBytes":1})] {
         let env = TestEnv::new("raw-stream-disabled");
@@ -537,6 +610,93 @@ fn set_response_recording(env: &TestEnv, recording: Value) {
     };
     settings["responseRecording"] = recording;
     std::fs::write(path, settings.to_string()).unwrap();
+}
+
+#[test]
+fn raw_stream_capture_reuses_compression_without_rewriting_earlier_responses() {
+    let env = TestEnv::new_mock("response-compression-reuse");
+    let provider = StreamProvider::new(ResponseKind::CaptureDistinct);
+    configure_peer(&env, &provider, ResponseKind::CaptureDistinct);
+    let mut cli = env.spawn(&[]);
+    common::expect_input_line_cleared(&cli, env.timeout(), "compression reuse prompt");
+    let mut retained = std::collections::BTreeMap::new();
+    let mut expected = std::collections::BTreeSet::new();
+    for index in 0..6 {
+        let marker = common::turn_status_marker(&cli);
+        cli.send(&format!("Capture a separate response {index}\r"))
+            .unwrap();
+        common::expect_turn_complete_after(
+            &cli,
+            &marker,
+            env.timeout(),
+            "distinct archived response completed",
+        );
+        let (session, directory) = capture_session_paths(&env);
+        expected.insert(padded_capture_body(
+            &format!("ARCHIVE_CAPTURE_{index:02}_"),
+            (index + 1) * 17,
+        ));
+        common::expect_screen(
+            &cli,
+            |_| {
+                let files: Vec<_> = std::fs::read_dir(&directory)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                    .collect();
+                files.len() == index + 1
+                    && files.iter().all(|path| {
+                        std::fs::read(path)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .is_some_and(|value| {
+                                value["gzip_complete"] == true
+                                    && value["saved_all_observed_bytes"] == true
+                            })
+                    })
+            },
+            env.timeout(),
+            "all response files finalized",
+        );
+        let mut decoded = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "gz") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            if let Some(previous) = retained.get(&path) {
+                assert_eq!(
+                    &bytes, previous,
+                    "reusing compression changed an earlier file"
+                );
+            }
+            let mut text = String::new();
+            flate2::read::GzDecoder::new(bytes.as_slice())
+                .read_to_string(&mut text)
+                .unwrap();
+            decoded.insert(text);
+            retained.insert(path, bytes);
+        }
+        assert_eq!(
+            decoded, expected,
+            "response bodies or CRC state crossed captures"
+        );
+        let restored = runtime::Session::load_from_path(&session).unwrap();
+        assert_eq!(
+            restored
+                .messages()
+                .iter()
+                .filter(|message| message.role == runtime::MessageRole::Assistant)
+                .count(),
+            index + 1
+        );
+    }
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 6);
 }
 
 fn capture_session_paths(env: &TestEnv) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -2023,11 +2183,17 @@ fixture_text
                     }
                     ResponseKind::GeminiCapture => body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"STREAM_BODY_VERIFIED\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":8}}\n\n".to_string(),
                     ResponseKind::SignedCapture => body = signed_capture_body(),
+                    ResponseKind::CaptureDistinct => {
+                        body = padded_capture_body(&format!("ARCHIVE_CAPTURE_{index:02}_"), (index + 1) * 17);
+                    }
                     ResponseKind::CapturePaced => {
                         body = padded_capture_body("SSE_LOG_ONLY_PADDING", 512);
                     }
                     ResponseKind::CaptureBurst => {
                         body = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
+                    }
+                    ResponseKind::CaptureIdleGaps => {
+                        body = padded_capture_body("CAPTURE_REARM_SENTINEL", 16);
                     }
                     ResponseKind::UsageAtStart => {
                         body = body.replace(
@@ -2075,7 +2241,23 @@ fn write_stream_response(
     response: &str,
     terminal_state: &AtomicUsize,
     stop: &AtomicBool,
+    release: &AtomicUsize,
 ) {
+    if matches!(kind, ResponseKind::CaptureIdleGaps) {
+        socket.set_nodelay(true).unwrap();
+        let size = response.len().div_ceil(3);
+        for (part, bytes) in response.as_bytes().chunks(size).enumerate() {
+            if socket.write_all(bytes).is_err() {
+                break;
+            }
+            if part < 2 {
+                while !stop.load(Ordering::SeqCst) && release.load(Ordering::SeqCst) <= part {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        return;
+    }
     if matches!(kind, ResponseKind::CapturePaced) {
         socket.set_nodelay(true).unwrap();
         for bytes in response.as_bytes().chunks(1024) {

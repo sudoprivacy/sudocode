@@ -63,7 +63,7 @@ use crate::stderr_capture as stderr_redirect;
 enum StatusSlot {
     /// Running model, tool, or retry activity; input panels own waiting states.
     Active(String),
-    /// Static task conclusion; shares the footer's event-fed task projection.
+    /// Task conclusion; shares the footer's event-fed task projection.
     Background {
         full: Arc<StyledText>,
         summary: Arc<StyledText>,
@@ -1350,6 +1350,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
+    let mut background_frame = hooks.use_state(|| 0usize);
+    let mut background_animation = hooks.use_ref_default::<bool>();
     let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
     let mut turn_result = hooks.use_state(|| None::<(u32, Arc<StyledText>)>);
@@ -1843,6 +1845,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut todo_hide_deadline: Option<Instant> = None;
         let mut stderr_text = Utf8Stream::default();
         let mut task_clock_tick = Instant::now();
+        let mut background_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
             let mut is_preview_changed = false;
@@ -2109,11 +2112,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 footer_hint.set(None);
             }
 
-            // One lifecycle snapshot drives the status and footer. Animate
-            // only Running; waiting hides the row, Idle changes no UI state.
+            // One lifecycle snapshot drives the status and footer. Foreground
+            // activity owns the fast cadence; visible background work reuses
+            // this clock at 400ms. It never records model/task progress.
             // Identical idle State::set calls starve keyboard delivery in iocraft.
             let idx = frame.get();
             let state = spinner_for_future.engine_state();
+            if state == EngineState::Idle && background_animation.get() {
+                if background_tick.elapsed() >= Duration::from_millis(400) {
+                    background_frame.set(background_frame.get().wrapping_add(1));
+                    background_tick = Instant::now();
+                }
+            } else {
+                background_tick = Instant::now();
+            }
             if state == EngineState::Running || is_preview_changed || is_transcript_changed {
                 frame.set(idx.wrapping_add(1));
             }
@@ -2165,12 +2177,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut browser = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Output-only task events do not invalidate these bounded static strings.
+    // Task events and the slow icon frame invalidate only this bounded row.
     // Both surfaces consume the browser's existing event projection, even idle.
     let completed_turn = turn_result.read().as_ref().map(|(turn, _)| *turn);
+    let background_animates = browser.summary().animates_status();
     let background_status = hooks.use_memo(
-        || browser.summary().status_lines(w, completed_turn),
-        (browser.summary(), w, completed_turn),
+        || {
+            browser
+                .summary()
+                .status_lines(w, completed_turn, background_frame.get())
+        },
+        (browser.summary(), w, completed_turn, background_frame.get()),
     );
 
     // StatusSlot: Foreground > Background > TurnResult > Empty
@@ -2434,6 +2451,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         &mut measured,
     );
+    // Do not wake the canvas when the allocator has hidden this row/icon or
+    // a question owns input. This presentation flag derives from the same
+    // task summary; it is neither a task registry nor an engine lifecycle.
+    *background_animation.write() = background_animates
+        && matches!(status_slot, StatusSlot::Background { .. })
+        && matches!(current_input_slot, InputSlot::TextInput)
+        && layout.status.rows > 0
+        && layout
+            .status
+            .content
+            .text
+            .starts_with(crate::render::activity::spinner_frame(
+                background_frame.get(),
+            ));
     if task_panel.is_some() {
         // The browser chooses its visible rows from the shared allocation.
         // Its lazy output cache survives both projections; fixed controls are

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use pty_expect::PtySession;
 
-use crate::common;
+use super::common;
 
 /// Wait for the synchronous editor's new prompt after this completed turn.
 ///

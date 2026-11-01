@@ -963,20 +963,13 @@ async fn run_peer_receiver(
         };
         // The session this agent's messages go to: the one bound so far
         // while it lives, else another session of the same agent.
+        // A refusal leaves the message unread; the mailbox receiver backs off
+        // and hands it over again. The engine owns the operator's pause gate.
         let Some(session_id) = registry.session_of_agent(&agent, &bound) else {
             let _ = ack.send(false);
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             continue;
         };
         bound.clone_from(&session_id);
-        if registry
-            .engine(&session_id)
-            .is_some_and(|engine| engine.tool_control().1)
-        {
-            let _ = ack.send(false);
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            continue;
-        }
         let Some(driver) = registry.driver(&session_id) else {
             let _ = ack.send(false);
             continue;

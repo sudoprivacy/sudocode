@@ -201,6 +201,21 @@ time. The required command prints this split. A real Git/Cargo/native-process
 guard verifies feature compilation, dev execution and refusal of a missing stamp;
 it adds no product journey coverage.
 
+The queue separates CLI daemon journeys from co-host/search acceptance. CLI
+source changes retain the real pinned daemon, cross-node CLI and authenticated
+sender journeys. The independent co-host duet, VFS search owner/restart and
+driver feature checks run for shared Rust, manifest/lock, build and daemon
+harness inputs. The selector excludes CLI source only when both committed
+layouts prove a binary-only package without declared workspace dependents;
+unknown layouts retain co-host checks. CLI tests remain outside co-host inputs.
+Unknown build/dependency changes keep the conservative scope.
+The required job prints its decision and refuses missing decisions. Real Git
+PR/push/queue events and actual Cargo builds prove a deliberately broken CLI
+does not enter the co-host build, while shared runtime changes rebuild it.
+Actual repository metadata requires a binary-only CLI without workspace
+dependents. This removes co-host execution on CLI-only revisions; CLI changes
+are still exercised against real daemons. Scope guards add no journey coverage.
+
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
 while its profiles run; a second invocation prints the holder from

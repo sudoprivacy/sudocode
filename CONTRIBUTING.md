@@ -456,6 +456,20 @@ on its required checks. A Windows prototype passed all 2,505 active cases with
 70 ignored markers; activation still requires fresh exact-head author and
 complementary native acceptance. Original per-file Cargo commands stay available,
 and new ungrouped targets are selected automatically.
+Grouped native workspace execution now selects integration targets explicitly,
+retiring legacy library/binary unit harnesses in line with the test-layer policy.
+An audited Windows run contained 1,423 such unit cases and 1,089 integration
+cases; the unit cases contributed 73 summed worker seconds, so their 56.6%
+share of case count is not a 56.6% time saving. Every selected integration/PTY
+case and ignored marker remains; queue all-target/all-feature Clippy,
+vendored Mermaid checks and workspace doctests remain. Legacy unit assertions
+are no longer runtime regression gates and gain no e2e coverage credit.
+Real Cargo/nextest controls poison both unit harnesses, require the former full
+selection to fail, then execute the production dispatcher and verify the complete
+integration inventory without either harness. Older ungrouped sources retain
+Cargo's complete original default suite, including legacy unit harnesses and
+disabled/feature-gated target exclusions. An explicit glob would enable manual
+targets; a real deliberately failing disabled target protects that boundary.
 Native workspace Clippy uses that same validated group inventory, retaining
 library and binary test configurations, examples, benches and ungrouped enabled
 tests. It avoids linting the 128 covered modules as separate crates on every

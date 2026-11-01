@@ -680,6 +680,20 @@ regression compares exact case/ignore inventories, checks independent native
 process state, executes original developer and named driver commands, rejects
 invalid wrappers, and verifies a Cargo-fresh, byte-identical normal product.
 This infrastructure fixture adds no product feature coverage.</p>
+<p><strong>Retire legacy workspace unit execution (2026-11-02).</strong>
+Grouped native runtime acceptance explicitly selects every integration/PTY target.
+Older ungrouped sources retain Cargo's original complete default suite, including
+legacy units and disabled/feature-gated target exclusions; a failing manual
+target protects this compatibility path. Grouped acceptance stops executing
+library/binary unit harnesses, matching the test-layer policy. An audited Windows
+run had 1,423 unit and 1,089 integration cases: 56.6% of case count is retired,
+but those unit cases contributed only 73 summed worker seconds. Compilation
+savings and whole-PR latency still require measurement. Legacy unit assertions
+cease to be runtime regression gates; every integration/PTY case and ignore
+marker, queue all-target/all-feature Clippy, vendored Mermaid checks and workspace
+doctests remain. Real native controls poison library and binary units, observe
+the old selection fail and the production dispatcher pass every integration
+case. This adds no e2e coverage credit.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in
@@ -923,6 +937,9 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       executor checks add no product journey coverage. Author-hook and native
       launcher controls reject failed prerequisites before profile execution.
       Successful terminal preparation remains part of the resize command receipt.
+      Original/grouped integration inventories are also checked with library/bin
+      unit harnesses excluded; poisoned unit controls must fail the old selection
+      while the actual native workspace dispatcher retains every integration case.
       Captured recovery instructions fetch current protected
       main, execute a newly required real process and publish SSH-signed evidence
       that an independent verifier fetches and validates. A copied production

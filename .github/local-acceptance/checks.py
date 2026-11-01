@@ -190,6 +190,20 @@ def grouped_workspace_test_targets(root, metadata):
                                   for (package, name), members in sorted(groups.items())]}
 
 
+def workspace_integration_test_targets(targets):
+    """Retire grouped unit harnesses; preserve older Cargo default exclusions."""
+    if not targets:
+        # An explicit glob enables test=false targets and can force inactive
+        # required-features. Older sources keep their complete default suite.
+        return []
+    if targets[:2] != ["--lib", "--bins"]:
+        raise RuntimeError("Unexpected grouped workspace target plan; no tests started")
+    selected = targets[2:]
+    if not selected or len(selected) % 2 or any(selected[index] != "--test" for index in range(0, len(selected), 2)):
+        raise RuntimeError("Integration target selection must retain explicit nonempty test names")
+    return selected
+
+
 def performance_low_power_mode():
     """Use Foundation's active mode, including desktops without a pmset setting."""
     import ctypes
@@ -376,11 +390,18 @@ def run(name, root, output, base, execute):
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
             metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
             targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
             (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
             print("Native workspace target selection: " + json.dumps(selection), flush=True)
             print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
-                  "test configurations, examples and benches before long builds and PTY execution. "
+                  "targets, examples and benches before long builds and PTY execution. "
                   "The integrated queue additionally checks original targets with all features.", flush=True)
+            if targets:
+                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                      "unit harnesses are not executed. Queue all-target/all-feature lint and workspace doctests remain.", flush=True)
+            else:
+                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
             lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
             cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
                   "--", "-D", "warnings")
@@ -388,7 +409,8 @@ def run(name, root, output, base, execute):
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
+            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox",
+                         *workspace_integration_test_targets(targets))
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
     elif name == "native-examples":
@@ -523,7 +545,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "9617bfa80849fd50d678ddc221df118297da8aab007e77ca6ad8b6624d5f3637",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "4119e4c3425c3250e4c5cf8740dd12044ab27baa8aa1829157fd2c84b301e6a9",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",

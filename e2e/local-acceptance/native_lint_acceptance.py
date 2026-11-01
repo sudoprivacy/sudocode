@@ -18,6 +18,124 @@ def load(name, path):
     return module
 
 
+def grouped_lint(output, helper, profiles):
+    """Compare real compiler diagnostics through the production dispatcher."""
+    root = output / "source"
+    rust = root / "rust"
+    files = {
+        "Cargo.toml": '[package]\nname="lint-group-probe"\nversion="0.0.0"\nedition="2021"\n'
+                      '[workspace]\nresolver="2"\n'
+                      '[[test]]\nname="acceptance_group"\npath="tests/acceptance_groups/acceptance_group.rs"\ntest=false\n'
+                      '[[test]]\nname="disabled_driver"\npath="tests/disabled_driver.rs"\ntest=false\n'
+                      '[[bench]]\nname="probe_bench"\nharness=false\n',
+        "src/lib.rs": 'pub fn value() -> u8 { 42 }\n',
+        "src/main.rs": 'fn main() {}\n',
+        "tests/first.rs": '#[path="support/ordinary.rs"]\nmod common;\n#[test]\nfn first() { let _ = common::value(); }\n',
+        "tests/second.rs": '#[test]\nfn second() {}\n',
+        "tests/support/ordinary.rs": 'pub fn value() -> u8 { 42 }\n',
+        "tests/disabled_driver.rs": '#[test]\nfn disabled() {}\n',
+        "tests/acceptance_groups/acceptance_group.rs": profiles.test_group_source(["first", "second"]),
+        "examples/probe_example.rs": 'fn main() {}\n',
+        "benches/probe_bench.rs": 'fn main() {}\n',
+    }
+    for name, contents in files.items():
+        path = rust / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    env = {"CARGO_TARGET_DIR": str(output / "target"), "CARGO_BUILD_JOBS": "1"}
+    commands = []
+
+    def command(args):
+        log = output / "commands" / f"{len(commands):03d}.log"
+        try:
+            record = helper.run_command(args, rust, log, env)
+        except RuntimeError:
+            record = json.loads(log.with_suffix(".command.json").read_text())
+        commands.append(record)
+        return record, log.read_text(encoding="utf-8")
+
+    record, _ = command(["cargo", "generate-lockfile", "--offline"])
+    assert record["exit_code"] == 0
+    record, text = command(["cargo", "metadata", "--no-deps", "--locked", "--format-version=1"])
+    assert record["exit_code"] == 0
+    metadata = json.loads(text)
+    targets, selection = profiles.grouped_workspace_test_targets(root, metadata)
+    for args in [["git", "init", "--initial-branch=main"], ["git", "add", "."],
+                 ["git", "-c", "user.name=Lint fixture", "-c", "user.email=lint@example.invalid",
+                  "commit", "-m", "Grouped lint fixture"]]:
+        subprocess.run(args, cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
+    # Obtain the actual lint argv from the production full-workspace branch.
+    # Cargo and Clippy below execute normally; unrelated later product work is
+    # deliberately not part of this private compiler fixture.
+    observed = []
+    class LintSelected(Exception):
+        pass
+
+    def observe(args, cwd, log, extra=None):
+        observed.append(list(args))
+        if list(args)[1:2] == ["clippy"]:
+            raise LintSelected()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(json.dumps(metadata) if list(args)[1:2] == ["metadata"] else "", encoding="utf-8")
+        return {"exit_code": 0}
+    try:
+        profiles.run("native-workspace", root, output / "dispatch", base, observe)
+    except LintSelected:
+        pass
+    lint = [row for row in observed if row[1:2] == ["clippy"]]
+    assert len(lint) == 1, observed
+    # The fixture has no mailbox package; remove only that feature selector.
+    grouped = lint[0].copy()
+    feature = grouped.index("--features")
+    assert grouped[feature + 1] == "engine-acp/mailbox"
+    del grouped[feature:feature + 2]
+    original = ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"]
+    inventory = {}
+    for mode, argv in {"original": original, "grouped": grouped}.items():
+        record, text = command([*argv[:-3], "--message-format=json", *argv[-3:]])
+        assert record["exit_code"] == 0, mode
+        rows = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+        inventory[mode] = sorted({row["target"]["name"] for row in rows
+                                  if row.get("reason") == "compiler-artifact" and row["target"]["kind"] == ["test"]})
+    assert inventory == {"original": ["first", "second"], "grouped": ["acceptance_group"]}, inventory
+    injection = '\n#[allow(dead_code)]\nfn diagnostic_marker() { let _ = 1 == 1; }\n'
+    cases = {
+        "ordinary-library": ("src/lib.rs", injection),
+        "test-library": ("src/lib.rs", '\n#[cfg(test)]' + injection),
+        "test-binary": ("src/main.rs", '\n#[cfg(test)]' + injection),
+        "wrapped-module": ("tests/first.rs", injection),
+        "ignored-test": ("tests/second.rs", '\n#[test]\n#[ignore]\nfn ignored_lint() { let diagnostic_unused = 1; }\n'),
+        "shared-helper": ("tests/support/ordinary.rs", injection),
+        "example": ("examples/probe_example.rs", injection),
+        "bench": ("benches/probe_bench.rs", injection),
+        "disabled-driver": ("tests/disabled_driver.rs", injection),
+    }
+    diagnostics = {}
+    try:
+        for case, (relative, addition) in cases.items():
+            path = rust / relative
+            path.write_text(files[relative] + addition, encoding="utf-8")
+            diagnostics[case] = {}
+            for mode, argv in {"original": original, "grouped": grouped}.items():
+                record, text = command([*argv[:-3], "--message-format=json", *argv[-3:]])
+                rows = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+                code = "unused_variables" if case == "ignored-test" else "clippy::eq_op"
+                errors = [row for row in rows if row.get("reason") == "compiler-message"
+                          and (row["message"].get("code") or {}).get("code") == code]
+                skipped = case == "disabled-driver"
+                assert (record["exit_code"] == 0) == skipped, (case, mode, record)
+                assert bool(errors) != skipped, (case, mode, text)
+                diagnostics[case][mode] = {"exit_code": record["exit_code"], "diagnostic_code": code, "diagnostics": len(errors)}
+            path.write_text(files[relative], encoding="utf-8")
+    finally:
+        for name, contents in files.items():
+            (rust / name).write_text(contents, encoding="utf-8")
+    return {"status": "PASS", "selection": selection, "integration_inventory": inventory,
+            "diagnostics": diagnostics, "commands": commands,
+            "scope": "Actual production lint argv, real Cargo and Clippy. No product execution or timing claim."}
+
+
 def run(output, executor=None):
     output.mkdir(parents=True, exist_ok=False)
     parent = load("lint_fixture_environment", SOURCE / "e2e/local-acceptance/run.py")
@@ -86,7 +204,9 @@ def run(output, executor=None):
             assert not any("nextest" in str(command[0]) for command in observed), observed
         else:
             raise AssertionError("A native compiler warning passed the strict lint gate")
+    grouped = grouped_lint(output / "grouped", helper, profiles)
     result = {"status": "PASS", "workspace_warning_refused": True, "selected_test_warning_refused": True,
+              "grouped_lint": grouped,
               "long_validation_and_nextest_unrun": True,
               "scope": "Actual native dispatcher, Git, Cargo and compiler warnings. Tiny enforcement fixture; no product journey coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + '\n', encoding="utf-8")

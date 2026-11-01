@@ -242,6 +242,58 @@ def verify_profile_compatibility(directory, work, command):
             install_note(note)
             run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", changed,
                 success=False, error="Acceptance commands changed")
+        # A diagnostic captured before another protected-main update must still
+        # recover against current main when the author follows it later.
+        run("git", "checkout", "-b", "compat-recovery-main", future)
+        checks.write_text("SHARED_PROFILE_REVISION = 2\n" + future_source)
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Advance the protected execution recipe")
+        diagnostic_policy = run("git", "rev-parse", "HEAD")
+        run("git", "fetch", str(work), "compat-recovery-main:refs/heads/main", cwd=origin)
+        run("git", "checkout", original_branch)
+        run("git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main")
+        install_note(original_note)
+        diagnostic = run(sys.executable, trusted, "verify", "--head", head,
+                         success=False, error="Acceptance commands changed", stderr=True)
+        recovery = next(json.loads(line.removeprefix("LOCAL_ACCEPTANCE_RECOVERY="))
+                        for line in diagnostic.splitlines() if line.startswith("LOCAL_ACCEPTANCE_RECOVERY="))
+        run("git", "checkout", "compat-recovery-main")
+        checks.write_text("SHARED_PROFILE_REVISION = 3\n" + future_source)
+        current_rules = json.loads(policy.read_text())
+        current_rules["checks"]["real-process-recovery"] = {"include": ["**"]}
+        policy.write_text(json.dumps(current_rules))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Require another real process after the diagnostic")
+        current_policy = run("git", "rev-parse", "HEAD")
+        run("git", "fetch", str(work), "compat-recovery-main:refs/heads/main", cwd=origin)
+        run("git", "checkout", original_branch)
+        # Deliberately keep the local tracking ref stale until the advertised
+        # fetch step. The old instruction pins diagnostic_policy even on a hit.
+        assert run("git", "rev-parse", "origin/main") == diagnostic_policy
+        for prepare in recovery.get("prepare", []):
+            run(*prepare)
+        fresh_output = fixture / "fresh-recovery"
+        run(sys.executable, trusted, *recovery["args"], "--output", fresh_output)
+        fresh = json.loads((fresh_output / "receipt.json").read_text())
+        assert fresh["commands_ref"] == current_policy, "Recovery instructions pinned an obsolete protected policy"
+        assert set(fresh["checks"]) == {"real-process", "real-process-recovery"}
+        assert (fresh_output / "real-process-recovery/actual-process.log").read_text().strip() == "pass"
+        # Publication updates the remote notes tree through a private temporary
+        # ref. Fetch exactly what CI consumes instead of reading the old note.
+        run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
+        published = json.loads(run("git", "notes", "--ref=local-acceptance", "show", head))
+        published_payload = json.loads(base64.b64decode(published["attestations"]["fixture"]["payload"]))
+        assert published_payload == fresh, "CI must receive the actual newly completed signed receipt"
+        run(sys.executable, trusted, "verify", "--head", head)
+        assert run("git", "rev-parse", "HEAD") == head
+        recovery_result = {
+            "diagnostic_policy": diagnostic_policy, "current_policy": current_policy,
+            "actual_receipt_policy": fresh["commands_ref"], "head": head,
+            "actual_completed_checks": sorted(fresh["checks"]), "recovery": recovery,
+        }
+        (fixture / "fresh-recovery-result.json").write_text(json.dumps(recovery_result, indent=2) + "\n")
+        print("FRESH_RECOVERY_RESULT=" + json.dumps(recovery_result))
+        print("PASS: captured author recovery fetches current protected main, runs its newly required real process, signs/publishes and verifies the unchanged candidate head")
         run("git", "checkout", original_branch)
         print("PASS: real hook pushes preserve modern/legacy SSH notes without repeating unchanged execution; "
               "selected/shared/executor/image changes, missing profiles and malformed fingerprints fail; "

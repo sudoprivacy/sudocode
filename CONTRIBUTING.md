@@ -205,8 +205,10 @@ The queue separates CLI daemon journeys from co-host/search acceptance. CLI
 source changes retain the real pinned daemon, cross-node CLI and authenticated
 sender journeys. The independent co-host duet, VFS search owner/restart and
 driver feature checks run for shared Rust, manifest/lock, build and daemon
-harness inputs. The selector excludes only CLI `src/` and `tests/` from those
-co-host inputs; unknown build/dependency changes keep the conservative scope.
+harness inputs. The selector excludes CLI source only when both committed
+layouts prove a binary-only package without declared workspace dependents;
+unknown layouts retain co-host checks. CLI tests remain outside co-host inputs.
+Unknown build/dependency changes keep the conservative scope.
 The required job prints its decision and refuses missing decisions. Real Git
 PR/push/queue events and actual Cargo builds prove a deliberately broken CLI
 does not enter the co-host build, while shared runtime changes rebuild it.

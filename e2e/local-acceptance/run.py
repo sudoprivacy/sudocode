@@ -136,8 +136,7 @@ def scope_acceptance(directory):
                 ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
-                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"},
-                cohost=False if path == "rust/crates/rusty-sudocode-cli/src/repl_ui/tasks.rs" else None)
+                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"})
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",

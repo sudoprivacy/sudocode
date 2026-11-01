@@ -262,6 +262,35 @@ def run(output):
         assert refused_cli["exit_code"] != 0 and "unused-CLI-control" in refused_log.read_text()
     else:
         raise AssertionError("The deliberately broken CLI unexpectedly compiled")
+    write("rust/crates/rusty-sudocode-cli/src/lib.rs", 'pub fn shared() {}\n')
+    library_head = commit("Automatic CLI library target retains co-host scope")
+    expect("a new CLI library target retains conservative co-host scope", base,
+           {"native-release", "native-services"})
+    ci_scope(base, True)
+    command("git", "rm", "rust/crates/rusty-sudocode-cli/src/lib.rs")
+    binary_head = commit("Removing a prior CLI library also retains co-host scope")
+    expect("a removed CLI library is not mistaken for an unchanged binary boundary", library_head,
+           {"native-release", "native-services"})
+    ci_scope(library_head, True)
+    cohost_manifest = (repository / "rust/crates/cohost/Cargo.toml").read_text()
+    write("rust/crates/cohost/Cargo.toml", cohost_manifest +
+          '[build-dependencies]\ncli_runner={package="rusty-sudocode-cli",path="../rusty-sudocode-cli"}\n')
+    importer = commit("An unknown declared CLI consumer invalidates independence")
+    write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n// consumer boundary\n')
+    commit("CLI source with a declared consumer keeps co-host acceptance")
+    expect("a declared CLI consumer retains scope for later CLI source", importer,
+           {"native-release", "native-services"})
+    ci_scope(importer, True)
+    command("git", "switch", "--detach", binary_head)
+    write("rust/Cargo.toml", workspace.replace('["crates/*"]',
+          '["crates/rusty-sudocode-cli","crates/runtime","crates/helper","crates/cohost"]'))
+    layout = commit("A different workspace layout keeps conservative scope")
+    write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n// workspace boundary\n')
+    commit("CLI source with an unfamiliar workspace layout keeps co-host acceptance")
+    expect("an unfamiliar workspace layout retains scope for later CLI source", layout,
+           {"native-release", "native-services"})
+    ci_scope(layout, True)
+    command("git", "switch", "--detach", binary_head)
     write("rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n')
     commit("A mixed CLI and shared runtime change retains co-host acceptance")
     expect("shared runtime source still selects the co-host with CLI source", base, PRODUCT)

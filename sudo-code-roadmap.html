@@ -798,6 +798,9 @@ script remains available for diagnosis and earns no additional coverage credit.<
       optimization profiles and assertions. Command logs and timings are retained.
       Outer and nested Cargo calls share the real test package metadata to avoid
       repeated native dependency rebuilds caused by inherited environment changes.
+      Main alone explicitly prewarms compiler outputs. Consumers use normal
+      <code>cargo test</code> to compile and execute the original case; the required
+      command refuses an extra pre-test build that switches plugin variants.
       Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
       <td>Coverage unchanged; cached compiler outputs never replace the real
       journey or authorize reuse of a passing result. Infrastructure fixtures add

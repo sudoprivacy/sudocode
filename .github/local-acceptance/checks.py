@@ -483,7 +483,7 @@ def native_guard_files():
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "c2bdb2a4ae04f93c81434b7b7552ff62f807090354bdcd8392686ed44ed0b8e7",
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
-        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "e590b4b726df03fa2b411d45029dcadb7e4081bc04da66ef00bd2030843b5ff0",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",

@@ -131,12 +131,21 @@ jobs:
         env:
           PIN_RESULT: ${{ needs.one-nexus-vfs-pin.result }}
           DAEMON_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
           CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
           A2A_RESULT: ${{ needs.a2a-live.result }}
           CLIPPY_RESULT: ${{ needs.clippy-workspace.result }}
         run: |
           set -eu
           test "$PIN_RESULT" = success
+          case "$COHOST_REQUIRED" in
+            true|false) ;;
+            *) echo "::error::Missing co-host input decision"; exit 1 ;;
+          esac
+          if [ "$COHOST_REQUIRED" = true ] && [ "$DAEMON_REQUIRED" != true ]; then
+            echo "::error::Co-host acceptance requires the actual daemon job"
+            exit 1
+          fi
           require_result() {
             label=$1 required=$2 actual=$3
             case "$required" in
@@ -169,6 +178,19 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+      - name: Explain selected daemon acceptance
+        env:
+          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+        run: |
+          case "$COHOST_REQUIRED" in
+            true)
+              echo "CLI daemon journeys and co-host/search acceptance are required by changed inputs."
+              ;;
+            false)
+              echo "CLI daemon journeys remain required. CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
+              ;;
+            *) echo "::error::Missing co-host input decision; no daemon build started"; exit 1 ;;
+          esac
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -245,28 +267,35 @@ jobs:
       # provisioned itself — here the conversation is created over gRPC by a
       # peer, which is the shape production has.
       - name: Co-host duet against a daemon built from this checkout
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         env:
           NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
 
       - name: Checkout the VFS contract used by the co-host
-        uses: actions/checkout@v4
-        with:
-          repository: nexi-lab/nexus-vfs
-          ref: ${{ needs.one-nexus-vfs-pin.outputs.commit }}
-          path: .native-vfs
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        uses: ./.github/actions/vfs-search-cache
 
       - name: Search authorization and restart under the confined co-host owner
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
           NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
         run: |
-          test -x "$NEXUS_SEARCH_USER_RUNTIME_BINARY"
-          cargo build --locked --manifest-path .native-vfs/Cargo.toml -p nexus-search-plugin
-          stat -c 'Search fixture plugin bytes: %s' "$CARGO_TARGET_DIR/debug/libnexus_search_plugin.so"
-          cargo test --locked --manifest-path .native-vfs/Cargo.toml \
-            -p nexus-cluster --all-features --test user_runtime \
-            signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes -- --nocapture
+          if [ -e "$RUNNER_TEMP/vfs-search-build" ]; then
+            echo "::error::The VFS consumer ran a redundant pre-test build. Keep fixed-driver prewarming in the main publisher; normal cargo test builds and executes this case."
+            exit 1
+          fi
+          python3 .github/scripts/vfs_search_cache.py test --output "$RUNNER_TEMP/vfs-search-journey"
+
+      - name: Retain fixed-driver build and current-runtime evidence
+        if: always() && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfs-search-commands
+          path: |
+            ${{ runner.temp }}/vfs-search-build
+            ${{ runner.temp }}/vfs-search-journey
+          if-no-files-found: error
 
       # The one feature combination nothing else builds. `driver-ai` forwards to
       # nexus-cluster so a co-host can carry `llm_mount` — the co-host has to be a
@@ -284,6 +313,7 @@ jobs:
       # the check passes while the COMMITTED lock cannot build this feature at all —
       # and a release builds `--locked`, so that gap only shows up in a release.
       - name: The driver-ai co-host still resolves
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         working-directory: rust
         run: cargo check -p nexusd-cohost --features daemon,driver-ai,egress-gate-presidio --bin nexusd-cohost --locked
 
@@ -295,6 +325,7 @@ jobs:
       commit: ${{ steps.pin.outputs.commit }}
       live_required: ${{ steps.scope.outputs.live_required }}
       daemon_required: ${{ steps.scope.outputs.daemon_required }}
+      cohost_required: ${{ steps.scope.outputs.cohost_required }}
       clippy_required: ${{ steps.scope.outputs.clippy_required }}
     defaults:
       run:
@@ -458,7 +489,7 @@ jobs:
         run: python3 .github/scripts/ci_input_scope.py
 
       - name: Install focused executor observer dependencies
-        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true')
+        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true')
         run: python3 -m pip install psutil
       - name: Exercise acceptance executors with real Cargo, Git and Docker
         # Only changed executor/fixture inputs, once on the PR. Queue/main
@@ -477,6 +508,26 @@ jobs:
         run: |
           rustup component add clippy
           python3 e2e/local-acceptance/clippy_fail_fast.py --output "$RUNNER_TEMP/clippy-fail-fast"
+      - name: Verify response gzip bytes, concurrent files and quota failures
+        if: github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
+        run: python3 e2e/response-gzip/run.py --output "$RUNNER_TEMP/response-gzip"
+      - name: Verify fixed-driver restoration and current runtime refusal
+        if: github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
+        run: python3 e2e/local-acceptance/vfs_search_cache_acceptance.py --output "$RUNNER_TEMP/vfs-search-cache-fixture"
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
+        with:
+          name: vfs-search-cache-fixture
+          path: ${{ runner.temp }}/vfs-search-cache-fixture
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
+        with:
+          name: response-gzip-files
+          path: ${{ runner.temp }}/response-gzip
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always() && contains(fromJSON('["success","failure"]'), steps.clippy_executor.outcome)
         with:

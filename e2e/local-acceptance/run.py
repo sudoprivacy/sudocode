@@ -54,7 +54,8 @@ def scope_acceptance(directory):
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
 
-    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False):
+    def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False,
+                     gzip_codec=False, cohost=None, vfs_cache=False):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -65,10 +66,13 @@ def scope_acceptance(directory):
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert f"live_required={str(live).lower()}" in output.read_text()
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+        assert f"cohost_required={str(daemon if cohost is None else cohost).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
         assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
         assert f"container_required={str(container).lower()}" in output.read_text()
         assert f"clippy_executor_required={str(clippy_executor).lower()}" in output.read_text()
+        assert f"gzip_codec_required={str(gzip_codec).lower()}" in output.read_text()
+        assert f"vfs_cache_required={str(vfs_cache).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -89,13 +93,22 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True, True),
+             ("rust/crates/rusty-sudocode-cli/src/repl_ui/tasks.rs", True, True, True),
+             ("rust/crates/rusty-sudocode-cli/build.rs", True, True, True),
              ("rust/crates/pty-harness/src/lib.rs", True, True, True),
              ("e2e/shared-services/check.py", False, True, False),
              (".github/local-acceptance/checks.py", False, False, False),
              (".github/scripts/local_acceptance.py", False, False, False),
              ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False),
              ("e2e/local-acceptance/container_inputs_acceptance.py", False, False, False),
-             ("e2e/local-acceptance/clippy_fail_fast.py", False, False, False)]
+             ("e2e/local-acceptance/clippy_fail_fast.py", False, False, False),
+             ("rust/crates/runtime/src/response_archive.rs", True, True, True),
+             ("rust/crates/runtime/src/response_archive/gzip.rs", True, True, True),
+             ("e2e/response-gzip/main.rs", False, False, False),
+             (".github/scripts/vfs_search_cache.py", False, True, False),
+             (".github/actions/vfs-search-cache/action.yml", False, True, False),
+             (".github/workflows/ci-vfs-search-cache.yml", False, True, False),
+             ("e2e/local-acceptance/vfs_search_cache_acceptance.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -125,7 +138,13 @@ def scope_acceptance(directory):
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"}, path in {
-                ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"})
+                ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
+                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
+                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
+                ".github/workflows/rust-ci.yml", ".github/scripts/vfs_search_cache.py",
+                ".github/actions/vfs-search-cache/action.yml", ".github/workflows/ci-vfs-search-cache.yml",
+                "e2e/local-acceptance/vfs_search_cache_acceptance.py"})
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -135,6 +154,7 @@ def scope_acceptance(directory):
     expect_native_targets(base, None)
     expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True)
     expect_scope("workflow_dispatch", {}, True, True, True)
+    expect_scope("push", {"before": "0" * 40, "after": head}, True, True, True)
     base = head
     for name in ["pty_first", "pty_second"]:
         (repository / f"rust/crates/rusty-sudocode-cli/tests/{name}.rs").write_text("new fixture input\n")
@@ -197,7 +217,10 @@ def performance_scope_acceptance(directory):
         "rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
         "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/host.cjs"]]
     cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
-              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"])]
+              ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"]),
+              ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", ["browser"]),
+              ("rust/crates/scode-benchmark-drivers/Cargo.toml", both),
+              ("rust/crates/scode-benchmark-drivers/future.rs", both)]
     for index, (path, expected) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -556,6 +579,8 @@ def enforcement_acceptance():
         # Passing runs retain every native build, cache and policy guard below.
         print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
                       "--output", directory / "dependency-scope", cwd=SOURCE))
+        print(command(sys.executable, str(Path(__file__).with_name("vfs_search_cache_acceptance.py")),
+                      "--output", directory / "vfs-search-cache", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
 

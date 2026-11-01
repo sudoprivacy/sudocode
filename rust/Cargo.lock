@@ -4752,6 +4752,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scode-benchmark-drivers"
+version = "0.2.37"
+dependencies = [
+ "mock-anthropic-service",
+ "pty-expect",
+ "runtime",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

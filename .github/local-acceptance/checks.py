@@ -498,7 +498,7 @@ def native_guard_files():
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "f720b213d315ce99cf1659ee7f840f97697bdeed6a1f219da99a1c7e0d73fdca",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "4119e4c3425c3250e4c5cf8740dd12044ab27baa8aa1829157fd2c84b301e6a9",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",

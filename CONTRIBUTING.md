@@ -660,10 +660,10 @@ probe checks. Its first failing step blocks its daemon/provider dependents.
 PRs always start this job, including SDK-only changes; path filters cannot leave
 a required status pending. The queue's protected acceptance gate still checks
 the combined Git history. No unique product test is removed by this consolidation.
-After merge, main reuses those completed integrity checks. Its lightweight
-preflight still resolves the pinned protocol and changed-input scope needed by
-the existing daemon/provider jobs. PR, queue and explicit runs retain the full
-preflight; no product assertion is removed.
+After merge, main reuses those completed integrity checks and does not start
+another Rust CI preflight. Independent cache/package publishers retain their
+own main-push triggers. PR, queue, legacy development-branch pushes and explicit
+runs retain the full preflight; no product assertion is removed.
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
@@ -694,9 +694,12 @@ scoped deployment acceptance still exercises the actual installed system.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
-the native suites on the combined merge-group tree. Rust-changing PRs also run
-strict all-target/all-feature Clippy on Linux; the queue runs that same strict
-check on Linux, Windows and macOS against the combined tree. The required daemon
+the native suites on the combined merge-group tree. Native acceptance retains
+its per-host lint. Strict all-target/all-feature Clippy runs once on Linux,
+Windows and macOS against the combined queue tree, without a duplicate Linux
+PR job. All-feature-only findings can therefore arrive later in the queue;
+this removes early feedback, not the final three-platform lint requirement.
+The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful

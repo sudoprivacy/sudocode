@@ -133,7 +133,7 @@ fn screen(session: &PtySession, text: &str) -> String {
 }
 
 fn screen_with_budget(session: &PtySession, text: &str, budget: Duration) -> String {
-    common::expect_screen(
+    common::expect_screen_rows(
         session,
         |s| {
             s.rsplit_once("Background tasks")
@@ -161,6 +161,62 @@ fn close(mut session: PtySession) {
     expect_input_ready(&session, common::DEFAULT_TIMEOUT, "back at input");
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+fn assert_detail_frame(session: &PtySession, border_color: &str) {
+    common::expect_screen_rows_settled(
+        session,
+        |view| view.contains("╭─ Output tail") && view.contains('╰'),
+        common::DEFAULT_TIMEOUT,
+        "output is inside the detail frame",
+    );
+    session.render(|screen| {
+        let raw = screen.raw();
+        let rows = raw.rows(0, raw.size().1).collect::<Vec<_>>();
+        let top = rows
+            .iter()
+            .position(|row| row.contains("╭─ Output tail"))
+            .unwrap();
+        let bottom = rows
+            .iter()
+            .enumerate()
+            .skip(top + 1)
+            .find(|(_, row)| row.contains('╰'))
+            .unwrap()
+            .0;
+        let column = |row, glyph: &str| {
+            (0..raw.size().1)
+                .find(|col| {
+                    raw.cell(u16::try_from(row).unwrap(), *col)
+                        .is_some_and(|cell| cell.contents() == glyph)
+                })
+                .unwrap()
+        };
+        let left = column(top, "╭");
+        let right = column(top, "╮");
+        for row in top..=bottom {
+            let (a, b) = if row == top {
+                ("╭", "╮")
+            } else if row == bottom {
+                ("╰", "╯")
+            } else {
+                ("│", "│")
+            };
+            for (col, glyph) in [(left, a), (right, b)] {
+                let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
+                assert_eq!(
+                    cell.contents(),
+                    glyph,
+                    "aligned border at {row}:{col}; rows={rows:?}"
+                );
+                assert_eq!(format!("{:?}", cell.fgcolor()), border_color);
+                assert!(
+                    !cell.bold() && !cell.dim(),
+                    "output style cannot change border weight"
+                );
+            }
+        }
+    });
 }
 
 #[test]
@@ -275,7 +331,7 @@ fn background_status_theme(background: &str, no_color: bool) {
         &env,
         &[shell(
             "status",
-            "while [ ! -f release ]; do sleep 0.1; done; echo STATUS_RESULT_READY",
+            r"while [ ! -f release ]; do sleep 0.1; done; printf '\033[1;32mSTATUS_RESULT_READY\033[0m\n'",
             "Status conclusion fixture",
         )],
         &[
@@ -299,6 +355,21 @@ fn background_status_theme(background: &str, no_color: bool) {
         "foreground conclusion and task footer have distinct content",
     );
     assert_background_activity(&session, &view, background, no_color);
+    open(&mut session);
+    let running = screen(&session, "╭─ Output");
+    assert!(
+        running.contains("Waiting for output…") || running.contains("Output tail · rows"),
+        "running detail shows its empty state or login-profile output: {running}"
+    );
+    screen(&session, "k stop");
+    session.send("\x1b").unwrap();
+    screen(&session, "Enter details");
+    session.send("\x1b").unwrap();
+    expect_input_ready(
+        &session,
+        common::DEFAULT_TIMEOUT,
+        "empty-output details closed",
+    );
     session.send("后台-draft").unwrap();
     common::expect_input_line(
         &session,
@@ -347,9 +418,31 @@ fn background_status_theme(background: &str, no_color: bool) {
         common::LIVE_TURN_BUDGET,
         "statistics and unread result remain on their own surfaces",
     );
-    open(&mut session);
-    screen(&session, "STATUS_RESULT_READY");
+    expect_completed_status_detail(&mut session, background, no_color);
     close(session);
+}
+
+fn expect_completed_status_detail(session: &mut PtySession, background: &str, no_color: bool) {
+    open(session);
+    screen(session, "STATUS_RESULT_READY");
+    screen(session, "Status:   completed · exit 0");
+    screen(session, "Runtime:");
+    assert_detail_frame(
+        session,
+        if no_color {
+            "Default"
+        } else if background == "0;15" {
+            "Idx(241)"
+        } else {
+            "Idx(248)"
+        },
+    );
+    let panel = session.render(common::screen_contents);
+    let panel = panel.rsplit_once("Background tasks").unwrap().1;
+    assert!(
+        !panel.contains("k stop"),
+        "completed tasks have no stop hint: {panel}"
+    );
 }
 
 #[test]
@@ -752,24 +845,80 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
 #[test]
 fn task_browser_resizes_and_returns_to_fast_prompt_input() {
     let (env, _release) = task_env("background-resize-input");
-    let mut session = start(
+    let mut session = start_with_env(
         &env,
         &[shell(
             "background",
-            "echo RESIZE_OUTPUT; while [ ! -f release ]; do sleep 0.1; done",
+            "echo 'RESIZE_OUTPUT 中文 🚀'; echo; echo AFTER_EMPTY_LINE; while [ ! -f release ]; do sleep 0.1; done # wrapped-command-中文-🚀-with-a-long-tail-for-resizing",
             "A long background terminal title with 中文 and a wide emoji 🚀",
         )],
+        &[("COLORFGBG", "15;0"), ("NO_COLOR", "")],
     );
     screen(&session, "1 terminal");
     open(&mut session);
+    screen(&session, "Command:");
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.lines().collect::<Vec<_>>().windows(3).any(|rows| {
+                rows[0].contains("RESIZE_OUTPUT 中文 🚀")
+                    && rows[1].trim().trim_matches('│').trim().is_empty()
+                    && rows[2].contains("AFTER_EMPTY_LINE")
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "output preserves its internal empty row and wide characters",
+    );
+    assert_detail_frame(&session, "Idx(248)");
     session.resize(30, 45).unwrap();
     screen(&session, "  RESIZE_OUTPUT");
+    screen(&session, "Command:");
+    assert_detail_frame(&session, "Idx(248)");
+    session.resize(12, 45).unwrap();
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.contains("AFTER_EMPTY_LINE")
+                && view.contains("k stop")
+                && !view.contains("Runtime:")
+                && !view.contains("Output tail · rows")
+                && !view.contains("Enlarge terminal")
+        },
+        common::DEFAULT_TIMEOUT,
+        "small detail viewport yields its decoration before controls",
+    );
     session.resize(40, 120).unwrap();
     screen(&session, "Full output:");
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.rsplit_once("Background tasks")
+                .is_some_and(|(_, panel)| {
+                    panel
+                        .lines()
+                        .map(str::trim)
+                        .collect::<String>()
+                        .contains("wrapped-command-中文-🚀")
+                })
+        },
+        common::DEFAULT_TIMEOUT,
+        "resizing preserves the command across its hanging continuation rows",
+    );
+    assert_detail_frame(&session, "Idx(248)");
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();
     common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "browser closed");
+    let prompt = session.render(common::screen_contents);
+    let separator = "─".repeat(120);
+    let input = prompt
+        .rsplit(&separator)
+        .nth(1)
+        .expect("current input slot");
+    assert!(
+        input.contains('❯') && !input.contains("Shell details") && !input.contains("Esc task list"),
+        "closing the resized browser restores the current input slot: {prompt}"
+    );
     session.send("FAST_INPUT_AFTER_TASK_VIEW").unwrap();
     common::expect_input_line(
         &session,
@@ -1061,5 +1210,125 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
     }
     assert_eq!(lines.next(), Some("LAST_LOG_EVIDENCE"));
     assert!(lines.next().is_none(), "unexpected records after log end");
+    let range = panel
+        .lines()
+        .find(|line| line.contains("Output tail · rows"))
+        .unwrap()
+        .trim()
+        .to_string();
+    session.send("\x1b[5~").unwrap();
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            let panel = view.rsplit_once("Background tasks").unwrap().1;
+            panel.contains("Output tail · rows")
+                && !panel.contains(&range)
+                && !panel
+                    .lines()
+                    .any(|line| line.contains("  LAST_LOG_EVIDENCE"))
+        },
+        common::DEFAULT_TIMEOUT,
+        "page-up moves the bounded output viewport",
+    );
+    session.send("\x1b[6~").unwrap();
+    screen(&session, "  LAST_LOG_EVIDENCE");
     close(session);
+}
+
+#[test]
+fn completed_task_history_prunes_in_the_open_session_without_losing_running_work() {
+    let (env, _release) = task_env("background-history-retention");
+    let mut session = start(
+        &env,
+        &[
+            shell("retired", "echo OLD_TASK_LOG", "HISTORY_RETIRED"),
+            shell(
+                "active",
+                "echo RUNNING_TASK_KEPT; while [ ! -f release ]; do sleep 0.1; done",
+                "HISTORY_ACTIVE",
+            ),
+        ],
+    );
+    screen(&session, "1 new result");
+    session.resize(45, 240).unwrap();
+    session.send("/ps\r").unwrap();
+    screen(&session, "2 in this session");
+    session.send("\x1b[B\r").unwrap();
+    let old = screen(&session, "  OLD_TASK_LOG");
+    let log = old
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Full output: "))
+        .unwrap()
+        .to_string();
+    // Keep the old task selected, but return control to the ordinary prompt.
+    session.send("\x1b").unwrap();
+    screen(&session, "Enter details");
+    session.send("\x1b").unwrap();
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "history read");
+
+    let calls = (0..50)
+        .map(|index| {
+            shell(
+                &format!("recent-{index}"),
+                &format!("echo HISTORY_RESULT_{index:02}"),
+                &format!("HISTORY_KEEP_{index:02}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let before = common::turn_status_marker(&session);
+    send_calls(&env, &mut session, &calls);
+    expect_parent_complete(&session, &before);
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.lines().any(|line| {
+                line.contains("danger-full-access") && line.contains("1 terminal · 50 new results")
+            })
+        },
+        common::LIVE_TURN_BUDGET,
+        "50 completed results plus the original running task",
+    );
+    session.send("/ps\r").unwrap();
+    screen(&session, "51 in this session");
+    session.send(&"\x1b[A".repeat(51)).unwrap();
+    screen(&session, "❯ HISTORY_ACTIVE");
+    session.send("\r").unwrap();
+    screen(&session, "RUNNING_TASK_KEPT");
+    session.send("\x1b").unwrap();
+    screen(&session, "Enter details");
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..51 {
+        session.send("\r").unwrap();
+        let view = screen(&session, "Esc task list");
+        let title = view
+            .lines()
+            .find(|line| line.contains("Shell details"))
+            .unwrap();
+        assert!(
+            !title.contains("HISTORY_RETIRED"),
+            "pruned history cannot stay in the UI"
+        );
+        seen.insert(title.trim().to_string());
+        session.send("\x1b").unwrap();
+        screen(&session, "Enter details");
+        session.send("\x1b[B").unwrap();
+    }
+    assert_eq!(
+        seen.len(),
+        51,
+        "one active task and all 50 retained results"
+    );
+    assert!(
+        fs::read_to_string(log).unwrap().contains("OLD_TASK_LOG"),
+        "pruning memory does not delete the complete shell log"
+    );
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    session.send("\x1b").unwrap();
+    expect_input_ready(
+        &session,
+        common::DEFAULT_TIMEOUT,
+        "retention browser closed",
+    );
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
 }

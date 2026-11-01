@@ -241,6 +241,61 @@ pub fn record(name: &str) {
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)
+    # Reproduce complementary CI's raw newer-main base with actual diverging
+    # commits. The PR changes one original integration target; main-only files
+    # must not turn it into a full-workspace run.
+    grouped_scope_head = git("rev-parse", "HEAD")
+    git("switch", "-c", "isolated-native-test")
+    write(package + "tests/kept_driver.rs", (root / (package + "tests/kept_driver.rs")).read_text()
+          + "// Isolated PR test edit.\n")
+    isolated_head = commit("Change one native integration target")
+    git("switch", "main")
+    write(".github/workflows/main-only.yml", "name: Main-only acceptance change\n")
+    write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
+    newer_main = commit("Advance main independently of the test branch")
+    git("switch", "isolated-native-test")
+    selected = profiles.changed_cli_test_targets(root, newer_main)
+    assert selected == ["kept_driver"], f"Newer-main-only changes widened isolated native scope: {selected}"
+    assert profiles.changed_cli_test_targets(root, git("merge-base", newer_main, "HEAD")) == selected
+    previous_pids = environment["SCODE_GROUP_PID_DIR"]
+    environment["SCODE_GROUP_PID_DIR"] = str(output / "isolated-target-pids")
+    selected_args = [argument for name in selected for argument in ["--test", name]]
+    command("cargo", "test", "--locked", "-p", "group-product", *selected_args)
+    assert {path.name for path in (output / "isolated-target-pids").iterdir()} == {"driver"}
+    environment["SCODE_GROUP_PID_DIR"] = previous_pids
+    behind_main = {"newer_main": newer_main, "head": isolated_head, "selected": selected,
+                   "actual_native_targets": ["driver"], "conservative_cases": []}
+    for index, (label, path) in enumerate([
+        ("shared test helper", package + "tests/common/mod.rs"),
+        ("production source", package + "src/main.rs"),
+        ("unknown external input", "spec/future-fixture.json"),
+    ]):
+        git("switch", "-c", f"mixed-native-{index}", isolated_head)
+        file = root / path
+        write(path, (file.read_text() if file.exists() else "") + "// Changed actual branch input.\n")
+        head = commit("Keep full scope for " + label)
+        assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        behind_main["conservative_cases"].append({"case": label, "head": head})
+        if index == 0:
+            environment["SCODE_GROUP_PID_DIR"] = str(output / "mixed-target-pids")
+            command(str(executable), "nextest", "run", *options, "--workspace", "--locked", *grown_arguments)
+            assert {path.name for path in (output / "mixed-target-pids").iterdir()} == {path.name for path in pid_files}
+            environment["SCODE_GROUP_PID_DIR"] = previous_pids
+    for label, operation in [("deleted target", "delete"), ("test renamed into production", "rename")]:
+        git("switch", "-c", "native-" + operation, isolated_head)
+        if operation == "delete":
+            git("rm", package + "tests/kept_driver.rs")
+        else:
+            git("mv", package + "tests/kept_driver.rs", package + "src/moved.rs")
+        head = commit(label)
+        assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        behind_main["conservative_cases"].append({"case": label, "head": head})
+    git("switch", "isolated-native-test")
+    write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
+    head = commit("Keep actual branch source changes even when main has identical bytes")
+    assert profiles.changed_cli_test_targets(root, newer_main) is None
+    behind_main["conservative_cases"].append({"case": "coincident main and PR source bytes", "head": head})
+    git("switch", "-c", "grouping-controls", grouped_scope_head)
     for label, replacement, workspace_text, remove in [
         ("Enabled target keeps ordinary scope", declaration.replace('test=false', 'test=true'), workspace, False),
         ("Unknown target fields keep ordinary scope", declaration + 'harness=false\n', workspace, False),
@@ -266,6 +321,7 @@ pub fn record(name: &str) {
               "normal_product_sha256": original_binary, "normal_product_cargo_fresh": True,
               "original_named_driver_and_developer_target_passed": True,
               "invalid_group_refusals": refusals, "scope_cases": scope_cases, "ungrouped_plan": ungrouped_plan,
+              "behind_main": behind_main,
               "commands": commands,
               "scope": "Real Git commits/public planner, Cargo metadata/builds, original and grouped nextest inventories, actual per-case native child processes and independent process-state assertions. Tiny infrastructure fixtures, no product PTY/provider coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

@@ -102,7 +102,8 @@ def nextest_options(output):
 
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    # Complementary CI can pass newer main; exclude changes outside this branch.
+    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"],
                                       cwd=root).decode().split("\0")[:-1]
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
@@ -480,7 +481,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "9d1c112503785ebd9236e5318923f238e9f0b2b117865dd9c3d345664e06496c",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "c2bdb2a4ae04f93c81434b7b7552ff62f807090354bdcd8392686ed44ed0b8e7",
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
@@ -488,7 +489,7 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "26f5044afdc527caa984399af4ef5724b7cb2b49156bbc6a95c3d23239c6ff4b",
-        "e2e/local-acceptance/run.py": "24808de8d0566c5908f35891fd81d9f30c9ddeed7b10fef1cbc498245eda137f",
+        "e2e/local-acceptance/run.py": "b28d2554f9a6f9479cab2b4a6743cdb6324f8560238d5852e059e453f33c3216",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
@@ -526,7 +527,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "ca6e3b4a34ed4b71c0527cb31c4524125cf0749bfb8cc6ce47682ab8c87fe63c":
+    if actual_scope != "ef5d87e3ec62ae376d6924ffc97c5b888b54ea3db59a4d3efe9b79edaa87f2a7":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -855,11 +856,14 @@ def benchmark_storage(name):
     return state / name, state / "target" / name
 
 
-def rendering_cases(terminal, arguments, output, command):
+def rendering_cases(terminal, arguments, output, command, plan):
     """Finish and judge each complete scenario before admitting the next one."""
     policy_path = terminal / "performance-policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["profiles"]["core"]
+    if (plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
+            or plan["cases"] != cases):
+        raise RuntimeError("Rendering policy changed after its pre-build validation")
     if not cases or len(cases) != len(set(cases)) or any(
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
@@ -867,7 +871,8 @@ def rendering_cases(terminal, arguments, output, command):
     report = {"version": 1, "profile": "core", "preview": "0", "policy": policy,
               "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
               "status": "running", "samples": [], "metrics": [], "calibration": [],
-              "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {}}
+              "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
+              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"]}
     metadata = None
 
     def save():
@@ -897,6 +902,8 @@ def rendering_cases(terminal, arguments, output, command):
                     child = json.loads(child_path.read_text(encoding="utf-8"))
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
+                        raise RuntimeError(f"Rendering scenario {case} returned an incomplete passing sample set")
                     for key in ["base_sha256", "candidate_sha256", "driver_sha256", "harness_sha256"]:
                         if key in report and report[key] != child[key]:
                             raise RuntimeError(f"Rendering {key} changed between scenarios")
@@ -925,6 +932,10 @@ def rendering_cases(terminal, arguments, output, command):
         if not succeeded or report["status"] != "running":
             raise RuntimeError(f"Rendering scenario {case} did not pass; scenarios without a pass: "
                                f"{report['remaining_cases']}. See {output / 'report.json'}")
+    if len(report["samples"]) != plan["total_samples"]:
+        report.update(status="invalid", failures=["Rendering matrix did not execute its complete declared sample count"])
+        save()
+        raise RuntimeError("Rendering matrix did not execute its complete declared sample count")
     report.update(status="passed", active_case=None)
     save()
 
@@ -959,6 +970,13 @@ def benchmark_locked(name, root, output, base, command, target):
     candidate, baseline, trusted = (checkouts[label] for label in ["candidate", "baseline", "trusted"])
     driver_source = trusted if name == "rendering" else candidate
     terminal = driver_source / "e2e/terminal-resize"
+    render_plan = None
+    if name == "rendering":
+        plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", "core",
+                           "--policy", str(terminal / "performance-policy.json"))
+        render_plan = json.loads(plan_log.read_text(encoding="utf-8"))
+        print(f"Required rendering plan: {len(render_plan['cases'])} scenarios, {render_plan['total_samples']} samples. "
+              "Every declared metric and budget remains required. Malformed plans fail before npm or Cargo.", flush=True)
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
@@ -994,7 +1012,7 @@ def benchmark_locked(name, root, output, base, command, target):
     args = [sys.executable, str(script), "--driver", drivers[0], "--base", str(output / "scode-baseline"),
             "--candidate", str(output / "scode-candidate")]
     if name == "rendering":
-        rendering_cases(terminal, args, output / "measurements", command)
+        rendering_cases(terminal, args, output / "measurements", command, render_plan)
     else:
         command(*args, "--output", str(output / "measurements"))
     if name == "browser":

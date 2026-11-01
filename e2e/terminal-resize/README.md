@@ -81,6 +81,13 @@ local; the signed Git note carries command and log digests bound to the exact
 commit and protected acceptance contract. See
 [mandatory local acceptance](../../CONTRIBUTING.md#mandatory-local-acceptance-and-complementary-ci).
 
+Edits limited to `benchmark.py`, `gui-benchmark.py`, `performance-policy.json`
+and `gui-policy.json` run both statistical profiles and the native builder
+regression. Ordinary workspace/resize suites and their complementary CI hosts
+are omitted for these measurement-only inputs. Rust and shared terminal-host
+changes retain their applicable native checks. The required planner prints the
+actual local and CI responsibilities from committed Git inputs.
+
 The old hosted rendering/browser jobs, periodic stress run and manual dispatch
 replacement are removed. Native visual/resize contracts still run on all three
 OSes through the author-local plus complementary-CI split. Budget and baseline
@@ -168,10 +175,13 @@ inspectable; these values must not be compared to scode's standalone RSS budget.
 pairs followed by three alternating A/B pairs and two warm-ups (14 runs).
 Each run keeps its existing gestures, observation counts and budgets. Fewer
 repetitions reduce precision and the chance of exposing intermittent regressions;
-equivalent statistical sensitivity is not established. The core six-scenario
-rendering matrix uses 96 runs: short retains five A/A and seven A/B pairs, while
-the other five scenarios use three A/A and three A/B pairs, with two warm-ups
-per scenario. The repeated-turn stress scenario also retains five/seven pairs.
+equivalent statistical sensitivity is not established. The core rendering matrix
+uses 68 runs across short prose, 12 KiB Markdown, foreground tools and background
+tools. Short retains five A/A and seven A/B pairs; the other three use three A/A
+and three A/B pairs, with two warm-ups per scenario. The large Markdown case
+replaces independent 8 KiB prose, 12 KiB prose and short Markdown scenarios;
+size-specific plain-text and short-Markdown regressions have less coverage.
+Every remaining metric is judged. The repeated-turn stress scenario retains five/seven pairs.
 The short check that caught a real RSS regression and the separate viewport
 checks retain their original sampling. `gui-policy.json` owns the
 additional browser budgets; the original `performance-policy.json` budgets and
@@ -179,4 +189,6 @@ fixed baseline are unchanged. Both binaries receive identical gestures and
 workloads; only candidate hyperlink assertions differ. The browser workflow
 compares releases built from the PR base and candidate in separate target dirs,
 and uploads failures as well as successful evidence. The existing required
-mandatory local rendering profile continues comparing the original workloads.
+mandatory local rendering profile runs on every affected PR. Before building,
+`benchmark.py --describe-policy --profile core` validates the declared matrix.
+The required host refuses policy-hash changes or incomplete passing sample sets.

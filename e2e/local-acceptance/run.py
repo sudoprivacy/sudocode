@@ -85,6 +85,16 @@ def scope_acceptance(directory):
         actual = command(sys.executable, "-c", code, selector, repository, base, cwd=repository)
         assert json.loads(actual) == targets, (base, actual, targets)
 
+    def selected_checks(diff_base):
+        policy = SOURCE / "spec/local_acceptance.json"
+        code = ('import importlib.util,json,subprocess,sys; '
+                'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
+                'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
+                'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
+        return json.loads(command(sys.executable, "-c", code,
+            SOURCE / ".github/scripts/local_acceptance.py", policy, diff_base, cwd=repository))
+
     cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, False, False),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
              ("spec/cache_metrics.json", True, False, False), ("rust/crates/runtime/src/prompt.md", True, True, True),
@@ -127,16 +137,11 @@ def scope_acceptance(directory):
         if path == "rust/crates/pty-harness/src/lib.rs":
             # The helper implementation may move out of tests/common. Its new
             # path must still select real native terminal acceptance.
-            policy = SOURCE / "spec/local_acceptance.json"
-            code = ('import importlib.util,json,subprocess,sys; '
-                    'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
-                    'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
-                    'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
-                    'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
-            selected = json.loads(command(sys.executable, "-c", code,
-                SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
+            selected = selected_checks(base)
             assert {"native-workspace", "native-resize", "rendering", "browser"}.issubset(selected)
             assert "native-release" not in selected, "Dev-only PTY helper edits must not rebuild native releases"
+        if path == "e2e/nexus-a2a/run.sh":
+            assert "native-workspace" not in selected_checks(base), "Daemon script edits keep their actual queue journey"
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
@@ -188,17 +193,21 @@ def scope_acceptance(directory):
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     (repository / ".github/scripts/vfs_search_cache.py").write_text("changed cache helper\n")
     (repository / "rust/crates/api/src/lib.rs").write_text("changed product source\n")
+    (repository / "e2e/nexus-a2a/run.sh").write_text("changed daemon harness alongside product code\n")
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "mixed cache and product inputs", cwd=repository)
     head = command("git", "rev-parse", "HEAD", cwd=repository)
     expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True,
                  vfs_cache=True)
+    assert "native-workspace" in selected_checks(base), "Mixed daemon script and Rust edits retain native validation"
     base = head
     command("git", "mv", ".github/scripts/vfs_search_cache.py", "rust/crates/api/src/moved.py", cwd=repository)
+    command("git", "mv", "e2e/nexus-a2a/run.sh", "rust/crates/api/src/moved_harness.py", cwd=repository)
     command("git", "commit", "-m", "cache helper moves into product source", cwd=repository)
     head = command("git", "rev-parse", "HEAD", cwd=repository)
     expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True,
                  vfs_cache=True)
+    assert "native-workspace" in selected_checks(base), "A daemon harness moved into Rust retains native validation"
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",

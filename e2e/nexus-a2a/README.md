@@ -33,6 +33,9 @@ the outer harness still closes its owned private daemon. Cancelled cases are
 not passes. This path requires Python 3, like the acceptance tooling.
 `mailbox_faults_acceptance.py --output FRESH_DIRECTORY` exercises the executor
 using real Cargo/native control processes; it adds no daemon coverage.
+Harness-only edits are validated by the real Linux queue journey and the
+author's realistic harness acceptance. They omit unrelated native workspace
+Cargo/PTY reruns; mixed Rust changes still require those native suites.
 
 The funded offline script uses a private `SUDO_CODE_CONFIG_HOME` containing the
 normal proxy configuration, `SCODE_LIVE_AUTH_PROFILE`, and `SCODE_LIVE_MODEL`.

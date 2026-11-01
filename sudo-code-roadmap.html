@@ -681,8 +681,10 @@ process state, executes original developer and named driver commands, rejects
 invalid wrappers, and verifies a Cargo-fresh, byte-identical normal product.
 This infrastructure fixture adds no product feature coverage.</p>
 <p><strong>Retire legacy workspace unit execution (2026-11-02).</strong>
-Native runtime acceptance explicitly selects every integration/PTY target,
-including original targets on older ungrouped sources. It stops executing
+Grouped native runtime acceptance explicitly selects every integration/PTY target.
+Older ungrouped sources retain Cargo's original complete default suite, including
+legacy units and disabled/feature-gated target exclusions; a failing manual
+target protects this compatibility path. Grouped acceptance stops executing
 library/binary unit harnesses, matching the test-layer policy. An audited Windows
 run had 1,423 unit and 1,089 integration cases: 56.6% of case count is retired,
 but those unit cases contributed only 73 summed worker seconds. Compilation

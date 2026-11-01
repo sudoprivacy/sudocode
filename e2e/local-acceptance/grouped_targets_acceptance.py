@@ -39,12 +39,15 @@ def run(output, repository, executable, options):
 
     def command(*args, cwd=root / "rust", success=True):
         log = output / "commands" / f"{len(commands):03}.log"
+        if not success:
+            print("EXPECTED_NEGATIVE_CONTROL: the next process must fail; its original error is retained.", flush=True)
         try:
             result = helper.run_command(args, cwd, log, environment)
         except RuntimeError:
             if success:
                 raise
             result = json.loads(log.with_suffix(".command.json").read_text())
+            print("PASS: expected negative process refused the controlled input.", flush=True)
         else:
             if not success:
                 raise AssertionError("Expected the real process to fail: " + str(args))
@@ -66,7 +69,8 @@ def run(output, repository, executable, options):
 
     workspace = '[workspace]\nmembers=["crates/rusty-sudocode-cli","crates/helper","crates/engine-acp"]\nresolver="2"\n'
     manifest = ('[package]\nname="group-product"\nversion="0.0.0"\nedition="2021"\n'
-                '[dev-dependencies]\ngroup-helper={path="../helper"}\n')
+                '[dev-dependencies]\ngroup-helper={path="../helper"}\n'
+                '\n[[test]]\nname="manual_disabled"\npath="tests/manual_disabled.rs"\ntest=false\n')
     package = "rust/crates/rusty-sudocode-cli/"
     write("rust/Cargo.toml", workspace)
     write(package + "Cargo.toml", manifest)
@@ -115,6 +119,7 @@ pub fn record(name: &str) {
 #[cfg(unix)] #[test] fn platform_case() { common::native("unix"); }
 ''')
     write(package + "tests/kept_driver.rs", 'mod common;\n#[test] fn native_driver() { common::native("driver"); }\n')
+    write(package + "tests/manual_disabled.rs", '#[test] fn manual_only() { panic!("disabled manual target executed"); }\n')
     write(package + "tests/acceptance_reserved/main.rs",
           '#[test] fn directory_target() { group_helper::record("directory"); }\n')
     write("rust/crates/helper/tests/independent.rs", '#[test] fn independent_package() { group_helper::record("other-package"); }\n')
@@ -180,9 +185,14 @@ pub fn record(name: &str) {
     original_cases = normalize(original, {})
     original_integrations = normalize(original, {}, integration_only=True)
     fallback = inventory(profiles.workspace_integration_test_targets([]))
-    assert normalize(fallback, {}) == original_integrations
+    assert normalize(fallback, {}) == original_cases
     assert {suite["kind"] for suite in original["rust-suites"].values() if suite["testcases"]} >= {"lib", "bin", "test"}
-    assert all(suite["kind"] == "test" for suite in fallback["rust-suites"].values())
+    assert not any(suite["binary-name"] == "manual_disabled" for suite in fallback["rust-suites"].values())
+    # Explicit target selection overrides test=false. Preserve the original
+    # default on old sources rather than accidentally turning manual tests on.
+    disabled = command(str(executable), "nextest", "run", *options, "--workspace", "--locked",
+                       "--test", "manual_disabled", success=False)
+    assert "disabled manual target executed" in disabled.read_text(encoding="utf-8")
     group_name = "acceptance_fixture"
     wrapper = package + f"tests/acceptance_groups/{group_name}.rs"
     declaration = f'\n[[test]]\nname="{group_name}"\npath="tests/acceptance_groups/{group_name}.rs"\ntest=false\n'
@@ -375,6 +385,7 @@ pub fn record(name: &str) {
     result = {"status": "PASS", "original_cases": original_cases, "grown_cases": grown,
               "every_integration_case_and_ignore_state_retained_without_unit_harnesses": True,
               "fallback_original_integration_cases": original_integrations,
+              "older_source_default_suite_and_disabled_target_exclusion_retained": True,
               "old_unit_harness_control_failed": True, "actual_production_dispatch_without_units_passed": True,
               "production_workspace_commands": dispatched,
               "exact_case_and_ignore_state_preserved": True, "nextest_process_state_isolated": True,

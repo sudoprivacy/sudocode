@@ -189,6 +189,97 @@ def grouped_workspace_test_targets(root, metadata):
                                   for (package, name), members in sorted(groups.items())]}
 
 
+def performance_low_power_mode():
+    """Use Foundation's active mode, including desktops without a pmset setting."""
+    import ctypes
+
+    ctypes.CDLL("/System/Library/Frameworks/Foundation.framework/Foundation")
+    objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+    objc.objc_getClass.argtypes, objc.objc_getClass.restype = [ctypes.c_char_p], ctypes.c_void_p
+    objc.sel_registerName.argtypes, objc.sel_registerName.restype = [ctypes.c_char_p], ctypes.c_void_p
+    pointer = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    boolean = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    responds = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    info = pointer(objc.objc_getClass(b"NSProcessInfo"), objc.sel_registerName(b"processInfo"))
+    selector = objc.sel_registerName(b"isLowPowerModeEnabled")
+    if not info or not responds(info, objc.sel_registerName(b"respondsToSelector:"), selector):
+        raise RuntimeError("Foundation cannot report the active low-power mode")
+    return boolean(info, selector)
+
+
+def performance_power_state():
+    """Read native macOS power settings without changing the user's configuration."""
+    source = subprocess.check_output(["/usr/bin/pmset", "-g", "ps"], text=True, timeout=5)
+    sources = re.findall(r"^Now drawing from '([^']+)'", source, re.MULTILINE)
+    if len(sources) != 1 or sources[0] not in {"AC Power", "Battery Power"}:
+        raise RuntimeError("Cannot determine macOS power source; no timing acceptance granted")
+    return {"source": sources[0], "low_power_mode": performance_low_power_mode()}
+
+
+@contextmanager
+def stable_performance_power(output):
+    """Refuse unqualified macOS timing windows; keep every observation for diagnosis."""
+    if platform.system() != "Darwin":
+        yield
+        return
+    import threading
+
+    evidence = output / "host-power.json"
+    observations, failures = [], []
+    stopped = threading.Event()
+
+    def sample():
+        row = {"at": time.time()}
+        try:
+            row.update(performance_power_state())
+            if row["source"] != "AC Power" or row["low_power_mode"]:
+                failures.append("Timing acceptance requires external AC power with low-power mode disabled")
+        except Exception as error:
+            row["error"] = str(error)
+            failures.append(str(error))
+        observations.append(row)
+        staged = evidence.with_suffix(".json.stage")
+        staged.write_text(json.dumps({
+            "kind": "native-performance-power-observations", "poll_interval_seconds": 1,
+            "observations": observations, "invalid": bool(failures),
+        }, indent=2) + "\n")
+        staged.replace(evidence)
+
+    def require_stable():
+        if failures:
+            raise RuntimeError(f"{failures[0]}. Power evidence: {evidence}. "
+                               "No settings were changed; preserve this attempt and connect AC power before a new run.")
+
+    sample()
+    require_stable()
+    print(f"Performance host: external AC, low-power mode disabled; monitoring each second: {evidence}", flush=True)
+
+    def monitor():
+        while not stopped.wait(1):
+            try:
+                sample()
+            except Exception as error:
+                failures.append(f"Cannot retain native power observations: {error}")
+                return
+
+    worker = threading.Thread(target=monitor, name="acceptance-power", daemon=True)
+    worker.start()
+    try:
+        yield
+    except BaseException:
+        # Preserve the original command failure; the sidecar still records any
+        # power problem. A failed command can never become a passing profile.
+        raise
+    else:
+        stopped.set()
+        worker.join()
+        sample()
+        require_stable()
+    finally:
+        stopped.set()
+        worker.join()
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -308,8 +399,9 @@ def run(name, root, output, base, execute):
               "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
         cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
-        command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
-                "--report", str(output / "startup.json"))
+        with stable_performance_power(output):
+            command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
+                    "--report", str(output / "startup.json"))
     elif name == "native-services":
         cargo("build", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
         binary = target / "debug" / ("scode" + suffix)
@@ -356,8 +448,9 @@ def run(name, root, output, base, execute):
                 policy_ref, candidate_ref = run.execution_refs
             except AttributeError:
                 policy_ref = candidate_ref = None
-            container(name, root, output, base, command, execute,
-                      policy_ref=policy_ref, candidate_ref=candidate_ref)
+            with stable_performance_power(output):
+                container(name, root, output, base, command, execute,
+                          policy_ref=policy_ref, candidate_ref=candidate_ref)
     else:
         raise RuntimeError(f"Unknown mandatory acceptance check: {name}")
     if not results:
@@ -392,11 +485,12 @@ def native_guard_files():
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
         ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
-        ".github/local-acceptance/native_guard.py": "8214da300cdfb0f2ccc5d6ccc7de8459948e2b09a02cf0bd0161eeda58a0a96e",
+        ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
         ".github/scripts/local_acceptance.py": "26f5044afdc527caa984399af4ef5724b7cb2b49156bbc6a95c3d23239c6ff4b",
         "e2e/local-acceptance/run.py": "24808de8d0566c5908f35891fd81d9f30c9ddeed7b10fef1cbc498245eda137f",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
         "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -445,7 +539,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "ab41f1cdd492e35b153ea98d3d29b1a59055f87b4ab6c366b159e659173433df"
+    expected = "d2d09b6970bf5912efd51956f2e2203f6342550f419c7ba0eea36ddc4e732af0"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

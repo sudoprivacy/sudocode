@@ -250,6 +250,19 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
+On macOS, rendering/browser profiles and the release startup measurement require
+external AC power with low-power mode disabled. One shared native probe reads
+the power source and Foundation's active low-power mode before and after the
+timing window and once per second while it runs. Unknown settings, a detected
+power change or a failed probe refuse
+the profile, preserving `host-power.json` and any original command failure.
+Shorter changes between observations may escape this periodic check; the probe
+does not prove a fixed CPU clock or thermal state. It never changes system
+settings, budgets, sample counts or automatic retry policy. Functional-only
+profiles and Linux/Windows keep their existing execution. These environmental
+observations are supplementary diagnostics; completed signed profiles still
+require their actual commands and current protected recipe.
+
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when CLI, engine-core, shared PTY helpers,
 measurement sources or Rust build/dependency inputs change. Other crates' source

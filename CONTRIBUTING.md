@@ -273,6 +273,15 @@ does not establish that those effects are impossible. A change known to affect
 the performance workloads must include the corresponding measurement scenario.
 Selected measurements keep their baselines, per-run assertions and budgets.
 Paired rounds are listed below.
+Changes limited to `e2e/terminal-resize/benchmark.py`, `gui-benchmark.py`,
+`performance-policy.json` and `gui-policy.json` select both statistical profiles
+and the native benchmark-builder regression in CI. These files feed the explicit
+statistical drivers; ordinary workspace and resize suites do not execute them.
+Those unrelated native suites and their complementary CI hosts are therefore
+omitted for these four inputs. Rust, shared terminal hosts, unknown external
+inputs and mixed changes keep their applicable native suites. Real committed-Git
+planner and PR/push/queue fixtures cover this boundary, including deletion and
+renaming a shared host into a measurement-only path.
 Rendering and browser use the same canonical candidate checkout and Cargo
 outputs under the existing exclusive benchmark lease. Each baseline and the
 trusted rendering driver keep separate outputs. Copied normal release binaries
@@ -326,32 +335,41 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
-Rendering completes and judges one scenario at a time. All six scenarios keep
-two warm-ups, per-run interaction counts and budgets. The short scenario keeps
+Rendering completes and judges one scenario at a time. Four scenarios keep
+two warm-ups, per-run interaction counts and every metric budget. The short scenario keeps
 five A/A and seven alternating A/B pairs, preserving the full check that caught
-a real RSS regression. Other core scenarios use three A/A and three A/B pairs;
-the core matrix runs 96 native samples instead of 156. Browser comparison uses
+a real RSS regression. The other scenarios use three A/A and three A/B pairs.
+A 12 KiB Markdown workload replaces the independent 8 KiB prose, 12 KiB prose
+and 2,300-byte Markdown workloads, adopting the consolidation proposed in #1196.
+Short prose, foreground tools and background tools remain separate. The required
+core matrix runs 68 native samples instead of 96. This reduces workload coverage:
+regressions specific to the removed plain-text sizes or short Markdown can escape
+the combined workload. No metric is filtered from the remaining cases.
+Browser comparison uses
 three A/A and three A/B pairs plus two warm-ups: 14 runs instead of 26.
 Headless and painted viewport comparisons inherit the same 3/3 rounds: each also
-runs 14 instead of 26 samples. Repeated comparisons total 138 instead of 234
-(41.0% fewer); the separate 60-sample painted interaction check remains.
+runs 14 instead of 26 samples. Repeated comparisons total 110 instead of the
+original 234 (53.0% fewer); the separate 60-sample painted interaction check remains.
 Per-run parsed/painted interactions and budgets stay intact.
 This reduces repeat coverage and precision: intermittent regressions and
 environmental noise have fewer chances to appear. A preserved actual viewport
 A/A calibration refuses CPU noise with five pairs but not its first three;
-that original record remains noisy. Equivalent statistical sensitivity and a
-41% whole-lifecycle speedup are not established.
+that original record remains noisy. Equivalent statistical sensitivity and
+whole-lifecycle savings are not established by these sample counts.
 The repeated-turn stress scenario retains five A/A and seven A/B pairs.
 A failed/noisy/invalid scenario stops the matrix and releases the lease; later
 scenarios remain unrun. The mandatory command prints the declared pair counts,
 active scenario and evidence path. `measurements/report.json` combines the original
 case reports, with original policy and binary/observer hashes, completed scenarios
-and remaining work. Real Cargo/native-process infrastructure acceptance exercises
+and remaining work. The actual benchmark CLI validates and describes the plan
+before npm or Cargo starts; the host checks its policy hash and complete sample
+count before accepting a passing report. Real Cargo/native-process acceptance exercises
 full success, relative RSS regression, broken drivers and changed observers with
-the unchanged paired evaluator; it does not claim product performance coverage.
+the unchanged paired evaluator, and rejects missing CPU metrics or passing
+reports with missing samples. It does not claim product performance coverage.
 Both changed performance recipes require new execution; earlier full-matrix
 results cannot authorize the reduced sampling policy. Native profile recipes
-remain unchanged. Actual native fixture processes verify the 96/14 schedules,
+remain unchanged. Actual native fixture processes verify the 68/14 schedules,
 alternating sides, the full short check and rejection of relative RSS/browser
 regressions and policies below their minimum rounds. These fixtures add no
 product performance coverage credit.

@@ -347,6 +347,29 @@ is not established. Required output prints pair counts; both changed recipes
 need fresh execution. Real native infrastructure canaries verify counts,
 alternating sides, regression refusals and minimum-round refusals without claiming
 product performance coverage. Actual production latency savings remain unmeasured.</p>
+<p><strong>Consolidate mandatory rendering workloads (2026-11-01).</strong>
+The required matrix adopts the 12 KiB Markdown workload proposed in
+<a href="https://github.com/sudoprivacy/sudocode/pull/1196">#1196</a>.
+It replaces independent 8 KiB prose, 12 KiB prose and short Markdown scenarios;
+short prose, foreground tools and background tools stay separate. The four
+scenarios run 68 samples instead of 96. Every affected PR still runs mandatory
+local rendering acceptance. All remaining metric judgements, interaction counts,
+baselines and budgets remain. This reduces workload coverage: regressions
+specific to the removed plain-text sizes or short Markdown can escape the
+combined case. The benchmark CLI validates and describes the plan before builds;
+the host refuses changed policy hashes and incomplete passing sample counts.
+Real native fixtures retain the original 156-process control and reject relative
+RSS regression, missing CPU metrics and missing samples. Fixture verdicts do not
+establish equivalent product coverage or production speedup. Browser and both
+viewport comparisons keep 14 runs each: 110 repeated runs in total, down from
+138 after the earlier round reduction and 234 originally. Changes limited to
+<code>benchmark.py</code>, <code>gui-benchmark.py</code> and their two measurement
+policy JSON files retain both statistical profiles and the native benchmark
+builder guard. Ordinary workspace/resize suites do not execute these explicit
+measurement inputs, so those native suites and their complementary CI hosts are
+omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
+changes retain their applicable native checks. Real Git planner and PR/push/queue
+fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -745,12 +768,19 @@ script remains available for diagnosis and earns no additional coverage credit.<
     </tr>
     <tr>
       <td>Paired rendering/browser/viewport measurements</td>
-      <td>Six rendering scenarios remain: 96 runs. Browser, headless viewport
-      and painted viewport comparisons each run 14 samples; total 138 instead
+      <td>Four rendering scenarios run 68 samples. A 12 KiB Markdown stream
+      replaces separate long prose, boundary prose and short Markdown cases,
+      reducing independent size/content coverage. All remaining metrics are
+      judged. Browser, headless viewport
+      and painted viewport comparisons each run 14 samples; total 110 instead
       of 234. Short retains its full 5/7 paired rounds; the other comparisons
       use 3/3. Lower repeat coverage can miss intermittent regressions and
       environmental noise. Budgets and per-run interactions stay intact;
-      the separate 60-sample painted interaction check remains.</td>
+      the separate 60-sample painted interaction check remains. Edits limited to
+      the two statistical entrypoints and their two policy JSON files retain
+      these measurements and the native builder guard while omitting unrelated
+      workspace/resize suites and their complementary CI hosts. Mixed Rust,
+      shared terminal-host and unknown inputs retain native checks.</td>
       <td>No additional journey credit from repeated measurements.</td>
       <td><code>benchmark.py</code> / <code>gui-benchmark.py</code> /
       <code>benchmark_prompt_viewport.py</code></td>

@@ -616,6 +616,15 @@ Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
 records the actual compiler priorities. It runs once on a PR only when the lint
 workflow, fixture or scope selector changes; queue/main reuse its result.
+In the queue, independent failure-only callers stop unfinished jobs in the same
+Rust CI run after either Clippy or real daemon acceptance fails. Each caller
+waits only for its own failing dependency. The shared cancellation job has the
+Actions write permission and runs no checkout or candidate executable. Successful
+runs allocate no cancellation runner. The original failed step remains visible;
+the command prints how to inspect it and rerun failed work after repair. A live
+GitHub fixture exercises both failure directions and the uncancelled success
+path on a disposable branch. These are CI execution checks and add no product
+journey coverage.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions remain available through explicit acceptance;

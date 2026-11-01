@@ -476,6 +476,15 @@ priorities are retained. This infrastructure check runs once on changed lint
 workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
 after a failure without reducing passing-run product or lint coverage; its small
 fixture timings are not a production PR latency claim.</p>
+<p><strong>Stop independent Rust CI peers after a known failure
+(2026-11-01).</strong> Queue Clippy and daemon failures independently invoke one
+shared cancellation job. It stops only its own workflow run, preserves the
+original failed step and prints inspection and repair commands. The Actions
+write token stays in a job without a candidate checkout. Successful runs skip
+both callers and allocate no cancellation runner. A real GitHub fixture tests
+both failure directions and a clean run; its controlled timings do not establish
+production lifecycle savings. Passing-run coverage, budgets and assertions stay
+unchanged.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -715,7 +724,10 @@ script remains available for diagnosis and earns no additional coverage credit.<
       packages and exercise original targets for older candidates; no unused
       CLI binary is built with standalone drivers. Actual Cargo metadata protects
       unique opt-in targets and shared sources; real Git events require this
-      guard when the driver package changes.</td>
+      guard when the driver package changes. A real GitHub fixture also verifies
+      cancellation of independent Rust CI peers in both failure directions,
+      retention of the original failed step, and no cancellation runner on
+      successful runs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>

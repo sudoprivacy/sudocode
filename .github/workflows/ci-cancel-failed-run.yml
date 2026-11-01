@@ -1,0 +1,34 @@
+name: Stop peers of a failed CI job
+
+on:
+  workflow_call:
+    inputs:
+      failed-job:
+        required: true
+        type: string
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    # No checkout or candidate executable receives this write token. Successful
+    # runs skip the caller entirely and allocate no cancellation runner.
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel this failed run and preserve its original error
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILED_JOB: ${{ inputs.failed-job }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Output "::warning::$env:FAILED_JOB failed. Stop unfinished peers of this exact workflow run. The original failed job remains the diagnosis."
+          Write-Output "Inspect: gh run view $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --log-failed"
+          Write-Output "After repairing the failure: gh run rerun $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --failed"
+          gh api --method POST "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/cancel" --silent
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output '::error::GitHub refused cancellation; the original failed job and unfinished peers retain their actual results. Inspect the API error above.'
+            exit $LASTEXITCODE
+          }

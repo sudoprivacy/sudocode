@@ -284,6 +284,23 @@ def stable_performance_power(output):
     return monitor_window()
 
 
+def prepare_windows_terminal(root, output, execute):
+    """Retain the actual installer command/log for the selected resize receipt."""
+    output.mkdir(parents=True, exist_ok=True)
+    terminal = Path.home() / ".cache/sudocode-terminal-host"
+    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+
+
+def prepare_native_checks(names, root, output, execute):
+    """Install selected Windows terminal inputs before long native compilation."""
+    prepared = {}
+    if os.name == "nt" and "native-resize" in names:
+        print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
+              "before compilation; original installer checks and terminal tests remain required.", flush=True)
+        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+    return prepared
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -381,7 +398,16 @@ def run(name, root, output, base, execute):
     elif name == "native-resize":
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            command(sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal))
+            try:
+                prepared = run.prepared_native.get(name)
+            except AttributeError:
+                prepared = None
+            if prepared:
+                # These are actual commands from this invocation, not a cached
+                # successful profile. Append them to the normal signed receipt.
+                results.extend(prepared)
+            else:
+                results.append(prepare_windows_terminal(root, output, execute))
             command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
@@ -488,8 +514,8 @@ def native_guard_files():
     return {
         **preflight_guard_files(),
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
-        "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
+        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
+        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
@@ -504,8 +530,8 @@ def native_guard_files():
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "7c8d01f87a1e2cc7b8fa27261da6c847aa0033d709b8792b5189a8ff9ed7a0fd",
-        "e2e/local-acceptance/run.py": "e43884270e6731dc29bb4266d54c87862377905a080df9ada1ff6af82a7376ba",
+        ".github/scripts/local_acceptance.py": "f8b63718a7030658428686dd2eedac57346b4b8150b044986f12ca07766e9717",
+        "e2e/local-acceptance/run.py": "c3cdad7819bd597529e847c63945b329e451c4926a42f8fe98f38f5540ee5ac4",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",

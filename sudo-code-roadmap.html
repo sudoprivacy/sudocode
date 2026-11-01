@@ -528,6 +528,18 @@ profiles remain; no test target is deleted.</p>
 <p>Shared PTY helper inputs retain native terminal resize acceptance at both
 the CLI <code>tests/common</code> path and the shared test-crate path. This
 preserves the native guard when reducing repeated helper compilation.</p>
+<p><strong>Keep native test scope on the PR branch (2026-11-01).</strong>
+The selector compares the common ancestor with the candidate HEAD. A newer main
+revision supplied by complementary CI cannot add reverse differences from
+unrelated main commits to an isolated test PR. In the observed #1205 Windows run,
+a one-test-file PR was expanded by 12 main-only paths into 2,512 cases and
+1,026.641 seconds of workspace acceptance despite a complete dependency-cache
+hit. Real divergent Git branches now drive the selected Cargo test and a full
+nextest control, checking actual native process markers. Actual branch source,
+shared helpers, unknown inputs, deletion, renaming into production and coincident
+main/branch source edits retain full scope. Test assertions, ignored cases,
+complement platforms and budgets remain unchanged. These executor fixtures add
+no product journey coverage; cloud savings require a subsequent real run.</p>
 <p>Deterministic workspace cases use checksum-pinned nextest with four global
 workers, preserving test targets and ignored markers. It stops scheduling after
 the first failure, lets running cases clean up, disables retries and refuses an
@@ -746,7 +758,10 @@ script remains available for diagnosis and earns no additional coverage credit.<
       either the raw stream or a VT100-rendered view. Catches what a
       real user sees: REPL UX, signals, tab completion, ANSI redraw,
       cursor placement. Native grouping preserves individual case processes,
-      assertions and ignored markers; it reduces linked executables.</td>
+      assertions and ignored markers; it reduces linked executables. Isolated
+      test edits compare the PR common ancestor with its HEAD, excluding
+      main-only changes from native target selection. Actual branch source,
+      shared/unknown inputs, deletion and renames retain full workspace scope.</td>
       <td><strong>Yes — this is the coverage measure.</strong></td>
       <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
     </tr>

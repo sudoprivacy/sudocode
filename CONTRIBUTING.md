@@ -422,6 +422,12 @@ Cargo; no provider coverage is inferred from deterministic fixture results.
 Lint now denies warnings before long native builds and PTY execution. Selected
 CLI-only changes lint those targets; a full workspace change lints all targets
 with the native mailbox feature graph. The queue additionally checks all features.
+The isolated-test selector compares the common ancestor with the candidate HEAD.
+Complementary CI can supply a newer main revision; files changed only on main do
+not widen that test-only PR into a full workspace run. Actual branch changes to
+production code, shared helpers, unknown inputs, deletions and renames retain the
+full scope. Real divergent Git branches drive selected and full Cargo/nextest
+commands and verify the native processes that actually ran.
 This moves ordinary source/test lint failures earlier without another full test run.
 The full native workspace opts into eight declarative integration wrappers for
 128 CLI targets, selecting 91 instead of 211 integration targets. The selector

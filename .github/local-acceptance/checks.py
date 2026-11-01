@@ -102,7 +102,8 @@ def nextest_options(output):
 
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    # Complementary CI can pass newer main; exclude changes outside this branch.
+    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"],
                                       cwd=root).decode().split("\0")[:-1]
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
@@ -480,7 +481,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "bcff2dca2c44f24e9e29b6f25b8d25ce46d82b3d78786b10ab56d4ce25900b2c",
         "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "9d1c112503785ebd9236e5318923f238e9f0b2b117865dd9c3d345664e06496c",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "c2bdb2a4ae04f93c81434b7b7552ff62f807090354bdcd8392686ed44ed0b8e7",
         ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",

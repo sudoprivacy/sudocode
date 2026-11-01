@@ -366,7 +366,13 @@ def run(output, profiles):
     def command(*args, cwd=inputs, extra=None):
         log = output / "commands" / f"{len(commands):03d}.log"
         environment = {"npm_config_audit": "false", "npm_config_fund": "false", **(extra or {})}
-        commands.append(executor.run_command(args, cwd, log, environment))
+        try:
+            row = executor.run_command(args, cwd, log, environment)
+        except RuntimeError:
+            # Keep expected refusals in the sequence before another stage runs.
+            commands.append(json.loads(log.with_suffix(".command.json").read_text()))
+            raise
+        commands.append(row)
         return log
 
     driver = '''#[test]
@@ -567,7 +573,7 @@ out=Path(a.output);out.mkdir()
         pass
     else:
         raise AssertionError("A broken standalone driver package fell back instead of failing")
-    refusal_path = output / "commands" / f"{len(commands):03d}.command.json"
+    refusal_path = output / "commands" / f"{len(commands) - 1:03d}.command.json"
     refusal = json.loads(refusal_path.read_text())
     assert refusal["exit_code"] != 0 and refusal["command"][-2:] == ["--no-run", "--message-format=json-render-diagnostics"]
     assert refusal["command"][refusal["command"].index("-p") + 1] == "scode-benchmark-drivers"
@@ -586,6 +592,10 @@ out=Path(a.output);out.mkdir()
               "rendering_matrix": matrix, "cache_migration": migration,
               "profiles_sha256": hashlib.sha256(profiles.read_bytes()).hexdigest(),
               "scope": "Real production browser build executor, Cargo and npm; distinct baseline/candidate and native integration drivers, reusable dev artifacts, immutable production binary. Tiny infrastructure fixtures, no product browser coverage credit."}
+    for index, row in enumerate(commands):
+        log = output / "commands" / f"{index:03d}.log"
+        assert hashlib.sha256(log.read_bytes()).hexdigest() == row["log_sha256"], "A later stage replaced earlier evidence"
+        assert json.loads(log.with_suffix(".command.json").read_text()) == row, "A command record was replaced"
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({"status": "PASS", "evidence": str(output), "candidate_sha256": digest}), flush=True)
 

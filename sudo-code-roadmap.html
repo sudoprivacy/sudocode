@@ -476,6 +476,15 @@ priorities are retained. This infrastructure check runs once on changed lint
 workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
 after a failure without reducing passing-run product or lint coverage; its small
 fixture timings are not a production PR latency claim.</p>
+<p><strong>Stop independent Rust CI peers after a known failure
+(2026-11-01).</strong> Queue Clippy and daemon failures independently invoke one
+shared cancellation job. It stops only its own workflow run, preserves the
+original failed step and prints inspection and repair commands. The Actions
+write token stays in a job without a candidate checkout. Successful runs skip
+both callers and allocate no cancellation runner. A real GitHub fixture tests
+both failure directions and a clean run; its controlled timings do not establish
+production lifecycle savings. Passing-run coverage, budgets and assertions stay
+unchanged.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -686,6 +695,18 @@ Before/after performance comparisons use isolated build directories and retain
 binary and harness hashes. A failed A/A noise calibration is inconclusive,
 not a performance pass. These resource checks do not add feature-coverage credit.</p>
 
+<p>macOS rendering/browser and release startup timing windows require external
+AC power with Foundation reporting low-power mode disabled. One shared native
+probe records the state before/after and once per second; unknown state, probe
+errors and observed power changes refuse the profile without changing system
+settings or rerunning it. Original failures and supplementary
+<code>host-power.json</code> observations remain. Changes shorter than the poll
+interval may escape detection; fixed clock/thermal conditions are not proved.
+Linux/Windows and functional-only profiles keep their existing execution.
+Native process fixtures cover admission, transient changes, probe failures and
+preservation of the original command error. They earn no product journey credit;
+performance budgets, workloads and sample counts remain unchanged.</p>
+
 <p>The automatic viewport on/off headless and browser budget checks run in the
 mandatory local browser profile. The existing source-before/after measurement
 script remains available for diagnosis and earns no additional coverage credit.</p>
@@ -715,7 +736,10 @@ script remains available for diagnosis and earns no additional coverage credit.<
       packages and exercise original targets for older candidates; no unused
       CLI binary is built with standalone drivers. Actual Cargo metadata protects
       unique opt-in targets and shared sources; real Git events require this
-      guard when the driver package changes.</td>
+      guard when the driver package changes. A real GitHub fixture also verifies
+      cancellation of independent Rust CI peers in both failure directions,
+      retention of the original failed step, and no cancellation runner on
+      successful runs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>
@@ -757,6 +781,45 @@ script remains available for diagnosis and earns no additional coverage credit.<
       five-platform release tags; optimized-only regressions can reach main.</td>
       <td>No; build and startup checks add no product PTY journey credit.</td>
       <td><code>native-cohost</code> / <code>release-nexusd-cohost.yml</code></td>
+    </tr>
+    <tr>
+      <td>Queue daemon and co-host scope</td>
+      <td>CLI source retains pinned-daemon, cross-node CLI and authenticated
+      sender journeys. Co-host duet, VFS search owner/restart and driver feature
+      checks run for shared Rust, build/dependency and daemon harness inputs.
+      CLI source is excluded only when both committed layouts prove a
+      binary-only package without declared workspace dependents. Unknown
+      layouts retain co-host checks; CLI tests stay outside co-host inputs.
+      Unknown manifest/build changes retain the conservative scope.
+      Required output explains the choice and refuses missing decisions.
+      Real Git events and Cargo processes verify CLI/co-host independence and
+      shared-runtime rebuilds; actual package metadata guards that boundary.</td>
+      <td>Existing CLI PTYs retain their current credit. Infrastructure scope
+      checks add no product journey coverage. Co-host runs are omitted on
+      CLI-only revisions.</td>
+      <td><code>rust-ci.yml</code> / <code>ci_input_scope.py</code> /
+      <code>dependency_scope_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Fixed VFS search compiler reuse</td>
+      <td>The Linux queue restores a pinned checkout with isolated Cargo inputs
+      and outputs; only main pushes publish missing exact keys. Compiler, runner
+      image, recipe, paths and codegen settings bind the key. Tracked source bytes
+      are verified before normal Cargo builds. The original authorization/restart
+      case still runs against the current co-host outside the cache, with unchanged
+      optimization profiles and assertions. Command logs and timings are retained.
+      Outer and nested Cargo calls share the real test package metadata to avoid
+      repeated native dependency rebuilds caused by inherited environment changes.
+      Main alone explicitly prewarms compiler outputs. Consumers use normal
+      <code>cargo test</code> to compile and execute the original case; the required
+      command refuses an extra pre-test build that switches plugin variants.
+      Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
+      <td>Coverage unchanged; cached compiler outputs never replace the real
+      journey or authorize reuse of a passing result. Infrastructure fixtures add
+      no product journey credit. Cache footprint and cold/warm product measurements
+      are required before a lifecycle speedup claim.</td>
+      <td><code>vfs_search_cache.py</code> / <code>ci-vfs-search-cache.yml</code> /
+      <code>vfs_search_cache_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Mock parity harness</td>

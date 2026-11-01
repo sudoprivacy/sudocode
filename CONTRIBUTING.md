@@ -201,6 +201,44 @@ time. The required command prints this split. A real Git/Cargo/native-process
 guard verifies feature compilation, dev execution and refusal of a missing stamp;
 it adds no product journey coverage.
 
+The queue separates CLI daemon journeys from co-host/search acceptance. CLI
+source changes retain the real pinned daemon, cross-node CLI and authenticated
+sender journeys. The independent co-host duet, VFS search owner/restart and
+driver feature checks run for shared Rust, manifest/lock, build and daemon
+harness inputs. The selector excludes CLI source only when both committed
+layouts prove a binary-only package without declared workspace dependents;
+unknown layouts retain co-host checks. CLI tests remain outside co-host inputs.
+Unknown build/dependency changes keep the conservative scope.
+The required job prints its decision and refuses missing decisions. Real Git
+PR/push/queue events and actual Cargo builds prove a deliberately broken CLI
+does not enter the co-host build, while shared runtime changes rebuild it.
+Actual repository metadata requires a binary-only CLI without workspace
+dependents. This removes co-host execution on CLI-only revisions; CLI changes
+are still exercised against real daemons. Scope guards add no journey coverage.
+
+The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
+outputs. An independent main-push publisher saves only a missing exact key;
+queue jobs only restore. The key binds the lockfile revision, compiler, runner
+image, build recipe, canonical path and explicit codegen settings. Source bytes
+are checked against the pinned Git tree before use, including same-mtime edits
+and unexpected files. Every invocation still asks Cargo to build normally and
+runs the original search authorization/restart case against the current
+checkout's co-host, outside this cache. The fixed driver and plugin retain their
+original optimization profiles. Cache hits never substitute a previous test
+result. The required command prints builds and stores timings and failure logs.
+The main publisher alone performs explicit prewarming. Consumers invoke normal
+`cargo test`, which compiles its driver and runs the original case's plugin build.
+The required job refuses a redundant pre-test build directory; this avoids extra
+switches between the plugin's semantic and default-off dependency variants.
+Outer builds use the cluster package metadata that Cargo supplies to the test's
+nested plugin build. This prevents native dependencies such as ring from
+rebuilding solely because inherited Cargo package variables flip between unset
+and test values. Each build script still receives its own package metadata;
+compiler flags and optimization profiles remain unchanged.
+Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runtime
+refusal; they add no product journey credit. The actual cache footprint and
+cold/warm product timings must be measured before claiming a lifecycle saving.
+
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
 while its profiles run; a second invocation prints the holder from
@@ -211,6 +249,19 @@ Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
 fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
+
+On macOS, rendering/browser profiles and the release startup measurement require
+external AC power with low-power mode disabled. One shared native probe reads
+the power source and Foundation's active low-power mode before and after the
+timing window and once per second while it runs. Unknown settings, a detected
+power change or a failed probe refuse
+the profile, preserving `host-power.json` and any original command failure.
+Shorter changes between observations may escape this periodic check; the probe
+does not prove a fixed CPU clock or thermal state. It never changes system
+settings, budgets, sample counts or automatic retry policy. Functional-only
+profiles and Linux/Windows keep their existing execution. These environmental
+observations are supplementary diagnostics; completed signed profiles still
+require their actual commands and current protected recipe.
 
 Rendering A/A and A/B, painted browser performance and viewport resource checks
 run automatically in local Docker when CLI, engine-core, shared PTY helpers,
@@ -578,6 +629,15 @@ Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
 records the actual compiler priorities. It runs once on a PR only when the lint
 workflow, fixture or scope selector changes; queue/main reuse its result.
+In the queue, independent failure-only callers stop unfinished jobs in the same
+Rust CI run after either Clippy or real daemon acceptance fails. Each caller
+waits only for its own failing dependency. The shared cancellation job has the
+Actions write permission and runs no checkout or candidate executable. Successful
+runs allocate no cancellation runner. The original failed step remains visible;
+the command prints how to inspect it and rerun failed work after repair. A live
+GitHub fixture exercises both failure directions and the uncancelled success
+path on a disposable branch. These are CI execution checks and add no product
+journey coverage.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions remain available through explicit acceptance;

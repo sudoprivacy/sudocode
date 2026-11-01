@@ -55,7 +55,7 @@ def scope_acceptance(directory):
     command("git", "commit", "-m", "base", cwd=repository)
 
     def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False,
-                     gzip_codec=False):
+                     gzip_codec=False, cohost=None):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -66,6 +66,7 @@ def scope_acceptance(directory):
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert f"live_required={str(live).lower()}" in output.read_text()
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+        assert f"cohost_required={str(daemon if cohost is None else cohost).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
         assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
         assert f"container_required={str(container).lower()}" in output.read_text()
@@ -91,6 +92,8 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/Cargo.toml", True, True, True),
+             ("rust/crates/rusty-sudocode-cli/src/repl_ui/tasks.rs", True, True, True),
+             ("rust/crates/rusty-sudocode-cli/build.rs", True, True, True),
              ("rust/crates/pty-harness/src/lib.rs", True, True, True),
              ("e2e/shared-services/check.py", False, True, False),
              (".github/local-acceptance/checks.py", False, False, False),
@@ -133,7 +136,8 @@ def scope_acceptance(directory):
                 ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
-                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"})
+                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"},
+                cohost=False if path == "rust/crates/rusty-sudocode-cli/src/repl_ui/tasks.rs" else None)
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -143,6 +147,7 @@ def scope_acceptance(directory):
     expect_native_targets(base, None)
     expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True)
     expect_scope("workflow_dispatch", {}, True, True, True)
+    expect_scope("push", {"before": "0" * 40, "after": head}, True, True, True)
     base = head
     for name in ["pty_first", "pty_second"]:
         (repository / f"rust/crates/rusty-sudocode-cli/tests/{name}.rs").write_text("new fixture input\n")

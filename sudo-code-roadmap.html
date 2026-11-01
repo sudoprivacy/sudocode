@@ -759,6 +759,22 @@ script remains available for diagnosis and earns no additional coverage credit.<
       <td><code>native-cohost</code> / <code>release-nexusd-cohost.yml</code></td>
     </tr>
     <tr>
+      <td>Queue daemon and co-host scope</td>
+      <td>CLI source retains pinned-daemon, cross-node CLI and authenticated
+      sender journeys. Co-host duet, VFS search owner/restart and driver feature
+      checks run for shared Rust, build/dependency and daemon harness inputs.
+      CLI <code>src/</code> and <code>tests/</code> are excluded from co-host
+      inputs; unknown manifest/build changes retain the conservative scope.
+      Required output explains the choice and refuses missing decisions.
+      Real Git events and Cargo processes verify CLI/co-host independence and
+      shared-runtime rebuilds; actual package metadata guards that boundary.</td>
+      <td>Existing CLI PTYs retain their current credit. Infrastructure scope
+      checks add no product journey coverage. Co-host runs are omitted on
+      CLI-only revisions.</td>
+      <td><code>rust-ci.yml</code> / <code>ci_input_scope.py</code> /
+      <code>dependency_scope_acceptance.py</code></td>
+    </tr>
+    <tr>
       <td>Mock parity harness</td>
       <td>Fast, in-process. Scripts a mock Anthropic backend and
       asserts on the byte stream <code>scode</code> produces. Catches

@@ -14,6 +14,74 @@ SOURCE = Path(__file__).resolve().parents[2]
 PRODUCT = {"native-release", "native-services", "native-cohost"}
 
 
+def workflow_scope(output, environment):
+    """Execute the actual workflow guards and bind their conditional steps."""
+    output.mkdir()
+    workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+
+    def step(name):
+        matches = [index for index, line in enumerate(lines) if line == "      - name: " + name]
+        assert len(matches) == 1, name
+        start = matches[0]
+        end = start + 1
+        while end < len(lines) and (not lines[end].strip() or
+                                   (lines[end].startswith("      ") and not lines[end].startswith("      - "))):
+            end += 1
+        return lines[start:end]
+
+    condition = "        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'"
+    for name in ["Co-host duet against a daemon built from this checkout", "Checkout the VFS contract used by the co-host",
+                 "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
+        assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
+    assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
+    for name in ["A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
+                 "Auth-on A2A — the node decides who a message is from"]:
+        assert not any(line.startswith("        if:") for line in step(name)), name
+
+    def script(name):
+        block = step(name)
+        start = block.index("        run: |") + 1
+        body = []
+        for line in block[start:]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            assert line.startswith("          "), (name, line)
+            body.append(line[10:])
+        return "set -eu\n" + "\n".join(body) + "\n"
+
+    scripts = {"explain": script("Explain selected daemon acceptance"),
+               "required": script("Require native daemon acceptance and zero workspace warnings")}
+    for name, source in scripts.items():
+        (output / f"{name}.sh").write_text(source, encoding="utf-8")
+    cases = [
+        ("explain", "true", "true", "success", True),
+        ("explain", "false", "true", "success", True),
+        ("explain", "", "true", "success", False),
+        ("required", "true", "true", "success", True),
+        ("required", "false", "true", "success", True),
+        ("required", "false", "false", "skipped", True),
+        ("required", "true", "false", "skipped", False),
+        ("required", "", "true", "success", False),
+        ("required", "false", "true", "skipped", False),
+        ("required", "true", "true", "failure", False),
+    ]
+    records = []
+    for index, (name, cohost, daemon, actual, succeeds) in enumerate(cases):
+        values = {"COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
+                  "PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped"}
+        result = subprocess.run(["bash", "-c", scripts[name]], env={**environment, **values},
+                                capture_output=True, text=True, encoding="utf-8")
+        log = output / f"{index:02}.log"
+        log.write_text(result.stdout + result.stderr, encoding="utf-8")
+        assert (result.returncode == 0) == succeeds, (values, result.stdout, result.stderr)
+        records.append({"script": name, "values": values, "exit_code": result.returncode,
+                        "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
+    (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
+    return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
+            "CLI_daemon_journeys_unconditional_inside_required_job": True}
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     repository = output / "repository"
@@ -52,6 +120,16 @@ def run(output):
     command("git", "config", "user.name", "Dependency scope acceptance")
     command("git", "config", "user.email", "scope@example.invalid")
     command("git", "config", "core.autocrlf", "false")
+    actual_metadata = json.loads(command("cargo", "metadata", "--no-deps", "--locked", "--format-version=1",
+                                         "--manifest-path", SOURCE / "rust/Cargo.toml"))
+    actual_cli = next(package for package in actual_metadata["packages"] if package["name"] == "rusty-sudocode-cli")
+    assert not any(set(target["kind"]) & {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+                   for target in actual_cli["targets"]), "The CLI gained a shared library; revisit co-host scope"
+    cli_directory = Path(actual_cli["manifest_path"]).parent.resolve()
+    assert not any(dependency["name"] == "rusty-sudocode-cli"
+                   or (dependency.get("path") and Path(dependency["path"]).resolve() == cli_directory)
+                   for package in actual_metadata["packages"] if package["id"] != actual_cli["id"]
+                   for dependency in package["dependencies"]), "A workspace package now depends on the CLI"
     configuration = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
                                    cwd=SOURCE, env=environment, capture_output=True, text=True).stdout.strip()
     if configuration:
@@ -73,6 +151,9 @@ def run(output):
     write("rust/crates/helper/Cargo.toml", '[package]\nname="scope-helper"\nversion="0.1.0"\nedition="2021"\n'
           '[dependencies]\nruntime={path="../runtime",features=["test-helper"]}\n')
     write("rust/crates/helper/src/lib.rs", 'pub fn value() -> u8 { runtime::value() }\n')
+    write("rust/crates/cohost/Cargo.toml", '[package]\nname="scope-cohost"\nversion="0.1.0"\nedition="2021"\n'
+          '[dependencies]\nruntime={path="../runtime"}\n')
+    write("rust/crates/cohost/src/main.rs", 'fn main() { println!("cohost-{}", runtime::value()); }\n')
     command("cargo", "generate-lockfile", "--offline", "--manifest-path", "rust/Cargo.toml")
     base = commit("Baseline native product and unused development helper")
     helper = SOURCE / ".github/scripts/local_acceptance.py"
@@ -96,6 +177,15 @@ def run(output):
         return hashlib.sha256(binary.read_bytes()).hexdigest()
 
     original_binary = product()
+
+    def cohost(value=42):
+        cargo("build", "--locked", "--offline", "-p", "scope-cohost")
+        binary = target / "debug" / ("scope-cohost.exe" if os.name == "nt" else "scope-cohost")
+        assert command(binary) == f"cohost-{value}"
+        return hashlib.sha256(binary.read_bytes()).hexdigest()
+
+    original_cohost = cohost()
+    workflow = workflow_scope(output / "workflow-scope", environment)
     development = application + '[dev-dependencies]\nscope-helper={path="../helper"}\n'
     write("rust/crates/rusty-sudocode-cli/Cargo.toml", development)
     write("rust/crates/rusty-sudocode-cli/tests/development.rs", '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); }\n')
@@ -115,7 +205,8 @@ def run(output):
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 
-    def ci_scope(diff_base, daemon, benchmark=False):
+    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None):
+        cohost_required = daemon if cohost_required is None else cohost_required
         head = command("git", "rev-parse", "HEAD")
         keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
         previous = {key: environment.get(key) for key in keys}
@@ -133,10 +224,13 @@ def run(output):
                                    GITHUB_OUTPUT=str(result_path))
                 result = json.loads(command(sys.executable, repository / ".github/scripts/ci_input_scope.py"))
                 assert result["daemon_required"] == str(daemon).lower(), result
+                assert result["cohost_required"] == str(cohost_required).lower(), result
+                emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
+                assert emitted["cohost_required"] == result["cohost_required"], emitted
                 assert result["clippy_required"] == "true", result
                 assert result["live_required"] == "true", result
                 assert result["benchmark_required"] == str(benchmark).lower(), result
-                print(f"PASS: actual {event} selector daemon={daemon}; native lint/provider coverage retained", flush=True)
+                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}; native lint/provider coverage retained", flush=True)
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -150,6 +244,30 @@ def run(output):
     cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
     assert product() == original_binary
     positive_lock = (repository / "rust/Cargo.lock").read_text()
+
+    # The actual Cargo build must not import a broken, independent CLI source.
+    write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n')
+    commit("CLI source keeps daemon journeys without rebuilding the independent co-host")
+    expect("CLI source retains normal CLI checks and skips the unchanged co-host", base,
+           {"native-release", "native-services"})
+    ci_scope(base, True, cohost_required=False)
+    assert cohost() == original_cohost
+    refused_log = output / "independent-cli-refusal.log"
+    try:
+        executor.run_command(["cargo", "build", "--locked", "--offline", "-p", "rusty-sudocode-cli"],
+                             repository / "rust", refused_log, build_environment)
+    except RuntimeError:
+        refused_cli = json.loads(refused_log.with_suffix(".command.json").read_text())
+        commands.append(refused_cli)
+        assert refused_cli["exit_code"] != 0 and "unused-CLI-control" in refused_log.read_text()
+    else:
+        raise AssertionError("The deliberately broken CLI unexpectedly compiled")
+    write("rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n')
+    commit("A mixed CLI and shared runtime change retains co-host acceptance")
+    expect("shared runtime source still selects the co-host with CLI source", base, PRODUCT)
+    ci_scope(base, True)
+    assert cohost(43) != original_cohost
+    command("git", "switch", "--detach", changed)
 
     variants = [
         ("normal dependency features", "rust/crates/rusty-sudocode-cli/Cargo.toml",
@@ -168,6 +286,8 @@ def run(output):
         ("ambiguous additional lock version", "rust/Cargo.lock", positive_lock + '\n[[package]]\nname="runtime"\nversion="0.2.0"\n', PRODUCT),
         ("lock format changed", "rust/Cargo.lock", positive_lock.replace('version = 4', 'version = 3'), PRODUCT),
         ("source stays a normal product input", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT),
+        ("CLI build script keeps conservative co-host scope", "rust/crates/rusty-sudocode-cli/build.rs",
+         'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-release", "native-services"}),
         ("release assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-release"}),
         ("service assertion stays required", "e2e/shared-services/scope.py", '# actual changed service fixture\n', {"native-services"}),
         ("target-specific development alias", "rust/crates/rusty-sudocode-cli/Cargo.toml",
@@ -183,7 +303,8 @@ def run(output):
             assert text != positive_lock, label
         commit("Scope boundary " + str(index))
         expect(label, base, expected)
-        if label == "source stays a normal product input":
+        if label in {"source stays a normal product input", "CLI build script keeps conservative co-host scope",
+                     "normal dependency features", "build dependency", "normal lock package changed"}:
             ci_scope(base, True)
         elif label == "standalone benchmark driver metadata":
             ci_scope(base, True, benchmark=True)
@@ -315,6 +436,10 @@ def run(output):
               "newly_required_profile_refused": True,
               "required_normal_failure_still_fails": True,
               "actual_pr_push_queue_selectors_keep_lint_and_provider_scope": True,
+              "actual_cli_package_is_binary_only_and_has_no_workspace_dependents": True,
+              "broken_independent_cli_does_not_build_into_cohost": True,
+              "shared_runtime_source_rebuilds_actual_cohost": True,
+              "workflow_scope": workflow,
               "compiler_priority": expected_priority,
               "scope": "Actual Git/public planner and Cargo/native canaries. No product runtime, provider or performance coverage claimed."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")

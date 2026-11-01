@@ -20,7 +20,7 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
-        paths, live, daemon, clippy = [], True, True, True
+        paths, live, daemon, cohost, clippy = [], True, True, True, True
     else:
         if name == "push":
             base, head = event["before"], event["after"]
@@ -33,7 +33,7 @@ def main():
         if not all(re.fullmatch(r"[a-f0-9]{40}", ref) for ref in [base, head]):
             raise RuntimeError("Invalid CI commit identity")
         if base == "0" * 40:
-            paths, live, daemon, clippy = [], True, True, True
+            paths, live, daemon, cohost, clippy = [], True, True, True, True
         else:
             for ref in [base, head]:
                 if subprocess.run(["git", "cat-file", "-e", ref + "^{commit}"], capture_output=True).returncode:
@@ -63,6 +63,14 @@ def main():
                          for path in normal_inputs
                          if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
                          for rule in daemon_inputs)
+            # The CLI package has only a binary; the co-host and VFS search
+            # fixture do not import its source. Keep the actual CLI daemon
+            # journeys above, and retain all shared/build/harness inputs here.
+            cohost = any(fnmatch.fnmatchcase(path, rule)
+                         for path in normal_inputs
+                         if not path.startswith(("rust/crates/rusty-sudocode-cli/src/",
+                                                 "rust/crates/rusty-sudocode-cli/tests/"))
+                         for rule in daemon_inputs)
     executor_inputs = {".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile",
                        ".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
                        ".github/workflows/rust-ci.yml"}
@@ -78,6 +86,7 @@ def main():
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}
                      for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
+              "cohost_required": str(cohost).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
               "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower(),
               "gzip_codec_required": str(gzip_codec).lower()}

@@ -318,8 +318,9 @@ command names, model aliases, permission modes, and recent session IDs.
 
 The live status follows the foreground engine lifecycle. A four-cell amber
 animation approximates the rotating Sudoprivacy logo in one row, using twelve
-precomputed frames. Model work shows `Thinking...` or `Reasoning...`.
-The activity label uses the theme's info/warning color; model, elapsed time and
+precomputed frames. Model work shows `Working...` or `Thinking...`.
+The activity label uses the terminal foreground, with the theme's warning color
+for retries or stalled output; model, elapsed time and
 tokens use its muted color so they remain secondary to the activity.
 Elapsed time and ETA refresh in whole seconds; tokens and the brand animation
 remain live. Final turn statistics retain their precise duration.
@@ -328,7 +329,8 @@ tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
-footer return. Background work keeps its separate task summary in the footer.
+footer return. Remaining background work uses the same status row as described
+under [Background tasks](#background-tasks-in-the-repl).
 
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
@@ -695,6 +697,15 @@ share a compact entry on the existing footer row. Explicit background launches
 and agents automatically moved to the background use the same view. It shows
 running terminal/agent counts and unread completion results. When neither
 exists, the entry is hidden; no additional permanent row is reserved.
+
+After the foreground turn finishes, the status row shows outstanding work, for
+example `1 task still running · turn 549 finished`. Running or stopping tasks
+use the amber activity accent and the same logo at a slower 400 ms cadence;
+the completed-turn suffix uses the muted theme color and stays fixed. Unconfirmed
+or failed tasks take priority with static warning/error text. Foreground work
+and input questions retain priority. Animation stops when the row is hidden or
+no work remains. The status and footer consume the same task-event projection;
+the animation does not indicate new task output or advance elapsed counters.
 
 The task summary normally shows just the counts. With an empty prompt, press
 **↓** to focus it; **Enter to view** then appears. Press **Enter** to open the task list.

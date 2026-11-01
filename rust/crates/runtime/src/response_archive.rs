@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
 use telemetry::{ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder};
 
 use crate::fs_backend::FsLock;
 use crate::json::JsonValue;
 use crate::{ConfigError, FsBackend, Session};
+
+mod gzip;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseRecordingConfig {
@@ -233,7 +234,7 @@ impl ResponseArchive for SessionResponseArchive {
             limit: self.config.max_session_bytes,
         };
         let recording = SessionResponseRecorder {
-            encoder: Some(GzEncoder::new(output, Compression::fast())),
+            encoder: Some(gzip::Encoder::new(output)?),
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
             metadata_path,
@@ -284,7 +285,7 @@ impl Write for ArchiveWriter {
 }
 
 struct SessionResponseRecorder {
-    encoder: Option<GzEncoder<ArchiveWriter>>,
+    encoder: Option<gzip::Encoder>,
     fs: Arc<dyn FsBackend>,
     writer: Arc<ResponseArchiveWriter>,
     metadata_path: PathBuf,
@@ -359,7 +360,7 @@ impl ResponseRecorder for SessionResponseRecorder {
             .encoder
             .take()
             .is_some_and(|encoder| match encoder.finish() {
-                Ok(_) => true,
+                Ok(()) => true,
                 Err(error) => {
                     self.error = Some(error.to_string());
                     false

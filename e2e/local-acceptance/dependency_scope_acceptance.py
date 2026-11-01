@@ -109,14 +109,16 @@ def run(output):
         names = set(plan["local_checks"])
         assert names & PRODUCT == set(expected), (label, text)
         assert "native-workspace" in names, (label, text)
-        # Dependency metadata no longer selects a per-PR performance run.
-        assert not {"rendering", "browser"} & names, (label, text)
+        # Dependency metadata selects no per-PR performance run; the benchmark
+        # driver package builds the browser smoke's drivers.
+        smoke = {"browser"} if label == "standalone benchmark driver metadata" else set()
+        assert {"rendering", "browser"} & names == smoke, (label, text)
         cases.append({"label": label, "base": diff_base, "head": command("git", "rev-parse", "HEAD"),
                       "product_checks": sorted(names & PRODUCT), "native_tests_retained": True})
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 
-    def ci_scope(diff_base, daemon):
+    def ci_scope(diff_base, daemon, benchmark=False):
         head = command("git", "rev-parse", "HEAD")
         keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
         previous = {key: environment.get(key) for key in keys}
@@ -136,6 +138,7 @@ def run(output):
                 assert result["daemon_required"] == str(daemon).lower(), result
                 assert result["clippy_required"] == "true", result
                 assert result["live_required"] == "true", result
+                assert result["benchmark_required"] == str(benchmark).lower(), result
                 print(f"PASS: actual {event} selector daemon={daemon}; native lint/provider coverage retained", flush=True)
         finally:
             for key, value in previous.items():
@@ -172,6 +175,9 @@ def run(output):
         ("service assertion stays required", "e2e/shared-services/scope.py", '# actual changed service fixture\n', {"native-services"}),
         ("target-specific development alias", "rust/crates/rusty-sudocode-cli/Cargo.toml",
          application + '[target.\'cfg(windows)\'.dev-dependencies]\nalias={package="scope-helper",path="../helper"}\n', []),
+        ("standalone benchmark driver metadata", "rust/crates/scode-benchmark-drivers/Cargo.toml",
+         # This test package is outside the policy's explicit co-host inputs.
+         '[package]\nname="scode-benchmark-drivers"\nversion="0.1.0"\nedition="2021"\n', {"native-release", "native-services"}),
     ]
     for index, (label, path, text, expected) in enumerate(variants):
         command("git", "switch", "--detach", changed)
@@ -182,6 +188,8 @@ def run(output):
         expect(label, base, expected)
         if label == "source stays a normal product input":
             ci_scope(base, True)
+        elif label == "standalone benchmark driver metadata":
+            ci_scope(base, True, benchmark=True)
     command("git", "switch", "--detach", changed)
     command("git", "mv", "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/renamed.rs")
     commit("Keep both sides of a renamed source")

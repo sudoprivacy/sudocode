@@ -458,7 +458,7 @@ jobs:
         run: python3 .github/scripts/ci_input_scope.py
 
       - name: Install focused executor observer dependencies
-        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true')
+        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true')
         run: python3 -m pip install psutil
       - name: Exercise acceptance executors with real Cargo, Git and Docker
         # Only changed executor/fixture inputs, once on the PR. Queue/main
@@ -477,6 +477,16 @@ jobs:
         run: |
           rustup component add clippy
           python3 e2e/local-acceptance/clippy_fail_fast.py --output "$RUNNER_TEMP/clippy-fail-fast"
+      - name: Verify response gzip bytes, concurrent files and quota failures
+        if: github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
+        run: python3 e2e/response-gzip/run.py --output "$RUNNER_TEMP/response-gzip"
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
+        with:
+          name: response-gzip-files
+          path: ${{ runner.temp }}/response-gzip
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always() && contains(fromJSON('["success","failure"]'), steps.clippy_executor.outcome)
         with:

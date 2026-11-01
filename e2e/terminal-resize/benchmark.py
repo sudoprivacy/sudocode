@@ -20,6 +20,18 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def comparison_rounds(policy, case):
+    """Keep paired sampling explicit, including the full short RSS sentinel."""
+    overrides = policy.get("case_rounds", {})
+    assert isinstance(overrides, dict), "round overrides must be an object"
+    assert set(overrides) <= policy["cases"].keys(), "round overrides name an unknown case"
+    rounds = overrides.get(case, policy["rounds"])
+    assert set(rounds) == {"calibration", "comparison"}, "missing/extra paired stages"
+    minimum = {"calibration": 5, "comparison": 7} if case in {"short", "repeated"} else {"calibration": 3, "comparison": 3}
+    assert all(type(rounds[key]) is int and rounds[key] >= minimum[key] for key in minimum), "insufficient paired rounds"
+    return rounds
+
+
 def expected_metrics(spec):
     assert spec["kind"] in ["prose", "markdown", "background", "foreground"], "unsupported workload kind"
     metrics = {"idle_cpu_ms", "cpu_ms", "rss_peak_mib", "rss_after_mib",
@@ -126,11 +138,12 @@ def main():
     args = parser.parse_args()
     policy = json.loads(args.policy.read_text())
     assert policy["version"] == 1
-    assert policy["rounds"]["calibration"] >= 5 and policy["rounds"]["comparison"] >= 7
     assert policy["sampling"]["input"] == 60 and policy["sampling"]["resize"] >= 40
     assert policy["sampling"]["resize"] % 2 == 0 and policy["sampling"]["cancel"] >= 20
     cases = policy["profiles"][args.profile]
     assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
+    rounds_by_case = {case: comparison_rounds(policy, case) for case in cases}
+    print("Rendering paired rounds (plus two warm-ups per case): " + json.dumps(rounds_by_case), flush=True)
     for case in cases:
         assert expected_metrics(policy["cases"][case]) <= policy["metrics"].keys()
         judged_metrics(policy["cases"][case])
@@ -182,13 +195,15 @@ def main():
         for case in cases:
             sample(args.base, case, "warm", 0, "base")
             sample(args.candidate, case, "warm", 0, "candidate")
-        for stage, rounds, collection in [
-            ("aa", policy["rounds"]["calibration"], controls),
-            ("ab", policy["rounds"]["comparison"], comparisons),
+        for stage, key, collection in [
+            ("aa", "calibration", controls),
+            ("ab", "comparison", comparisons),
         ]:
-            for number in range(rounds):
+            for number in range(max(rounds[key] for rounds in rounds_by_case.values())):
                 # Reverse both binary and scenario order to reduce thermal/time drift.
                 for case in cases if number % 2 == 0 else list(reversed(cases)):
+                    if number >= rounds_by_case[case][key]:
+                        continue
                     pair = {}
                     for side in ["base", "candidate"] if number % 2 == 0 else ["candidate", "base"]:
                         binary = args.base if stage == "aa" or side == "base" else args.candidate

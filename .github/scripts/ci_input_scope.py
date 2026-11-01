@@ -67,14 +67,20 @@ def main():
                        ".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
                        ".github/workflows/rust-ci.yml"}
     benchmark = any(path in executor_inputs | {"e2e/local-acceptance/benchmark_targets_acceptance.py"}
+                    or path.startswith("rust/crates/scode-benchmark-drivers/")
                     for path in paths)
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
     clippy_executor = any(path in {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py",
                                   "e2e/local-acceptance/clippy_fail_fast.py"} for path in paths)
+    gzip_codec = any(path.startswith("e2e/response-gzip/")
+                     or path in executor_inputs | {"rust/crates/runtime/src/response_archive.rs",
+                                                   "rust/crates/runtime/src/response_archive/gzip.rs"}
+                     for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
-              "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower()}
+              "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower(),
+              "gzip_codec_required": str(gzip_codec).lower()}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")

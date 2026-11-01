@@ -218,9 +218,11 @@ and cancel on prose, paste and resize on a short reply, and CPU and peak memory 
 a 12 KB Markdown stream. It drives the actual release binary through a headless
 terminal, which isolates scode's own cost, and compares it with the fixed baseline
 in `e2e/terminal-resize/performance-policy.json`. Each scenario names the metrics
-it is judged on; the driver records them all. Each scenario keeps two warm-ups,
-five A/A pairs and seven alternating A/B pairs, and a failed, noisy or invalid
-scenario stops the matrix. The matrix runs once a day on main
+it is judged on; the driver records them all. Each scenario keeps two warm-ups;
+the short reply keeps five A/A and seven alternating A/B pairs, the check that
+caught a real RSS regression, and the others use three and three. A failed, noisy
+or invalid scenario stops the matrix. Drivers build in the binary-free
+`scode-benchmark-drivers` package, so measuring compiles no extra CLI binary. The matrix runs once a day on main
 (`.github/workflows/rendering-main.yml`), so a regression surfaces within a day
 and is bisected between nightly heads. Run it on demand with
 `python .github/local-acceptance/checks.py --native-checks rendering --base origin/main --output DIR`.
@@ -284,6 +286,10 @@ replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
 Cargo; no provider coverage is inferred from deterministic fixture results.
+Lint now denies warnings before long native builds and PTY execution. Selected
+CLI-only changes lint those targets; a full workspace change lints all targets
+with the native mailbox feature graph. The queue additionally checks all features.
+This moves ordinary source/test lint failures earlier without another full test run.
 The full native workspace opts into eight declarative integration wrappers for
 128 CLI targets, selecting 91 instead of 211 integration targets. The selector
 contract was qualified before this Rust activation so installed verifiers agree
@@ -561,6 +567,15 @@ authorized temporary admin route was specific to that migration; it is not a
 general approval route for later contract changes.
 
 Rust caches keep the existing 10 GB quota and three shared main publishers.
+The publisher and complementary native jobs derive their cache paths from
+`.github/local-acceptance/cache_layout.py`. Sources stay in `candidate/rust`,
+while native Cargo outputs use the publisher's `rust/target` path. Identical keys
+with different paths have different cache versions and cannot share an entry.
+`CARGO_TARGET_DIR` is bound after restore so it does not change the publisher's
+environment hash. Required output prints `CI_CACHE_LAYOUT` and `CI_CACHE_BINDING`.
+Real Cargo/native-process acceptance checks both layouts, dependency reuse,
+fresh candidate execution and refusal of a conflicting target. It adds no product
+journey coverage; real hosted restores establish remote cache hits and timings.
 Queue maintenance retains current runs and cancels obsolete merge groups only
 when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

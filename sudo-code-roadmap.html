@@ -249,8 +249,11 @@ during streaming, viewport interaction and an idle terminal, selected by CLI
 and browser-harness inputs. This deliberately moves performance regressions
 from pre-merge to the next daily run on main, where they are bisected between
 nightly heads, and retires painted-browser latency, Chromium resource budgets
-and the viewport cost benchmarks. These measurement drivers back no Feature
-inventory row, so the coverage denominator is unchanged.</p>
+and the viewport cost benchmarks, superseding the browser and viewport rounds
+and six-scenario matrix of "Reduce repeated measurements (2026-10-31)"; its
+per-scenario rounds remain.
+These measurement drivers back no Feature inventory row, so the coverage
+denominator is unchanged.</p>
 
 <p>A managed Git pre-push hook selects checks from changed inputs and blocks a
 push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
@@ -316,9 +319,8 @@ passed. Previous failed records remain failed; raw output is not promoted into
 signed acceptance.
 Both Docker recipes require new evidence; native recipes stay unchanged.</p>
 <p><strong>Stop a failed rendering matrix after its first complete scenario
-(2026-10-31).</strong> Each scenario retains two warm-ups, five A/A pairs, seven
-alternating A/B pairs and all interaction counts and budgets. The successful
-six-scenario matrix still runs 156 samples. A failed, noisy or invalid scenario
+(2026-10-31).</strong> Each scenario retains two warm-ups, all per-run
+interaction counts and budgets. A failed, noisy or invalid scenario
 stops later scenarios, preserving their unrun status and releasing the shared
 lease. Warm-ups and measurements now group by scenario; this changes scheduling,
 and future noise still needs observation. The required interface prints the active
@@ -330,7 +332,50 @@ one complete real failed run preserved its verdict and metric rows: the first
 scenario accounted for 360.46 of 1,989.19 recorded driver seconds. That projects
 81.9% less sample work before this failure; it is not a measured new production
 latency result and excludes compilation and lease waiting. Passing-run cost is
-not reduced by this change.</p>
+not reduced by that scheduling change.</p>
+<p><strong>Shared native cache paths and earlier lint (2026-10-31).</strong>
+The cache publisher and native consumers derive paths from one helper. Native
+sources remain in <code>candidate/rust</code>; compiled outputs use the publisher's
+<code>rust/target</code> path. Previously, Linux and macOS requested an existing
+main key but reported no cache because their path-derived cache versions differed.
+Cargo's target is bound after restore to preserve the publisher's environment
+hash. Required output prints the source and target. Real Cargo/native-process
+acceptance checks dependency reuse, candidate execution and conflicting-target
+refusal; hosted CI establishes actual remote restores and timings. These are
+executor checks, with no product journey credit. Lint now denies warnings before
+long builds/tests. Full workspace changes lint all targets with the native mailbox
+feature graph; targeted changes lint their targets. The queue additionally checks
+all features.</p>
+<p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
+scenarios remain. Short retains five A/A and seven alternating A/B pairs,
+preserving the full check that caught a real RSS regression. Long, cap, markdown,
+foreground and background use three A/A and three A/B pairs. With two warm-ups
+per scenario this is 96 native samples instead of 156. Browser comparison uses
+three A/A and three A/B pairs plus two warm-ups: 14 instead of 26 runs. Per-run
+interaction counts, workloads, budgets and the relative evaluator stay unchanged.
+Headless and painted viewport comparisons also inherit 3/3 rounds: each runs 14
+instead of 26 samples. The separate 60-sample painted interaction check remains.
+The repeated-turn stress scenario retains five A/A and seven A/B pairs.
+Across these repeated comparisons this removes 96 of 234 runs (41.0%);
+it does not imply a 41% reduction in total CI or local elapsed time.
+<strong>Coverage reduction:</strong> fewer repetitions reduce precision and the
+chance of exposing intermittent regressions or environmental noise. A preserved
+actual viewport A/A calibration refuses CPU noise with five pairs but not its
+first three; the original record remains noisy. Equivalent statistical sensitivity
+is not established. Required output prints pair counts; both changed recipes
+need fresh execution. Real native infrastructure canaries verify counts,
+alternating sides, regression refusals and minimum-round refusals without claiming
+product performance coverage. Actual production latency savings remain unmeasured.</p>
+<p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
+Performance drivers use a binary-free Cargo package that references the same CLI
+test sources and launches the copied normal release through
+<code>SCODE_TEST_BIN</code>. Distinct opt-in target names avoid duplicating cases
+in normal workspace acceptance. Real Cargo/native-process fixtures inspect
+artifacts, keep an unused trusted CLI deliberately uncompilable, verify normal/dev
+feature separation and execute every observer stage. Older author snapshots use
+their original targets; a present but broken new package is refused. These
+infrastructure checks add no product journey coverage. Sampling, assertions,
+baselines and budgets remain unchanged; end-to-end savings need measurement.</p>
 <p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
 Source-only changes in API, runtime, tools, ACP and services no longer select
 these two Docker profiles. Their selected native functional checks, including
@@ -685,9 +730,25 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Grouping fixtures use small native programs.</td>
+      identity. Grouping fixtures use small native programs. Benchmark builder
+      fixtures also inspect real Cargo artifacts, reject broken standalone driver
+      packages and exercise original targets for older candidates; no unused
+      CLI binary is built with standalone drivers. Actual Cargo metadata protects
+      unique opt-in targets and shared sources; real Git events require this
+      guard when the driver package changes.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
+    </tr>
+    <tr>
+      <td>SSE archive compressor reuse</td>
+      <td>Real PTY checks six distinct responses and earlier-file integrity.
+      A conditional PR check writes 42 real files, with six concurrent captures,
+      independently decodes them and compares exact gzip bytes and quota failure
+      prefixes. At most one finished compression state is retained, after
+      releasing its file, session budget and attachment lease.</td>
+      <td>PTY assertions cover archive persistence; native codec checks add no
+      provider or user journey coverage.</td>
+      <td><code>pty_model_stream_close</code> / <code>e2e/response-gzip/</code></td>
     </tr>
     <tr>
       <td>Compile-only examples</td>
@@ -708,7 +769,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     <tr>
       <td>Rendering matrix and browser smoke</td>
       <td>Daily paired matrix on main: typing latency, first output, cancel,
-      paste, resize, CPU and peak memory against the fixed baseline. Pre-merge
+      paste, resize, CPU and peak memory against the fixed baseline; short keeps
+      5/7 paired rounds and the other scenarios 3/3. Pre-merge
       painted-terminal smoke: clickable links, selection during streaming,
       viewport interaction and an idle terminal, when CLI or harness inputs change.</td>
       <td>No; their drivers back no Feature inventory row.</td>

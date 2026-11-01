@@ -74,6 +74,7 @@
     },
     "browser": {
       "include": [
+        "rust/crates/scode-benchmark-drivers/**",
         "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",

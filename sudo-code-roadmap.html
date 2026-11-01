@@ -374,6 +374,23 @@ measurement inputs, so those native suites and their complementary CI hosts are
 omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
 changes retain their applicable native checks. Real Git planner and PR/push/queue
 fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
+<p><strong>Remove unjudged full warm-up workloads (2026-11-01).</strong>
+Rendering now runs 60 judged observations and browser comparison runs 12. This
+removes eight rendering and two browser runs that did not enter A/A or A/B
+statistics. The retained field spent 151.84 driver seconds on those ten runs;
+this is a recorded component cost, not a measured new lifecycle saving. Every
+sample starts fresh driver/Node/SUT and browser processes, so JIT state does not
+carry between samples. All judged pair counts, interactions, metrics and budgets
+remain. Colder file caches may affect the first calibration pair; unchanged A/A
+noise checks still refuse inconclusive fields. Exact stage/round/side inventories
+reject missing, extra and duplicate/mispaired observations. Headless and painted
+viewport comparisons retain 14 runs each, for 100 total instead of 110; all 96
+judged observations remain. Rendering needs fresh evidence. An exact protected
+pair preserves browser execution for an unchanged candidate head through the
+shared helper edit; candidate-owned browser code and the relative evaluator keep
+their existing ownership. Native recipes remain unchanged. Real Cargo/native
+regression retains all 144 judged calls of the former six-scenario control and
+its RSS refusal. Original historical reports remain preserved.</p>
 <p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
 Performance drivers use a binary-free Cargo package that references the same CLI
 test sources and launches the copied normal release through
@@ -816,14 +833,16 @@ script remains available for diagnosis and earns no additional coverage credit.<
     </tr>
     <tr>
       <td>Paired rendering/browser/viewport measurements</td>
-      <td>Four rendering scenarios run 68 samples. A 12 KiB Markdown stream
+      <td>Four rendering scenarios run 60 judged observations. A 12 KiB Markdown stream
       replaces separate long prose, boundary prose and short Markdown cases,
       reducing independent size/content coverage. All remaining metrics are
-      judged. Browser, headless viewport
-      and painted viewport comparisons each run 14 samples; total 110 instead
+      judged. Browser comparison runs 12; headless viewport
+      and painted viewport comparisons each retain 14 samples; total 100 instead
       of 234. Short retains its full 5/7 paired rounds; the other comparisons
       use 3/3. Lower repeat coverage can miss intermittent regressions and
-      environmental noise. Budgets and per-run interactions stay intact;
+      environmental noise. Ten full unjudged warm-ups are removed; all 96 judged
+      observations from the preceding 110-run matrix remain. Colder file caches
+      may affect the first pair, with unchanged A/A noise refusal. Budgets and per-run interactions stay intact;
       the separate 60-sample painted interaction check remains. Edits limited to
       the two statistical entrypoints and their two policy JSON files retain
       these measurements and the native builder guard while omitting unrelated

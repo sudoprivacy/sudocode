@@ -887,7 +887,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
     policy_path = terminal / "performance-policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["profiles"]["core"]
-    if (plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    if (plan.get("unjudged_warmups") != 0
+            or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
         raise RuntimeError("Rendering policy changed after its pre-build validation")
     if not cases or len(cases) != len(set(cases)) or any(
@@ -898,7 +899,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
               "status": "running", "samples": [], "metrics": [], "calibration": [],
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
-              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"]}
+              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
+              "unjudged_warmups": 0}
     metadata = None
 
     def save():
@@ -914,7 +916,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
         report["active_case"] = case
         save()
         print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
-              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; two warm-ups. "
+              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; no unjudged warm-ups. "
               f"Complete paired result: {output / case / 'report.json'}. "
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
@@ -929,7 +931,12 @@ def rendering_cases(terminal, arguments, output, command, plan):
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
                     if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
-                        raise RuntimeError(f"Rendering scenario {case} returned an incomplete passing sample set")
+                        raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
+                                           f"required {plan['samples'][case]} judged observations and no extra warm-ups")
+                    if succeeded and child["status"] == "passed":
+                        observed = [{key: row[key] for key in ["stage", "round", "side"]} for row in child["samples"]]
+                        if observed != plan["pairs"][case]:
+                            raise RuntimeError(f"Rendering scenario {case} paired sample inventory differs from its declared rounds")
                     for key in ["base_sha256", "candidate_sha256", "driver_sha256", "harness_sha256"]:
                         if key in report and report[key] != child[key]:
                             raise RuntimeError(f"Rendering {key} changed between scenarios")

@@ -354,20 +354,27 @@ The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
 Rendering completes and judges one scenario at a time. Four scenarios keep
-two warm-ups, per-run interaction counts and every metric budget. The short scenario keeps
+their per-run interaction counts and every metric budget. The short scenario keeps
 five A/A and seven alternating A/B pairs, preserving the full check that caught
 a real RSS regression. The other scenarios use three A/A and three A/B pairs.
 A 12 KiB Markdown workload replaces the independent 8 KiB prose, 12 KiB prose
 and 2,300-byte Markdown workloads, adopting the consolidation proposed in #1196.
 Short prose, foreground tools and background tools remain separate. The required
-core matrix runs 68 native samples instead of 96. This reduces workload coverage:
+core matrix runs 60 judged observations; the previous 68 included eight extra
+unjudged warm-up workloads. The earlier consolidation reduced workload coverage:
 regressions specific to the removed plain-text sizes or short Markdown can escape
 the combined workload. No metric is filtered from the remaining cases.
 Browser comparison uses
-three A/A and three A/B pairs plus two warm-ups: 14 runs instead of 26.
+three A/A and three A/B pairs: 12 judged observations; its two extra full warm-ups
+are also removed in current candidate snapshots. Older candidate-owned browser
+runners can retain their legacy warm-ups with the same judged pairs. Each driver
+starts a fresh Node/SUT; browser observations also start a fresh browser, so
+process JIT state never carries between them. The same A/A checks
+still refuse noisy calibration; colder file caches may affect the first pair.
 Headless and painted viewport comparisons inherit the same 3/3 rounds: each also
-runs 14 instead of 26 samples. Repeated comparisons total 110 instead of the
-original 234 (53.0% fewer); the separate 60-sample painted interaction check remains.
+runs 14 instead of 26 samples, retaining their warm-ups. Repeated comparisons total
+100 instead of the original 234 (57.3% fewer). All 96 judged observations from the
+previous 110-run matrix remain; the separate 60-sample painted interaction check remains.
 Per-run parsed/painted interactions and budgets stay intact.
 This reduces repeat coverage and precision: intermittent regressions and
 environmental noise have fewer chances to appear. A preserved actual viewport
@@ -381,13 +388,14 @@ active scenario and evidence path. `measurements/report.json` combines the origi
 case reports, with original policy and binary/observer hashes, completed scenarios
 and remaining work. The actual benchmark CLI validates and describes the plan
 before npm or Cargo starts; the host checks its policy hash and complete sample
-count before accepting a passing report. Real Cargo/native-process acceptance exercises
+count and exact stage/round/side inventory before accepting a passing report. Real Cargo/native-process acceptance exercises
 full success, relative RSS regression, broken drivers and changed observers with
 the unchanged paired evaluator, and rejects missing CPU metrics or passing
-reports with missing samples. It does not claim product performance coverage.
-Both changed performance recipes require new execution; earlier full-matrix
-results cannot authorize the reduced sampling policy. Native profile recipes
-remain unchanged. Actual native fixture processes verify the 68/14 schedules,
+reports with missing, extra or duplicated/mispaired samples. It does not claim product performance coverage.
+The changed rendering recipe requires fresh execution. Browser execution remains
+candidate-owned for the same head; an exact protected recipe pair preserves its
+unchanged completed work through the shared rendering-helper edit. Native profile
+recipes remain unchanged. Actual native fixture processes verify the 60/12 schedules,
 alternating sides, the full short check and rejection of relative RSS/browser
 regressions and policies below their minimum rounds. These fixtures add no
 product performance coverage credit.

@@ -577,6 +577,13 @@ sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
 <p>Native, SDK and installer test matrices stop peer work after the first failure.
+Strict all-target/all-feature Clippy runs once on the three-platform merge queue;
+the duplicate Linux PR job is removed (2026-11-02). Native per-host lint remains.
+All-feature-only findings can arrive later in the queue; the final lint
+requirement is unchanged. Main pushes no longer allocate another Rust CI
+preflight after the same tree passed the queue. Independent cache/package
+publishers and legacy development-branch push checks retain their own triggers.</p>
+<p>
 Strict all-target/all-feature Clippy also stops scheduling extra crates after
 its first error, allowing matrix cancellation sooner; already running compilers
 can finish. All three queue platforms and <code>-D warnings</code> remain.
@@ -902,7 +909,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       guard when the driver package changes. A real GitHub fixture also verifies
       cancellation of independent Rust CI peers in both failure directions,
       retention of the original failed step, and no cancellation runner on
-      successful runs. Captured recovery instructions fetch current protected
+      successful runs. Native Bash guards reject failed, skipped or cancelled
+      selected queue lint and bind its three platforms, queue-only scheduling
+      and independent main cache publishers to the current workflow. These
+      executor checks add no product journey coverage. Captured recovery instructions fetch current protected
       main, execute a newly required real process and publish SSH-signed evidence
       that an independent verifier fetches and validates. A copied production
       timing factory preserves real signed hook execution while unused; selected

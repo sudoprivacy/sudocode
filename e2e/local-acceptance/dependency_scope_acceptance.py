@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,28 @@ def workflow_scope(output, environment):
         raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     lines = workflow.splitlines()
+    # Bind the real native guard cases below to the production queue wiring.
+    # The PR must not allocate a duplicate lint matrix, while the final gate
+    # must continue to wait for all three native platforms.
+    lint = re.search(r"^  clippy-workspace:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+    predicate = lint.split("    if: >-\n", 1)[1].split("    needs:", 1)[0]
+    assert " ".join(predicate.split()) == (
+        "!inputs.live_only && !inputs.cache_only && "
+        "needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' && "
+        "github.event_name == 'merge_group'"), predicate
+    assert "        os: [ubuntu-latest, windows-latest, macos-latest]" in lint
+    assert "      fail-fast: true" in lint
+    gate = re.search(r"^  integrated-acceptance:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+    assert "    if: always() && github.event_name == 'merge_group'" in gate
+    assert "    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]" in gate
+    branches = workflow.split("  push:\n    branches:\n", 1)[1].split("    paths:", 1)[0]
+    assert {line.strip() for line in branches.splitlines() if line.strip().startswith("- ")} == {
+        "- 'gaebal/**'", "- 'omx-issue-*'"}, branches
+    assert "  pull_request:\n" in workflow and "  merge_group:\n" in workflow
+    assert "full_preflight" not in workflow, "Every remaining event must retain full metadata checks"
+    for filename in ["ci-dependency-cache.yml", "ci-vfs-search-cache.yml"]:
+        publisher = (SOURCE / ".github/workflows" / filename).read_text(encoding="utf-8")
+        assert "  push:\n    branches: [main]\n" in publisher, filename
 
     def step(name):
         matches = [index for index, line in enumerate(lines) if line == "      - name: " + name]
@@ -90,10 +113,23 @@ def workflow_scope(output, environment):
         ("required", "false", "true", "true", "skipped", False),
         ("required", "true", "true", "true", "failure", False),
     ]
+    cases = [(name, {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
+                     "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual}, succeeds)
+             for name, a2a, cohost, daemon, actual, succeeds in cases]
+    cases.extend(("required", {"A2A_REQUIRED": "false", "COHOST_REQUIRED": "false",
+                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped", **values}, succeeds)
+                 for values, succeeds in [
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success"}, True),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "failure"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "skipped"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "cancelled"}, False),
+                     ({"CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "success"}, False),
+                     ({"CLIPPY_REQUIRED": "", "CLIPPY_RESULT": "skipped"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success", "PIN_RESULT": "failure"}, False),
+                 ])
     records = []
-    for index, (name, a2a, cohost, daemon, actual, succeeds) in enumerate(cases):
-        values = {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
-                  "PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped"}
+    for index, (name, overrides, succeeds) in enumerate(cases):
+        values = {"PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped", **overrides}
         result = subprocess.run([bash, "-c", scripts[name]], env={**environment, **values}, capture_output=True)
         log = output / f"{index:02}.log"
         # Native setup failures can use a different encoding. Retain their raw
@@ -104,7 +140,9 @@ def workflow_scope(output, environment):
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
     return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
-            "CLI_and_cohost_steps_bound_to_independent_selectors": True}
+            "CLI_and_cohost_steps_bound_to_independent_selectors": True,
+            "three_platform_lint_required_once_on_queue": True,
+            "main_preflight_removed_and_independent_cache_publishers_retained": True}
 
 
 def run(output):

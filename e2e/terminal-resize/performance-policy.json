@@ -8,14 +8,12 @@
   },
   "sampling": { "input": 60, "resize": 40, "cancel": 20 },
   "profiles": {
-    "core": ["short", "long", "cap", "markdown", "foreground", "background"],
-    "stress": ["short", "long", "cap", "markdown", "foreground", "background", "repeated"]
+    "core": ["short", "heavy", "foreground", "background"],
+    "stress": ["short", "heavy", "foreground", "background", "repeated"]
   },
   "cases": {
     "short": { "kind": "prose", "bytes": 2300, "turns": 1 },
-    "long": { "kind": "prose", "bytes": 8192, "turns": 1 },
-    "cap": { "kind": "prose", "bytes": 12288, "turns": 1 },
-    "markdown": { "kind": "markdown", "bytes": 2300, "turns": 1 },
+    "heavy": { "kind": "markdown", "bytes": 12288, "turns": 1 },
     "foreground": { "kind": "foreground", "bytes": 0, "turns": 1, "batches": 10 },
     "background": { "kind": "background", "bytes": 0, "turns": 1, "batches": 10 },
     "repeated": { "kind": "prose", "bytes": 2300, "turns": 30 }

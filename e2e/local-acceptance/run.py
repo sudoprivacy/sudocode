@@ -100,6 +100,8 @@ def scope_acceptance(directory):
              (".github/local-acceptance/checks.py", False, False, False),
              (".github/scripts/local_acceptance.py", False, False, False),
              ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False),
+             ("e2e/terminal-resize/benchmark.py", False, False, False),
+             ("e2e/terminal-resize/performance-policy.json", False, False, False),
              ("e2e/local-acceptance/container_inputs_acceptance.py", False, False, False),
              ("e2e/local-acceptance/clippy_fail_fast.py", False, False, False),
              ("rust/crates/runtime/src/response_archive.rs", True, True, True),
@@ -135,7 +137,8 @@ def scope_acceptance(directory):
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
             expect_scope(event_name, event, live, daemon, clippy, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
-                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"}, path in {
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py",
+                "e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"}, path in {
                 ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {

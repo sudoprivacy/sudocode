@@ -216,6 +216,20 @@ Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
 
+The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
+outputs. An independent main-push publisher saves only a missing exact key;
+queue jobs only restore. The key binds the lockfile revision, compiler, runner
+image, build recipe, canonical path and explicit codegen settings. Source bytes
+are checked against the pinned Git tree before use, including same-mtime edits
+and unexpected files. Every invocation still asks Cargo to build normally and
+runs the original search authorization/restart case against the current
+checkout's co-host, outside this cache. The fixed driver and plugin retain their
+original optimization profiles. Cache hits never substitute a previous test
+result. The required command prints builds and stores timings and failure logs.
+Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runtime
+refusal; they add no product journey credit. The actual cache footprint and
+cold/warm product timings must be measured before claiming a lifecycle saving.
+
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
 while its profiles run; a second invocation prints the holder from

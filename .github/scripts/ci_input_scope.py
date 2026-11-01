@@ -98,7 +98,9 @@ def main():
                         or (path.startswith("rust/") and Path(path).name.lower() != "readme.md")]
             live_inputs = ["rust/**", "spec/**", "e2e/thinking/**", ".github/scripts/probe_live_usage*",
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
-            daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**"]
+            daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**",
+                             ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/**",
+                             ".github/workflows/ci-vfs-search-cache.yml"]
             # Acceptance metadata changes execution authorization, not provider
             # requests. Keep these identities with the acceptance authority.
             live = any(fnmatch.fnmatchcase(path, rule)
@@ -141,11 +143,16 @@ def main():
                      or path in executor_inputs | {"rust/crates/runtime/src/response_archive.rs",
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}
                      for path in paths)
+    vfs_cache = any(path in {".github/scripts/vfs_search_cache.py", ".github/workflows/rust-ci.yml",
+                             ".github/workflows/ci-vfs-search-cache.yml", ".github/scripts/ci_input_scope.py",
+                             "e2e/local-acceptance/vfs_search_cache_acceptance.py"}
+                    or path.startswith(".github/actions/vfs-search-cache/") for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
               "cohost_required": str(cohost).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
               "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower(),
               "gzip_codec_required": str(gzip_codec).lower()}
+    result["vfs_cache_required"] = str(vfs_cache).lower()
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")

@@ -1039,6 +1039,16 @@ fn spawn_with_workspace(
     // want async mode set SUDOCODE_INTERRUPT_QUEUE_MODE explicitly in
     // `env_vars`, which appears later and overrides this default.
     cmd.push_str(" SUDOCODE_INTERRUPT_QUEUE_MODE=off");
+    // Scripted text pastes must not attach an image from the host clipboard.
+    // The documented clipboard source treats a missing image as empty. Image
+    // paste journeys override this default in `env_vars` below.
+    let no_image = workspace.root.join("no-clipboard-image");
+    write!(
+        cmd,
+        " SUDOCODE_CLIPBOARD_IMAGE={}",
+        shell_quote(&no_image.display().to_string())
+    )
+    .unwrap();
     for (k, v) in env_vars {
         write!(cmd, " {}={}", k, shell_quote(v)).unwrap();
     }

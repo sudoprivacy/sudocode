@@ -215,6 +215,13 @@ does not enter the co-host build, while shared runtime changes rebuild it.
 Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
+Fixed VFS cache helper, composite action and publisher changes select the
+co-host/search checks without rerunning the independent CLI A2A, cross-node
+and sender-identity journeys. Product Rust and A2A/shared harness changes
+retain those journeys, including mixed edits and moves across that boundary.
+The mandatory output reports both decisions and refuses a missing decision
+or a daemon-job selection that differs from their union. No case, assertion,
+lease wait or timeout is shortened within a selected journey.
 
 The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
 outputs. An independent main-push publisher saves only a missing exact key;

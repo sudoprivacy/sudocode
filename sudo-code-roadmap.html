@@ -980,12 +980,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       binary-only package without declared workspace dependents. Unknown
       layouts retain co-host checks; CLI tests stay outside co-host inputs.
       Unknown manifest/build changes retain the conservative scope.
+      Fixed VFS cache helper/action/publisher changes retain current co-host,
+      search and feature checks, while omitting independent CLI A2A, cross-node
+      and sender-identity journeys. Product Rust, A2A/shared harness and mixed
+      changes retain those journeys. Selected cases and deadlines are unchanged.
       Required output explains the choice and refuses missing decisions.
       Real Git events and Cargo processes verify CLI/co-host independence and
       shared-runtime rebuilds; actual package metadata guards that boundary.</td>
       <td>Existing CLI PTYs retain their current credit. Infrastructure scope
       checks add no product journey coverage. Co-host runs are omitted on
-      CLI-only revisions.</td>
+      CLI-only revisions; independent CLI journeys are omitted on fixed VFS
+      cache-only revisions. No product case is deleted.</td>
       <td><code>rust-ci.yml</code> / <code>ci_input_scope.py</code> /
       <code>dependency_scope_acceptance.py</code></td>
     </tr>

@@ -73,7 +73,7 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
-        paths, live, daemon, cohost, clippy = [], True, True, True, True
+        paths, live, daemon, a2a, cohost, clippy = [], True, True, True, True, True
     else:
         if name == "push":
             base, head = event["before"], event["after"]
@@ -86,7 +86,7 @@ def main():
         if not all(re.fullmatch(r"[a-f0-9]{40}", ref) for ref in [base, head]):
             raise RuntimeError("Invalid CI commit identity")
         if base == "0" * 40:
-            paths, live, daemon, cohost, clippy = [], True, True, True, True
+            paths, live, daemon, a2a, cohost, clippy = [], True, True, True, True, True
         else:
             for ref in [base, head]:
                 if subprocess.run(["git", "cat-file", "-e", ref + "^{commit}"], capture_output=True).returncode:
@@ -114,21 +114,23 @@ def main():
             # remain unchanged; manifests, src and moved source still qualify.
             normal_inputs = production_build_paths(relevant, base, head)
             ignored_product_inputs = [path for path in relevant if path not in normal_inputs]
-            daemon = any(fnmatch.fnmatchcase(path, rule)
-                         for path in normal_inputs
-                         if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
-                         for rule in daemon_inputs)
+            daemon_paths = [path for path in normal_inputs
+                            if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
+                            and any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs)]
+            # These helpers only prepare the separate fixed search driver.
+            # They cannot change the CLI, its pinned daemon or A2A harness.
+            a2a = any(path not in {".github/scripts/vfs_search_cache.py",
+                                  ".github/workflows/ci-vfs-search-cache.yml"}
+                      and not path.startswith(".github/actions/vfs-search-cache/")
+                      for path in daemon_paths)
             # The CLI package has only a binary; the co-host and VFS search
             # fixture do not import its source. Keep the actual CLI daemon
             # journeys above, and retain all shared/build/harness inputs here.
             cli_sources = [path for path in normal_inputs if path.startswith("rust/crates/rusty-sudocode-cli/src/")]
             if cli_sources and independent_cli_sources(base, head):
                 ignored_cohost_cli_sources = cli_sources
-            cohost = any(fnmatch.fnmatchcase(path, rule)
-                         for path in normal_inputs
-                         if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
-                         and path not in ignored_cohost_cli_sources
-                         for rule in daemon_inputs)
+            cohost = any(path not in ignored_cohost_cli_sources for path in daemon_paths)
+            daemon = a2a or cohost
     executor_inputs = {".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile",
                        ".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
                        ".github/workflows/rust-ci.yml"}
@@ -154,6 +156,7 @@ def main():
                              "e2e/local-acceptance/vfs_search_cache_acceptance.py"}
                     or path.startswith(".github/actions/vfs-search-cache/") for path in paths)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
+              "a2a_required": str(a2a).lower(),
               "cohost_required": str(cohost).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
               "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower(),

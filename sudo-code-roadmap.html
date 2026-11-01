@@ -617,6 +617,14 @@ The new runner-enforcement guard still executes. Real Git/SSH regressions cover
 current and legacy signed receipts, unchanged notes, changed assertions and new
 required checks. Later recipe changes cannot inherit an obsolete pair. Reuse
 appears in mandatory hook and CI output; no product coverage is removed.</p>
+<p>Obsolete-recipe refusals include a machine-readable author-host recovery
+record. For protected-main policies it fetches main before resolving the current
+policy, preventing old CI diagnostics from publishing obsolete evidence after
+another main update. Explicit experimental snapshots remain pinned; each check
+still freezes its resolved source and policy. Real Git/SSH regression captures
+the diagnostic, advances main with another required process, then follows that
+original recovery record, publishes and independently verifies the fresh receipt.
+No required check or signature verification is removed.</p>
 <p>Local acceptance freezes candidate, PR base and authorized policy commits at
 invocation start. Docker snapshots and image context follow that fixed policy;
 the run uses the actual build's immutable image ID. Each invocation saves
@@ -777,7 +785,9 @@ script remains available for diagnosis and earns no additional coverage credit.<
       guard when the driver package changes. A real GitHub fixture also verifies
       cancellation of independent Rust CI peers in both failure directions,
       retention of the original failed step, and no cancellation runner on
-      successful runs.</td>
+      successful runs. Captured recovery instructions fetch current protected
+      main, execute a newly required real process and publish SSH-signed evidence
+      that an independent verifier fetches and validates.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>

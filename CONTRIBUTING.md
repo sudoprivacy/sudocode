@@ -531,6 +531,12 @@ abrupt process exit can therefore retain earlier completed profiles without
 running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
 host; custom output directories can use the printed `check --resume-from` command.
+When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
+record includes preparation commands and the author-host runner arguments.
+Run preparation first: mainline recovery fetches protected main before resolving
+its current policy, so an old CI diagnostic cannot pin an obsolete recipe.
+Explicit experimental policy snapshots remain pinned. The check freezes the
+resolved commits at startup and still requires every newly selected profile.
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
 Earlier `checkpoint/` records remain readable. An incomplete unadvertised generation

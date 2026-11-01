@@ -528,7 +528,7 @@ def selected(policy, paths, *, base=None, head=None):
             and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
-                             else [p for p in paths if p not in opt_in] if name == "browser"
+                             else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
                              else paths)))]
 
 
@@ -588,9 +588,16 @@ def acceptance_plan(policy, names, author):
 def report_plan(plan):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
-    lines.append("Performance: the paired rendering matrix runs on main, not per PR. "
-                 + ("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]
-                    else "No browser terminal input changed."))
+    performance = [name for name in ["rendering"] if name in plan["local_checks"]]
+    lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
+                 "none selected; indirect performance effects outside the selected inputs are not measured."))
+    release = "native-release" in plan["local_checks"] or any("native-release" in job["checks"] for job in plan["ci"])
+    lines.append("Native release build/startup: " + ("selected on the author and complementary native hosts." if release else
+                 "not selected; native optimized stream/resume behavior and the 100 ms startup budget are outside this run's scope.")
+                 + " Trigger scope: Cargo/build/vendor inputs, CLI entry/startup/parser, runtime config, stream-capture test or startup harness. "
+                   "Ordinary functional checks and selected Linux release rendering keep their own scopes.")
+    lines.append("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]
+                 else "No browser terminal input changed.")
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")
@@ -599,6 +606,8 @@ def report_plan(plan):
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
+          "ordinary_source_optimized_native_coverage_reduced": True}, separators=(",", ":")), flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write("## Acceptance responsibilities\n\n" + "\n".join("- " + line for line in lines) + "\n")

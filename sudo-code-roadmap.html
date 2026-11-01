@@ -239,22 +239,26 @@ Elapsed savings remain unmeasured until those builds finish.</p>
 <p><strong>Performance placement (2026-11-01).</strong> A full macOS acceptance
 measured 5.5 hours of command time; the statistical browser comparison (145 min)
 and rendering matrix (84 min) were 70% of it, and a dependency-only change
-selected both. Typing feel is now judged by the rendering matrix once a day on
-main (<code>.github/workflows/rendering-main.yml</code>): keypress-to-echo P95
+selected both. Typing feel is judged by mandatory author-local rendering before
+push for CLI, engine-core, PTY helper/harness, rendering-driver and named native
+observer inputs: keypress-to-echo P95
 while reading history, waiting and streaming, plus first output, cancel, paste
-and resize, with CPU and peak memory on the 12 KB Markdown stream. Each of the
-four scenarios names the metrics it is judged on. The pre-merge
+and resize, with RSS peak/after limits on short replies and CPU/peak memory on the
+12 KB Markdown stream. These two required scenarios replace four: task-specific
+foreground/background performance comparisons are removed, while their applicable
+functional PTY checks remain. Each scenario names the metrics it is judged on. The pre-merge
 <code>browser</code> profile is a functional smoke of clickable links, selection
 during streaming, viewport interaction and an idle terminal, selected by CLI
-and browser-harness inputs. This deliberately moves performance regressions
-from pre-merge to the next daily run on main, where they are bisected between
-nightly heads, and retires painted-browser latency, Chromium resource budgets
-and the viewport cost benchmarks. This supersedes the per-PR rendering matrix
+and browser-harness inputs. Scheduled and manual runs do not replace this local
+gate. Cargo/dependency metadata and unrelated crate source omit the rendering
+comparison, reducing coverage of their indirect performance effects. This retires
+painted-browser latency, Chromium resource budgets
+and the viewport cost benchmarks. This supersedes the broader input scope
 and the browser and viewport comparisons of "Reduce repeated measurements
 (2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)",
 and the browser comparison of "Remove unjudged full warm-up workloads
-(2026-11-01)"; their per-scenario rounds, four workloads and 60 judged
-observations without warm-ups remain in the daily matrix.
+(2026-11-01)". Short keeps 5/7 pairs and heavy keeps 3/3: 36 judged observations
+without warm-ups. The original short-reply RSS checks remain judged.
 With no cross-profile reuse, each build still keeps its invocation-owned image
 tag.
 These measurement drivers back no Feature inventory row, so the coverage
@@ -525,6 +529,20 @@ A real Cargo/native-process regression checks warm driver reuse, exact release
 artifact identity and rejection of a debug executable substituted for it.
 This removes a duplicate compilation graph; it does not claim a measured
 end-to-end percentage improvement.</p>
+<p><strong>Scope native optimized builds (2026-11-01).</strong> The separate
+native release profile runs for Cargo/build/vendor inputs, CLI entry/startup/parser
+modules, runtime configuration, its stream-capture test and startup harness.
+Ordinary business/source and shared PTY helper changes keep applicable native
+functional/resize/service checks and selected Linux release rendering, while
+omitting the additional optimized build/startup profile on each native host.
+Optimized-only Windows/macOS behavior and the 100 ms startup budget are therefore
+outside ordinary source acceptance. Existing release-tag platform builds remain;
+full artifact journey acceptance is not added there. Required plan output includes
+<code>RELEASE_ACCEPTANCE_SCOPE</code> and explains the reduction. Real committed
+Git plans exercise ordinary, retained, mixed, renamed and deleted inputs; the
+selected release executor retains actual Cargo/native artifact identity checks.
+Two earlier Windows receipts spent 406.49 and 409.98 seconds in this profile;
+those are historical costs, not controlled savings for a new PR.</p>
 
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
@@ -901,6 +919,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
     </tr>
     <tr>
+      <td>Native release stream/resume and startup</td>
+      <td>Normal optimized binary, exact artifact identity and the 40-sample,
+      100 ms startup budget on build/startup/configuration and dedicated test
+      inputs. Ordinary business/source edits omit this profile on native hosts;
+      their applicable functional tests and selected Linux release rendering remain.
+      Optimized-only Windows/macOS behavior is outside that reduced scope.</td>
+      <td>The existing stream/resume PTY journey counts once. Optimized variants
+      and startup measurements add no extra unique journey credit.</td>
+      <td><code>native-release</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
       <td>Co-host build and identity</td>
       <td>Pre-merge dev build with deployed features and exact revision stamp,
       on all three native OSes. Optimized builds and footprint budgets run on
@@ -910,14 +939,18 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Rendering matrix and browser smoke</td>
-      <td>Daily paired matrix on main: typing latency, first output, cancel,
+      <td>Scoped mandatory author-local paired matrix before push: typing latency, first output, cancel,
       paste, resize, CPU and peak memory against the fixed baseline; short keeps
-      5/7 paired rounds and the other scenarios 3/3, 60 judged observations
-      without warm-ups. Pre-merge
+      5/7 paired rounds with RSS peak/after checks and heavy Markdown keeps 3/3,
+      36 judged observations. Foreground/background task-specific performance
+      comparisons are removed; applicable functional cases remain.
+      without warm-ups. Cargo/dependency metadata and unrelated crate source
+      omit these comparisons; their indirect performance effects are outside
+      this reduced scope. No scheduled/manual replacement. Pre-merge
       painted-terminal smoke: clickable links, selection during streaming,
       viewport interaction and an idle terminal, when CLI or harness inputs change.</td>
       <td>No; their drivers back no Feature inventory row.</td>
-      <td><code>rendering-main.yml</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
+      <td><code>rendering</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>
     <tr>
       <td>Queue daemon and co-host scope</td>

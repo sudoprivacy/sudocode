@@ -211,10 +211,10 @@ def run(output):
         names = set(plan["local_checks"])
         assert names & PRODUCT == set(expected), (label, text)
         assert "native-workspace" in names, (label, text)
-        # Dependency metadata selects no per-PR performance run. CLI source and
-        # the benchmark driver package select the browser smoke.
+        # Ordinary dependency metadata omits performance; actual CLI/driver
+        # changes require local rendering and the functional browser smoke.
         changed = command("git", "diff", "--name-only", "--no-renames", diff_base, "HEAD").splitlines()
-        smoke = {"browser"} if any(path.startswith(("rust/crates/rusty-sudocode-cli/src/",
+        smoke = {"rendering", "browser"} if any(path.startswith(("rust/crates/rusty-sudocode-cli/src/",
                                                     "rust/crates/scode-benchmark-drivers/"))
                                    for path in changed) else set()
         assert {"rendering", "browser"} & names == smoke, (label, text)
@@ -288,7 +288,7 @@ def run(output):
     command("git", "rm", "rust/crates/rusty-sudocode-cli/src/lib.rs")
     binary_head = commit("Removing a prior CLI library also retains co-host scope")
     expect("a removed CLI library is not mistaken for an unchanged binary boundary", library_head,
-           {"native-release", "native-services"})
+           {"native-services"})
     ci_scope(library_head, True)
     cohost_manifest = (repository / "rust/crates/cohost/Cargo.toml").read_text()
     write("rust/crates/cohost/Cargo.toml", cohost_manifest +
@@ -332,7 +332,7 @@ def run(output):
         ("normal lock package changed", "rust/Cargo.lock", positive_lock.replace('name = "runtime"\nversion = "0.1.0"', 'name = "runtime"\nversion = "0.2.0"'), PRODUCT),
         ("ambiguous additional lock version", "rust/Cargo.lock", positive_lock + '\n[[package]]\nname="runtime"\nversion="0.2.0"\n', PRODUCT),
         ("lock format changed", "rust/Cargo.lock", positive_lock.replace('version = 4', 'version = 3'), PRODUCT),
-        ("source stays a normal product input", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT),
+        ("ordinary runtime source keeps services without the separate release build", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT - {"native-release"}),
         ("CLI build script keeps conservative co-host scope", "rust/crates/rusty-sudocode-cli/build.rs",
          'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-release", "native-services"}),
         ("release assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-release"}),
@@ -350,7 +350,7 @@ def run(output):
             assert text != positive_lock, label
         commit("Scope boundary " + str(index))
         expect(label, base, expected)
-        if label in {"source stays a normal product input", "CLI build script keeps conservative co-host scope",
+        if label in {"ordinary runtime source keeps services without the separate release build", "CLI build script keeps conservative co-host scope",
                      "normal dependency features", "build dependency", "normal lock package changed"}:
             ci_scope(base, True)
         elif label == "standalone benchmark driver metadata":
@@ -358,7 +358,7 @@ def run(output):
     command("git", "switch", "--detach", changed)
     command("git", "mv", "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/renamed.rs")
     commit("Keep both sides of a renamed source")
-    expect("renamed product source stays required", base, PRODUCT)
+    expect("renamed ordinary source keeps services without the separate release build", base, PRODUCT - {"native-release"})
     command("git", "switch", "--detach", changed)
     assert not command("git", "status", "--porcelain")
     # An earlier broader receipt/checkpoint must retain actual completed work

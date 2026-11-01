@@ -237,6 +237,7 @@ pub fn record(name: &str) {
         assert (checks & costly == set()) if expected else (costly - {"native-cohost"}) <= checks, (label, text)
         # Manifests and test-group wrappers are not browser terminal inputs.
         assert "browser" not in checks, (label, text)
+        assert "rendering" not in checks, (label, text)
         assert "native-workspace" in checks
         if expected:
             assert "native-examples" in checks, text

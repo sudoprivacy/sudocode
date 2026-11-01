@@ -289,7 +289,11 @@ GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
 workline's source into the shared cache between profiles, then verifies that
 browser uses the original normal release without another normal candidate build.
 Actual Docker acceptance checks frozen images, the invocation boundary and five
-tampered release identities/bytes. This removes duplicate compilation without
+tampered release identities/bytes. Each build also retains an invocation-owned
+image tag, allocated by the same helper for contract and performance images.
+An actual same-context build is interleaved before the original browser launch
+to verify that another BuildKit index does not replace the retained reference.
+This removes duplicate compilation without
 reducing measurement coverage; production elapsed savings remain unmeasured.
 The host and container entrypoint now share the canonical
 <code>container/&lt;profile&gt;</code> output layout. Docker regression uses the

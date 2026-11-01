@@ -633,6 +633,20 @@ regression compares exact case/ignore inventories, checks independent native
 process state, executes original developer and named driver commands, rejects
 invalid wrappers, and verifies a Cargo-fresh, byte-identical normal product.
 This infrastructure fixture adds no product feature coverage.</p>
+<p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
+lint shares the validated test-group inventory with nextest, checking covered
+modules through their wrappers once: 91 instead of 211 integration targets in
+the current workspace, 56.9% fewer. Library/bin test configurations, enabled
+ungrouped tests, examples and benches remain selected. Ungrouped sources retain
+<code>--all-targets</code>; disabled standalone tests keep their original exclusion.
+The merge queue retains original-target, all-feature Clippy. Per-host lint no
+longer checks differences specific to each original test crate's identity;
+that configuration remains checked in the queue. Real Cargo/Clippy regression
+compares actual target inventories and injected diagnostics in ordinary and
+test-only library/bin code, grouped/ignored tests, shared helpers, examples and
+benches, including the disabled-target boundary. Product cases, assertions and
+deadlines are unchanged; this fixture adds no product journey coverage.
+No production latency saving is claimed before comparable measurements.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the

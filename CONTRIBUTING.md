@@ -394,6 +394,19 @@ on its required checks. A Windows prototype passed all 2,505 active cases with
 70 ignored markers; activation still requires fresh exact-head author and
 complementary native acceptance. Original per-file Cargo commands stay available,
 and new ungrouped targets are selected automatically.
+Native workspace Clippy uses that same validated group inventory, retaining
+library and binary test configurations, examples, benches and ungrouped enabled
+tests. It avoids linting the 128 covered modules as separate crates on every
+author/complementary host: 91 instead of 211 integration targets in the current
+workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
+Ungrouped sources keep `--all-targets`; disabled
+standalone test targets keep their original exclusion. The merge queue still
+checks every original target with all features. This reduces per-host lint
+coverage of differences specific to an original test crate's identity; that
+configuration remains checked in the queue. Real Cargo/Clippy controls inject
+errors into ordinary and test-only library/bin code, grouped/ignored tests,
+shared helpers, examples and benches, and verify disabled-target exclusion.
+No product test case, assertion or deadline changes.
 The selector checks real Cargo metadata and exact declarative wrapper bytes;
 missing, duplicated, redirected, unregistered or feature-hidden members fail.
 Wrappers retain the original helper namespaces and explicitly allow only

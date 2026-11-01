@@ -357,18 +357,20 @@ def run(name, root, output, base, execute):
         else:
             command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
-            print("Workspace lint with warnings denied runs before long builds and PTY execution. "
-                  "The integrated queue additionally checks all targets/features.", flush=True)
-            cargo("clippy", "--workspace", "--all-targets", "--locked", "--features", "engine-acp/mailbox",
+            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
+            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
+            print("Native workspace target selection: " + json.dumps(selection), flush=True)
+            print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
+                  "test configurations, examples and benches before long builds and PTY execution. "
+                  "The integrated queue additionally checks original targets with all features.", flush=True)
+            lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
+            cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
                   "--", "-D", "warnings")
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
-            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
-            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
-            print("Native workspace test selection: " + json.dumps(selection), flush=True)
             native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
@@ -490,7 +492,7 @@ def native_guard_files():
         "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
         ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
-        "e2e/local-acceptance/native_lint_acceptance.py": "94229d3b06f0944ad23f31e73e9355d7b5ba48d1dc8258aa07fc8c23172ca593",
+        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",

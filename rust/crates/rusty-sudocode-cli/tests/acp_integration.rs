@@ -7498,29 +7498,14 @@ $stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime
     }
 }
 
-/// Native Windows Job accounting must confirm all generations before publishing cancellation.
+/// Wait for native identities and preserve producer diagnostics before cleanup.
 #[cfg(windows)]
-#[tokio::test]
-async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
-    let server = MockAnthropicService::spawn().await.unwrap();
-    let workspace = TestWorkspace::new("windows-task-job");
-    workspace.create();
-    workspace.write_sudocode_json(&server.base_url());
-    let _release = CompletionFixtureRelease(workspace.root.join("release-native"));
-    write_powershell_process_tree(&workspace.root);
-    let mut client = spawn_stdio_client_danger(&workspace);
-    initialize_task_completions(&mut client).await;
-    let sid = scenario_session_new(&mut client, &workspace.root).await;
-    let (_, probe) = client
-        .send_request(
-            "_sudocode/task/replay",
-            json!({"sessionId":sid,"cwd":workspace.root}),
-        )
-        .await;
-    let storage = probe["result"]["storageRef"].clone();
-    let calls = json!([{"id":"windows-owned","name":"PowerShell","input":{"command":"Set-ExecutionPolicy -Scope Process Bypass -Force; & ./parent.ps1","run_in_background":true}}]);
-    let (started, parent) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"windows-owned:1"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
-    assert_eq!(parent["result"]["stopReason"], "end_turn", "{parent}");
+async fn wait_powershell_process_tree(
+    client: &mut AcpTestClient,
+    root: &Path,
+    sid: &str,
+    started: &[Value],
+) -> Vec<String> {
     let mut last_stamps = Vec::new();
     // Cold-starting three interpreters uses the same startup budget as the
     // server fixture. This does not change the runtime's cancellation deadline.
@@ -7529,7 +7514,7 @@ async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
             let mut identities = Vec::new();
             last_stamps.clear();
             for name in ["parent", "child", "grandchild"] {
-                let stamp = fs::read_to_string(workspace.root.join(format!("{name}.pid")));
+                let stamp = fs::read_to_string(root.join(format!("{name}.pid")));
                 last_stamps.push(format!("{name}: {stamp:?}"));
                 if let Ok(value) = stamp {
                     let value = value.trim();
@@ -7547,7 +7532,7 @@ async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
         }
     })
     .await;
-    let identities = match identities {
+    match identities {
         Ok(identities) => identities,
         Err(error) => {
             // Read the producer before unwinding closes the CLI and its Job.
@@ -7594,7 +7579,34 @@ async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
             }
             panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}");
         }
-    };
+    }
+}
+
+/// Native Windows Job accounting must confirm all generations before publishing cancellation.
+#[cfg(windows)]
+#[tokio::test]
+async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("windows-task-job");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let _release = CompletionFixtureRelease(workspace.root.join("release-native"));
+    write_powershell_process_tree(&workspace.root);
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_task_completions(&mut client).await;
+    let sid = scenario_session_new(&mut client, &workspace.root).await;
+    let (_, probe) = client
+        .send_request(
+            "_sudocode/task/replay",
+            json!({"sessionId":sid,"cwd":workspace.root}),
+        )
+        .await;
+    let storage = probe["result"]["storageRef"].clone();
+    let calls = json!([{"id":"windows-owned","name":"PowerShell","input":{"command":"Set-ExecutionPolicy -Scope Process Bypass -Force; & ./parent.ps1","run_in_background":true}}]);
+    let (started, parent) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"windows-owned:1"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
+    assert_eq!(parent["result"]["stopReason"], "end_turn", "{parent}");
+    let identities =
+        wait_powershell_process_tree(&mut client, &workspace.root, &sid, &started).await;
     let running = powershell_process_identities(&identities);
     assert!(
         identities.iter().all(|identity| running.contains(identity)),

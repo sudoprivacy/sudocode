@@ -315,6 +315,135 @@ def run(output):
     assert product() == original_binary
     positive_lock = (repository / "rust/Cargo.lock").read_text()
 
+    # Update a real shared Git dependency, including a package-version change.
+    # The same public planner/CI entry points must retain the native driver
+    # while omitting only unchanged normal products. Normal consumers below
+    # deliberately compile broken Git code, so stale product binaries cannot
+    # turn a required normal build into a passing control.
+    positive_state = command("git", "rev-parse", "HEAD")
+    previous_offline = environment.get("CARGO_NET_OFFLINE")
+    environment["CARGO_NET_OFFLINE"] = "false"  # Fetch only this fixture's local file:// Git source.
+    shared = output / "shared-git-dependency"
+    shared.mkdir()
+    command("git", "init", "--initial-branch=main", shared)
+    command("git", "-C", shared, "config", "user.name", "Dependency scope acceptance")
+    command("git", "-C", shared, "config", "user.email", "scope@example.invalid")
+    command("git", "-C", shared, "config", "core.autocrlf", "false")
+    (shared / "src").mkdir()
+
+    def revision(value, version="0.1.0", broken=False):
+        (shared / "Cargo.toml").write_text('[package]\nname="scope-shared-helper"\n'
+            f'version="{version}"\nedition="2021"\n', encoding="utf-8")
+        (shared / "src/lib.rs").write_text(
+            ('compile_error!("shared-normal-refusal");\n' if broken else "")
+            + f'pub fn value() -> u8 {{ {value} }}\n', encoding="utf-8")
+        command("git", "-C", shared, "add", ".")
+        command("git", "-C", shared, "commit", "-m", f"Native dependency value {value}")
+        return command("git", "-C", shared, "rev-parse", "HEAD")
+
+    first_revision = revision(7)
+    shared_application = development + 'scope-git={workspace=true}\n'
+
+    def shared_workspace(ref):
+        return workspace + '[workspace.dependencies]\nscope-git={package="scope-shared-helper",git="' + shared.as_uri() + '",rev="' + ref + '"}\n'
+
+    def shared_driver(value):
+        write("rust/crates/rusty-sudocode-cli/tests/development.rs",
+            '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); '
+            f'assert_eq!(scope_git::value(), {value}); }}\n')
+
+    write("rust/Cargo.toml", shared_workspace(first_revision))
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", shared_application)
+    shared_driver(7)
+    # Only local file:// Git repositories are involved; no registry/model API.
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    shared_base = commit("Add a shared aliased Git development dependency")
+    expect("shared workspace dev Git addition skips normal products", positive_state, [])
+    ci_scope(positive_state, False)
+    assert product() == original_binary and cohost() == original_cohost
+    cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+    shared_revisions = []
+    for value, version in [(8, "0.1.0"), (9, "0.2.0")]:
+        ref = revision(value, version)
+        write("rust/Cargo.toml", shared_workspace(ref))
+        shared_driver(value)
+        command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+        commit("Update shared development Git source and actual driver expectation")
+        expect(f"shared dev Git value {value} version {version} keeps normal products unchanged", shared_base, [])
+        ci_scope(shared_base, False)
+        assert product() == original_binary and cohost() == original_cohost
+        cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+        shared_revisions.append(ref)
+    stable_revision = shared_revisions[-1]
+    current_target = "cfg(windows)" if os.name == "nt" else "cfg(unix)"
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", development
+          + f'[target.\'{current_target}\'.dev-dependencies]\nscope-git={{workspace=true}}\n')
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    commit("Use the shared dependency through a target-specific development alias")
+    expect("target-specific shared dev aliases retain native tests and skip normal products", shared_base, [])
+    ci_scope(shared_base, False)
+    assert product() == original_binary and cohost() == original_cohost
+    cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+
+    # Keep a normal transitive Git branch declaration fixed while its actual
+    # lock resolution changes alongside the development revision.
+    runtime_manifest = (repository / "rust/crates/runtime/Cargo.toml").read_text()
+    write("rust/crates/runtime/Cargo.toml", runtime_manifest
+          + '[dependencies]\nnormal-alias={package="scope-shared-helper",git="'
+          + shared.as_uri() + '",branch="main"}\n')
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    transitive_base = commit("Normal runtime imports a transitive Git branch")
+    product()
+    broken_revision = revision(10, "0.2.0", broken=True)
+    write("rust/Cargo.toml", shared_workspace(broken_revision))
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    commit("Actual normal Git branch and dev revision both resolve broken code")
+    expect("normal transitive resolution change retains every normal gate", transitive_base, PRODUCT)
+    ci_scope(transitive_base, True)
+
+    def normal_git_refusal(label):
+        log = output / f"{label}.log"
+        try:
+            executor.run_command(["cargo", "build", "--locked", "--offline", "-p", "rusty-sudocode-cli"],
+                                 repository / "rust", log, build_environment)
+        except RuntimeError:
+            refused = json.loads(log.with_suffix(".command.json").read_text())
+            commands.append(refused)
+            assert refused["exit_code"] != 0 and "shared-normal-refusal" in log.read_text(encoding="utf-8", errors="replace")
+        else:
+            raise AssertionError("Broken normal Git dependency unexpectedly compiled")
+
+    normal_git_refusal("transitive-normal-refusal")
+    write("rust/crates/runtime/Cargo.toml", runtime_manifest)
+    for kind in ["dependencies", "build-dependencies", f"target.'{current_target}'.dependencies"]:
+        # The normal alias inherits the *same* shared entry when appropriate;
+        # separate target/build tables still participate in normal resolution.
+        manifest = (shared_application.replace('[dependencies]\n',
+                    '[dependencies]\nscope-git={workspace=true}\n', 1) if kind == "dependencies"
+                    else shared_application + f'[{kind}]\nscope-git={{workspace=true}}\n')
+        write("rust/Cargo.toml", shared_workspace(stable_revision))
+        write("rust/crates/rusty-sudocode-cli/Cargo.toml", manifest)
+        if kind == "build-dependencies":
+            write("rust/crates/rusty-sudocode-cli/build.rs", 'fn main() { assert_eq!(scope_git::value(), 9); }\n')
+        command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+        normal_base = commit("Normal alias consumes the shared Git declaration")
+        write("rust/Cargo.toml", shared_workspace(broken_revision))
+        command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+        commit("Updating a shared normal Git alias keeps required product validation")
+        expect(f"shared {kind} Git update retains normal gates", normal_base, PRODUCT)
+        ci_scope(normal_base, True)
+        normal_git_refusal(kind.replace(".", "-").replace("'", ""))
+        if kind == "build-dependencies":
+            command("git", "rm", "rust/crates/rusty-sudocode-cli/build.rs")
+
+    # Resume the pre-existing controls from their exact original fixture tree.
+    command("git", "restore", "--source", positive_state, "--staged", "--worktree", ".")
+    commit("Restore original development fixture after shared Git workflows")
+    if previous_offline is None:
+        environment.pop("CARGO_NET_OFFLINE", None)
+    else:
+        environment["CARGO_NET_OFFLINE"] = previous_offline
+
     # The actual Cargo build must not import a broken, independent CLI source.
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n')
     commit("CLI source keeps daemon journeys without rebuilding the independent co-host")
@@ -528,6 +657,9 @@ def run(output):
     result = {"status": "PASS", "cases": cases, "commands": commands,
               "unchanged_normal_binary_sha256": original_binary,
               "actual_development_feature_case_passed": True,
+              "shared_workspace_git_revision_and_version_drivers_passed": True,
+              "shared_target_dev_alias_keeps_normal_binary_unchanged": True,
+              "broken_shared_normal_build_target_and_transitive_Git_dependencies_refused": True,
               "normal_binary_after_development_driver_unchanged": True,
               "earlier_broader_full_and_partial_signed_evidence_reused": True,
               "legacy_signed_receipt_without_plan_reused": True,

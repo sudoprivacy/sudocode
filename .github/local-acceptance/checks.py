@@ -600,7 +600,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        "e2e/local-acceptance/publication_acceptance.py": "7a1f8c99613d762a2ae89c67c97384e7bdf68bcde854ac7b856f4a463bd04759",
+        "e2e/local-acceptance/publication_acceptance.py": "f25e3a2159cfb892372b74615bb64a1238ce023da87ff20e5662f1ef0a7af080",
         ".github/local-acceptance/publish.py": "80be60c5a237cacec64d4519805eadf8d412ab1d33bde6058dcf4f47f58ab471",
         ".github/local-acceptance/gate.py": "1a2fa6558ff2d86b970eab3a20d442abb85fe26acd75b53f79cc553f5960bcc4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",

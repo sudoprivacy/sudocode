@@ -30,6 +30,10 @@ def verify_publication(directory, work, clean_environment):
     head, trusted = git("rev-parse", "HEAD"), git("rev-parse", "origin/main")
     origin = Path(git("remote", "get-url", "origin")).resolve()
     assert origin.is_relative_to(directory.resolve()) and git("rev-parse", "--is-bare-repository", cwd=origin) == "true"
+    # The private bare origin writes the deliberately corrupted note below.
+    # Supply its identity locally; clean containers have no global Git identity.
+    git("config", "user.name", "Acceptance fixture", cwd=origin)
+    git("config", "user.email", "acceptance@fixture.invalid", cwd=origin)
     git("update-ref", "refs/pull/1/head", head, cwd=origin)
     original_note_ref = git("rev-parse", "refs/notes/local-acceptance", cwd=origin)
     original_note = git("notes", "--ref=local-acceptance", "show", head, cwd=origin)

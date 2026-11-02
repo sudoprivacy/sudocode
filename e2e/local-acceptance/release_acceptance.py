@@ -130,6 +130,136 @@ a.artifacts.mkdir(parents=True)
             "same_binary_and_driver": before, "stale_source_exit": failure["exit_code"]}
 
 
+def resize_graph(profiles, root, output, target, execute):
+    """Run real Git/Cargo/native children with controlled installer/npm boundaries."""
+    terminal = root / "e2e/terminal-resize"
+    terminal.mkdir(parents=True)
+    installer = '''import os
+from pathlib import Path
+p = Path(os.environ['SCODE_RESIZE_FIXTURE_MARKERS'])
+p.mkdir(parents=True, exist_ok=True)
+(p / Path(__file__).stem).write_text('controlled installer boundary')
+'''
+    for name in ["setup_windows.py", "check_windows_setup.py"]:
+        (terminal / name).write_text(installer, encoding="utf-8")
+    names = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback", "pty_codex_colors"]
+    tests = root / "rust/crates/rusty-sudocode-cli/tests"
+    tests.mkdir(parents=True)
+    manifest = root / "rust/Cargo.toml"
+    declarations = "".join(f'\n[[test]]\nname="{name}"\npath="crates/rusty-sudocode-cli/tests/{name}.rs"\n' for name in names)
+    manifest.write_text(manifest.read_text(encoding="utf-8") + declarations, encoding="utf-8")
+    for name in names:
+        (tests / (name + ".rs")).write_text('''#[test]
+#[ignore = "controlled real native child"]
+fn selected_native_case() {
+    assert!(engine_acp::MAILBOX, "resize must retain the workspace feature graph");
+    let expected = std::env::var("SCODE_EXPECT_WORKSPACE_GRAPH").unwrap() == "1";
+    assert_eq!(shared_support::workspace_graph(), expected, "package selection changed feature union");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_scode"))
+        .arg("service-graph-probe").output().unwrap();
+    assert!(child.status.success());
+    assert_eq!(String::from_utf8(child.stdout).unwrap().trim(), "debug=true,flavor=dev,mailbox=true");
+}
+#[test]
+fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only selection"); }
+''', encoding="utf-8")
+    sequence = 0
+
+    def git(*args):
+        nonlocal sequence
+        sequence += 1
+        log = output / f"resize-git-{sequence}.log"
+        execute(["git", *args], root, log)
+        return log.read_text(encoding="utf-8").strip()
+
+    def commit():
+        git("add", ".")
+        git("-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Fixture input transition")
+        return git("rev-parse", "HEAD")
+
+    git("init", "--initial-branch=main")
+    base = commit()
+    (root / "rust/src/ordinary.rs").write_text("// Ordinary Rust input.\n", encoding="utf-8")
+    (root / "README.md").write_text("Ordinary documentation.\n", encoding="utf-8")
+    ordinary = commit()
+    arguments = ["cargo", "test", "--no-run", "--locked", "--workspace",
+                 "--features", "engine-acp/mailbox"]
+    for name in names:
+        arguments += ["--test", name]
+    execute(arguments, root / "rust", output / "resize-workspace-warm.log")
+    binary = target / "debug" / ("scode.exe" if os.name == "nt" else "scode")
+    before = (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    observations = []
+
+    def check(label, reference, required, isolated=False):
+        directory = output / label
+        requested = []
+
+        def boundary(args, cwd, log, env=None):
+            requested.append(list(map(str, args)))
+            # Real npm and pinned-host integration remain in the product PTYs.
+            # This infrastructure fixture controls only dependency acquisition.
+            actual = [str(binary), "service-graph-probe"] if str(args[0]) == "npm" else args
+            return execute(actual, cwd, log, {**(env or {}),
+                "SCODE_RESIZE_FIXTURE_MARKERS": str(directory / "markers"),
+                "SCODE_EXPECT_WORKSPACE_GRAPH": "0" if isolated else "1"})
+
+        previous = {key: os.environ.get(key) for key in ["GIT_DIR", "GIT_WORK_TREE"]}
+        os.environ.update(GIT_DIR=str(SOURCE / ".git"), GIT_WORK_TREE=str(SOURCE))
+        try:
+            records = profiles.run("native-resize", root, directory, reference, boundary)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        scope = json.loads((directory / "installer-scope.json").read_text(encoding="utf-8"))
+        assert scope["fault_injection_required"] == required, scope
+        assert (directory / "markers/check_windows_setup").exists() == (required and os.name == "nt")
+        if os.name == "nt":
+            assert (directory / "markers/setup_windows").exists(), "Real setup selection was removed"
+        commands = [row for row in requested if row[0] == "cargo"]
+        expected = names[:3] if os.name == "nt" else names
+        assert [row[row.index("--test") + 1] for row in commands] == expected
+        for row in commands:
+            assert ("--workspace" in row) != isolated, row
+            assert row[row.index("--features") + 1] == "engine-acp/mailbox"
+            assert row[-3:] == ["--", "--ignored", "--nocapture"]
+        for index, row in enumerate(records):
+            log = directory / f"{index:03d}.log"
+            if "test" in row["command"]:
+                text = log.read_text(encoding="utf-8")
+                assert "1 passed; 0 failed; 0 ignored" in text and "1 filtered out" in text, text
+                assert "Compiling " not in text, "Warm resize driver was rebuilt"
+        assert before == (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+        observations.append({"case": label, "scope": scope, "isolated_cli_tests": isolated, "commands": records})
+
+    check("resize-rust-docs", base, False)
+    extra = root / "unknown-installer-helper.py"
+    extra.write_text("# Unknown installer helper.\n", encoding="utf-8")
+    (root / "rust/src/ordinary.rs").write_text("// Mixed Rust and unknown helper inputs.\n", encoding="utf-8")
+    unknown = commit()
+    check("resize-unknown", ordinary, True)
+    extra.rename(root / "rust/src/renamed.rs")
+    renamed = commit()
+    check("resize-renamed", unknown, True)
+    check("resize-unresolved", "missing-acceptance-base", True)
+    source = tests / "pty_chrome_resize.rs"
+    source.write_text(source.read_text(encoding="utf-8") + "\n// Isolated CLI test input.\n", encoding="utf-8")
+    commit()
+    isolated = list(arguments)
+    position = isolated.index("--workspace")
+    isolated[position:position + 1] = ["-p", "rusty-sudocode-cli"]
+    execute(isolated, root / "rust", output / "resize-isolated-warm.log")
+    before = (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    check("resize-isolated-cli", renamed, False, isolated=True)
+    return {"observations": observations, "same_warm_binary": before,
+            "native_targets": names[:3] if os.name == "nt" else names,
+            "scope": "Git/Cargo/process enforcement only; installer/npm acquisition is controlled, no product journey credit."}
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     profiles = load("release_profiles", SOURCE / ".github/local-acceptance/checks.py")
@@ -142,7 +272,7 @@ name="rusty-sudocode-cli"
 version="0.0.1"
 edition="2021"
 [workspace]
-members=["support", "engine-acp"]
+members=["support", "engine-acp", "auxiliary"]
 resolver="2"
 [[bin]]
 name="scode"
@@ -173,8 +303,12 @@ shared-support={path="support",features=["dev"]}
 }
 ''',
         "rust/support/Cargo.toml": '[package]\nname="shared-support"\nversion="0.0.1"\nedition="2021"\n'
-            '[features]\nnormal=[]\ndev=[]\n',
-        "rust/support/src/lib.rs": 'pub fn flavor() -> &\'static str { if cfg!(feature="dev") { "dev" } else { "normal" } }\n',
+            '[features]\nnormal=[]\ndev=[]\nworkspace-graph=[]\n',
+        "rust/support/src/lib.rs": 'pub fn flavor() -> &\'static str { if cfg!(feature="dev") { "dev" } else { "normal" } }\n'
+            'pub fn workspace_graph() -> bool { cfg!(feature="workspace-graph") }\n',
+        "rust/auxiliary/Cargo.toml": '[package]\nname="auxiliary"\nversion="0.0.1"\nedition="2021"\n'
+            '[dependencies]\nshared-support={path="../support",features=["workspace-graph"]}\n',
+        "rust/auxiliary/src/lib.rs": 'pub fn uses_workspace_graph() -> bool { shared_support::workspace_graph() }\n',
         "rust/engine-acp/Cargo.toml": '[package]\nname="engine-acp"\nversion="0.0.1"\nedition="2021"\n'
             '[features]\nmailbox=[]\n',
         "rust/engine-acp/src/lib.rs": 'pub const MAILBOX: bool = cfg!(feature="mailbox");\n',
@@ -182,6 +316,7 @@ shared-support={path="support",features=["dev"]}
 fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
     assert!(cfg!(debug_assertions), "Only the driver uses the test profile");
     assert!(engine_acp::MAILBOX, "Reuse the same native workspace feature graph");
+    assert!(shared_support::workspace_graph(), "Preserve features enabled by other workspace members");
     assert_eq!(shared_support::flavor(), "dev");
     let binary = std::env::var_os("SCODE_TEST_BIN").expect("Explicit release artifact required");
     assert_ne!(std::path::Path::new(&binary), std::path::Path::new(env!("CARGO_BIN_EXE_scode")));
@@ -213,7 +348,7 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         return execute(["cargo", *args], rust, output / (name + ".log"))
 
     cargo("generate-lockfile", name="lockfile")
-    cargo("test", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
+    cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
           "--no-run", "--message-format=json-render-diagnostics", name="workspace-driver")
     artifacts = [json.loads(line) for line in (output / "workspace-driver.log").read_text(encoding="utf-8").splitlines()
                  if line.startswith("{")]
@@ -256,6 +391,7 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
     os.environ["CARGO_TARGET_DIR"] = str(target)
     try:
         services = service_graph(profiles, root, output, target, execute, driver)
+        resize = resize_graph(profiles, root, output, target, execute)
     finally:
         if previous is None:
             os.environ.pop("CARGO_TARGET_DIR", None)
@@ -266,10 +402,11 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         "status": "PASS", "commands": commands, "release_sha256": digest,
         "color_environment_commands": color_records,
         "service_graph": services,
+        "resize_graph": resize,
         "driver_sha256": before[1], "startup": startup_report,
         "scope": "Real Cargo/native release executor fixture; not product PTY or provider coverage."}, indent=2), encoding="utf-8")
     print(f"PASS: normal release child, reused driver, startup budget, wrong-artifact refusal, "
-          f"service graph reuse/standalone/stale-source guards and inherited/explicit color settings "
+          f"service reuse/standalone/stale-source, resize input scope/warm ignored-only guards and color settings "
           f"after Cargo/SDK setup; {output}", flush=True)
 
 

@@ -622,10 +622,38 @@ unchanged.</p>
 (2026-11-02).</strong> The author hook and complementary CI install the
 checksum-pinned terminal host before long native builds when resize acceptance
 is selected. Failed installation stops early; its actual command/log is reused
-in the resize receipt. Installer regressions and all selected terminal tests
-still run. Real Git/hook and native-launcher negative controls refuse failed
+in the resize receipt. Every selected real terminal test still runs. The input
+scope described below determines artificial installer fault checks. Real Git/hook and native-launcher negative controls refuse failed
 preparation before profile execution. This adds no product coverage and changes
 neither assertions nor deadlines.</p>
+<p><strong>Reuse native resize inputs (2026-11-02).</strong> Ignored terminal
+drivers use the workspace dev/mailbox graph and Cargo's current-source checks.
+Their separate standalone default-feature debug graph is no longer covered.
+Rust-only changes, optionally with known README/contribution/roadmap or Markdown
+documentation paths, skip unchanged artificial installer HTTP/cache corruption
+checks. Changed installer/helper/executor or unknown non-Rust inputs, mixed
+changes, renames/deletions of those inputs and unresolved Git scope retain the
+fault checks. Actual checksum-pinned setup and all selected real terminal cases
+remain. Negative installer paths therefore have less coverage on ordinary source
+PRs. Mandatory output and <code>installer-scope.json</code> record the decision.
+A Windows baseline took 109.1 seconds; an ordinary-scope prototype took 88.6
+seconds with the same seven real ConPTY cases. The former included 19.9 seconds
+of artificial installer faults; compilation reuse needs separate evidence, and
+these observations do not prove whole-PR savings. Real Git/Cargo/native-process
+guards verify inherited Git isolation, ordinary/unknown/renamed/unresolved input
+scope, warm artifacts and ignored-only target selection. Their controlled
+dependency-acquisition boundaries add no product journey credit.</p>
+<p><strong>Preserve package selection with the feature graph (2026-11-02).</strong>
+Resize, service and release-driver tests use one package selector: full native
+acceptance keeps <code>--workspace</code>, while isolated CLI-test acceptance
+keeps <code>-p rusty-sudocode-cli</code>. Matching the mailbox flag alone was
+insufficient: a real trial still rebuilt CLI artifacts because other workspace
+members enabled additional dependency features. The original failed reuse
+assertion is retained. <code>NATIVE_CLI_TEST_GRAPH</code> reports the selection;
+real Git/Cargo/native guards model an extra workspace member and verify both
+full and isolated modes. Normal release product builds keep their original
+graph. This changes dependency-graph reuse, without adding product journey
+credit or reducing any selected terminal case or performance budget.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -1013,6 +1041,18 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>The existing stream/resume PTY journey counts once. Optimized variants
       and startup measurements add no extra unique journey credit.</td>
       <td><code>native-release</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native terminal resize and installer inputs</td>
+      <td>All existing native ignored cases use the workspace dev/mailbox graph;
+      the separate standalone default-feature debug graph is outside this scope.
+      Actual checksum-pinned Windows setup remains. Artificial installer fault
+      checks are required for non-Rust control inputs, mixed/renamed/deleted
+      controls and unknown Git scope. Ordinary Rust with known docs omits that
+      unchanged fault matrix, reducing its negative-path coverage.</td>
+      <td>Existing terminal cases count once. Git/Cargo/process scope and warm
+      artifact guards add no product journey credit.</td>
+      <td><code>native-resize</code> / <code>release_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Native service lifecycle and artifact selection</td>

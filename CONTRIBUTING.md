@@ -701,10 +701,24 @@ pool. This metadata placement does not replace native Linux or macOS tests.
 When Windows terminal resize acceptance is selected, both the author hook and
 complementary CI install its checksum-pinned terminal host before long native
 compilation. A failed download stops before workspace builds. The same actual
-installation command/log is retained in the later resize receipt; installer
-regressions and every selected terminal test still run. Completed resize
-checkpoints are reused without another preparation step. This changes failure
-ordering, not test coverage or deadlines.
+installation command/log is retained in the later resize receipt. Completed
+resize checkpoints are reused without another preparation step.
+
+Resize drivers use the workspace dev/mailbox feature graph, so Cargo can reuse
+the same current executable and ignored-test binaries. All selected real
+terminal cases, assertions and deadlines remain. These journeys no longer
+cover a separate standalone default-feature debug graph. Artificial installer
+HTTP/cache corruption checks run when committed non-Rust inputs change,
+excluding the known README/contribution/roadmap and Markdown documentation
+paths. Installer/helper/executor changes, mixed changes, renames/deletions of
+those inputs and unresolved Git scope retain those checks. Ordinary Rust-only edits keep actual
+checksum-pinned installation and all real terminal cases, but skip the unchanged
+installer fault matrix. Negative installer paths therefore have less coverage
+on ordinary source PRs. `WINDOWS_TERMINAL_INSTALLER_SCOPE` and the retained
+`installer-scope.json` explain the decision. Real Git/Cargo/native-process guards
+check input transitions, inherited Git bindings, warm reuse and ignored-only
+target selection; their controlled dependency-acquisition boundaries add no
+product journey coverage.
 
 Native service journeys use the workspace's dev/mailbox feature graph. Cargo
 verifies or builds the `pty_model_stream_close` driver with `--no-run`, then

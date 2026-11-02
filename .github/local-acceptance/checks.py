@@ -318,6 +318,23 @@ def prepare_windows_terminal(root, output, execute):
     return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
 
 
+def terminal_installer_scope(root, base):
+    """Retain fault injection for unknown inputs; Rust-only edits keep real setup."""
+    try:
+        if not base:
+            raise ValueError("No committed base")
+        paths = subprocess.check_output(
+            ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+            stderr=subprocess.PIPE).decode().split("\0")[:-1]
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return {"resolved": False, "fault_injection_required": True, "changed_control_inputs": None}
+    controls = [path for path in paths if not path.startswith("rust/")
+                and path not in {"README.md", "CONTRIBUTING.md", "sudo-code-roadmap.html"}
+                and not (path.startswith("docs/") and path.endswith(".md"))]
+    return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
+
+
 def prepare_native_checks(names, root, output, execute):
     """Install selected Windows terminal inputs before long native compilation."""
     prepared = {}
@@ -433,6 +450,9 @@ def run(name, root, output, base, execute):
               "This profile never runs example entry points.", flush=True)
         cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
     elif name == "native-resize":
+        installer_scope = {**terminal_installer_scope(root, base), "windows_host": os.name == "nt"}
+        (output / "installer-scope.json").write_text(json.dumps(installer_scope, indent=2), encoding="utf-8")
+        print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
             try:
@@ -445,7 +465,11 @@ def run(name, root, output, base, execute):
                 results.extend(prepared)
             else:
                 results.append(prepare_windows_terminal(root, output, execute))
-            command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            if installer_scope["fault_injection_required"]:
+                command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            else:
+                print("Installer code/executor inputs unchanged: skipping artificial HTTP/cache corruption checks; "
+                      "actual checksum-pinned setup and every real terminal test remain required.", flush=True)
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
         else:
@@ -454,8 +478,11 @@ def run(name, root, output, base, execute):
         tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
         if os.name != "nt":
             tests.append("pty_codex_colors")
+        print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
+              "all selected ignored cases and original budgets remain. The standalone default-feature "
+              "debug graph is outside this profile's coverage.", flush=True)
         for test in tests:
-            cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--test", test,
+            cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", test,
                   "--", "--ignored", "--nocapture")
     elif name == "native-release":
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
@@ -579,7 +606,7 @@ def native_guard_files():
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "d9983bad5480673d49153ed94944593c0f07efb7db64369581d3476ff7923858",
+        "e2e/local-acceptance/release_acceptance.py": "e31a4107cfc2f7096da25aac0247c31e303f0eb554427e68e07058f158a1c6c0",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
     }

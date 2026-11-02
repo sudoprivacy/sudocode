@@ -1192,6 +1192,11 @@ def compiled_drivers(log, names):
     return {name: executables[0] for name, executables in found.items()}
 
 
+def browser_viewport_cases():
+    """Required native viewport journeys for browser execution and its build fixture."""
+    return ("viewport_browser_interaction", "viewport_browser_resource_exit")
+
+
 def browser_smoke(inputs, output, command):
     """Painted-terminal behaviour against the measured release or a dev build.
 
@@ -1233,7 +1238,7 @@ def browser_smoke(inputs, output, command):
             "--candidate", str(binary), "--output", str(output / "smoke"),
             extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
                    "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
-    for case in ["viewport_browser_interaction", "viewport_browser_resource_exit"]:
+    for case in browser_viewport_cases():
         log = command(drivers[viewport], case, "--ignored", "--exact", "--nocapture",
                       extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
         counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))

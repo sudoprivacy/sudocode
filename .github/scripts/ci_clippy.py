@@ -1,17 +1,19 @@
-"""Lint the complete feature graph using the validated native test groups."""
+"""Keep full source lint; scope isolated CLI test edits through the native selector."""
 
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def lint_plan(repository):
-    """Reuse the native group inventory and preserve manual-target exclusions."""
+def lint_plan(repository, base=None):
+    """Keep all features and normal targets; narrow only committed isolated tests."""
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--locked", "--all-features", "--format-version", "1"],
         cwd=repository / "rust"))
@@ -33,22 +35,30 @@ def lint_plan(repository):
         recipes = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(recipes)
         grouped, selection = recipes.grouped_workspace_test_targets(repository, metadata)
-        if grouped:
-            covered = {(group["package"], name) for group in selection["groups"]
-                       for name in group["modules"]}
-            selected = {grouped[index + 1] for index, argument in enumerate(grouped[:-1])
-                        if argument == "--test"}
-            # Cargo's original all-target lint excludes manual test=false
-            # drivers. Only validated groups opt in to replace their modules.
-            manual = sorted(target["name"] for package, target in tests
-                            if (package, target["name"]) not in covered
-                            and target["name"] not in selected)
-            target_args = [*grouped, "--examples", "--benches"]
-            scope.update(mode="grouped-workspace", groups=selection["groups"],
-                         covered_original_targets=len(covered), manual_targets_excluded=manual,
-                         integration_targets_selected=len(selected))
-        else:
+        if not grouped:
             scope["reason"] = "source-without-validated-groups"
+        elif not base or not re.fullmatch(r"[0-9a-f]{40}", base):
+            scope["reason"] = "missing-or-invalid-queue-base"
+        else:
+            try:
+                dirty = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"],
+                                                cwd=repository)
+                changed = recipes.changed_cli_test_targets(repository, base) if not dirty else None
+            except (OSError, ValueError, subprocess.CalledProcessError):
+                changed = None
+                scope["reason"] = "queue-base-unavailable-full-lint-retained"
+            eligible = {target["name"] for _, target in tests if target["test"]
+                        and Path(target["src_path"]).resolve() == repository / "rust/crates/rusty-sudocode-cli/tests" / (target["name"] + ".rs")}
+            if changed and set(changed) <= eligible:
+                groups = [group for group in selection["groups"] if set(group["modules"]) & set(changed)]
+                selected = sorted(set(changed) | {group["target"] for group in groups})
+                target_args = ["--lib", "--bins", "--examples", "--benches"]
+                for name in selected:
+                    target_args += ["--test", name]
+                scope.update(mode="changed-cli-tests", changed_tests=changed, groups=groups,
+                             integration_targets_selected=len(selected))
+            else:
+                scope.setdefault("reason", "ordinary-shared-dirty-or-unregistered-inputs")
     arguments = ["cargo", "clippy", "--workspace", "--locked", "--all-features", *target_args]
     return arguments, scope
 
@@ -57,17 +67,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, default=ROOT)
     parser.add_argument("--message-format", choices=["json", "human"])
+    parser.add_argument("--base", default=os.environ.get("SCODE_QUEUE_BASE"))
     args = parser.parse_args()
     repository = args.repository.resolve(strict=True)
-    command, scope = lint_plan(repository)
+    command, scope = lint_plan(repository, args.base)
     if args.message_format:
         command += ["--message-format=" + args.message_format]
     command += ["--", "-D", "warnings"]
     scope["command"] = command
     print("QUEUE_CLIPPY_SCOPE=" + json.dumps(scope), flush=True)
     print("Queue lint retains all features, library/bin test configurations, examples, benches and manual-target exclusions. "
-          "Covered integration modules compile through their validated groups; their original standalone crate "
-          "identities are no longer checked again here. No product test case or timeout is removed.", flush=True)
+          "Ordinary/shared inputs retain all-targets. Isolated committed CLI test edits select original targets plus "
+          "their validated groups; unchanged unrelated integration crates are omitted. No product case or timeout changes.", flush=True)
     return subprocess.call(command, cwd=repository / "rust")
 
 

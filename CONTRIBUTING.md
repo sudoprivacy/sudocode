@@ -635,10 +635,9 @@ be missing; these diagnostics neither authorize a push nor prove complete histor
 For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
 in a private local Docker container. Native guards retain the actual failing
 process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
-native nextest/Cargo enforcement fixture runs on the author OS and each
-complementary native CI host. Windows also verifies its native color initialization.
-Docker is required on
-the author's machine, not by the complementary native jobs. The full
+native nextest/Cargo enforcement fixture runs on the author OS. Windows author
+acceptance also verifies native color initialization. Docker is required on
+the author's machine, not by complementary native jobs. The full
 negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build

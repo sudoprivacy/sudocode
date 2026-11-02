@@ -127,7 +127,7 @@ def main():
     except RuntimeError:
         negative = json.loads((output / "old-path-negative.command.json").read_text())
         assert negative["exit_code"] == 2, negative
-    entry = profiles.stage_profile_executor(candidate, protected, "native-guard", output / "native-guard-policy")
+    entry = profiles.stage_profile_executor(candidate, protected, "guard-contract", output / "native-guard-policy")
     executable = profiles.nextest_binary(output)
     result = authority.run_command([
         sys.executable, str(entry), "--repository", str(candidate), "--output", str(output / "positive"),
@@ -165,7 +165,7 @@ def main():
         path.write_bytes(path.read_bytes() + b"\n# Changed protected dependency.\n")
         changed = commit("Change a protected guard dependency")
         try:
-            profiles.stage_profile_executor(candidate, changed, "native-guard", output / f"rejected-input-{index}")
+            profiles.stage_profile_executor(candidate, changed, "guard-contract", output / f"rejected-input-{index}")
             raise AssertionError(f"Changed executor bytes were accepted: {relative}")
         except RuntimeError as error:
             assert "Update its protected pin before running acceptance" in str(error), error
@@ -203,7 +203,7 @@ def main():
     (candidate / "spec/local_acceptance.json").write_text(json.dumps(data))
     changed_scope = commit("Change protected grouping selection rules without updating their pin")
     try:
-        profiles.stage_profile_executor(candidate, changed_scope, "native-guard", output / "rejected-scope-policy")
+        profiles.stage_profile_executor(candidate, changed_scope, "guard-contract", output / "rejected-scope-policy")
         raise AssertionError("Changed grouping scope policy was accepted")
     except RuntimeError as error:
         assert "Native grouping scope policy changed" in str(error), error
@@ -213,7 +213,7 @@ def main():
     bad = commit("Reject an executor outside the protected contract")
     bad_profiles = load("invalid_policy_guard_paths", selector)
     try:
-        bad_profiles.stage_profile_executor(candidate, bad, "native-guard", output / "must-not-start")
+        bad_profiles.stage_profile_executor(candidate, bad, "guard-contract", output / "must-not-start")
         raise AssertionError("Unprotected executor input was accepted")
     except RuntimeError as error:
         assert "Executor input escaped its policy snapshot" in str(error), error

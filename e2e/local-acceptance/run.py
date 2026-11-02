@@ -26,7 +26,6 @@ def fixture_environment():
     environment = {key: value for key, value in os.environ.items() if key not in names
                    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
     environment["PYTHONIOENCODING"] = "utf-8"
-    # Every real fixture push inherits the coding-agent color opt-out.
     return {**environment, "NO_COLOR": "1"}
 
 
@@ -276,7 +275,7 @@ def performance_scope_acceptance(directory):
             assert "RELEASE_ACCEPTANCE_SCOPE=" in text, text
         assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native else set()), text
         for job in plan["ci"]:
-            assert set(job["checks"]) == native_checks, text
+            assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
 
     both = ["rendering", "browser"]
     measurement_inputs = ["e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
@@ -383,7 +382,7 @@ def performance_scope_acceptance(directory):
     history.write_text("changed Git history acceptance fixture\n")
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "Git-only history fixture", cwd=repository)
-    expect(base, [], workspace=False, guard=False)
+    expect(base, [], native=False, guard=False)
     for path in ["e2e/pr-history/future.py", "rust/crates/runtime/src/history_fixture.rs"]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         destination = repository / path
@@ -392,24 +391,24 @@ def performance_scope_acceptance(directory):
         history.write_text(history.read_text() + "mixed fixture edit\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", "History fixture with conservative native input", cwd=repository)
-        expect(base, [], workspace=True, guard=False)
+        expect(base, [], native=True, guard=False)
     for left, right in [("e2e/pr-history/run.py", "rust/crates/runtime/src/moved_history.rs"),
                         ("rust/crates/runtime/src/moved_history.rs", "e2e/pr-history/run.py")]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         command("git", "mv", left, right, cwd=repository)
         command("git", "commit", "-m", "Move across Git-only fixture boundary", cwd=repository)
-        expect(base, [], workspace=True, guard=False)
+        expect(base, [], native=True, guard=False)
     print("PASS: public planner keeps Git-only history acceptance in CI preflight; mixed, unknown and renamed native inputs retain product validation")
     # These three independent executor fixtures already run in scoped PR CI.
-    # Their Docker matrix scope is independent of workspace/performance scopes. Unknown
+    # They do not change enforcement or its pinned native helpers. Unknown
     # future fixtures and every shared contract input remain conservative.
     independent = ["benchmark_targets_acceptance.py", "container_inputs_acceptance.py", "clippy_fail_fast.py"]
-    paths = [("e2e/local-acceptance/" + name, False, []) for name in independent]
-    paths += [(name, True, both if name == ".github/local-acceptance/checks.py" else []) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
+    paths = [("e2e/local-acceptance/" + name, False) for name in independent]
+    paths += [(name, True) for name in ["e2e/local-acceptance/run.py", "e2e/local-acceptance/future_guard.py",
         ".github/local-acceptance/checks.py", ".github/scripts/local_acceptance.py",
         ".github/scripts/check_pr_history.py",
         "spec/local_acceptance.json", ".github/workflows/local-acceptance.yml"]]
-    for path, guard, performance in paths:
+    for path, guard in paths:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
         file.parent.mkdir(parents=True, exist_ok=True)
@@ -419,7 +418,7 @@ def performance_scope_acceptance(directory):
             file.write_text("changed enforcement-scope input\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"Enforcement input {path}", cwd=repository)
-        expect(base, performance, workspace=False, guard=guard)
+        expect(base, [], native=False, guard=guard)
     for shared in [False, True]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         for name in independent + (["run.py"] if shared else []):
@@ -427,18 +426,18 @@ def performance_scope_acceptance(directory):
             file.write_text(file.read_text() + "mixed change\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"Independent fixtures with shared={shared}", cwd=repository)
-        expect(base, [], workspace=False, guard=shared)
+        expect(base, [], native=False, guard=shared)
     for source, target in [("benchmark_targets_acceptance.py", "moved_guard.py"),
                            ("moved_guard.py", "benchmark_targets_acceptance.py")]:
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         command("git", "mv", "e2e/local-acceptance/" + source, "e2e/local-acceptance/" + target, cwd=repository)
         command("git", "commit", "-m", "Move across enforcement boundary", cwd=repository)
-        expect(base, [], workspace=False, guard=True)
+        expect(base, [], native=False, guard=True)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "rm", "e2e/local-acceptance/clippy_fail_fast.py", cwd=repository)
     command("git", "commit", "-m", "Delete independent fixture input", cwd=repository)
-    expect(base, [], workspace=False, guard=False)
-    print("PASS: public Git planner keeps independent executor fixtures in scoped CI; shared/mixed/unknown inputs and both rename directions retain contract validation")
+    expect(base, [], native=False, guard=False)
+    print("PASS: public Git planner skips unchanged enforcement for three independently gated fixtures; shared/mixed/unknown inputs and both rename directions retain it")
 
 
 def plan_acceptance(directory):
@@ -503,18 +502,6 @@ def plan_acceptance(directory):
     assert all(set(job["checks"]) == expected for job in native)
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
 
-    source = repository / "e2e/local-acceptance/native.py"
-    source.parent.mkdir(parents=True)
-    source.write_text("native guard fixture input\n")
-    command("git", "add", ".", cwd=repository)
-    command("git", "commit", "-m", "Contract and native guard inputs", cwd=repository)
-    plan = preview("macos", "x86_64")
-    assert {"guard-contract", "native-guard"}.issubset(plan["local_checks"]), plan
-    native = [job for job in plan["ci"] if job["family"] == "native"]
-    assert native and all("native-guard" in job["checks"] for job in native), plan
-    assert all("guard-contract" not in job["checks"] for job in plan["ci"]), plan
-    print("PASS: public CLI planner keeps Docker matrix author-local and native guards on every host")
-
 
 def enforcement_acceptance(*, profile_compat_only=False):
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
@@ -562,7 +549,6 @@ def enforcement_acceptance(*, profile_compat_only=False):
             '    policy_ref, candidate_ref = run.execution_refs\n'
             '    assert policy_ref and len(policy_ref) == 40\n'
             '    assert candidate_ref and len(candidate_ref) == 40\n'
-            '    assert isinstance(run.execution_images, dict)\n'
             '    if name == "native-sdk":\n'
             '        return [execute([shared_python(), "-c", '
             '"from pathlib import Path; text=Path(\'sdk/typescript/input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
@@ -626,8 +612,8 @@ def enforcement_acceptance(*, profile_compat_only=False):
         receipt = json.loads(base64.b64decode(envelope["payload"]))
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
-        assert len(receipt["checks"]["real-process"]) == 2
-        assert receipt["checks"]["real-process"][1]["exit_code"] == 0
+        assert len(receipt['checks']['real-process']) == 2
+        assert receipt['checks']['real-process'][1]['exit_code'] == 0
 
         from profile_compat_acceptance import verify_profile_compatibility
         verify_profile_compatibility(directory, work, command)

@@ -1190,7 +1190,6 @@ def perform_check(args, attempt):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
-    module.run.execution_images = {}
     reusable, resumed = {}, None
     previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
     if previous:

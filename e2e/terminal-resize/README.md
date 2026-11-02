@@ -165,8 +165,8 @@ and link-activation assertions. All raw observations, including readback spikes,
 remain in the report. With only twelve observations, nearest-rank P95 equals
 the maximum; 48 observations put two samples above its rank. Completeness checks
 require at least forty observations across multiple complete gestures and verify
-both each gesture and the flattened sample series. The five A/A and seven A/B
-pairs, existing input samples and candidate-only Write drag stay unchanged.
+both each gesture and the flattened sample series. Existing input samples and
+the final Write-source drag remain required by this functional smoke.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same
 deterministic inter-key delays outside timed regions, retained in the report.

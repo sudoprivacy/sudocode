@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
-import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner } from './codexMcp';
+import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
 import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 
@@ -37,12 +37,13 @@ function verify(): void {
 }
 
 async function main(): Promise<void> {
-  const { values } = parseArgs({ options: {
+  const { values, positionals } = parseArgs({ allowPositionals:true, options: {
     config: { type: 'string' }, help: { type: 'boolean' }, version: { type: 'boolean' },
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
     'prepare-codex-owner': { type: 'boolean' },
+    'launch-codex': {type:'boolean'},
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'peer-policy': {type:'string'},
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
     'enroll-codex': {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
+  if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
       + 'scode-acp-bridge --verify | --version\n'
@@ -59,6 +61,7 @@ async function main(): Promise<void> {
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
+      + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
       + 'scode-acp-bridge --init-codex-operator --config FILE --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]\n'
@@ -71,6 +74,10 @@ async function main(): Promise<void> {
   }
   if (values.verify) { verify(); return; }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
+  if(values['launch-codex']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','launch-codex'].includes(key)))throw new Error('Select one foreground launch mode');
+    process.exitCode=await launchCodexFromConfig(values.config,positionals);return;
+  }
   if(values['prepare-codex-owner']){
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','prepare-codex-owner'].includes(key)))throw new Error('Select one owner preparation mode');
     console.log(JSON.stringify(prepareWindowsCodexOwner(values.config,__filename)));

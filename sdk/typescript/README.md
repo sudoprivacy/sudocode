@@ -109,6 +109,21 @@ its thread, approval policy and native package context. The initializer only
 prints those commands; it never starts/stops a native server or adopts a
 running frontend. This package adds no native daemon lifecycle implementation.
 
+`userEntryArgv` is an optional foreground entry for an existing command that
+repeats `-c approvals_reviewer=user`. Native Codex treats that CLI override as
+a request for an embedded server, which the shared bridge cannot observe.
+The entry reuses the official daemon start and read-only config API, removes
+only a redundant user-review override after confirming effective `user`
+review for the selected cwd, then delegates all remaining argv and exit status
+to the official native command. A conflicting or absent reviewer refuses
+normalization. Other overrides, explicit private/remote modes and noninteractive
+commands remain unchanged. No policy is rewritten, actor enrolled, package
+updated, or Nexus daemon started by this foreground compatibility step.
+Install the returned entry as the user's ordinary `codex` command after
+review; adding a higher-priority PATH entry also requires rehashing an already
+running shell. A plain native command remains available by its original
+absolute path. Its incompatible CLI overrides still select native private mode.
+
 Existing fixed-session Agents can be prepared offline with `--bind-codex`.
 The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
 specifies its explicit mapping document, original SID and separate native/ACP

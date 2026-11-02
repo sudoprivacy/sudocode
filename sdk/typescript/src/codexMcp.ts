@@ -12,6 +12,7 @@ import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
 import { prepareWindowsOwnerTask, startWindowsOwnerTask, type WindowsCodexOwnerPreparation } from './windowsCodexOwner';
 import { ScodeA2aError } from './scodeA2a';
+import { runCodexUserEntry } from './codexLaunch';
 import { bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
   type CodexBinding } from './codexBindings';
 
@@ -34,7 +35,7 @@ export interface CodexMcpConfig {
 export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
   entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {
     configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[];
-    ownerPreparationArgv?: string[]; installed: false;
+    ownerPreparationArgv?: string[]; userEntryArgv: string[]; installed: false;
   } {
   const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
   validateCodexConnectionConfig({codexArgv});
@@ -51,6 +52,7 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
   writeFileSync(file,JSON.stringify(config,null,2)+'\n',{flag:'wx',mode:0o600});
   return {configFile:file,...(process.platform==='win32'
       ? {ownerPreparationArgv:[process.execPath,entry,'--prepare-codex-owner','--config',file]} : {}),
+    userEntryArgv:[process.execPath,entry,'--launch-codex','--config',file,'--'],
     nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
     nativeProxyArgv:[...codexArgv,'app-server','proxy'],registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
     '--codex','--config',file],installed:false};
@@ -60,6 +62,11 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
 export function prepareWindowsCodexOwner(file: string, entry: string): WindowsCodexOwnerPreparation {
   readConfig(file);
   return prepareWindowsOwnerTask(file, entry);
+}
+
+/** The ordinary user entry and the bridge share one validated native prefix. */
+export async function launchCodexFromConfig(file: string, args: string[]): Promise<number> {
+  return runCodexUserEntry(readConfig(file).config.native,args);
 }
 
 export interface ExistingCodexAgentBinding {

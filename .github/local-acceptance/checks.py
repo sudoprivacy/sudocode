@@ -103,12 +103,14 @@ def nextest_options(output):
 def workspace_nextest_options(output, grouped):
     """Raise only the full grouped workspace pool; preserve explicit lower limits."""
     options = nextest_options(output)
-    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+    if (grouped and (os.environ.get('GITHUB_ACTIONS') == 'true' or (os.cpu_count() or 0) >= 8)
+            and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ):
         options[options.index('--test-threads') + 1] = '8'
     print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
           + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
-          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
-          'counts, legacy/isolated/other profiles retain four.',
+          'Full grouped suites use eight on GitHub Actions or hosts with at least eight logical CPUs. '
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; smaller/unknown author hosts, '
+          'legacy/isolated/other profiles retain four.',
           flush=True)
     return options
 
@@ -614,7 +616,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "d34ebe36e045e1402fb9605da2956b92bf172533920b7ee37ce4f73fc556ef04",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",

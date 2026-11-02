@@ -252,29 +252,60 @@ pub fn record(name: &str) {
     def execute(arguments, cwd, log, extra=None):
         return helper.run_command(arguments, cwd, log, {**environment, **(extra or {})})
 
+    def options_for_cpu_hint(count):
+        # Supply a hardware capability to the dispatcher only. The following
+        # pinned nextest commands still launch real native child processes.
+        original = profiles.os.cpu_count
+        try:
+            profiles.os.cpu_count = lambda: count
+            return profiles.workspace_nextest_options(output, True)
+        finally:
+            profiles.os.cpu_count = original
+
     explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+    original_ci = os.environ.get("GITHUB_ACTIONS")
     environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
     try:
         dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        os.environ["GITHUB_ACTIONS"] = "true"
+        ci = options_for_cpu_hint(3)
+        assert ci[ci.index("--test-threads") + 1] == "8", "Dedicated CI must not retain the small author-host pool"
+        ci_unknown = options_for_cpu_hint(None)
+        assert ci_unknown[ci_unknown.index("--test-threads") + 1] == "8"
+        environment["SCODE_GROUP_POOL_DIR"] = str(output / "ci-pool")
+        command(str(executable), "nextest", "run", *ci, "--workspace", "--locked", *integration_arguments)
         legacy = profiles.workspace_nextest_options(output, False)
         assert legacy[legacy.index("--test-threads") + 1] == "4"
         os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
         environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
         limited = profiles.workspace_nextest_options(output, True)
         command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
+        os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "1"
+        single = options_for_cpu_hint(3)
+        assert single[single.index("--test-threads") + 1] == "1"
+        os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS")
+        os.environ["GITHUB_ACTIONS"] = "false"
+        for count in [3, None]:
+            author = options_for_cpu_hint(count)
+            assert author[author.index("--test-threads") + 1] == "4"
     finally:
         if explicit_workers is None:
             os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
         else:
             os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = explicit_workers
+        if original_ci is None:
+            os.environ.pop("GITHUB_ACTIONS", None)
+        else:
+            os.environ["GITHUB_ACTIONS"] = original_ci
     assert all(row["exit_code"] == 0 for row in dispatched)
     actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
     assert "--lib" not in actual and "--bins" not in actual
     assert actual[-len(integration_arguments):] == integration_arguments
-    expected_workers = 8 if (os.cpu_count() or 0) >= 8 else 4
+    expected_workers = 8 if os.environ.get("GITHUB_ACTIONS") == "true" or (os.cpu_count() or 0) >= 8 else 4
     assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
     observed_workers = {}
     for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
+                                ("ci-pool", 5, 8),
                                 ("limited-pool", 1, 4)]:
         observed = output / label / "observed"
         maximum = max(int(path.read_text()) for path in observed.iterdir())

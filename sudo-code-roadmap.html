@@ -749,9 +749,9 @@ doctests remain. Real native controls poison library and binary units, observe
 the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
 <p><strong>Bound grouped workspace concurrency (2026-11-02).</strong> Complete
-grouped native suites default to eight test processes on hosts with at least
-eight logical CPUs. Smaller/unknown hosts, older ungrouped workspaces, isolated
-targets and other profiles retain four. An explicit
+grouped native suites default to eight test processes on GitHub Actions and author
+hosts with at least eight logical CPUs. Smaller/unknown author hosts, older
+ungrouped workspaces, isolated targets and other profiles retain four. An explicit
 <code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
 still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
 A matched Windows run on 20 logical CPUs reused identical native binaries and
@@ -762,7 +762,14 @@ compilation and proves neither cross-hardware nor whole-PR savings. A prior run
 with one leaked ACP child was refused; the test now awaits its existing shutdown
 helper. Real native process guards observe overlap and explicit four-worker
 limits. Cases, assertions, retries, deadlines and budgets remain unchanged;
-the guards add no e2e coverage credit.</p>
+the guards add no e2e coverage credit. A separate hosted Linux comparison passed
+the same 1,151 cases at four/eight workers in 454.9/256.2 seconds, with identical
+binary hashes before and after its eight-worker run. Four-CPU Windows CI passed
+all 1,092 cases at eight workers with matching binary hashes; no matched Windows
+four-worker baseline was collected. These single-run, different-VM observations
+do not establish causal or whole-PR savings. Native process guards also cover
+small/unknown CI CPU hints, the dedicated CI pool and explicit limits. Author
+limits, case counts and acceptance budgets retain their existing behavior.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

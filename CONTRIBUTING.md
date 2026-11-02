@@ -443,15 +443,26 @@ setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
 Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces default to eight test workers on hosts with at least eight
-logical CPUs; smaller/unknown hosts, older ungrouped sources, isolated targets
-and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
+grouped workspaces default to eight test workers on GitHub Actions and author
+hosts with at least eight logical CPUs; smaller/unknown author hosts, older
+ungrouped sources, isolated targets and other profiles retain four.
+`SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
 pool explicitly. Compiler jobs stay at one locally, with only compiler workers
 at BelowNormal priority; test processes stay Normal. A matched Windows run on
 20 logical CPUs passed the same 1,089 integration cases and 69 ignored markers:
 four workers took 424.5 seconds, eight took 244.7 seconds. Real ConPTY echo P95
 was 0.58/0.74 ms. This warm, single-host execution comparison excludes compilation
-and does not establish whole-PR or cross-hardware savings. A test that previously
+and does not establish whole-PR or cross-hardware savings. A separate hosted
+Linux comparison passed the same 1,151 cases at four and eight workers in
+454.9/256.2 seconds. A four-CPU Windows CI run passed all 1,092 cases at eight
+workers; it has no matched four-worker baseline. These are single-run observations
+on different VMs, not causal speedup estimates. Native process guards exercise
+the dedicated CI pool, explicit one/four-worker limits and smaller/unknown author
+CPU hints; the hints affect only dispatch, while test processes run normally.
+Exact protected recipe pairs retain earlier complete workspace evidence across
+this scheduling change, including its previously approved log-only predecessor.
+Selected commands, case isolation, deadlines and receipt verification still apply;
+the changed enforcement guard requires fresh validation. A test that previously
 left its ACP child holding output pipes now awaits its existing shutdown helper.
 Native guards run actual case processes, observe overlap and enforce an explicit
 four-worker limit; they add no product journey coverage.

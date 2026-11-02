@@ -795,6 +795,9 @@ also prove manual-driver exclusion with deliberately broken manual code. Require
 `QUEUE_CLIPPY_SCOPE`, including all-feature target counts and the actual command.
 The fixture runs once on a PR only when the lint workflow, entry, fixture or scope
 selector changes; queue/main reuse its result.
+Changing the queue entry itself also selects the real all-feature workspace
+lint on all three queue platforms. Real committed PR/push/queue event controls
+verify this trigger and the exclusion of documentation-only changes.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

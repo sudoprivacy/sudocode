@@ -179,10 +179,53 @@ def run(output):
     wrapper.write_text(recipes.test_group_source(["covered_a", "covered_b"]), encoding="utf-8")
     grouped_final = invoke("grouped-restored", command, output / "fast-target")
     assert grouped_final["exit_code"] == 0, grouped_final
+    # Actual committed Git events select the real three-platform queue lint
+    # when this entry changes. Documentation alone must not allocate it.
+    repository = output / "scope-repository"
+    repository.mkdir()
+
+    def git(*arguments):
+        return subprocess.check_output(["git", *arguments], cwd=repository, env=environment,
+                                       stderr=subprocess.PIPE).decode().strip()
+
+    git("init", "--quiet")
+    git("config", "user.name", "CI fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    (repository / "README.md").write_text("Original docs\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Initial fixture")
+    base = git("rev-parse", "HEAD")
+    (repository / "README.md").write_text("Updated docs\n")
+    git("commit", "--quiet", "-am", "Update docs")
+    docs = git("rev-parse", "HEAD")
+    (repository / ".github/scripts").mkdir(parents=True)
+    (repository / ".github/scripts/ci_clippy.py").write_text("# Changed queue entry\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "Update queue entry")
+    changed = git("rev-parse", "HEAD")
+    selections = []
+    for head, required in [(docs, "false"), (changed, "true")]:
+        for event_name in ["pull_request", "push", "merge_group"]:
+            event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}} if event_name == "pull_request" else (
+                {"before": base, "after": head} if event_name == "push" else
+                {"merge_group": {"base_sha": base, "head_sha": head}})
+            label = f"scope-{required}-{event_name}"
+            event_file, result_file = output / (label + ".json"), output / (label + ".txt")
+            event_file.write_text(json.dumps(event), encoding="utf-8")
+            value = subprocess.check_output([sys.executable, str(SOURCE / ".github/scripts/ci_input_scope.py")],
+                cwd=repository, env={**environment, "GITHUB_EVENT_NAME": event_name,
+                                     "GITHUB_EVENT_PATH": str(event_file), "GITHUB_OUTPUT": str(result_file)})
+            (output / (label + ".stdout.log")).write_bytes(value)
+            selection = json.loads(value)
+            assert selection["clippy_required"] == required, selection
+            assert selection["clippy_executor_required"] == required, selection
+            assert selection["daemon_required"] == "false" and selection["live_required"] == "false", selection
+            selections.append({"event": event_name, "head": head, "clippy_required": required})
     result = {"status": "PASS", "first_failure": fast, "previous_keep_going": continuing,
               "clean_workspace": passing,
               "grouped_workspace": grouped, "grouped_restored": grouped_final, "controls": controls,
               "original_all_targets": original_targets, "grouped_manual_excluded": manual_excluded,
+              "real_git_selections": selections,
               "scope": "Actual workflow entry and Cargo/Clippy processes. Legacy full-target fallback, all-feature first-error behavior, every grouped module, example, bench and library/bin test configuration are exercised. Old/new compiler artifacts prove manual-driver exclusions. Original standalone covered-module identities are omitted. Infrastructure only; no product PTY or production latency credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({"status": "PASS", "failed_packages_before": 3, "failed_packages_after": 1,

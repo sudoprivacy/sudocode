@@ -791,6 +791,9 @@ output prints <code>QUEUE_CLIPPY_SCOPE</code> and the actual command. Real
 Cargo/Clippy controls inject feature-only errors into both grouped modules,
 the example, bench and library/bin test configurations; old/new compiler
 artifacts verify that deliberately broken manual drivers remain excluded.
+Changing the queue entry also selects the real all-feature workspace lint on
+all three queue platforms. Committed PR/push/queue event controls verify that
+trigger and reject unrelated documentation-only allocation.
 The original first-failure control remains. This reduces compiler targets,
 not product test cases or timeout budgets. Standalone crate identity coverage
 is reduced for the covered modules; no whole-lifecycle speedup is inferred

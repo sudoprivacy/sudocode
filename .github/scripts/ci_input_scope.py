@@ -171,9 +171,12 @@ def main():
             live = any(fnmatch.fnmatchcase(path, rule)
                        for path in relevant if path not in {POLICY, SIGNERS}
                        for rule in live_inputs)
-            # Test modules remain part of all-target/all-feature linting even
+            # Test modules remain part of all-feature linting even
             # when they do not rebuild or exercise the daemon binary.
-            clippy = any(path.startswith("rust/") for path in relevant)
+            # Exercise a changed queue entry on the real workspace/platforms,
+            # in addition to its small compiler controls in PR preflight.
+            clippy = any(path.startswith("rust/") or path == ".github/scripts/ci_clippy.py"
+                         for path in relevant)
             # CLI integration modules are not inputs to the daemon/cohost
             # binaries or shell journeys. Native PTYs and live model scope
             # remain unchanged; manifests, src and moved source still qualify.
@@ -212,6 +215,7 @@ def main():
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
     clippy_executor = any(path in {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py",
+                                  ".github/scripts/ci_clippy.py",
                                   "e2e/local-acceptance/clippy_fail_fast.py",
                                   ".github/workflows/ci-cancel-failed-run.yml",
                                   "e2e/local-acceptance/failed_ci_live.py"} for path in paths)

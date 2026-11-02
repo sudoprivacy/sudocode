@@ -448,10 +448,10 @@ def run(name, root, output, base, execute):
             print("Native workspace target selection: " + json.dumps(selection), flush=True)
             print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
                   "targets, examples and benches before long builds and PTY execution. "
-                  "The integrated queue additionally checks original targets with all features.", flush=True)
+                  "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
             if targets:
                 print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
-                      "unit harnesses are not executed. Queue all-target/all-feature lint and workspace doctests remain.", flush=True)
+                      "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
             else:
                 print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
                       "including legacy units and original disabled/feature-gated target exclusions.", flush=True)

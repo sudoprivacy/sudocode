@@ -593,14 +593,14 @@ sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
 <p>Native, SDK and installer test matrices stop peer work after the first failure.
-Strict all-target/all-feature Clippy runs once on the three-platform merge queue;
+Strict all-feature Clippy runs once on the three-platform merge queue;
 the duplicate Linux PR job is removed (2026-11-02). Native per-host lint remains.
 All-feature-only findings can arrive later in the queue; the final lint
 requirement is unchanged. Main pushes no longer allocate another Rust CI
 preflight after the same tree passed the queue. Independent cache/package
 publishers and legacy development-branch push checks retain their own triggers.</p>
 <p>
-Strict all-target/all-feature Clippy also stops scheduling extra crates after
+Strict all-feature Clippy also stops scheduling extra crates after
 its first error, allowing matrix cancellation sooner; already running compilers
 can finish. All three queue platforms and <code>-D warnings</code> remain.
 A real Cargo/Clippy fixture with three independent feature-gated warning failures
@@ -745,7 +745,7 @@ run had 1,423 unit and 1,089 integration cases: 56.6% of case count is retired,
 but those unit cases contributed only 73 summed worker seconds. Compilation
 savings and whole-PR latency still require measurement. Legacy unit assertions
 cease to be runtime regression gates; every integration/PTY case and ignore
-marker, queue all-target/all-feature Clippy, vendored Mermaid checks and workspace
+marker, queue all-feature Clippy, vendored Mermaid checks and workspace
 doctests remain. Real native controls poison library and binary units, observe
 the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
@@ -770,14 +770,35 @@ modules through their wrappers once: 91 instead of 211 integration targets in
 the current workspace, 56.9% fewer. Library/bin test configurations, enabled
 ungrouped tests, examples and benches remain selected. Ungrouped sources retain
 <code>--all-targets</code>; disabled standalone tests keep their original exclusion.
-The merge queue retains original-target, all-feature Clippy. Per-host lint no
-longer checks differences specific to each original test crate's identity;
-that configuration remains checked in the queue. Real Cargo/Clippy regression
+Queue all-feature lint also uses validated groups, retaining uncovered enabled
+tests and Cargo's manual-target exclusions. Lint no longer checks covered modules under their original
+standalone crate identities on the author, complementary hosts or queue.
+Every module still compiles in its group. Real Cargo/Clippy regression
 compares actual target inventories and injected diagnostics in ordinary and
 test-only library/bin code, grouped/ignored tests, shared helpers, examples and
 benches, including the disabled-target boundary. Product cases, assertions and
 deadlines are unchanged; this fixture adds no product journey coverage.
 No production latency saving is claimed before comparable measurements.</p>
+<p><strong>Queue lint deduplication (2026-11-02).</strong> The queue reuses the
+native Cargo metadata and canonical wrapper validator. Current all-feature
+integration targets fall from 211 to 91: eight groups replace 128 standalone
+test crates. The 222 declarations include eleven disabled group/manual targets,
+so declaration count alone overstates the former lint inventory. The three
+separate <code>test=false</code> benchmark drivers retain their prior exclusion.
+Library/bin test configurations, examples, benches and every uncovered enabled
+integration target remain selected. Sources without validated
+groups retain <code>--all-targets</code>; invalid declarations fail. Required
+output prints <code>QUEUE_CLIPPY_SCOPE</code> and the actual command. Real
+Cargo/Clippy controls inject feature-only errors into both grouped modules,
+the example, bench and library/bin test configurations; old/new compiler
+artifacts verify that deliberately broken manual drivers remain excluded.
+Changing the queue entry also selects the real all-feature workspace lint on
+all three queue platforms. Committed PR/push/queue event controls verify that
+trigger and reject unrelated documentation-only allocation.
+The original first-failure control remains. This reduces compiler targets,
+not product test cases or timeout budgets. Standalone crate identity coverage
+is reduced for the covered modules; no whole-lifecycle speedup is inferred
+from the 56.9% target-count reduction.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the
@@ -1022,6 +1043,13 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       successful runs. Native Bash guards reject failed, skipped or cancelled
       selected queue lint and bind its three platforms, queue-only scheduling
       and independent main cache publishers to the current workflow. These
+      queue lint controls also execute the actual Python entry and Cargo/Clippy,
+      reject feature-only warnings in both grouped modules, retain examples,
+      benches and library/bin test
+      configurations, preserve manual <code>test=false</code> exclusions with
+      real old/new compiler artifacts, and refuse invalid wrapper declarations. Covered original
+      integration crates no longer compile separately in all-feature queue lint.
+      These
       executor checks add no product journey coverage. Author-hook and native
       launcher controls reject failed prerequisites before profile execution.
       Successful terminal preparation remains part of the resize command receipt.
@@ -1043,7 +1071,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       Native test and performance scopes remain selected; unchanged normal
       product profiles may be omitted for these proven metadata-only inputs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
-      <td><code>e2e/local-acceptance/</code></td>
+      <td><code>e2e/local-acceptance/</code>; <code>.github/scripts/ci_clippy.py</code></td>
     </tr>
     <tr>
       <td>SSE archive compressor reuse</td>

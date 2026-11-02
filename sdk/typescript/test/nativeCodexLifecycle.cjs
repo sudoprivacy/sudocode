@@ -15,9 +15,10 @@ const options = parseArgs({ options: {
   'managed-package-root': {type:'string'}, help: {type:'boolean'},
   'operator-context': {type:'string'},
   'legacy-import': {type:'boolean'},
+  'human-review-entry': {type:'boolean'},
 } }).values;
 if (options.help) {
-  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>]');
+  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>] [--human-review-entry]');
   process.exit(0);
 }
 const executable = options.codex ?? process.env.CODEX_TEST_BIN;
@@ -28,6 +29,9 @@ assert(options.output, 'An explicit evidence output directory is required');
 const managedPackageRoot=options['managed-package-root'];
 if(managedPackageRoot)assert(path.isAbsolute(managedPackageRoot)
   && fs.statSync(path.join(managedPackageRoot,'bin/codex.js')).isFile(),'Select the existing official npm package root');
+const humanReviewEntry=options['human-review-entry']===true;
+if(humanReviewEntry)assert(managedPackageRoot,'The human-review entry must exercise the official managed native package');
+if(humanReviewEntry)assert(!options['legacy-import'],'The explicit remote legacy frontend is a separate launch mode');
 const evidence = path.resolve(options.output);
 fs.mkdirSync(evidence,{recursive:true,mode:0o700});
 const library = path.resolve(__dirname,'../dist/index.cjs');
@@ -80,6 +84,7 @@ Object.assign(childEnv,{CODEX_HOME:isolatedHome,HOME:userHome,USERPROFILE:userHo
 if(managedPackageRoot)Object.assign(childEnv,{CODEX_MANAGED_BY_NPM:'1',CODEX_MANAGED_PACKAGE_ROOT:managedPackageRoot});
 const receipt = {
   ordinaryManagedLaunch:!!managedPackageRoot,
+  humanReviewEntry,
   ...(managedPackageRoot?{launcherWrapperSha256:crypto.createHash('sha256')
     .update(fs.readFileSync(path.join(managedPackageRoot,'bin/codex.js'))).digest('hex')}:{}),
   at: new Date().toISOString(), scenario:options.case, platform:process.platform, driverArgv,
@@ -136,6 +141,7 @@ let nativeExited;
 let nativeStderr = '';
 let windowsOwnerPreparation;
 let legacySocket;
+let userEntryArgv;
 const request = async (client,label,method,params) => {
   receipt.requests.push({client:label,method,threadId:params.threadId});
   return client.request(method,params);
@@ -171,8 +177,12 @@ const closeTui = async own => {
     'Actual TUI must exit normally; forced cleanup is not lifecycle acceptance');
 };
 const spawnTui = async (label,args=[],env=childEnv) => {
-  const driver=spawn(driverArgv[0],[...driverArgv.slice(1),configured.codexArgv[0],
-    ...configured.codexArgv.slice(1),...args,'--no-alt-screen','--cd',workspace],{cwd:workspace,
+  // Reuse this fixture's history, unload and request-count assertions for the
+  // actual habitual command, rather than implementing another resume harness.
+  const command=userEntryArgv??configured.codexArgv;
+  const launch=[...command,...args,'--no-alt-screen','--cd',workspace];
+  if(humanReviewEntry)(receipt.userEntryLaunches??=[]).push({label,argv:launch});
+  const driver=spawn(driverArgv[0],[...driverArgv.slice(1),...launch],{cwd:workspace,
       env:{...env,NATIVE_LIFECYCLE_PTY_TRACE:path.join(root,'tui-'+label+'.trace.json')},stdio:['pipe','pipe','pipe']});
   const own={label,driver,exit:once(driver,'close'),lines:[],stderr:''};tuis.push(own);
   let buffer='';driver.stdout.on('data',bytes=>{buffer+=bytes;let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);own.lines.push(JSON.parse(line));}});
@@ -209,7 +219,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     }
     fs.writeFileSync(path.join(isolatedHome,'config.toml'),
       (managedPackageRoot?'thread_unload_delay_secs = 1\n':'')+
-      'check_for_update_on_startup = false\nmodel = "gpt-5.4"\nmodel_provider = "lifecycle_fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n'+
+      'check_for_update_on_startup = false\nmodel = "gpt-5.4"\nmodel_provider = "lifecycle_fixture"\n'+
+      (humanReviewEntry?'approval_policy = "on-request"\napprovals_reviewer = "user"\nsandbox_mode = "danger-full-access"\n'
+        :'approval_policy = "never"\nsandbox_mode = "read-only"\n')+
       '[features]\napps = false\nplugins = false\n[analytics]\nenabled = false\n[model_providers.lifecycle_fixture]\nname = "No inference lifecycle fixture"\n'+
       'base_url = "http://127.0.0.1:'+apiPort+'/v1"\nwire_api = "responses"\nenv_key = "NATIVE_LIFECYCLE_FIXTURE_KEY"\n'+
       '[projects.'+JSON.stringify(workspace)+']\ntrust_level = "trusted"\n'+
@@ -218,6 +230,14 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
       (options.autojoin ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
+    if(humanReviewEntry){
+      const entry=path.resolve(__dirname,'../dist/server.cjs');
+      const configFile=autojoinConfig??path.join(root,'user-entry.json');
+      if(!autojoinConfig)require(library).prepareCodexMcp(configFile,configured.codexArgv,
+        [process.execPath,'fixture-enrollment-must-not-run'],[],entry);
+      userEntryArgv=[process.execPath,entry,'--launch-codex','--config',configFile,'--',
+        '--sandbox','danger-full-access','--ask-for-approval','on-request','-c','approvals_reviewer=user'];
+    }
     if(options['legacy-import']){
       const file=path.join(isolatedHome,'config.toml'),standard=fs.readFileSync(file,'utf8');
       const profile=JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8'));
@@ -350,6 +370,14 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           scope:'fixture only; does not select production retirement policy'};
         assert.equal(receipt.experimentalUnloadConfiguration.readSeconds,1);
       }
+      if(humanReviewEntry){
+        const read=await request(observer,'effective human review','config/read',{cwd:workspace,includeLayers:false});
+        receipt.effectiveHumanReview={approvalsReviewer:read.config.approvals_reviewer,
+          approvalPolicy:read.config.approval_policy,sandboxMode:read.config.sandbox_mode};
+        assert.equal(receipt.effectiveHumanReview.approvalsReviewer,'user');
+        assert.equal(receipt.effectiveHumanReview.approvalPolicy,'on-request');
+        assert.equal(receipt.effectiveHumanReview.sandboxMode,'danger-full-access');
+      }
       let inventory;
       let loadedThreads=[];
       receipt.readiness=[];
@@ -374,6 +402,10 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       for(const thread of loadedThreads){
         const id=thread.id;
         assert.equal(fs.realpathSync(thread.cwd),fs.realpathSync(workspace));assert.equal(thread.status.type,'idle');
+        if(humanReviewEntry){
+          assert.equal(thread.threadSource,'user');assert.equal(thread.parentThreadId,null);
+          assert.equal(thread.canAcceptDirectInput,true,'the actual user entry must join the shared root inventory');
+        }
         receipt.created.push({id,cwd:thread.cwd,status:thread.status,source:thread.source,
           hasParentField:Object.hasOwn(thread,'parentThreadId'),parentThreadId:thread.parentThreadId??null,
           threadSource:thread.threadSource,ephemeral:thread.ephemeral,
@@ -512,7 +544,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           await new Promise(resolve=>setTimeout(resolve,50));
         }
         phase='post-seed';
-        if(!cancelledResume)assert.equal(receipt.modelRequests.length,1,'Only one explicit mock seed inference is allowed');
+        if(!cancelledResume||humanReviewEntry)assert.equal(receipt.modelRequests.length,1,'Only one explicit mock seed inference is allowed');
         receipt.seedModelRequests=receipt.modelRequests.length;
         receipt.cleanup=[];
         for(const own of tuis)await closeTui(own);

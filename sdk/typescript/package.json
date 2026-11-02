@@ -57,7 +57,7 @@
     "test:native": "node scripts/native.cjs",
     "test:codex-lifecycle": "node test/nativeCodexLifecycle.cjs",
     "test:codex-queue": "node test/nativeCodexQueue.cjs",
-    "test:codex-entry": "node test/nativeCodexUserEntry.cjs"
+    "test:codex-entry": "node test/nativeCodexLifecycle.cjs --human-review-entry"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "1.9.0",

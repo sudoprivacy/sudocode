@@ -27,7 +27,13 @@ const env={};for(const key of ['PATH','SystemRoot','WINDIR','COMSPEC','PATHEXT',
 Object.assign(env,{HOME:user,USERPROFILE:user,CODEX_HOME:home,TERM:'xterm-256color',
   APPDATA:path.join(root,'roaming'),LOCALAPPDATA:path.join(root,'local'),XDG_CONFIG_HOME:path.join(root,'xdg'),
   NPM_CONFIG_PREFIX:path.join(root,'npm'),NO_PROXY:'127.0.0.1,localhost',no_proxy:'127.0.0.1,localhost'});
-const mock=http.createServer((req,res)=>{state.modelRequests.push({method:req.method,url:req.url});save();res.writeHead(503);res.end('No inference expected');});
+const heldResponses=new Set();
+const mock=http.createServer((req,res)=>{
+  state.modelRequests.push({method:req.method,url:req.url});save();
+  // Materialize one explicit seed without an automatic retry/503 loop. The
+  // native turn is then interrupted; a resumed TUI must add no request.
+  heldResponses.add(res);res.once('close',()=>heldResponses.delete(res));req.resume();
+});
 const bounded=(promise,ms,label)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error(label+' timeout')),ms);promise.then(x=>{clearTimeout(timer);resolve(x);},e=>{clearTimeout(timer);reject(e);});});
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const native=(args)=>{const result=spawnSync(argv[0],[...argv.slice(1),...args],{env,cwd:work,encoding:'utf8',timeout:35000});return {args,status:result.status,stdout:result.stdout,stderr:result.stderr,error:result.error?.message};};
@@ -39,7 +45,7 @@ async function closeTui(){
   assert(!active.row.events.some(x=>['terminate','kill','unsafe_update_prompt','normal_exit_timeout'].includes(x.event)));
   active=undefined;
 }
-async function startTui(label,args){
+async function startTui(label,args,visibleSeed){
   const row={label,events:[]};state.frontends.push(row);
   const trace=path.join(root,label+'.trace.json');
   const launch=[driver,process.execPath,entry,'--launch-codex','--config',path.join(root,'entry.json'),'--',
@@ -59,7 +65,8 @@ async function startTui(label,args){
       if(loaded.data.length===1){
         const {thread}=await observer.request('thread/read',{threadId:loaded.data[0],includeTurns:false});
         let output;try{output=JSON.parse(fs.readFileSync(trace,'utf8')).outputTail;}catch{}
-        if(thread.threadSource==='user'&&thread.parentThreadId===null&&thread.canAcceptDirectInput===true&&output?.includes('›')){
+        if(thread.threadSource==='user'&&thread.parentThreadId===null&&thread.canAcceptDirectInput===true
+          &&output?.includes('›')&&(!visibleSeed||output.includes(visibleSeed))){
           assert(output.includes('user review is already configured'));
           row.threadId=thread.id;row.sharedRootMetadata={cwd:thread.cwd,status:thread.status,threadSource:thread.threadSource,parentThreadId:thread.parentThreadId,canAcceptDirectInput:thread.canAcceptDirectInput};
           row.outputTail=output;save();return thread.id;
@@ -79,16 +86,29 @@ async function startTui(label,args){
   fs.writeFileSync(path.join(root,'entry.json'),JSON.stringify({version:1,mode:'codex-autojoin',native:{codexArgv:argv,env},
     stateDirectory:path.join(root,'never-enrolled'),auditLog:path.join(root,'never-audit.jsonl'),peers:[],enrollmentArgv:[process.execPath,'never-run'],endpoint:{port:23262,token:'a'.repeat(64)}}),{mode:0o600});
   state.nativeVersion=native(['--version']);assert.equal(state.nativeVersion.status,0);
-  const first=await startTui('new',[]);await closeTui();
-  const resumed=await startTui('resume',['resume',first]);assert.equal(resumed,first);await closeTui();
+  const first=await startTui('new',[]);
+  const seed='Owned shared-launch cancellation seed.';
+  state.promptsSubmitted=true;state.explicitFakeProviderSeed=seed;save();
+  const started=await observer.request('turn/start',{threadId:first,input:[{type:'text',text:seed}]});
+  const seedDeadline=Date.now()+10000;
+  while(state.modelRequests.length===0){assert(Date.now()<seedDeadline,'One explicit seed request not observed');await sleep(50);}
+  assert.equal(state.modelRequests.length,1);
+  await observer.request('turn/interrupt',{threadId:first,turnId:started.turn.id});
+  for(;;){const {thread}=await observer.request('thread/read',{threadId:first,includeTurns:false});
+    if(thread.status.type==='idle')break;assert(Date.now()<seedDeadline,'Seed turn did not become idle');await sleep(50);}
+  state.seedModelRequests=state.modelRequests.length;save();await closeTui();
+  const resumed=await startTui('resume',['resume',first],seed);assert.equal(resumed,first);await closeTui();
   state.managedVersion=native(['app-server','daemon','version']);assert.equal(state.managedVersion.status,0);
-  assert.equal(state.modelRequests.length,0);assert(!fs.existsSync(path.join(root,'never-enrolled')));
+  assert.equal(state.modelRequests.length,1);state.resumeAdditionalModelRequests=0;
+  assert(!fs.existsSync(path.join(root,'never-enrolled')));
   state.state='PASS_REAL_NATIVE_OLD_USER_COMMAND_SHARED_NEW_AND_RESUME';
 }catch(error){state.state='FAILED_RETAINED';state.error=String(error);process.exitCode=1;}
 finally{
-  if(active){try{await closeTui();}catch(error){state.cleanupError=String(error);}}
+  if(active&&active.row.exitCode===undefined){try{await closeTui();}catch(error){state.cleanupError=String(error);}}
+  if(active?.row.exitCode!==undefined)active=undefined;
   await observer?.close().catch(error=>{state.observerCloseError=String(error);});
   state.privateDaemonStop=native(['app-server','daemon','stop']);
+  for(const response of heldResponses)response.destroy();
   await new Promise(resolve=>mock.close(resolve));
   // Preserve receipt/trace tails; no private authentication or daemon package.
   if(state.privateDaemonStop.status===0&&!active)fs.rmSync(root,{recursive:true,force:true});

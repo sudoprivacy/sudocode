@@ -129,7 +129,13 @@ wrapped Chinese, combining characters and emoji. No programmatic selection API
 stands in for dragging. Selection must contain only visible text, must not open
 a link, and must survive output arriving while old history is selected.
 The workload includes dense links, long URLs, query semicolons, and rejected
-oversized/non-web targets. Static and streamed copies use the same document.
+oversized/non-web targets, plus adaptive tables and multiline fenced code.
+Static and streamed copies use the same document. It also executes a real file
+Write before the model question and verifies the resulting file bytes. A final
+native mouse drag selects wrapped Unicode source from that Write card; the
+selection and screenshot are retained separately. This candidate-only assertion
+runs after resource sampling. It remains a content and native-selection check;
+the smoke does not claim paired CPU/RSS or drag-performance coverage.
 
 Install with `npm ci --prefix e2e/terminal-resize`, then run
 `npx playwright install chromium` in that directory. From `rust/`:
@@ -138,30 +144,29 @@ Install with `npm ci --prefix e2e/terminal-resize`, then run
 SCODE_TEST_BACKEND=mock cargo test -p rusty-sudocode-cli --test pty_hyperlinks -- --ignored --nocapture
 ```
 
-Headless Chromium still runs the DOM layout, renderer, rasterization and native
-xterm selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports
-and screenshots are retained under `SCODE_TERMINAL_LOG_DIR`. Input timing starts
-before browser keyboard dispatch and ends after xterm parses the expected cells,
-two animation frames and a PNG capture. Each typed character must change pixels.
-This is a conservative rendering/readback measurement, including automation and
-capture overhead; it does not measure physical keyboard/display scanout latency.
-The observer waits for fonts and two animation frames, then reads a PNG of the
-same terminal bounds through Chromium CDP with fast lossless compression.
-The fixture disables decorative scrollbar transitions and rejects other running
-CSS animations. Per-capture frame, bounds and PNG
-readback timings remain in the report, and the readback mode is part of the
-browser cohort identity. The settled frame supplies fresh pixel bounds through
-the same geometry provider used by link and selection hit testing.
-Both browser workflows launch through `browser.cjs`. It owns one raster worker,
-keeps the existing container CPU limit, and records the actual graphics backend
-and its own source digest. A/A and A/B reject a changed observer identity.
-Workload counts, two animation frames, PNG readback and all budgets remain.
+Headless Chromium runs DOM layout, renderer, rasterization and native xterm
+selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports and
+screenshots remain under `SCODE_TERMINAL_LOG_DIR`. Each painted input and drag
+must change terminal pixels. `browser.cjs` owns the pinned browser launch and
+records its actual graphics backend; two animation frames and completed PNG
+readback remain part of each observation. Timing includes browser automation
+and readback, so it is not physical keyboard/display latency. The browser smoke
+retains these diagnostics without a paired performance verdict. Core typing,
+CPU and RSS comparisons use the separately required rendering profile.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,
 then samples 20 keys with pixel evidence. Parsed P95 uses the larger independent
 burst; painted P95 retains its separate readback workload. Sampling counts and the delay schedule are
 owned by `gui-policy.json` and shared by the observer and completeness checks.
+The primary drag repeats four complete twelve-point gestures, giving 48 frame
+observations per workload. Every gesture retains its pixel, Unicode, copied-text
+and link-activation assertions. All raw observations, including readback spikes,
+remain in the report. With only twelve observations, nearest-rank P95 equals
+the maximum; 48 observations put two samples above its rank. Completeness checks
+require at least forty observations across multiple complete gestures and verify
+both each gesture and the flattened sample series. Existing input samples and
+the final Write-source drag remain required by this functional smoke.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same
 deterministic inter-key delays outside timed regions, retained in the report.

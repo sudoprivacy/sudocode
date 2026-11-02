@@ -438,6 +438,8 @@ Legacy receipts without plans retain known completed checks. Failed/unrun
 required profiles still run, and old failures and first timing remain recorded.
 Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Compiler observation reads executable paths instead of argv, avoiding macOS
+process-argument permission races while preserving native command failures.
 Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
@@ -643,9 +645,11 @@ waiting, retries and publication through CI failure or merge. Use the earliest
 applicable start, without adding overlapping intervals. Older/manual history can
 be missing; these diagnostics neither authorize a push nor prove complete history.
 For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
-in a private local Docker container. A native host smoke retains the actual failing
+in a private local Docker container. Native guards retain the actual failing
 process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
-native nextest/Cargo enforcement fixture also remains on the author OS. The full
+native nextest/Cargo enforcement fixture runs on the author OS. Windows author
+acceptance also verifies native color initialization. Docker is required on
+the author's machine, not by complementary native jobs. The full
 negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build

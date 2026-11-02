@@ -19,6 +19,20 @@ pub(crate) struct StyledText {
 }
 
 impl StyledText {
+    pub(crate) fn append(&mut self, source: &Self) {
+        for (style, text, link) in source.rich_spans(0..source.text.len()) {
+            self.push_link(style, text, link);
+        }
+    }
+
+    pub(crate) fn slice(&self, range: Range<usize>) -> Self {
+        let mut result = Self::default();
+        for (style, text, link) in self.rich_spans(range) {
+            result.push_link(style, text, link);
+        }
+        result
+    }
+
     /// Account retained allocations conservatively for bounded layout caches.
     pub(crate) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()

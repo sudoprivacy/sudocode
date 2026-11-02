@@ -592,14 +592,14 @@ sustained hits and net build-time savings still require hosted observation.
 Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
 
 <p>Native, SDK and installer test matrices stop peer work after the first failure.
-Strict all-target/all-feature Clippy runs once on the three-platform merge queue;
+Strict all-feature Clippy runs once on the three-platform merge queue;
 the duplicate Linux PR job is removed (2026-11-02). Native per-host lint remains.
 All-feature-only findings can arrive later in the queue; the final lint
 requirement is unchanged. Main pushes no longer allocate another Rust CI
 preflight after the same tree passed the queue. Independent cache/package
 publishers and legacy development-branch push checks retain their own triggers.</p>
 <p>
-Strict all-target/all-feature Clippy also stops scheduling extra crates after
+Strict all-feature Clippy also stops scheduling extra crates after
 its first error, allowing matrix cancellation sooner; already running compilers
 can finish. All three queue platforms and <code>-D warnings</code> remain.
 A real Cargo/Clippy fixture with three independent feature-gated warning failures
@@ -622,10 +622,48 @@ unchanged.</p>
 (2026-11-02).</strong> The author hook and complementary CI install the
 checksum-pinned terminal host before long native builds when resize acceptance
 is selected. Failed installation stops early; its actual command/log is reused
-in the resize receipt. Installer regressions and all selected terminal tests
-still run. Real Git/hook and native-launcher negative controls refuse failed
+in the resize receipt. Every selected real terminal test still runs. The input
+scope described below determines artificial installer fault checks. Real Git/hook and native-launcher negative controls refuse failed
 preparation before profile execution. This adds no product coverage and changes
 neither assertions nor deadlines.</p>
+<p><strong>Reuse native resize inputs (2026-11-02).</strong> Ignored terminal
+drivers use the workspace dev/mailbox graph and Cargo's current-source checks.
+Their separate standalone default-feature debug graph is no longer covered.
+Rust-only changes, optionally with known README/contribution/roadmap or Markdown
+documentation paths, skip unchanged artificial installer HTTP/cache corruption
+checks. Changed installer/helper/executor or unknown non-Rust inputs, mixed
+changes, renames/deletions of those inputs and unresolved Git scope retain the
+fault checks. Actual checksum-pinned setup and all selected real terminal cases
+remain. Negative installer paths therefore have less coverage on ordinary source
+PRs. Mandatory output and <code>installer-scope.json</code> record the decision.
+A Windows baseline took 109.1 seconds; an ordinary-scope prototype took 88.6
+seconds with the same seven real ConPTY cases. The former included 19.9 seconds
+of artificial installer faults; compilation reuse needs separate evidence, and
+these observations do not prove whole-PR savings. Real Git/Cargo/native-process
+guards verify inherited Git isolation, ordinary/unknown/renamed/unresolved input
+scope, warm artifacts and ignored-only target selection. Their controlled
+dependency-acquisition boundaries add no product journey credit.</p>
+<p><strong>Preserve package selection with the feature graph (2026-11-02).</strong>
+Resize, service and release-driver tests use one package selector: full native
+acceptance keeps <code>--workspace</code>, while isolated CLI-test acceptance
+keeps <code>-p rusty-sudocode-cli</code>. Matching the mailbox flag alone was
+insufficient: a real trial still rebuilt CLI artifacts because other workspace
+members enabled additional dependency features. The original failed reuse
+assertion is retained. <code>NATIVE_CLI_TEST_GRAPH</code> reports the selection;
+real Git/Cargo/native guards model an extra workspace member and verify both
+full and isolated modes. Normal release product builds keep their original
+graph. This changes dependency-graph reuse, without adding product journey
+credit or reducing any selected terminal case or performance budget.</p>
+<p><strong>Drain PTY teardown without waiting for its own master (2026-11-02).</strong>
+The pinned <code>pty-expect</code> revision closes the master after terminating
+and reaping the child, then joins the independent reader. Previously an active
+Windows ConPTY exhausted its 500 ms reaper budget while retaining the handle
+that kept its output open. Five real Windows samples fell from 506–510 ms to
+10.5–11.0 ms. The existing cleanup budget and child ownership rules remain.
+The upstream three-platform native suite, final-output integrity, child reaping
+and macOS fresh-controller regressions passed. A new Windows regression rejects
+waiting out the reaper budget on every sample. It protects the test harness;
+it adds no product journey credit and does not establish a whole-suite speedup.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -706,7 +744,7 @@ run had 1,423 unit and 1,089 integration cases: 56.6% of case count is retired,
 but those unit cases contributed only 73 summed worker seconds. Compilation
 savings and whole-PR latency still require measurement. Legacy unit assertions
 cease to be runtime regression gates; every integration/PTY case and ignore
-marker, queue all-target/all-feature Clippy, vendored Mermaid checks and workspace
+marker, queue all-feature Clippy, vendored Mermaid checks and workspace
 doctests remain. Real native controls poison library and binary units, observe
 the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
@@ -731,14 +769,35 @@ modules through their wrappers once: 91 instead of 211 integration targets in
 the current workspace, 56.9% fewer. Library/bin test configurations, enabled
 ungrouped tests, examples and benches remain selected. Ungrouped sources retain
 <code>--all-targets</code>; disabled standalone tests keep their original exclusion.
-The merge queue retains original-target, all-feature Clippy. Per-host lint no
-longer checks differences specific to each original test crate's identity;
-that configuration remains checked in the queue. Real Cargo/Clippy regression
+Queue all-feature lint also uses validated groups, retaining uncovered enabled
+tests and Cargo's manual-target exclusions. Lint no longer checks covered modules under their original
+standalone crate identities on the author, complementary hosts or queue.
+Every module still compiles in its group. Real Cargo/Clippy regression
 compares actual target inventories and injected diagnostics in ordinary and
 test-only library/bin code, grouped/ignored tests, shared helpers, examples and
 benches, including the disabled-target boundary. Product cases, assertions and
 deadlines are unchanged; this fixture adds no product journey coverage.
 No production latency saving is claimed before comparable measurements.</p>
+<p><strong>Queue lint deduplication (2026-11-02).</strong> The queue reuses the
+native Cargo metadata and canonical wrapper validator. Current all-feature
+integration targets fall from 211 to 91: eight groups replace 128 standalone
+test crates. The 222 declarations include eleven disabled group/manual targets,
+so declaration count alone overstates the former lint inventory. The three
+separate <code>test=false</code> benchmark drivers retain their prior exclusion.
+Library/bin test configurations, examples, benches and every uncovered enabled
+integration target remain selected. Sources without validated
+groups retain <code>--all-targets</code>; invalid declarations fail. Required
+output prints <code>QUEUE_CLIPPY_SCOPE</code> and the actual command. Real
+Cargo/Clippy controls inject feature-only errors into both grouped modules,
+the example, bench and library/bin test configurations; old/new compiler
+artifacts verify that deliberately broken manual drivers remain excluded.
+Changing the queue entry also selects the real all-feature workspace lint on
+all three queue platforms. Committed PR/push/queue event controls verify that
+trigger and reject unrelated documentation-only allocation.
+The original first-failure control remains. This reduces compiler targets,
+not product test cases or timeout budgets. Standalone crate identity coverage
+is reduced for the covered modules; no whole-lifecycle speedup is inferred
+from the 56.9% target-count reduction.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the
@@ -879,9 +938,14 @@ prove the 10% latency target or detect main changes after the check.</p>
 
 <p>Normal release, service, co-host and daemon build selection shares one
 Git/TOML comparison for development-only Cargo metadata. Resolver 2, workspace
-settings and normal/build dependency declarations must stay unchanged; existing
-lock packages/normal edges cannot change. New versions of existing names,
-deleted nodes and malformed/unknown metadata retain the ordinary scope. Rust
+settings and normal/build dependency declarations must stay unchanged. In the
+standard <code>crates/*</code> workspace, shared development dependency revisions
+and versions may change only when all reachable normal/build lock records and
+resolved edges remain identical. Aliases, optional and target-specific entries
+are included. Removed/replaced dev-only nodes are allowed; changed normal
+resolutions, missing/ambiguous edges and unsupported metadata retain ordinary
+scope. One Git batch reads immutable metadata blobs; candidate code is not
+executed. Older/custom layouts retain the conservative direct-addition verifier. Rust
 sources and changed release/service assertions retain their own input rules.
 Native workspace/lint, provider, resize and both performance scopes remain.
 The mandatory interface prints ignored normal-build inputs. Earlier broader
@@ -891,6 +955,17 @@ and still-required failures remain blocking. Real Git/Cargo/process/SSH regressi
 cover these boundaries, dev-feature isolation, unchanged normal binary bytes,
 legacy receipts and actual failed-profile recovery. This reduces redundant
 execution for qualifying inputs; it is not measured proof of the 10% target.</p>
+<p><strong>Shared workspace development dependency updates (2026-11-02).</strong>
+The same selector serves author-local, complementary native and daemon CI
+decisions. Real Git/Cargo/native workflows update a local Git dependency's
+revision and package version, execute the new test driver, and verify unchanged
+normal binary bytes. Normal, build, target and transitive consumers retain the
+product gates and actually reject broken dependency code. Existing broader
+signed receipts/checkpoints, failure history and original timing remain valid
+only for still-required checks. These infrastructure controls add no product
+journey credit. In the preceding dependency update, local release/services/cohost
+cost 1,057.2 seconds of a 1,690.6-second invocation; that identifies work this
+classification can omit, not a controlled whole-lifecycle speedup.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
 
@@ -967,6 +1042,13 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       successful runs. Native Bash guards reject failed, skipped or cancelled
       selected queue lint and bind its three platforms, queue-only scheduling
       and independent main cache publishers to the current workflow. These
+      queue lint controls also execute the actual Python entry and Cargo/Clippy,
+      reject feature-only warnings in both grouped modules, retain examples,
+      benches and library/bin test
+      configurations, preserve manual <code>test=false</code> exclusions with
+      real old/new compiler artifacts, and refuse invalid wrapper declarations. Covered original
+      integration crates no longer compile separately in all-feature queue lint.
+      These
       executor checks add no product journey coverage. Author-hook and native
       launcher controls reject failed prerequisites before profile execution.
       Successful terminal preparation remains part of the resize command receipt.
@@ -980,9 +1062,15 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       helper changes still require fresh evidence. Every pinned native input is
       checked through real Git: unrelated pins leave metadata preflight unchanged,
       while history-checker changes invalidate it. A real old-checkout preflight
-      runs against the changed protected native policy.</td>
+      runs against the changed protected native policy. Shared workspace dev
+      dependency revisions/versions are checked through committed normal/build
+      declarations and reachable lock edges, including aliases and targets.
+      Real Git/Cargo workflows run the updated driver, preserve normal binary
+      bytes, and refuse broken normal/build/target/transitive dependencies.
+      Native test and performance scopes remain selected; unchanged normal
+      product profiles may be omitted for these proven metadata-only inputs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
-      <td><code>e2e/local-acceptance/</code></td>
+      <td><code>e2e/local-acceptance/</code>; <code>.github/scripts/ci_clippy.py</code></td>
     </tr>
     <tr>
       <td>SSE archive compressor reuse</td>
@@ -1013,6 +1101,29 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>The existing stream/resume PTY journey counts once. Optimized variants
       and startup measurements add no extra unique journey credit.</td>
       <td><code>native-release</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native terminal resize and installer inputs</td>
+      <td>All existing native ignored cases use the workspace dev/mailbox graph;
+      the separate standalone default-feature debug graph is outside this scope.
+      Actual checksum-pinned Windows setup remains. Artificial installer fault
+      checks are required for non-Rust control inputs, mixed/renamed/deleted
+      controls and unknown Git scope. Ordinary Rust with known docs omits that
+      unchanged fault matrix, reducing its negative-path coverage.</td>
+      <td>Existing terminal cases count once. Git/Cargo/process scope and warm
+      artifact guards add no product journey credit.</td>
+      <td><code>native-resize</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native PTY disposal</td>
+      <td>Real Windows ConPTY teardown releases the master before waiting for
+      its reader. The upstream three-platform suite retains final-output,
+      child-reaping and concurrent lifecycle checks, including fresh macOS
+      controllers. The existing 500 ms reaper budget remains.</td>
+      <td>Native harness regression only; existing scode journeys count once.
+      A Windows five-sample latency check rejects the previous mandatory wait.
+      No assertion, deadline or selected product case is removed.</td>
+      <td><code>pty-expect/tests/drop_drain.rs</code> / upstream three-platform CI</td>
     </tr>
     <tr>
       <td>Native service lifecycle and artifact selection</td>

@@ -339,6 +339,10 @@ streaming, the prompt viewport scrolls and selects, and an idle terminal receive
 no output. Measurement-only inputs (`benchmark.py`, `performance-policy.json`,
 `gui-smoke.py`, `gui-policy.json` and the retired `gui-benchmark.py`) do not select
 the native workspace or resize suites, which never execute them.
+The GUI controller, its Python import and sampling policy travel with the runner
+from the frozen protected policy. Older candidate snapshots do not need to contain
+new acceptance scripts; the CLI and native browser drivers still come from the
+candidate. No baseline or full trusted source checkout is added to browser runs.
 When rendering precedes browser smoke in the same acceptance process, browser
 reuses its immutable Docker image and copied normal release. The key binds the
 output namespace, candidate, protected policy and image context; the consumer
@@ -413,10 +417,15 @@ receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays re
 in CI preflight; editing it alone skips unrelated native product builds.
 Development-only Cargo manifest/lock changes do not select normal release,
 service, co-host or daemon builds. The shared selector reads committed Git/TOML:
-resolver 2 and workspace settings must stay unchanged, manifest edits must be
-limited to dev dependencies, and existing lock packages/normal edges must stay
-unchanged. New versions of an existing package name, deleted lock nodes and
-unknown/malformed metadata keep the ordinary scope. Native workspace/lint,
+resolver 2 and normal workspace settings must stay unchanged. For the standard
+`crates/*` workspace, shared dev dependency revisions and versions may change
+when every normal/build declaration and its reachable lock records and resolved
+edges remain identical. Aliases, optional dependencies and target-specific
+tables participate in that proof. Removed or replaced dev-only lock nodes are
+allowed; changed normal resolutions, missing/ambiguous edges and unsupported
+metadata retain the ordinary scope. Committed blobs are read in one Git batch,
+without executing candidate code. Older/custom layouts retain the existing
+conservative verifier for direct dev-only additions. Native workspace/lint,
 provider, resize and statistical performance scopes stay unchanged. Other
 source or assertion changes still select their checks. Required output prints
 `BUILD_INPUT_SCOPE` and CI's `normal_product_ignored` paths. Python without the
@@ -473,7 +482,7 @@ retiring legacy library/binary unit harnesses in line with the test-layer policy
 An audited Windows run contained 1,423 such unit cases and 1,089 integration
 cases; the unit cases contributed 73 summed worker seconds, so their 56.6%
 share of case count is not a 56.6% time saving. Every selected integration/PTY
-case and ignored marker remains; queue all-target/all-feature Clippy,
+case and ignored marker remains; queue all-feature Clippy,
 vendored Mermaid checks and workspace doctests remain. Legacy unit assertions
 are no longer runtime regression gates and gain no e2e coverage credit.
 Real Cargo/nextest controls poison both unit harnesses, require the former full
@@ -485,13 +494,14 @@ targets; a real deliberately failing disabled target protects that boundary.
 Native workspace Clippy uses that same validated group inventory, retaining
 library and binary test configurations, examples, benches and ungrouped enabled
 tests. It avoids linting the 128 covered modules as separate crates on every
-author/complementary host: 91 instead of 211 integration targets in the current
+author/complementary host: 91 instead of 211 integration targets in the audited
 workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
 Ungrouped sources keep `--all-targets`; disabled
-standalone test targets keep their original exclusion. The merge queue still
-checks every original target with all features. This reduces per-host lint
-coverage of differences specific to an original test crate's identity; that
-configuration remains checked in the queue. Real Cargo/Clippy controls inject
+standalone test targets keep their original exclusion. Queue all-feature lint
+also reuses validated groups, retaining uncovered enabled tests and Cargo's
+exclusion of manual `test=false` performance drivers. Lint no longer checks covered modules under
+their original standalone crate identities on the author, complementary hosts
+or queue. Every module still compiles in its group. Real Cargo/Clippy controls inject
 errors into ordinary and test-only library/bin code, grouped/ignored tests,
 shared helpers, examples and benches, and verify disabled-target exclusion.
 No product test case, assertion or deadline changes.
@@ -697,10 +707,33 @@ pool. This metadata placement does not replace native Linux or macOS tests.
 When Windows terminal resize acceptance is selected, both the author hook and
 complementary CI install its checksum-pinned terminal host before long native
 compilation. A failed download stops before workspace builds. The same actual
-installation command/log is retained in the later resize receipt; installer
-regressions and every selected terminal test still run. Completed resize
-checkpoints are reused without another preparation step. This changes failure
-ordering, not test coverage or deadlines.
+installation command/log is retained in the later resize receipt. Completed
+resize checkpoints are reused without another preparation step.
+
+Resize drivers use the workspace dev/mailbox feature graph, so Cargo can reuse
+the same current executable and ignored-test binaries. All selected real
+terminal cases, assertions and deadlines remain. These journeys no longer
+cover a separate standalone default-feature debug graph. Artificial installer
+HTTP/cache corruption checks run when committed non-Rust inputs change,
+excluding the known README/contribution/roadmap and Markdown documentation
+paths. Installer/helper/executor changes, mixed changes, renames/deletions of
+those inputs and unresolved Git scope retain those checks. Ordinary Rust-only edits keep actual
+checksum-pinned installation and all real terminal cases, but skip the unchanged
+installer fault matrix. Negative installer paths therefore have less coverage
+on ordinary source PRs. `WINDOWS_TERMINAL_INSTALLER_SCOPE` and the retained
+`installer-scope.json` explain the decision. Real Git/Cargo/native-process guards
+check input transitions, inherited Git bindings, warm reuse and ignored-only
+target selection; their controlled dependency-acquisition boundaries add no
+product journey coverage.
+
+Resize, service and release-driver tests share the native workspace's package
+selection as well as its mailbox feature. Full acceptance uses `--workspace`;
+an isolated CLI-test scope retains `-p rusty-sudocode-cli`. Other selected
+workspace members can enable additional dependency features, so matching the
+mailbox flag alone does not preserve the graph. `NATIVE_CLI_TEST_GRAPH` reports
+the chosen packages. The shared committed-input reader ignores inherited Git
+bindings and keeps unresolved scope conservative. The normal release product
+build remains separately selected and uses its original package graph.
 
 Native service journeys use the workspace's dev/mailbox feature graph. Cargo
 verifies or builds the `pty_model_stream_close` driver with `--no-run`, then
@@ -743,7 +776,7 @@ scoped deployment acceptance still exercises the actual installed system.
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. Native acceptance retains
-its per-host lint. Strict all-target/all-feature Clippy runs once on Linux,
+its per-host lint. Strict all-feature Clippy runs once on Linux,
 Windows and macOS against the combined queue tree, without a duplicate Linux
 PR job. All-feature-only findings can therefore arrive later in the queue;
 this removes early feedback, not the final three-platform lint requirement.
@@ -751,11 +784,20 @@ The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful
-runs retain every target, feature and `-D warnings` check. An actual three-package
+runs retain every feature, target category and `-D warnings` check; covered
+integration modules compile through their validated groups. An actual three-package
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
-records the actual compiler priorities. It runs once on a PR only when the lint
-workflow, fixture or scope selector changes; queue/main reuse its result.
+records the actual compiler priorities. Additional real compiler controls reject
+errors in either grouped module, examples, benches and library/bin test
+configurations, and refuse noncanonical wrappers. Old/new compiler artifacts
+also prove manual-driver exclusion with deliberately broken manual code. Required output prints
+`QUEUE_CLIPPY_SCOPE`, including all-feature target counts and the actual command.
+The fixture runs once on a PR only when the lint workflow, entry, fixture or scope
+selector changes; queue/main reuse its result.
+Changing the queue entry itself also selects the real all-feature workspace
+lint on all three queue platforms. Real committed PR/push/queue event controls
+verify this trigger and the exclusion of documentation-only changes.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

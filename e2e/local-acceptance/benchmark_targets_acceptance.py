@@ -330,7 +330,12 @@ def run(output, profiles):
         raise RuntimeError("Browser benchmark executors require Linux. Run this acceptance in local Docker or Linux CI.")
     output.mkdir(parents=True, exist_ok=False)
     inputs = output / "inputs"
-    checks = load("benchmark_profiles", profiles)
+    # Load the actual executor from a private runner tree so its harness lookup
+    # uses that runner's control files, independently of candidate source age.
+    runner = output / "runner/.github/local-acceptance/checks.py"
+    runner.parent.mkdir(parents=True)
+    shutil.copyfile(profiles, runner)
+    checks = load("benchmark_profiles", runner)
     executor = load("benchmark_executor", SOURCE / ".github/scripts/local_acceptance.py")
     commands = []
 
@@ -403,6 +408,9 @@ subprocess.run([a.driver,"--ignored","--exact","browser_terminal_links_and_inter
 out=Path(a.output);out.mkdir()
 (out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
 '''
+    control = output / "runner/e2e/terminal-resize/gui-smoke.py"
+    control.parent.mkdir(parents=True)
+    control.write_text(smoke, encoding="utf-8")
     for label in ["baseline", "candidate", "trusted"]:
         checkout = inputs / label
         files = {
@@ -428,7 +436,9 @@ out=Path(a.output);out.mkdir()
             "e2e/terminal-resize/package.json": '{"name":"browser-builder-acceptance","version":"1.0.0"}\n',
             "e2e/terminal-resize/package-lock.json": '{"name":"browser-builder-acceptance","version":"1.0.0",'
                 '"lockfileVersion":3,"packages":{"":{"name":"browser-builder-acceptance","version":"1.0.0"}}}\n',
-            "e2e/terminal-resize/gui-smoke.py": smoke,
+            "e2e/terminal-resize/gui-smoke.py": (
+                'raise SystemExit("Required GUI harness must come from the runner")\n'
+                if label == "candidate" else smoke),
             "e2e/terminal-resize/benchmark.py": measurement,
             "e2e/terminal-resize/performance-policy.json": '{"fixture":true,"rounds":{"calibration":5,"comparison":7},"profiles":{"core":["short"]}}\n',
         }
@@ -630,6 +640,7 @@ out=Path(a.output);out.mkdir()
     # broken new package must fail; it cannot silently fall back to CLI targets.
     legacy = output / "legacy-inputs"
     shutil.copytree(inputs, legacy)
+    (legacy / "candidate/e2e/terminal-resize/gui-smoke.py").unlink()
     source = legacy / "candidate/rust"
     shutil.rmtree(source / "crates/scode-benchmark-drivers")
     manifest = source / "Cargo.toml"
@@ -643,6 +654,9 @@ out=Path(a.output);out.mkdir()
     assert all(row["command"][row["command"].index("-p") + 1] == "rusty-sudocode-cli"
                for row in commands[before:] if "--test" in row["command"])
     assert json.loads((legacy_output / "smoke/fixture.json").read_text())["candidate_sha256"] == digest
+    legacy_smoke = next(row["command"] for row in commands[before:]
+                        if str(control) in row["command"])
+    assert legacy_smoke[1] == str(control), "An old candidate did not use the runner's GUI harness"
 
     broken = source / "crates/scode-benchmark-drivers"
     broken.mkdir(parents=True)
@@ -678,6 +692,7 @@ out=Path(a.output);out.mkdir()
               "target_trees": target_trees, "standalone_drivers_emit_no_cli_binary": True,
               "actual_source_driver_layout": layout,
               "legacy_candidate_supported": True, "broken_standalone_package_refused": True,
+              "legacy_candidate_without_gui_harness_supported": True,
               "expected_broken_package_failure": {"record": str(refusal_path), **refusal},
               "invalid_render_plan_refused_before_build": True,
               "rendering_matrix": matrix, "cache_migration": migration,

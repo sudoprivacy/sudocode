@@ -113,11 +113,20 @@ def workspace_nextest_options(output, grouped):
     return options
 
 
+def committed_input_paths(root, base):
+    """Read this checkout's committed inputs independently of caller Git bindings."""
+    if not base:
+        raise ValueError("No committed base")
+    return subprocess.check_output(
+        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        stderr=subprocess.PIPE).decode().split("\0")[:-1]
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
     # Complementary CI can pass newer main; exclude changes outside this branch.
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"],
-                                      cwd=root).decode().split("\0")[:-1]
+    changed = committed_input_paths(root, base)
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
     inputs = [path for path in changed if path != "README.md"
@@ -126,6 +135,17 @@ def changed_cli_test_targets(root, base):
     if not inputs or any(not re.fullmatch(pattern, path) or not (root / path).is_file() for path in inputs):
         return None
     return sorted({Path(path).stem for path in inputs})
+
+
+def native_cli_test_package_args(root, base):
+    """Match the native workspace's package selection, including feature union."""
+    try:
+        isolated = changed_cli_test_targets(root, base) is not None
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        isolated = False
+    arguments = ["-p", "rusty-sudocode-cli"] if isolated else ["--workspace"]
+    print("NATIVE_CLI_TEST_GRAPH=" + json.dumps({"packages": arguments, "isolated_cli_tests": isolated}), flush=True)
+    return arguments
 
 
 def test_group_source(names):
@@ -318,6 +338,18 @@ def prepare_windows_terminal(root, output, execute):
     return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
 
 
+def terminal_installer_scope(root, base):
+    """Retain fault injection for unknown inputs; Rust-only edits keep real setup."""
+    try:
+        paths = committed_input_paths(root, base)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return {"resolved": False, "fault_injection_required": True, "changed_control_inputs": None}
+    controls = [path for path in paths if not path.startswith("rust/")
+                and path not in {"README.md", "CONTRIBUTING.md", "sudo-code-roadmap.html"}
+                and not (path.startswith("docs/") and path.endswith(".md"))]
+    return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
+
+
 def prepare_native_checks(names, root, output, execute):
     """Install selected Windows terminal inputs before long native compilation."""
     prepared = {}
@@ -392,7 +424,7 @@ def run(name, root, output, base, execute):
             "targets": tests,
         }, indent=2))
         if tests is not None:
-            arguments = ["--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
+            arguments = ["--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
             print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
@@ -408,10 +440,10 @@ def run(name, root, output, base, execute):
             print("Native workspace target selection: " + json.dumps(selection), flush=True)
             print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
                   "targets, examples and benches before long builds and PTY execution. "
-                  "The integrated queue additionally checks original targets with all features.", flush=True)
+                  "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
             if targets:
                 print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
-                      "unit harnesses are not executed. Queue all-target/all-feature lint and workspace doctests remain.", flush=True)
+                      "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
             else:
                 print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
                       "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
@@ -433,6 +465,9 @@ def run(name, root, output, base, execute):
               "This profile never runs example entry points.", flush=True)
         cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
     elif name == "native-resize":
+        installer_scope = {**terminal_installer_scope(root, base), "windows_host": os.name == "nt"}
+        (output / "installer-scope.json").write_text(json.dumps(installer_scope, indent=2), encoding="utf-8")
+        print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
             try:
@@ -445,7 +480,11 @@ def run(name, root, output, base, execute):
                 results.extend(prepared)
             else:
                 results.append(prepare_windows_terminal(root, output, execute))
-            command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            if installer_scope["fault_injection_required"]:
+                command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            else:
+                print("Installer code/executor inputs unchanged: skipping artificial HTTP/cache corruption checks; "
+                      "actual checksum-pinned setup and every real terminal test remain required.", flush=True)
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
         else:
@@ -454,8 +493,12 @@ def run(name, root, output, base, execute):
         tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
         if os.name != "nt":
             tests.append("pty_codex_colors")
+        print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
+              "all selected ignored cases and original budgets remain. The standalone default-feature "
+              "debug graph is outside this profile's coverage.", flush=True)
+        package_args = native_cli_test_package_args(root, base)
         for test in tests:
-            cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--test", test,
+            cargo("test", "--locked", *package_args, "--features", "engine-acp/mailbox", "--test", test,
                   "--", "--ignored", "--nocapture")
     elif name == "native-release":
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
@@ -466,7 +509,7 @@ def run(name, root, output, base, execute):
         # SCODE_TEST_BIN still launches the copied normal release executable.
         print("Release acceptance: the native test driver launches the copied release scode; "
               "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
-        cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
+        cargo("test", "--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
         with stable_performance_power(output):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
@@ -478,7 +521,7 @@ def run(name, root, output, base, execute):
         print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
               "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
               "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
-        cargo("test", "--no-run", "--locked", "-p", "rusty-sudocode-cli",
+        cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
@@ -568,18 +611,18 @@ def native_guard_files():
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "4119e4c3425c3250e4c5cf8740dd12044ab27baa8aa1829157fd2c84b301e6a9",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "f8b63718a7030658428686dd2eedac57346b4b8150b044986f12ca07766e9717",
+        ".github/scripts/local_acceptance.py": "d433bb4401f3727c905a9e4e5e276b053adbf3483b7812b5a82b8d6ae73cb634",
         "e2e/local-acceptance/run.py": "c3cdad7819bd597529e847c63945b329e451c4926a42f8fe98f38f5540ee5ac4",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "d9983bad5480673d49153ed94944593c0f07efb7db64369581d3476ff7923858",
+        "e2e/local-acceptance/release_acceptance.py": "8c0b83871b77061719df08145fb7be1adf141453100d7178af51e73b940f9f35",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
     }
@@ -635,7 +678,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7"
+    expected = "acf035cdf079cf5bc02c9d77390f57f4c4c3e88828061f857b739362d0127b80"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
@@ -793,6 +836,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
+    if name == "browser":
+        # The executor owns this harness, including for candidates that predate
+        # it. Stage only its Python imports/policy, not another source checkout.
+        for relative in ["e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/benchmark.py",
+                         "e2e/terminal-resize/gui-policy.json"]:
+            path = sources / "runner" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
@@ -1170,7 +1221,8 @@ def browser_smoke(inputs, output, command):
                   "-p", package, "--test", links, "--test", viewport,
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
-    command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
+    smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
+    command(sys.executable, str(smoke), "--driver", drivers[links],
             "--candidate", str(binary), "--output", str(output / "smoke"),
             extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
                    "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})

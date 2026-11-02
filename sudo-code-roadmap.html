@@ -769,35 +769,44 @@ modules through their wrappers once: 91 instead of 211 integration targets in
 the current workspace, 56.9% fewer. Library/bin test configurations, enabled
 ungrouped tests, examples and benches remain selected. Ungrouped sources retain
 <code>--all-targets</code>; disabled standalone tests keep their original exclusion.
-Queue all-feature lint also uses validated groups, retaining uncovered enabled
-tests and Cargo's manual-target exclusions. Lint no longer checks covered modules under their original
-standalone crate identities on the author, complementary hosts or queue.
-Every module still compiles in its group. Real Cargo/Clippy regression
+Queue all-feature lint retains original standalone targets for ordinary/shared
+source changes. Isolated test edits select changed original targets and their
+containing groups; unchanged unrelated integration crates are omitted only for
+that class. Every selected module still compiles. Real Cargo/Clippy regression
 compares actual target inventories and injected diagnostics in ordinary and
 test-only library/bin code, grouped/ignored tests, shared helpers, examples and
 benches, including the disabled-target boundary. Product cases, assertions and
 deadlines are unchanged; this fixture adds no product journey coverage.
 No production latency saving is claimed before comparable measurements.</p>
-<p><strong>Queue lint deduplication (2026-11-02).</strong> The queue reuses the
-native Cargo metadata and canonical wrapper validator. Current all-feature
-integration targets fall from 211 to 91: eight groups replace 128 standalone
-test crates. The 222 declarations include eleven disabled group/manual targets,
-so declaration count alone overstates the former lint inventory. The three
-separate <code>test=false</code> benchmark drivers retain their prior exclusion.
-Library/bin test configurations, examples, benches and every uncovered enabled
-integration target remain selected. Sources without validated
-groups retain <code>--all-targets</code>; invalid declarations fail. Required
-output prints <code>QUEUE_CLIPPY_SCOPE</code> and the actual command. Real
-Cargo/Clippy controls inject feature-only errors into both grouped modules,
-the example, bench and library/bin test configurations; old/new compiler
-artifacts verify that deliberately broken manual drivers remain excluded.
-Changing the queue entry also selects the real all-feature workspace lint on
-all three queue platforms. Committed PR/push/queue event controls verify that
-trigger and reject unrelated documentation-only allocation.
-The original first-failure control remains. This reduces compiler targets,
-not product test cases or timeout budgets. Standalone crate identity coverage
-is reduced for the covered modules; no whole-lifecycle speedup is inferred
-from the 56.9% target-count reduction.</p>
+<p><strong>Scope queue lint to isolated test edits (2026-11-02).</strong>
+Workspace-wide grouping reduced declared compiler targets but its first
+three-platform comparison on identical Rust inputs took 353 seconds versus
+348 seconds before, so it did not establish a time saving. Ordinary/shared
+source changes retain <code>--all-targets</code>. Committed isolated CLI test
+edits reuse the native selector and canonical wrapper validator: changed
+original targets and containing groups, with the full workspace all-feature
+dependency graph retained. Unchanged unrelated integration, library/bin test,
+example and bench roots are omitted only for this class. A real cross-member
+feature counterexample rejects a package-only command that loses the required
+dependency feature. Missing base history, dirty/untracked
+inputs, unknown or unregistered targets retain full lint. Invalid wrappers fail.
+The three manual <code>test=false</code> drivers retain Cargo's prior exclusion.
+Required <code>QUEUE_CLIPPY_SCOPE</code> output reports mode, reason, counts and
+the command. Real Git/Cargo/Clippy controls cover isolated modules, shared and
+ordinary full fallback, feature-only errors, manual exclusions and first-error
+behavior. Entry changes still exercise the real three-platform workspace in the
+queue; PR/push/queue event controls verify that trigger and docs-only exclusion.
+No functional case, assertion or timeout changes. Target counts alone do not
+establish whole-lifecycle savings.</p>
+<p><strong>Draft/ready ordering (2026-11-02).</strong> Draft snapshots use a
+separate concurrency group and explicit run title. A late draft event cannot
+cancel or supersede ready acceptance. Wholly skipped snapshots allocate no
+publisher runner. Publication still waits for the latest applicable ready/queue
+run and current attempt, verifies required jobs and real SSH evidence, and
+retains genuine failures. Required output explains ignored draft/old events.
+Nine real publisher child-process/HTTP/Git/SSH scenarios cover both orders,
+queued newer drafts, failed newer ready runs, stale attempts and corrupt notes.
+The controls protect CI protocol behavior and add no product journey credit.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the
@@ -1046,8 +1055,14 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       reject feature-only warnings in both grouped modules, retain examples,
       benches and library/bin test
       configurations, preserve manual <code>test=false</code> exclusions with
-      real old/new compiler artifacts, and refuse invalid wrapper declarations. Covered original
-      integration crates no longer compile separately in all-feature queue lint.
+      real old/new compiler artifacts, and refuse invalid wrapper declarations.
+      Committed isolated CLI test edits select changed originals plus their
+      containing groups. Ordinary/shared changes and dirty or unavailable-base
+      inputs retain full all-feature lint; actual compiler artifacts verify each mode.
+      Actual publisher processes with HTTP, Git fetches and SSH notes also
+      exercise draft/ready ordering, current failure ownership and corrupt-note
+      refusal. Workflow wiring preserves separate draft concurrency and skips
+      publisher runners for wholly skipped source workflows.
       These
       executor checks add no product journey coverage. Author-hook and native
       launcher controls reject failed prerequisites before profile execution.

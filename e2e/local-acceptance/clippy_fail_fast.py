@@ -28,15 +28,18 @@ def run(output):
     project.mkdir(parents=True)
     command = [sys.executable, str(SOURCE / ".github/scripts/ci_clippy.py"),
                "--repository", str(project.parent), "--message-format", "json"]
-    (project / "Cargo.toml").write_text('[workspace]\nmembers=["first", "second", "third"]\nresolver="2"\n')
+    (project / "Cargo.toml").write_text('[workspace]\nmembers=["crates/rusty-sudocode-cli", "second", "third"]\nresolver="2"\n')
+    package_paths = {"first": project / "crates/rusty-sudocode-cli",
+                     "second": project / "second", "third": project / "third"}
     for name in ["first", "second", "third"]:
-        package = project / name
+        package = package_paths[name]
         (package / "src").mkdir(parents=True)
         (package / "Cargo.toml").write_text(f'[package]\nname="lint-{name}"\nversion="0.0.0"\nedition="2021"\n'
             '[features]\nextra=[]\n')
         (package / "src/lib.rs").write_text('#[cfg(feature="extra")]\npub fn feature_path() { let unused_value = 42; }\n')
     environment = dict(os.environ, CARGO_BUILD_JOBS="1", CARGO_INCREMENTAL="0",
                        CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0", CARGO_TERM_COLOR="always")
+    environment.pop("SCODE_QUEUE_BASE", None)
     subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=project, env=environment,
                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # Lint compilation runs no product/test executable. Keep this fixture's
@@ -91,7 +94,7 @@ def run(output):
     assert continuing["exit_code"] != 0 and len(continuing["failed_packages"]) == 3, continuing
     # The warning exists only under the extra feature: the actual negative
     # proves all-features and -D warnings remain active in the selected command.
-    for package in project.iterdir():
+    for package in package_paths.values():
         source = package / "src/lib.rs"
         if source.is_file():
             source.write_text(source.read_text().replace("let unused_value", "let _unused_value"))
@@ -102,12 +105,12 @@ def run(output):
     assert all("extra" in row["features"] for row in artifacts), artifacts
     assert {row["profile"]["test"] for row in artifacts} == {False, True}, artifacts
 
-    # The queue replaces original test crates with validated groups, preserving
-    # Cargo's existing exclusion of manual test=false targets.
+    # Actual Git commits select only a changed original and its containing
+    # group. Ordinary/shared changes restore all original enabled targets.
     spec = importlib.util.spec_from_file_location("clippy_fixture_groups", SOURCE / ".github/local-acceptance/checks.py")
     recipes = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recipes)
-    first = project / "first"
+    first = package_paths["first"]
     (first / "tests/acceptance_groups").mkdir(parents=True)
     (first / "tests/support").mkdir()
     manifest = first / "Cargo.toml"
@@ -119,7 +122,10 @@ def run(output):
     wrapper = first / "tests/acceptance_groups/acceptance_first.rs"
     wrapper.write_text(recipes.test_group_source(["covered_a", "covered_b"]), encoding="utf-8")
     manual = first / "tests/support/manual_driver.rs"
-    manual.write_text('#[test]\nfn manual_driver() { lint_first::feature_path(); }\n')
+    manual.write_text('compile_error!("manual driver must stay excluded");\n')
+    (first / "tests/unrelated.rs").write_text('#[path="support/shared.rs"]\nmod shared;\n#[test]\nfn unrelated() { shared::value(); }\n')
+    shared = first / "tests/support/shared.rs"
+    shared.write_text('pub fn value() {}\n')
     (first / "examples").mkdir()
     (first / "benches").mkdir()
     example, bench = first / "examples/demo.rs", first / "benches/sample.rs"
@@ -127,18 +133,51 @@ def run(output):
     bench.write_text('fn main() { lint_first::feature_path(); }\n')
     binary = project / "second/src/main.rs"
     binary.write_text('fn main() {}\n')
-    grouped = invoke("grouped-clean", command, output / "fast-target")
+    # A normal dependency's extra API is enabled by another workspace member.
+    # Retaining --workspace must preserve that graph even with few test roots.
+    manifest.write_text(manifest.read_text() + '\n[dependencies]\nlint-second={path="../../second"}\n')
+    third_manifest = project / "third/Cargo.toml"
+    third_manifest.write_text(third_manifest.read_text() + '\n[dependencies]\nlint-second={path="../second",features=["extra"]}\n')
+    first_library = first / "src/lib.rs"
+    first_library.write_text(first_library.read_text() + '\n#[cfg(feature="extra")]\npub fn require_shared_extra() { lint_second::feature_path(); }\n')
+    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=project, env=environment,
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def workspace_git(*arguments):
+        return subprocess.check_output(["git", *arguments], cwd=project.parent, env=environment,
+                                       stderr=subprocess.PIPE).decode().strip()
+
+    def commit_workspace(message):
+        workspace_git("add", ".")
+        workspace_git("commit", "--quiet", "-m", message)
+        return workspace_git("rev-parse", "HEAD")
+
+    workspace_git("init", "--quiet")
+    workspace_git("config", "user.name", "CI fixture")
+    workspace_git("config", "user.email", "fixture@example.invalid")
+    workspace_git("config", "core.autocrlf", "false")
+    workspace_git("config", "commit.gpgsign", "false")
+    lint_base = commit_workspace("Original workspace with test groups")
+    changed_test = first / "tests/covered_a.rs"
+    changed_test.write_text(changed_test.read_text() + "\n// Changed isolated test.\n")
+    commit_workspace("Change one CLI test")
+    isolated_command = [*command, "--base", lint_base]
+    grouped = invoke("isolated-clean", isolated_command, output / "fast-target")
     assert grouped["exit_code"] == 0, grouped
     scope = grouped["scope"]
-    assert scope["mode"] == "grouped-workspace" and scope["covered_original_targets"] == 2, scope
-    assert scope["manual_targets_excluded"] == ["manual_driver"], scope
-    assert scope["integration_targets_declared"] == 4, scope
-    assert scope["integration_targets_before"] == 2 and scope["integration_targets_selected"] == 1, scope
+    assert scope["mode"] == "changed-cli-tests" and scope["changed_tests"] == ["covered_a"], scope
+    assert scope["integration_targets_declared"] == 5, scope
+    assert scope["integration_targets_before"] == 3 and scope["integration_targets_selected"] == 2, scope
     targets = {row["target"]["name"] for row in grouped["artifacts"]}
-    assert {"acceptance_first", "demo", "sample", "lint-second"} <= targets, targets
-    assert not {"covered_a", "covered_b", "manual_driver"} & targets, targets
+    assert {"acceptance_first", "covered_a", "lint_first", "lint_second"} <= targets, targets
+    assert not {"covered_b", "unrelated", "manual_driver", "demo", "sample", "lint-second", "lint_third"} & targets, targets
     assert all("extra" in row["features"] for row in grouped["artifacts"]), grouped
     assert {row["profile"]["test"] for row in grouped["artifacts"]} == {False, True}, grouped
+    wrong_package = invoke("lost-workspace-feature-refused",
+        ["cargo", "clippy", "--locked", "-p", "lint-first", "--all-features", "--test", "covered_a",
+         "--message-format=json", "--", "-D", "warnings"], output / "fast-target")
+    assert wrong_package["exit_code"] != 0, wrong_package
+    assert "feature_path" in (output / "lost-workspace-feature-refused.stdout.log").read_text(encoding="utf-8")
 
     # Inspect real old/new compiler artifacts: declaration count alone includes
     # disabled groups/manual drivers and overstates the former lint inventory.
@@ -147,9 +186,9 @@ def run(output):
     original_targets = invoke("original-all-targets", selected, output / "fast-target")
     assert original_targets["exit_code"] == 0, original_targets
     originals = {row["target"]["name"] for row in original_targets["artifacts"]}
-    assert {"covered_a", "covered_b"} <= originals, originals
+    assert {"covered_a", "covered_b", "unrelated"} <= originals, originals
     assert not {"acceptance_first", "manual_driver"} & originals, originals
-    manual_excluded = invoke("grouped-manual-excluded", command, output / "fast-target", compiler_expected=False)
+    manual_excluded = invoke("isolated-manual-excluded", isolated_command, output / "fast-target", compiler_expected=False)
     assert manual_excluded["exit_code"] == 0, manual_excluded
     assert manual_excluded["artifacts"] and all(row["fresh"] for row in manual_excluded["artifacts"]), manual_excluded
     manual.write_text(manual_source)
@@ -161,24 +200,40 @@ def run(output):
         ("bench", bench, "feature=\"extra\""),
         ("library-test-configuration", first / "src/lib.rs", "all(test, feature=\"extra\")"),
         ("binary-test-configuration", binary, "all(test, feature=\"extra\")"),
+        ("shared-helper", shared, "feature=\"extra\""),
     ]:
         original = path.read_text()
         path.write_text(original + f'\n#[cfg({cfg})]\npub fn lint_poison() {{ let unused_value = 42; }}\n')
-        negative = invoke(label, command, output / "fast-target")
+        commit_workspace("Inject " + label)
+        negative = invoke(label, isolated_command, output / "fast-target")
         assert negative["exit_code"] != 0 and negative["errors"], negative
+        expected_mode = "changed-cli-tests" if label.startswith("group-") else "all-targets"
+        assert negative["scope"]["mode"] == expected_mode, negative["scope"]
         assert any(any(Path(span["file_name"]).name == path.name for span in error["message"]["spans"])
                    for error in negative["errors"]), negative
         controls.append({"case": label, "exit_code": negative["exit_code"],
                          "elapsed_seconds": negative["elapsed_seconds"]})
         path.write_text(original)
+        commit_workspace("Restore " + label)
     # Invalid wrapper declarations must refuse selection before lint begins.
     wrapper.write_text(wrapper.read_text(encoding="utf-8") + '\nfn hidden_code() {}\n', encoding="utf-8")
     invalid = invoke("invalid-wrapper", command, output / "fast-target", compiler_expected=False)
     assert invalid["exit_code"] != 0 and invalid["scope"] is None, invalid
     assert "canonical path modules" in (output / "invalid-wrapper.stderr.log").read_text(encoding="utf-8")
     wrapper.write_text(recipes.test_group_source(["covered_a", "covered_b"]), encoding="utf-8")
-    grouped_final = invoke("grouped-restored", command, output / "fast-target")
+    grouped_final = invoke("isolated-restored", isolated_command, output / "fast-target")
     assert grouped_final["exit_code"] == 0, grouped_final
+    ordinary = invoke("ordinary-full-targets", command, output / "fast-target")
+    assert ordinary["exit_code"] == 0 and ordinary["scope"]["mode"] == "all-targets", ordinary
+    assert {"covered_a", "covered_b", "unrelated"} <= {row["target"]["name"] for row in ordinary["artifacts"]}
+    unavailable = invoke("unavailable-base", [*command, "--base", "0" * 40], output / "fast-target", compiler_expected=False)
+    assert unavailable["exit_code"] == 0 and unavailable["scope"]["mode"] == "all-targets", unavailable
+    untracked = first / "tests/extra_untracked.rs"
+    untracked.write_text('#[test]\nfn extra_untracked() {}\n')
+    dirty = invoke("untracked-input-full", isolated_command, output / "fast-target")
+    assert dirty["exit_code"] == 0 and dirty["scope"]["mode"] == "all-targets", dirty
+    assert "extra_untracked" in {row["target"]["name"] for row in dirty["artifacts"]}
+    untracked.unlink()
     # Actual committed Git events select the real three-platform queue lint
     # when this entry changes. Documentation alone must not allocate it.
     repository = output / "scope-repository"
@@ -225,8 +280,11 @@ def run(output):
               "clean_workspace": passing,
               "grouped_workspace": grouped, "grouped_restored": grouped_final, "controls": controls,
               "original_all_targets": original_targets, "grouped_manual_excluded": manual_excluded,
+              "ordinary_full_targets": ordinary, "unavailable_base": unavailable,
+              "dirty_worktree_full_targets": dirty,
+              "isolated_package_loses_required_feature": wrong_package,
               "real_git_selections": selections,
-              "scope": "Actual workflow entry and Cargo/Clippy processes. Legacy full-target fallback, all-feature first-error behavior, every grouped module, example, bench and library/bin test configuration are exercised. Old/new compiler artifacts prove manual-driver exclusions. Original standalone covered-module identities are omitted. Infrastructure only; no product PTY or production latency credit."}
+              "scope": "Actual Git/workflow/Cargo/Clippy processes. Isolated originals plus groups, ordinary/shared/full fallback, all-feature first-error behavior, examples/benches/lib-bin test configurations and manual exclusions are exercised. Only unchanged unrelated integration targets are omitted for isolated committed CLI test edits. Infrastructure only; no product PTY or production latency credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({"status": "PASS", "failed_packages_before": 3, "failed_packages_after": 1,
                       "passing_packages": 3, "evidence": str(output)}))

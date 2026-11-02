@@ -451,7 +451,7 @@ def run(name, root, output, base, execute):
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
+        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
         if os.name != "nt":
             tests.append("pty_codex_colors")
         for test in tests:
@@ -1184,10 +1184,12 @@ def browser_smoke(inputs, output, command):
             "--candidate", str(binary), "--output", str(output / "smoke"),
             extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
                    "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
-    command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
-            "-p", package, "--test", viewport, "viewport_browser_interaction",
-            "--", "--ignored", "--exact", "--nocapture",
-            extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+    for case in ["viewport_browser_interaction", "viewport_browser_resource_exit"]:
+        log = command(drivers[viewport], case, "--ignored", "--exact", "--nocapture",
+                      extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+        counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))
+        if not counts or sum(int(passed) for passed, _ in counts) == 0 or any(int(failed) for _, failed in counts):
+            raise RuntimeError(f"No actual passing viewport lifecycle test: {case}")
     if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
         raise RuntimeError("Browser candidate changed after validation")
 

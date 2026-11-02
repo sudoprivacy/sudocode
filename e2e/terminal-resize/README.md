@@ -134,8 +134,8 @@ Static and streamed copies use the same document. It also executes a real file
 Write before the model question and verifies the resulting file bytes. A final
 native mouse drag selects wrapped Unicode source from that Write card; the
 selection and screenshot are retained separately. This candidate-only assertion
-runs after resource sampling, since the older baseline has no Write body to
-select. It does not enter paired CPU/RSS, input or drag timing metrics.
+runs after resource sampling. It remains a content and native-selection check;
+the smoke does not claim paired CPU/RSS or drag-performance coverage.
 
 Install with `npm ci --prefix e2e/terminal-resize`, then run
 `npx playwright install chromium` in that directory. From `rust/`:
@@ -144,29 +144,15 @@ Install with `npm ci --prefix e2e/terminal-resize`, then run
 SCODE_TEST_BACKEND=mock cargo test -p rusty-sudocode-cli --test pty_hyperlinks -- --ignored --nocapture
 ```
 
-Headless Chromium still runs the DOM layout, renderer, rasterization and native
-xterm selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports
-and screenshots are retained under `SCODE_TERMINAL_LOG_DIR`. Input timing starts
-before browser keyboard dispatch and ends after xterm parses the expected cells,
-two animation frames and a PNG capture. Each typed character must change pixels.
-Both browser observers use `paint.cjs` to capture only `.xterm-screen`, updating
-the clip after resize. Encoding the surrounding empty page adds observer CPU
-work and can amplify fixed-quota scheduling noise. The shared boundary retains
-both animation frames and the completed PNG readback; it does not relax budgets,
-change input delays or remove samples.
-This is a conservative rendering/readback measurement, including automation and
-capture overhead; it does not measure physical keyboard/display scanout latency.
-The observer waits for fonts and two animation frames, then reads a PNG of the
-same terminal bounds through Chromium CDP with fast lossless compression.
-The fixture disables decorative scrollbar transitions and rejects other running
-CSS animations. Per-capture frame, bounds and PNG
-readback timings remain in the report, and the readback mode is part of the
-browser cohort identity. The settled frame supplies fresh pixel bounds through
-the same geometry provider used by link and selection hit testing.
-Both browser workflows launch through `browser.cjs`. It owns one raster worker,
-keeps the existing container CPU limit, and records the actual graphics backend
-and its own source digest. A/A and A/B reject a changed observer identity.
-The two animation frames, completed PNG readback and all budgets remain.
+Headless Chromium runs DOM layout, renderer, rasterization and native xterm
+selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports and
+screenshots remain under `SCODE_TERMINAL_LOG_DIR`. Each painted input and drag
+must change terminal pixels. `browser.cjs` owns the pinned browser launch and
+records its actual graphics backend; two animation frames and completed PNG
+readback remain part of each observation. Timing includes browser automation
+and readback, so it is not physical keyboard/display latency. The browser smoke
+retains these diagnostics without a paired performance verdict. Core typing,
+CPU and RSS comparisons use the separately required rendering profile.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,

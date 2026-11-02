@@ -1,0 +1,128 @@
+name: Diagnose background status waits
+
+on:
+  push:
+    branches: [ci/background-animation-settling-20261102]
+    paths: [.github/workflows/diagnose-background-waits.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  mac-trace:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Trace the three original real PTY journeys
+        shell: bash
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import time
+
+          root = Path.cwd()
+          output = Path(os.environ['RUNNER_TEMP']) / 'background-wait-diagnostic'
+          output.mkdir()
+          source = root / 'rust/crates/rusty-sudocode-cli/tests/pty_background_tasks.rs'
+          original = source.read_text(encoding='utf-8')
+          text = original
+
+          def insert_after(needle, addition):
+              global text
+              assert text.count(needle) == 1, needle
+              text = text.replace(needle, needle + addition)
+
+          insert_after('fn expect_parent_complete(session: &PtySession, before: &str) {',
+                       '\n    let trace = Instant::now();\n    eprintln!("WAIT_PARENT begin");')
+          insert_after('        "background launch turn completed",\n    );',
+                       '\n    eprintln!("WAIT_PARENT complete {:.3}", trace.elapsed().as_secs_f64());')
+          insert_after('    expect_input_ready(session, common::DEFAULT_TIMEOUT, "parent returned to input");',
+                       '\n    eprintln!("WAIT_PARENT input-ready {:.3}", trace.elapsed().as_secs_f64());')
+
+          start = text.index('fn background_status_theme(')
+          end = text.index('\n#[test]', start)
+          body = text[start:end]
+          assert body.count('    let (env, _release)') == 1
+          body = body.replace('    let (env, _release)', '    let trace = Instant::now();\n    let (env, _release)', 1)
+          for stage, needle in [
+              ('started', '    let view = common::expect_screen_rows_settled('),
+              ('conclusion-settled', '    assert_background_activity(&session, &view, background, no_color);'),
+              ('animation-checked', '    session.send("后台-draft").unwrap();'),
+              ('typed', '    session.resize(12, 32).unwrap();'),
+              ('narrow-ready', '    session.resize(40, 100).unwrap();'),
+              ('draft-restored', '    session.send("\\x15").unwrap();'),
+              ('draft-cleared', '    let marker = common::turn_status_marker(&session);'),
+              ('notification-complete', '    common::expect_screen_rows_settled(\n        &session,\n        |view| {\n            let statistics'),
+              ('statistics-settled', '    open(&mut session);'),
+              ('details-opened', '    screen(&session, "STATUS_RESULT_READY");'),
+              ('result-visible', '    close(session);'),
+          ]:
+              assert body.count(needle) == 1, stage
+              message = '    eprintln!("WAIT_THEME {} {} ' + stage + ' {:.3}", background, no_color, trace.elapsed().as_secs_f64());\n'
+              body = body.replace(needle, message + needle, 1)
+          body = body.replace('    close(session);', '    close(session);\n    eprintln!("WAIT_THEME closed {:.3}", trace.elapsed().as_secs_f64());', 1)
+          text = text[:start] + body + text[end:]
+          source.write_text(text, encoding='utf-8')
+          patch = subprocess.check_output(['git', 'diff', '--binary', '--', 'rust'])
+          (output / 'instrumentation.patch').write_bytes(patch)
+          provenance = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                        'baseline_rust_tree': subprocess.check_output(['git', 'rev-parse', 'HEAD:rust'], text=True).strip(),
+                        'scope': 'Private timing instrumentation only. Original case bodies, assertions, budgets and four-worker configuration; no acceptance attestation.'}
+          (output / 'source.json').write_text(json.dumps(provenance, indent=2))
+
+          spec = importlib.util.spec_from_file_location('protected_diagnostic_recipe', root / '.github/local-acceptance/checks.py')
+          checks = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(checks)
+          tool = checks.nextest_binary(output)
+          options = checks.nextest_options(output)
+          command = [str(tool), 'nextest', 'run', *options, '--locked', '-p', 'rusty-sudocode-cli',
+                     '--features', 'engine-acp/mailbox', '--test', 'acceptance_cli_02',
+                     '-E', 'test(/background_status_animates_and_results_preserve_turn_statistics/)',
+                     '--success-output', 'final']
+          os.environ.update(CARGO_BUILD_JOBS=str(os.cpu_count() or 1), CARGO_INCREMENTAL='0')
+          result = {**provenance, 'command': command, 'started_at': datetime.now(timezone.utc).isoformat()}
+          started = time.monotonic()
+          with (output / 'nextest.log').open('w') as log:
+              process = subprocess.Popen(command, cwd=root / 'rust', stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         text=True, encoding='utf-8', errors='replace')
+              for line in process.stdout:
+                  print(line, end='', flush=True)
+                  log.write(line)
+              process.wait()
+          result.update(exit_code=process.returncode, seconds=time.monotonic() - started,
+                        finished_at=datetime.now(timezone.utc).isoformat())
+          (output / 'result.json').write_text(json.dumps(result, indent=2))
+          raise SystemExit(process.returncode)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: private-background-wait-trace
+          path: ${{ runner.temp }}/background-wait-diagnostic
+          if-no-files-found: error
+          retention-days: 7

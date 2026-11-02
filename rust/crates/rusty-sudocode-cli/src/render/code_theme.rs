@@ -83,19 +83,19 @@ pub(super) fn role_color(role: TextRole, light: bool, support: ColorSupport) -> 
         })
     });
     colors[index].map_or(fallback, |color| {
-        let rgb = if index == 0 {
-            (color.r, color.g, color.b)
-        } else {
-            // Codex's status accents retain 85% saturation; no faint attribute.
-            let luma =
-                (77 * u16::from(color.r) + 150 * u16::from(color.g) + 29 * u16::from(color.b))
-                    / 256;
-            let soften = |channel| {
-                u8::try_from((u16::from(channel) * 85 + luma * 15 + 50) / 100)
-                    .expect("softened channel")
-            };
-            (soften(color.r), soften(color.g), soften(color.b))
+        // Inline code keeps the syntax asset's exact foreground, just like
+        // fenced code and Codex. Only UI metadata is softened/contrast-adjusted.
+        if index == 0 {
+            return foreground(color, support);
+        }
+        // Codex's status accents retain 85% saturation; no faint attribute.
+        let luma =
+            (77 * u16::from(color.r) + 150 * u16::from(color.g) + 29 * u16::from(color.b)) / 256;
+        let soften = |channel| {
+            u8::try_from((u16::from(channel) * 85 + luma * 15 + 50) / 100)
+                .expect("softened channel")
         };
+        let rgb = (soften(color.r), soften(color.g), soften(color.b));
         color_math::foreground(rgb, terminal_palette::background(), support)
     })
 }

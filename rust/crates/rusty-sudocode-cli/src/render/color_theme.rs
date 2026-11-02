@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 #[repr(usize)]
 pub enum TextRole {
     Body,
+    Reasoning,
     Strong,
     Secondary,
     Border,
@@ -88,6 +89,8 @@ impl ColorTheme {
             }
             if role == TextRole::Strong {
                 style.attributes.set(Attribute::Bold);
+            } else if role == TextRole::Reasoning {
+                style.attributes.set(Attribute::Dim);
             }
             style
         })
@@ -108,7 +111,7 @@ impl ColorTheme {
         let limited = support == ColorSupport::Ansi16;
         let readable = |rgb| color_math::foreground(rgb, terminal_palette::background(), support);
         match role {
-            TextRole::Body | TextRole::Strong => Color::Reset,
+            TextRole::Body | TextRole::Strong | TextRole::Reasoning => Color::Reset,
             TextRole::Brand => {
                 if limited {
                     Color::DarkYellow

@@ -1295,19 +1295,10 @@ impl TerminalRenderer {
         highlighted.write_ansi_lines(&mut output);
         output
     }
-
-    pub fn stream_markdown(&self, markdown: &str, out: &mut impl Write) -> io::Result<()> {
-        let rendered_markdown = self.render_markdown(markdown);
-        write!(out, "{rendered_markdown}")?;
-        if !rendered_markdown.ends_with('\n') {
-            writeln!(out)?;
-        }
-        out.flush()
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct MarkdownStreamState {
+pub(crate) struct MarkdownStreamState {
     pending: String,
 }
 
@@ -1317,25 +1308,28 @@ impl MarkdownStreamState {
     }
 
     #[must_use]
-    pub fn push(&mut self, renderer: &TerminalRenderer, delta: &str) -> Option<String> {
+    pub(crate) fn push(&mut self, renderer: &TerminalRenderer, delta: &str) -> Option<StyledText> {
         self.pending.push_str(delta);
         let split = find_stream_safe_boundary(&self.pending)?;
-        let ready = self.pending[..split].to_string();
+        let ready = renderer.render_markdown_styled_with_width(
+            &self.pending[..split],
+            query_terminal_width().saturating_sub(2),
+        );
         self.pending.drain(..split);
-        Some(renderer.render_markdown_with_width(&ready, query_terminal_width().saturating_sub(2)))
+        Some(ready)
     }
 
     #[must_use]
-    pub fn flush(&mut self, renderer: &TerminalRenderer) -> Option<String> {
+    pub(crate) fn flush(&mut self, renderer: &TerminalRenderer) -> Option<StyledText> {
         if self.pending.trim().is_empty() {
             self.pending.clear();
             None
         } else {
             let pending = std::mem::take(&mut self.pending);
-            Some(
-                renderer
-                    .render_markdown_with_width(&pending, query_terminal_width().saturating_sub(2)),
-            )
+            Some(renderer.render_markdown_styled_with_width(
+                &pending,
+                query_terminal_width().saturating_sub(2),
+            ))
         }
     }
 }
@@ -1604,8 +1598,6 @@ pub(crate) struct ResponseGlyphState {
     started: bool,
     pub(crate) visible_col: usize,
     max_col: usize,
-    decoder: styled_text::AnsiDecoder,
-    parser: vte::Parser,
 }
 
 impl ResponseGlyphState {
@@ -1629,8 +1621,6 @@ impl ResponseGlyphState {
             visible_col: 0,
             // Ensure at least 4 columns to avoid degenerate wrapping.
             max_col: terminal_width.max(4),
-            decoder: styled_text::AnsiDecoder::new(),
-            parser: vte::Parser::new(),
         }
     }
 
@@ -1639,14 +1629,12 @@ impl ResponseGlyphState {
         self.max_col = terminal_width.max(4);
     }
 
-    /// Process a rendered ANSI text chunk. Returns the wrapped+margined output.
-    pub(crate) fn apply(&mut self, rendered: &str) -> String {
-        if rendered.is_empty() {
+    /// Serialize structured response text with its shared wrapping and margin.
+    pub(crate) fn apply(&mut self, text: &StyledText) -> String {
+        if text.text.is_empty() {
             return String::new();
         }
-        self.decoder.advance(&mut self.parser, rendered);
-        let text = std::mem::take(&mut self.decoder.output);
-        let (laid_out, first_glyph) = self.layout_styled(&text);
+        let (laid_out, first_glyph) = self.layout_styled(text);
         let mut output = String::with_capacity(laid_out.text.len() + 64);
         // Only direct terminal writes erase the old cursor row. A live canvas
         // consumes the same text/layout without embedding terminal controls.

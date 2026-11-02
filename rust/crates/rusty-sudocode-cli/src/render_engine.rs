@@ -20,6 +20,7 @@ use engine_events::{
 use crate::cli::format::{
     format_auto_compaction_notice, format_compaction_notice, format_tool_result,
 };
+use crate::render::styled_text::StyledText;
 use crate::render::{
     layout_policy::LayoutPolicy, query_terminal_width, theme, MarkdownStreamState,
     ResponseGlyphState, SpinnerRef, TerminalRenderer, TextRole, DIM, RESET,
@@ -117,7 +118,7 @@ impl EngineEventRenderer {
         }
     }
 
-    fn apply_response(&mut self, text: &str) -> String {
+    fn apply_response(&mut self, text: &StyledText) -> String {
         self.glyph.set_width(query_terminal_width());
         self.glyph.apply(text)
     }
@@ -146,8 +147,8 @@ impl EngineEventRenderer {
         self.block = Some(block);
     }
 
-    fn write_response(&mut self, text: &str, block: OutputBlock) {
-        if !text.is_empty() {
+    fn write_response(&mut self, text: &StyledText, block: OutputBlock) {
+        if !text.text.is_empty() {
             self.start_block(block);
             let prefixed = self.apply_response(text);
             self.write_out(&prefixed);
@@ -406,7 +407,7 @@ impl EngineEventRenderer {
                         // 0. Reasoning is written at line boundaries and has the
                         // same protection.
                         self.pause_spinner();
-                        self.write_response(&crate::cli::format::thinking_header(), OutputBlock::Reasoning);
+                        self.write_response(&crate::cli::format::thinking_header_styled(), OutputBlock::Reasoning);
                         self.thinking_printed = true;
                     }
                     self.thinking_pending.push_str(&text);
@@ -706,11 +707,11 @@ fn format_hook_progress(event: &HookProgressEvent) -> String {
 /// place that decides it — instead of once per streamed delta, which is what
 /// turned reasoning into a stream of `\x1b[2m…\x1b[0m` fragments. A whitespace-
 /// only line has no text to tint, so wrapping it would only add escape noise.
-fn render_thinking_line(line: &str) -> String {
+fn render_thinking_line(line: &str) -> StyledText {
     if line.trim().is_empty() {
-        line.to_string()
+        StyledText::from_ansi(line)
     } else {
-        crate::cli::format::dim_thinking(line)
+        crate::cli::format::dim_thinking_styled(line)
     }
 }
 
@@ -816,9 +817,10 @@ mod tests {
     #[test]
     fn a_reasoning_line_is_dimmed_once_as_a_whole() {
         let rendered = render_thinking_line("checking 17 is prime\n");
-        assert_eq!(rendered, format!("{DIM}checking 17 is prime\n{RESET}"));
-        assert_eq!(rendered.matches(DIM).count(), 1, "one dim open per line");
-        assert_eq!(rendered.matches(RESET).count(), 1, "one reset per line");
+        assert_eq!(rendered.text, "checking 17 is prime\n");
+        let spans: Vec<_> = rendered.spans(0..rendered.text.len()).collect();
+        assert_eq!(spans.len(), 1, "one dim run per complete line");
+        assert!(spans[0].0.attributes.has(crossterm::style::Attribute::Dim));
     }
 
     /// A blank separator line between reasoning paragraphs is emitted raw: it
@@ -827,7 +829,9 @@ mod tests {
     #[test]
     fn a_blank_reasoning_line_is_emitted_without_escapes() {
         let rendered = render_thinking_line("  \n");
-        assert_eq!(rendered, "  \n");
-        assert!(!rendered.contains(DIM), "blank line carries no dim escape");
+        assert_eq!(rendered.text, "  \n");
+        assert!(rendered
+            .spans(0..rendered.text.len())
+            .all(|(style, _)| style == crossterm::style::ContentStyle::default()));
     }
 }

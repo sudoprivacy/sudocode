@@ -16,8 +16,8 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) use crate::render::text_layout::display_width;
 use crate::render::text_layout::{truncate_to_width, wrap_ansi_to_width};
 
-use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
+use crate::render::{styled_text::StyledText, StyledLine};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
@@ -238,32 +238,30 @@ fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         .join("\n")
 }
 
-/// Wrap one chunk of extended-thinking text in the dim attribute.
-///
-/// Deliberately one self-contained `DIM`…`RESET` pair per call rather than a
-/// single run held open across a whole reasoning block. The live path receives
-/// thinking as deltas that split mid-word, and [`ResponseGlyphState::apply`]
-/// injects its margin at every line start — so a run left open across a delta
-/// boundary would be closed by whichever writer comes next. Per-chunk pairs are
-/// idempotent under both, at the cost of one escape pair per delta.
-///
-/// [`ResponseGlyphState::apply`]: crate::render::ResponseGlyphState::apply
-#[inline]
-pub(crate) fn dim_thinking(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    format!("{DIM}{text}{RESET}")
+/// Reasoning is styled prose, never parsed as Markdown. Both live and replay
+/// consume this representation; terminal adapters alone serialize ANSI.
+pub(crate) fn dim_thinking_styled(text: &str) -> StyledText {
+    StyledText::from_ansi_with_style(text, theme().style(TextRole::Reasoning))
 }
 
-/// Header that opens a reasoning block.
-///
-/// Without it dim text is ambiguous — it reads as a faded *answer* rather than
-/// as reasoning, and a turn that opens on thinking would look like the model
-/// started replying in the wrong style.
+pub(crate) fn thinking_header_styled() -> StyledText {
+    let mut text = dim_thinking_styled("✻ Thinking…");
+    text.plain("\n");
+    text
+}
+
+#[inline]
+pub(crate) fn dim_thinking(text: &str) -> String {
+    let mut output = String::new();
+    dim_thinking_styled(text).write_ansi_lines(&mut output);
+    output
+}
+
 #[inline]
 pub(crate) fn thinking_header() -> String {
-    format!("{DIM}✻ Thinking…{RESET}\n")
+    let mut output = String::new();
+    thinking_header_styled().write_ansi_lines(&mut output);
+    output
 }
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant

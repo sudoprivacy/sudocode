@@ -1,4 +1,5 @@
 name: Local and cross-platform acceptance
+run-name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft local acceptance' || 'Local acceptance' }}
 
 on:
   pull_request:
@@ -12,7 +13,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: acceptance-${{ github.event.pull_request.number || github.ref }}
+  group: acceptance-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'draft' || 'ready' }}
   cancel-in-progress: true
 
 jobs:

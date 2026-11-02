@@ -13,7 +13,7 @@ permissions:
 jobs:
   publish:
     name: Publish verified local and cross-platform acceptance
-    if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group'
+    if: (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group') && github.event.workflow_run.conclusion != 'skipped'
     # Keep this read-only verification/publication off the busy Linux pool.
     runs-on: windows-latest
     permissions:

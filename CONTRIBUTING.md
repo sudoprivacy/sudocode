@@ -417,10 +417,15 @@ receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays re
 in CI preflight; editing it alone skips unrelated native product builds.
 Development-only Cargo manifest/lock changes do not select normal release,
 service, co-host or daemon builds. The shared selector reads committed Git/TOML:
-resolver 2 and workspace settings must stay unchanged, manifest edits must be
-limited to dev dependencies, and existing lock packages/normal edges must stay
-unchanged. New versions of an existing package name, deleted lock nodes and
-unknown/malformed metadata keep the ordinary scope. Native workspace/lint,
+resolver 2 and normal workspace settings must stay unchanged. For the standard
+`crates/*` workspace, shared dev dependency revisions and versions may change
+when every normal/build declaration and its reachable lock records and resolved
+edges remain identical. Aliases, optional dependencies and target-specific
+tables participate in that proof. Removed or replaced dev-only lock nodes are
+allowed; changed normal resolutions, missing/ambiguous edges and unsupported
+metadata retain the ordinary scope. Committed blobs are read in one Git batch,
+without executing candidate code. Older/custom layouts retain the existing
+conservative verifier for direct dev-only additions. Native workspace/lint,
 provider, resize and statistical performance scopes stay unchanged. Other
 source or assertion changes still select their checks. Required output prints
 `BUILD_INPUT_SCOPE` and CI's `normal_product_ignored` paths. Python without the
@@ -433,6 +438,8 @@ Legacy receipts without plans retain known completed checks. Failed/unrun
 required profiles still run, and old failures and first timing remain recorded.
 Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Compiler observation reads executable paths instead of argv, avoiding macOS
+process-argument permission races while preserving native command failures.
 Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
@@ -477,7 +484,7 @@ retiring legacy library/binary unit harnesses in line with the test-layer policy
 An audited Windows run contained 1,423 such unit cases and 1,089 integration
 cases; the unit cases contributed 73 summed worker seconds, so their 56.6%
 share of case count is not a 56.6% time saving. Every selected integration/PTY
-case and ignored marker remains; queue all-target/all-feature Clippy,
+case and ignored marker remains; queue all-feature Clippy,
 vendored Mermaid checks and workspace doctests remain. Legacy unit assertions
 are no longer runtime regression gates and gain no e2e coverage credit.
 Real Cargo/nextest controls poison both unit harnesses, require the former full
@@ -489,13 +496,20 @@ targets; a real deliberately failing disabled target protects that boundary.
 Native workspace Clippy uses that same validated group inventory, retaining
 library and binary test configurations, examples, benches and ungrouped enabled
 tests. It avoids linting the 128 covered modules as separate crates on every
-author/complementary host: 91 instead of 211 integration targets in the current
+author/complementary host: 91 instead of 211 integration targets in the audited
 workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
 Ungrouped sources keep `--all-targets`; disabled
-standalone test targets keep their original exclusion. The merge queue still
-checks every original target with all features. This reduces per-host lint
-coverage of differences specific to an original test crate's identity; that
-configuration remains checked in the queue. Real Cargo/Clippy controls inject
+standalone test targets keep their original exclusion. Queue all-feature lint
+retains `--all-targets` for ordinary/shared changes, checking original standalone
+crate identities. Only committed isolated CLI test edits use the same native
+scope predicate: changed original targets and their canonical containing groups.
+Unchanged unrelated integration, library/bin test, example and bench roots are
+not linted again for that test-only class. The full workspace all-feature
+dependency graph remains; a real cross-member feature counterexample rejects
+isolated package selection that drops a required dependency feature. Missing base
+history, dirty/untracked inputs, unknown or unregistered targets retain full lint.
+`QUEUE_CLIPPY_SCOPE` reports the exact mode/reason, counts and command.
+Real Cargo/Clippy controls inject
 errors into ordinary and test-only library/bin code, grouped/ignored tests,
 shared helpers, examples and benches, and verify disabled-target exclusion.
 No product test case, assertion or deadline changes.
@@ -631,9 +645,11 @@ waiting, retries and publication through CI failure or merge. Use the earliest
 applicable start, without adding overlapping intervals. Older/manual history can
 be missing; these diagnostics neither authorize a push nor prove complete history.
 For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
-in a private local Docker container. A native host smoke retains the actual failing
+in a private local Docker container. Native guards retain the actual failing
 process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
-native nextest/Cargo enforcement fixture also remains on the author OS. The full
+native nextest/Cargo enforcement fixture runs on the author OS. Windows author
+acceptance also verifies native color initialization. Docker is required on
+the author's machine, not by complementary native jobs. The full
 negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build
@@ -770,7 +786,7 @@ scoped deployment acceptance still exercises the actual installed system.
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. Native acceptance retains
-its per-host lint. Strict all-target/all-feature Clippy runs once on Linux,
+its per-host lint. Strict all-feature Clippy runs once on Linux,
 Windows and macOS against the combined queue tree, without a duplicate Linux
 PR job. All-feature-only findings can therefore arrive later in the queue;
 this removes early feedback, not the final three-platform lint requirement.
@@ -778,11 +794,28 @@ The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful
-runs retain every target, feature and `-D warnings` check. An actual three-package
+runs retain every feature and `-D warnings` check; ordinary source changes retain
+all target categories, and isolated test edits
+select changed originals plus their groups. An actual three-package
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
-records the actual compiler priorities. It runs once on a PR only when the lint
-workflow, fixture or scope selector changes; queue/main reuse its result.
+records the actual compiler priorities. Additional real compiler controls reject
+errors in either grouped module, examples, benches and library/bin test
+configurations, and refuse noncanonical wrappers. Old/new compiler artifacts
+also prove manual-driver exclusion with deliberately broken manual code. Required output prints
+`QUEUE_CLIPPY_SCOPE`, including all-feature target counts and the actual command.
+The fixture runs once on a PR only when the lint workflow, entry, fixture or scope
+selector changes; queue/main reuse its result.
+Changing the queue entry itself also selects the real all-feature workspace
+lint on all three queue platforms. Real committed PR/push/queue event controls
+verify this trigger and the exclusion of documentation-only changes.
+Draft snapshots use a separate concurrency group and explicit run title. They
+cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
+workflows allocate no publisher runner. A newer applicable ready run and its
+current attempt still own the result, including failures; required jobs and
+SSH signatures remain verified. Publisher output explains an ignored event
+on the mandatory execution path. Real child-process/HTTP/Git/SSH controls cover
+both event orders, queued drafts, failed ready runs and signature corruption.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

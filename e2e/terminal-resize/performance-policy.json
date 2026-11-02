@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "baseline_commit": "82a99dd262c746a1872ccfaf0ea46d7fe4bd6754",
+  "baseline_commit": "709765f910cf7d47242dd5c12c5ab5dba16e5a66",
   "rounds": { "calibration": 3, "comparison": 3 },
   "case_rounds": {
     "short": { "calibration": 5, "comparison": 7 },

@@ -1,0 +1,29 @@
+{
+  "source": "openai/codex 970111f6cb markdown_render_tests.rs and committed snapshots",
+  "cases": [
+    {
+      "name": "table_keeps_grid_when_only_one_compact_record_fragments_snapshot",
+      "width": 40,
+      "markdown": "| Key | Date | State |\n| --- | --- | --- |\n| short | 2025-01-01 | Ready |\n| verylongidentifier | 2025-02-02 | Ready |\n| final | 2025-03-03 | Done |\n",
+      "expected": " Key                Date          State\n━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━  ━━━━━━━\n short              2025-01-01    Ready\n─────────────────  ────────────  ───────\n verylongidentif    2025-02-02    Ready\n ier\n─────────────────  ────────────  ───────\n final              2025-03-03    Done"
+    },
+    {
+      "name": "table_renders_key_value_records_when_compact_fragmentation_is_systemic_snapshot",
+      "width": 17,
+      "markdown": "| Key | Notes |\n| --- | --- |\n| firstlongid | A readable explanatory sentence for this row. |\n| secondlongid | Another readable explanatory sentence for this row. |\n| short | A final readable explanatory sentence for this row. |\n",
+      "expected": " Key\n  firstlongid\n Notes\n  A readable\n  explanatory\n  sentence for\n  this row.\n─────────────────\n Key\n  secondlongid\n Notes\n  Another\n  readable\n  explanatory\n  sentence for\n  this row.\n─────────────────\n Key\n  short\n Notes\n  A final\n  readable\n  explanatory\n  sentence for\n  this row."
+    },
+    {
+      "name": "table_renders_halfwidth_sound_marks_at_constrained_width_snapshot_23",
+      "width": 23,
+      "markdown": "| Key | Notes |\n| --- | --- |\n| ｶﾞﾊﾟtail | First ｶﾞ row with an escaped \\| pipe. |\n| ﾊﾟｶﾞtail | Second ﾊﾟ row with an escaped \\| pipe. |\n| short | Final ｶﾞﾊﾟ row. |\n",
+      "expected": " Key         Notes\n━━━━━━━━━━  ━━━━━━━━━━━\n ｶﾞﾊﾟtail    First ｶﾞ\n             row with\n             an\n             escaped |\n             pipe.\n──────────  ───────────\n ﾊﾟｶﾞtail    Second ﾊﾟ\n             row with\n             an\n             escaped |\n             pipe.\n──────────  ───────────\n short       Final ｶﾞ\n             ﾊﾟ row."
+    },
+    {
+      "name": "table_renders_halfwidth_sound_marks_at_constrained_width_snapshot_17",
+      "width": 17,
+      "markdown": "| Key | Notes |\n| --- | --- |\n| ｶﾞﾊﾟtail | First ｶﾞ row with an escaped \\| pipe. |\n| ﾊﾟｶﾞtail | Second ﾊﾟ row with an escaped \\| pipe. |\n| short | Final ｶﾞﾊﾟ row. |\n",
+      "expected": " Key\n  ｶﾞﾊﾟtail\n Notes\n  First ｶﾞ row\n  with an escaped\n  | pipe.\n─────────────────\n Key\n  ﾊﾟｶﾞtail\n Notes\n  Second ﾊﾟ row\n  with an escaped\n  | pipe.\n─────────────────\n Key\n  short\n Notes\n  Final ｶﾞﾊﾟ row."
+    }
+  ]
+}

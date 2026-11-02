@@ -9,6 +9,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 pub(crate) mod activity;
+pub(crate) mod code_preview;
 mod code_theme;
 mod color_math;
 mod color_theme;
@@ -25,7 +26,9 @@ pub use color_theme::{theme, ColorTheme, TextRole};
 
 mod styled_line;
 pub(crate) mod styled_text;
+mod table;
 pub(crate) mod text_layout;
+mod word_wrap;
 
 pub(crate) use styled_line::StyledLine;
 use styled_text::StyledText;
@@ -457,8 +460,9 @@ enum ListKind {
     Ordered { next_index: u64 },
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct TableState {
+    alignments: Vec<pulldown_cmark::Alignment>,
     headers: Vec<StyledText>,
     rows: Vec<Vec<StyledText>>,
     current_row: Vec<StyledText>,
@@ -492,7 +496,7 @@ impl TableState {
 /// paragraph the way GitHub / CC render it.
 const TOP_LEVEL_LIST_INDENT: usize = 2;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct RenderState {
     code_block_complete: bool,
     emphasis: usize,
@@ -955,10 +959,22 @@ impl TerminalRenderer {
                         .style_for(TextRole::Accent, self.color_support),
                 );
             }
-            Event::Start(Tag::Table(..)) => state.table = Some(TableState::default()),
+            Event::Start(Tag::Table(alignments)) => {
+                state.table = Some(TableState {
+                    alignments,
+                    ..TableState::default()
+                });
+            }
             Event::End(TagEnd::Table) => {
                 if let Some(table) = state.table.take() {
-                    output.append(&self.render_table(&table));
+                    output.append(&table::render(
+                        &table.headers,
+                        &table.rows,
+                        &table.alignments,
+                        state.max_width,
+                        self.color_theme,
+                        self.color_support,
+                    ));
                     output.plain("\n\n");
                 }
             }
@@ -1135,7 +1151,7 @@ impl TerminalRenderer {
         state: &RenderState,
         output: &mut StyledText,
     ) {
-        if mermaid::is_mermaid(code_language) {
+        if fence_presentation(code_language) == FencePresentation::Mermaid {
             let prefix = format!(
                 "{}{}",
                 "> ".repeat(state.quote),
@@ -1207,76 +1223,6 @@ impl TerminalRenderer {
         } else {
             state.append_styled(output, text, self.color_theme);
         }
-    }
-
-    fn render_table(&self, table: &TableState) -> StyledText {
-        let column_count = std::iter::once(&table.headers)
-            .chain(table.rows.iter())
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
-        let widths = (0..column_count)
-            .map(|column| {
-                std::iter::once(&table.headers)
-                    .chain(table.rows.iter())
-                    .filter_map(|row| row.get(column))
-                    .map(|cell| visible_width(&cell.text))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect::<Vec<_>>();
-        let mut output = StyledText::default();
-        if !table.headers.is_empty() {
-            output.append(&self.render_table_row(&table.headers, &widths, true));
-            output.plain("\n");
-            let border = self
-                .color_theme
-                .style_for(TextRole::Border, self.color_support);
-            output.push(border, "│");
-            for (index, width) in widths.iter().enumerate() {
-                if index > 0 {
-                    output.push(border, "┼");
-                }
-                output.push(border, &"─".repeat(width + 2));
-            }
-            output.push(border, "│");
-            if !table.rows.is_empty() {
-                output.plain("\n");
-            }
-        }
-        for (index, row) in table.rows.iter().enumerate() {
-            output.append(&self.render_table_row(row, &widths, false));
-            if index + 1 < table.rows.len() {
-                output.plain("\n");
-            }
-        }
-        output
-    }
-
-    fn render_table_row(
-        &self,
-        row: &[StyledText],
-        widths: &[usize],
-        is_header: bool,
-    ) -> StyledText {
-        let border = self
-            .color_theme
-            .style_for(TextRole::Border, self.color_support);
-        let mut line = StyledText::default();
-        line.push(border, "│");
-        for (index, width) in widths.iter().enumerate() {
-            line.plain(" ");
-            let mut occupied = 0;
-            if let Some(cell) = row.get(index) {
-                occupied = visible_width(&cell.text);
-                for (style, part, link) in cell.rich_spans(0..cell.text.len()) {
-                    line.push_link(if is_header { style.bold() } else { style }, part, link);
-                }
-            }
-            line.plain(&" ".repeat(width.saturating_sub(occupied) + 1));
-            line.push(border, "│");
-        }
-        line
     }
 
     fn highlight_styled(&self, code: &str, language: &str) -> StyledText {
@@ -1573,6 +1519,22 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
     }
 
     mermaid::stream_boundary(markdown, last_boundary)
+}
+
+/// Shared presentation choice for canonical blocks and disposable live previews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FencePresentation {
+    Source,
+    Mermaid,
+}
+
+#[inline]
+fn fence_presentation(info: &str) -> FencePresentation {
+    if mermaid::is_mermaid(info) {
+        FencePresentation::Mermaid
+    } else {
+        FencePresentation::Source
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

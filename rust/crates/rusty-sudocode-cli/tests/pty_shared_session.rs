@@ -162,7 +162,15 @@ fn wait_for_file(path: &std::path::Path) {
 }
 
 fn wait_for_file_with_diagnostics(path: &std::path::Path, diagnostics: impl Fn() -> String) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    wait_for_file_with_budget(path, Duration::from_secs(20), diagnostics);
+}
+
+fn wait_for_file_with_budget(
+    path: &std::path::Path,
+    budget: Duration,
+    diagnostics: impl Fn() -> String,
+) {
+    let deadline = Instant::now() + budget;
     while !path.exists() {
         assert!(
             Instant::now() < deadline,
@@ -479,7 +487,13 @@ fn begin_gate(env: &TestEnv, cli: &mut PtySession, label: &str) {
         "tool batch entered",
     );
     cli.send("\r").unwrap();
-    wait_for_file(&env.workspace_root().join(format!("{label}.ready")));
+    // This barrier includes the provider's response, unlike later local-file
+    // effects. Reuse the same budget as the other waits for this backend.
+    wait_for_file_with_budget(
+        &env.workspace_root().join(format!("{label}.ready")),
+        env.timeout(),
+        String::new,
+    );
 }
 
 #[test]

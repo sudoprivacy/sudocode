@@ -57,6 +57,13 @@ impl StyledText {
         self.runs.clear();
     }
 
+    #[inline]
+    pub(crate) fn slice(&self, range: Range<usize>) -> Self {
+        let mut result = Self::default();
+        result.append_range(self, range);
+        result
+    }
+
     /// Account retained allocations conservatively for bounded layout caches.
     pub(crate) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()

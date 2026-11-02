@@ -78,7 +78,7 @@ fn write_fixture(root: &Path) -> (String, String) {
         format!(
             r"const fs = require('fs');
 const started = 'started.json';
-const staged = started + '.' + process.pid + '.tmp';
+const staged = started + '.tmp';
 try {{
   fs.writeFileSync(staged, JSON.stringify({{pid:process.pid,run_id:{run_id_json}}}));
   fs.renameSync(staged, started);

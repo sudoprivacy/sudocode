@@ -85,6 +85,7 @@ jobs:
   clippy-workspace:
     # Local/complementary acceptance owns the native suites. Preserve the
     # stronger all-feature lint contract once on the integrated queue tree.
+    # Validated groups cover their modules once; manual drivers remain selected.
     # All-feature-only findings can arrive later than native per-host lint.
     # Stop at its first error so matrix fail-fast can cancel peer platforms.
     if: >-
@@ -115,7 +116,7 @@ jobs:
           env-vars: ImageOS
           save-if: false
       - name: Run workspace clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: python ../.github/scripts/ci_clippy.py
 
   stop-after-clippy-failure:
     # Start as soon as this matrix fails; waiting for the daemon defeats this.
@@ -520,7 +521,7 @@ jobs:
         id: scope
         run: |
           python3 .github/scripts/ci_input_scope.py
-          echo "::notice::Native acceptance retains per-host lint. Full all-target/all-feature Clippy runs once on the three-platform merge queue; feature-only errors may first appear there. Main reuses completed queue preflight."
+          echo "::notice::Native acceptance retains per-host lint. Queue Clippy checks all features on three platforms, using validated groups plus every uncovered/manual target; legacy sources retain all-targets. Feature-only errors may first appear there. Main reuses completed queue preflight."
 
       - name: Install focused executor observer dependencies
         if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true')

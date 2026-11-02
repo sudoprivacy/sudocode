@@ -1,4 +1,4 @@
-name: Private native worker comparison
+name: Private background history wire
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   measure:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: 83c73556d9f99c335f905d36e9ec29427fe6bb54
+          ref: 0412b94c7bbd938959e8ae2fa59e60bf2e4891a3
           path: candidate
           fetch-depth: 0
           persist-credentials: false
@@ -47,12 +47,12 @@ jobs:
           save-if: false
       - name: Install process observer
         run: python -m pip install psutil jsonschema
-      - name: Measure identical full suites with eight then four workers
-        run: python driver/.github/diagnostics/ci_worker_probe.py --source candidate --output "${{ runner.temp }}/native-workers"
+      - name: Capture the actual background-history wire
+        run: python driver/.github/diagnostics/history_wire_probe.py --source candidate --output "${{ runner.temp }}/native-workers"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-workers-macos
+          name: background-history-wire-linux
           path: ${{ runner.temp }}/native-workers
           if-no-files-found: error
           retention-days: 7

@@ -512,6 +512,47 @@ fn live_prose_is_visible_and_input_remains_usable() {
 
 #[test]
 #[ignore = "requires the pinned real terminal host; run explicitly for rendering acceptance"]
+fn wide_grid_and_narrow_records_match_codex_snapshots() {
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/codex_tables.json")).unwrap();
+    for case in reference["cases"].as_array().unwrap() {
+        let env = TestEnv::new_mock("codex-table-reference");
+        let root = env.workspace_root();
+        let document = format!(
+            "{}\n\nTableSnapshotDone.",
+            case["markdown"].as_str().unwrap()
+        );
+        let prompt = common::terminal_host::prose_prompt(
+            &env,
+            &document,
+            serde_json::json!({
+                "start_ready": root.join("table-start-ready"),
+                "start_release": root.join("table-start-release"),
+                "chunk_chars": document.chars().count(),
+            }),
+        );
+        // vt100 truncates rows on resize. Use the same reflowing terminal and
+        // completed-frame barrier as native prose acceptance instead.
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/prose.cjs");
+        let output = common::terminal_host::run_script(
+            &env,
+            &["--auth", "api-key", "--model", "sonnet"],
+            case["name"].as_str().unwrap(),
+            serde_json::json!({
+                "scenario": "table_snapshots",
+                "cols": 100, "rows": 90, "prompt": prompt, "case": case,
+                "timeoutMs": common::DEFAULT_TIMEOUT.as_millis(),
+            }),
+            &script,
+        );
+        common::terminal_host::assert_success(&output);
+        assert_persisted_text(&env, &document);
+    }
+}
+
+#[test]
+#[ignore = "requires the pinned real terminal host; run explicitly for rendering acceptance"]
 fn real_terminal_handoff_and_resize_preserve_native_history() {
     for (scenario, cols) in [
         ("prose_wide", 120),

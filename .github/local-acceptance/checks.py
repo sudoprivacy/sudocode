@@ -617,7 +617,7 @@ def native_guard_files():
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
-        ".github/workflows/local-acceptance.yml": "65854652e5288fef4a9bc14852f9a1bfc0a692fc746af5c236e94ce1c19c8888",
+        ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",

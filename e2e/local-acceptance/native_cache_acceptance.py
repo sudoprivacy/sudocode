@@ -101,8 +101,19 @@ fn main() {
     if configured:
         subprocess.run(["git", "-C", str(trusted), "config", "localAcceptance.vsdevcmd", configured], check=True)
     (entry.parent / "checks.py").write_text('''import os
+import sys
 from pathlib import Path
+def prepare_native_checks(names, root, output, execute):
+    assert names == ["native-workspace"]
+    code = ("from pathlib import Path; import os,sys; "
+            "Path(sys.argv[1]).write_text('ready'); "
+            "print('controlled native prerequisite failure' if os.environ.get('PREPARE_FAIL') else 'ready'); "
+            "raise SystemExit(23 if os.environ.get('PREPARE_FAIL') else 0)")
+    execute([sys.executable, "-c", code, str(output / "prepare-order")], root, output / "prepare.log")
+    return {}
 def run(name, root, output, base, execute):
+    assert (output.parent / "prepare-order").read_text() == "ready"
+    print("RUNNING_NATIVE_PROFILE", flush=True)
     output.mkdir(parents=True)
     commands = [execute(["cargo", "build", "--locked"], root / "rust", output / "build.log")]
     target = Path(os.environ.get("CARGO_TARGET_DIR", root / "rust/target"))
@@ -116,6 +127,16 @@ def run(name, root, output, base, execute):
     assert (output / "native/native-workspace/run.log").read_text(encoding="utf-8").strip() == "candidate"
     assert before == (hashlib.sha256(shared.read_bytes()).hexdigest(), shared.stat().st_mtime_ns), "Shared dependency recompiled"
     assert not (source / "target").exists(), "The consumer built outside the restored shared target"
+    print("Expected negative control: native prerequisite failure must refuse before Cargo/profile execution.", flush=True)
+    try:
+        helper.run_command([sys.executable, str(entry)], candidate, output / "early-failure.log",
+                           {**native_env, "PREPARE_FAIL": "1", "ACCEPTANCE_OUTPUT": str(output / "early-failure")})
+    except RuntimeError:
+        text = (output / "early-failure.log").read_text(encoding="utf-8")
+        assert "controlled native prerequisite failure" in text and "RUNNING_NATIVE_PROFILE" not in text, text
+        assert not (output / "early-failure/native-workspace").exists()
+    else:
+        raise AssertionError("Native launcher ignored failed preparation")
     for name, extra, message in [
         ("wrong-target", {"CARGO_TARGET_DIR": str(workspace / "wrong")}, "differs from the restored cache"),
         ("non-native", {"ACCEPTANCE_NATIVE_CHECKS": "preflight"}, "Only native profiles"),
@@ -131,6 +152,7 @@ def run(name, root, output, base, execute):
     result = {"status": "PASS", "publisher_consumer_target_identical": True,
               "pre_restore_environment_unchanged": True, "actual_candidate_executed": True,
               "shared_dependency_bytes_and_mtime_preserved": True, "wrong_target_and_non_native_refused": True,
+              "prerequisite_precedes_Cargo_and_failed_prerequisite_stops_native_profiles": True,
               "scope": "Actual configuration CLI, native launcher, Cargo and native processes. Remote cache restore and product journeys qualify in real CI; this fixture grants no product coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result), flush=True)

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,28 @@ def workflow_scope(output, environment):
         raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     lines = workflow.splitlines()
+    # Bind the real native guard cases below to the production queue wiring.
+    # The PR must not allocate a duplicate lint matrix, while the final gate
+    # must continue to wait for all three native platforms.
+    lint = re.search(r"^  clippy-workspace:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+    predicate = lint.split("    if: >-\n", 1)[1].split("    needs:", 1)[0]
+    assert " ".join(predicate.split()) == (
+        "!inputs.live_only && !inputs.cache_only && "
+        "needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' && "
+        "github.event_name == 'merge_group'"), predicate
+    assert "        os: [ubuntu-latest, windows-latest, macos-latest]" in lint
+    assert "      fail-fast: true" in lint
+    gate = re.search(r"^  integrated-acceptance:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+    assert "    if: always() && github.event_name == 'merge_group'" in gate
+    assert "    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]" in gate
+    branches = workflow.split("  push:\n    branches:\n", 1)[1].split("    paths:", 1)[0]
+    assert {line.strip() for line in branches.splitlines() if line.strip().startswith("- ")} == {
+        "- 'gaebal/**'", "- 'omx-issue-*'"}, branches
+    assert "  pull_request:\n" in workflow and "  merge_group:\n" in workflow
+    assert "full_preflight" not in workflow, "Every remaining event must retain full metadata checks"
+    for filename in ["ci-dependency-cache.yml", "ci-vfs-search-cache.yml"]:
+        publisher = (SOURCE / ".github/workflows" / filename).read_text(encoding="utf-8")
+        assert "  push:\n    branches: [main]\n" in publisher, filename
 
     def step(name):
         matches = [index for index, line in enumerate(lines) if line == "      - name: " + name]
@@ -46,9 +69,16 @@ def workflow_scope(output, environment):
                  "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
-    for name in ["A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
+    assert "      a2a_required: ${{ steps.scope.outputs.a2a_required }}" in lines
+    for name in ["Install native durability fault injector", "A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
                  "Auth-on A2A — the node decides who a message is from"]:
-        assert not any(line.startswith("        if:") for line in step(name)), name
+        assert [line for line in step(name) if line.startswith("        if:")] == [
+            "        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'"], name
+    assert "        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(
+        "Retain native syscall fault evidence")
+    for name in ["Explain selected daemon acceptance", "Require native daemon acceptance and zero workspace warnings"]:
+        assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(name)
+        assert "          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}" in step(name)
 
     def script(name):
         block = step(name)
@@ -66,21 +96,40 @@ def workflow_scope(output, environment):
     for name, source in scripts.items():
         (output / f"{name}.sh").write_text(source, encoding="utf-8")
     cases = [
-        ("explain", "true", "true", "success", True),
-        ("explain", "false", "true", "success", True),
-        ("explain", "", "true", "success", False),
-        ("required", "true", "true", "success", True),
-        ("required", "false", "true", "success", True),
-        ("required", "false", "false", "skipped", True),
-        ("required", "true", "false", "skipped", False),
-        ("required", "", "true", "success", False),
-        ("required", "false", "true", "skipped", False),
-        ("required", "true", "true", "failure", False),
+        ("explain", "true", "true", "true", "success", True),
+        ("explain", "false", "true", "true", "success", True),
+        ("explain", "true", "false", "true", "success", True),
+        ("explain", "", "true", "true", "success", False),
+        ("explain", "true", "", "true", "success", False),
+        ("required", "true", "true", "true", "success", True),
+        ("required", "false", "true", "true", "success", True),
+        ("required", "true", "false", "true", "success", True),
+        ("required", "false", "false", "false", "skipped", True),
+        ("required", "true", "false", "false", "skipped", False),
+        ("required", "false", "true", "false", "skipped", False),
+        ("required", "false", "false", "true", "success", False),
+        ("required", "", "true", "true", "success", False),
+        ("required", "true", "", "true", "success", False),
+        ("required", "false", "true", "true", "skipped", False),
+        ("required", "true", "true", "true", "failure", False),
     ]
+    cases = [(name, {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
+                     "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual}, succeeds)
+             for name, a2a, cohost, daemon, actual, succeeds in cases]
+    cases.extend(("required", {"A2A_REQUIRED": "false", "COHOST_REQUIRED": "false",
+                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped", **values}, succeeds)
+                 for values, succeeds in [
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success"}, True),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "failure"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "skipped"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "cancelled"}, False),
+                     ({"CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "success"}, False),
+                     ({"CLIPPY_REQUIRED": "", "CLIPPY_RESULT": "skipped"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success", "PIN_RESULT": "failure"}, False),
+                 ])
     records = []
-    for index, (name, cohost, daemon, actual, succeeds) in enumerate(cases):
-        values = {"COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
-                  "PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped"}
+    for index, (name, overrides, succeeds) in enumerate(cases):
+        values = {"PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped", **overrides}
         result = subprocess.run([bash, "-c", scripts[name]], env={**environment, **values}, capture_output=True)
         log = output / f"{index:02}.log"
         # Native setup failures can use a different encoding. Retain their raw
@@ -91,7 +140,9 @@ def workflow_scope(output, environment):
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
     return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
-            "CLI_daemon_journeys_unconditional_inside_required_job": True}
+            "CLI_and_cohost_steps_bound_to_independent_selectors": True,
+            "three_platform_lint_required_once_on_queue": True,
+            "main_preflight_removed_and_independent_cache_publishers_retained": True}
 
 
 def run(output):
@@ -242,6 +293,7 @@ def run(output):
                                    GITHUB_OUTPUT=str(result_path))
                 result = json.loads(command(sys.executable, repository / ".github/scripts/ci_input_scope.py"))
                 assert result["daemon_required"] == str(daemon).lower(), result
+                assert result["a2a_required"] == str(daemon).lower(), result
                 assert result["cohost_required"] == str(cohost_required).lower(), result
                 emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
                 assert emitted["cohost_required"] == result["cohost_required"], emitted
@@ -262,6 +314,135 @@ def run(output):
     cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
     assert product() == original_binary
     positive_lock = (repository / "rust/Cargo.lock").read_text()
+
+    # Update a real shared Git dependency, including a package-version change.
+    # The same public planner/CI entry points must retain the native driver
+    # while omitting only unchanged normal products. Normal consumers below
+    # deliberately compile broken Git code, so stale product binaries cannot
+    # turn a required normal build into a passing control.
+    positive_state = command("git", "rev-parse", "HEAD")
+    previous_offline = environment.get("CARGO_NET_OFFLINE")
+    environment["CARGO_NET_OFFLINE"] = "false"  # Fetch only this fixture's local file:// Git source.
+    shared = output / "shared-git-dependency"
+    shared.mkdir()
+    command("git", "init", "--initial-branch=main", shared)
+    command("git", "-C", shared, "config", "user.name", "Dependency scope acceptance")
+    command("git", "-C", shared, "config", "user.email", "scope@example.invalid")
+    command("git", "-C", shared, "config", "core.autocrlf", "false")
+    (shared / "src").mkdir()
+
+    def revision(value, version="0.1.0", broken=False):
+        (shared / "Cargo.toml").write_text('[package]\nname="scope-shared-helper"\n'
+            f'version="{version}"\nedition="2021"\n', encoding="utf-8")
+        (shared / "src/lib.rs").write_text(
+            ('compile_error!("shared-normal-refusal");\n' if broken else "")
+            + f'pub fn value() -> u8 {{ {value} }}\n', encoding="utf-8")
+        command("git", "-C", shared, "add", ".")
+        command("git", "-C", shared, "commit", "-m", f"Native dependency value {value}")
+        return command("git", "-C", shared, "rev-parse", "HEAD")
+
+    first_revision = revision(7)
+    shared_application = development + 'scope-git={workspace=true}\n'
+
+    def shared_workspace(ref):
+        return workspace + '[workspace.dependencies]\nscope-git={package="scope-shared-helper",git="' + shared.as_uri() + '",rev="' + ref + '"}\n'
+
+    def shared_driver(value):
+        write("rust/crates/rusty-sudocode-cli/tests/development.rs",
+            '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); '
+            f'assert_eq!(scope_git::value(), {value}); }}\n')
+
+    write("rust/Cargo.toml", shared_workspace(first_revision))
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", shared_application)
+    shared_driver(7)
+    # Only local file:// Git repositories are involved; no registry/model API.
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    shared_base = commit("Add a shared aliased Git development dependency")
+    expect("shared workspace dev Git addition skips normal products", positive_state, [])
+    ci_scope(positive_state, False)
+    assert product() == original_binary and cohost() == original_cohost
+    cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+    shared_revisions = []
+    for value, version in [(8, "0.1.0"), (9, "0.2.0")]:
+        ref = revision(value, version)
+        write("rust/Cargo.toml", shared_workspace(ref))
+        shared_driver(value)
+        command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+        commit("Update shared development Git source and actual driver expectation")
+        expect(f"shared dev Git value {value} version {version} keeps normal products unchanged", shared_base, [])
+        ci_scope(shared_base, False)
+        assert product() == original_binary and cohost() == original_cohost
+        cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+        shared_revisions.append(ref)
+    stable_revision = shared_revisions[-1]
+    current_target = "cfg(windows)" if os.name == "nt" else "cfg(unix)"
+    write("rust/crates/rusty-sudocode-cli/Cargo.toml", development
+          + f'[target.\'{current_target}\'.dev-dependencies]\nscope-git={{workspace=true}}\n')
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    commit("Use the shared dependency through a target-specific development alias")
+    expect("target-specific shared dev aliases retain native tests and skip normal products", shared_base, [])
+    ci_scope(shared_base, False)
+    assert product() == original_binary and cohost() == original_cohost
+    cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
+
+    # Keep a normal transitive Git branch declaration fixed while its actual
+    # lock resolution changes alongside the development revision.
+    runtime_manifest = (repository / "rust/crates/runtime/Cargo.toml").read_text()
+    write("rust/crates/runtime/Cargo.toml", runtime_manifest
+          + '[dependencies]\nnormal-alias={package="scope-shared-helper",git="'
+          + shared.as_uri() + '",branch="main"}\n')
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    transitive_base = commit("Normal runtime imports a transitive Git branch")
+    product()
+    broken_revision = revision(10, "0.2.0", broken=True)
+    write("rust/Cargo.toml", shared_workspace(broken_revision))
+    command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+    commit("Actual normal Git branch and dev revision both resolve broken code")
+    expect("normal transitive resolution change retains every normal gate", transitive_base, PRODUCT)
+    ci_scope(transitive_base, True)
+
+    def normal_git_refusal(label):
+        log = output / f"{label}.log"
+        try:
+            executor.run_command(["cargo", "build", "--locked", "--offline", "-p", "rusty-sudocode-cli"],
+                                 repository / "rust", log, build_environment)
+        except RuntimeError:
+            refused = json.loads(log.with_suffix(".command.json").read_text())
+            commands.append(refused)
+            assert refused["exit_code"] != 0 and "shared-normal-refusal" in log.read_text(encoding="utf-8", errors="replace")
+        else:
+            raise AssertionError("Broken normal Git dependency unexpectedly compiled")
+
+    normal_git_refusal("transitive-normal-refusal")
+    write("rust/crates/runtime/Cargo.toml", runtime_manifest)
+    for kind in ["dependencies", "build-dependencies", f"target.'{current_target}'.dependencies"]:
+        # The normal alias inherits the *same* shared entry when appropriate;
+        # separate target/build tables still participate in normal resolution.
+        manifest = (shared_application.replace('[dependencies]\n',
+                    '[dependencies]\nscope-git={workspace=true}\n', 1) if kind == "dependencies"
+                    else shared_application + f'[{kind}]\nscope-git={{workspace=true}}\n')
+        write("rust/Cargo.toml", shared_workspace(stable_revision))
+        write("rust/crates/rusty-sudocode-cli/Cargo.toml", manifest)
+        if kind == "build-dependencies":
+            write("rust/crates/rusty-sudocode-cli/build.rs", 'fn main() { assert_eq!(scope_git::value(), 9); }\n')
+        command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+        normal_base = commit("Normal alias consumes the shared Git declaration")
+        write("rust/Cargo.toml", shared_workspace(broken_revision))
+        command("cargo", "generate-lockfile", "--manifest-path", "rust/Cargo.toml")
+        commit("Updating a shared normal Git alias keeps required product validation")
+        expect(f"shared {kind} Git update retains normal gates", normal_base, PRODUCT)
+        ci_scope(normal_base, True)
+        normal_git_refusal(kind.replace(".", "-").replace("'", ""))
+        if kind == "build-dependencies":
+            command("git", "rm", "rust/crates/rusty-sudocode-cli/build.rs")
+
+    # Resume the pre-existing controls from their exact original fixture tree.
+    command("git", "restore", "--source", positive_state, "--staged", "--worktree", ".")
+    commit("Restore original development fixture after shared Git workflows")
+    if previous_offline is None:
+        environment.pop("CARGO_NET_OFFLINE", None)
+    else:
+        environment["CARGO_NET_OFFLINE"] = previous_offline
 
     # The actual Cargo build must not import a broken, independent CLI source.
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n')
@@ -476,6 +657,9 @@ def run(output):
     result = {"status": "PASS", "cases": cases, "commands": commands,
               "unchanged_normal_binary_sha256": original_binary,
               "actual_development_feature_case_passed": True,
+              "shared_workspace_git_revision_and_version_drivers_passed": True,
+              "shared_target_dev_alias_keeps_normal_binary_unchanged": True,
+              "broken_shared_normal_build_target_and_transitive_Git_dependencies_refused": True,
               "normal_binary_after_development_driver_unchanged": True,
               "earlier_broader_full_and_partial_signed_evidence_reused": True,
               "legacy_signed_receipt_without_plan_reused": True,

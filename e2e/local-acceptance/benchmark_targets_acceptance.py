@@ -330,7 +330,14 @@ def run(output, profiles):
         raise RuntimeError("Browser benchmark executors require Linux. Run this acceptance in local Docker or Linux CI.")
     output.mkdir(parents=True, exist_ok=False)
     inputs = output / "inputs"
-    checks = load("benchmark_profiles", profiles)
+    # Load the actual executor from a private runner tree so its harness lookup
+    # uses that runner's control files, independently of candidate source age.
+    runner = output / "runner/.github/local-acceptance/checks.py"
+    runner.parent.mkdir(parents=True)
+    shutil.copyfile(profiles, runner)
+    checks = load("benchmark_profiles", runner)
+    viewport_cases = checks.browser_viewport_cases()
+    assert viewport_cases == ("viewport_browser_interaction", "viewport_browser_resource_exit")
     executor = load("benchmark_executor", SOURCE / ".github/scripts/local_acceptance.py")
     commands = []
 
@@ -403,6 +410,9 @@ subprocess.run([a.driver,"--ignored","--exact","browser_terminal_links_and_inter
 out=Path(a.output);out.mkdir()
 (out/"fixture.json").write_text(json.dumps({"candidate_sha256":hashlib.sha256(Path(a.candidate).read_bytes()).hexdigest()}))
 '''
+    control = output / "runner/e2e/terminal-resize/gui-smoke.py"
+    control.parent.mkdir(parents=True)
+    control.write_text(smoke, encoding="utf-8")
     for label in ["baseline", "candidate", "trusted"]:
         checkout = inputs / label
         files = {
@@ -423,12 +433,15 @@ out=Path(a.output);out.mkdir()
                 + ''.join(f'[[test]]\nname="benchmark_{name}"\npath="../../tests/pty_{name}.rs"\ntest=false\n'
                           for name in ["hyperlinks", "prompt_viewport", "render_performance"]),
             "rust/tests/pty_hyperlinks.rs": driver.format(name="browser_terminal_links_and_interaction", origin=label, expected="candidate"),
-            "rust/tests/pty_prompt_viewport.rs": driver.format(name="viewport_browser_interaction", origin=label, expected="candidate"),
+            "rust/tests/pty_prompt_viewport.rs": ''.join(
+                driver.format(name=case, origin=label, expected="candidate") for case in viewport_cases),
             "rust/tests/pty_render_performance.rs": driver.format(name="rendering_driver_runs_release", origin=label, expected="trusted"),
             "e2e/terminal-resize/package.json": '{"name":"browser-builder-acceptance","version":"1.0.0"}\n',
             "e2e/terminal-resize/package-lock.json": '{"name":"browser-builder-acceptance","version":"1.0.0",'
                 '"lockfileVersion":3,"packages":{"":{"name":"browser-builder-acceptance","version":"1.0.0"}}}\n',
-            "e2e/terminal-resize/gui-smoke.py": smoke,
+            "e2e/terminal-resize/gui-smoke.py": (
+                'raise SystemExit("Required GUI harness must come from the runner")\n'
+                if label == "candidate" else smoke),
             "e2e/terminal-resize/benchmark.py": measurement,
             "e2e/terminal-resize/performance-policy.json": '{"fixture":true,"rounds":{"calibration":5,"comparison":7},"profiles":{"core":["short"]}}\n',
         }
@@ -452,7 +465,8 @@ out=Path(a.output);out.mkdir()
     with checks.exclusive_benchmark_state(locks):
         checks.benchmark_locked("browser", inputs / "candidate", evidence, "fixture-base", command, output / "unused-target")
     smoke_commands = commands[before:]
-    assert len(smoke_commands) == 5, "A browser smoke build/driver/run stage was omitted"
+    assert len(smoke_commands) == 4 + len(viewport_cases), "A browser smoke build/driver/run stage was omitted"
+    assert [row["command"][1] for row in smoke_commands[-len(viewport_cases):]] == list(viewport_cases)
     assert not any("--release" in row["command"] for row in smoke_commands), "The smoke needs no optimized build"
     drivers = [row["command"] for row in smoke_commands if "--no-run" in row["command"]]
     assert len(drivers) == 1 and {"benchmark_hyperlinks", "benchmark_prompt_viewport"} <= set(drivers[0]), drivers
@@ -524,19 +538,43 @@ out=Path(a.output);out.mkdir()
     with checks.exclusive_benchmark_state(locks):
         checks.benchmark_locked("browser", inputs / "candidate", paired, "fixture-base", command, output / "unused-target")
     reused_commands = commands[before:]
-    assert len(reused_commands) == 4
+    assert len(reused_commands) == 3 + len(viewport_cases)
+    assert [row["command"][1] for row in reused_commands[-len(viewport_cases):]] == list(viewport_cases)
     assert not any("build" in row["command"] for row in reused_commands), "Browser rebuilt the promoted CLI"
     assert subprocess.check_output([str(paired / "scode-candidate"), "--build-profile"]).decode().strip() == "release"
     assert (paired / "scode-candidate").read_bytes() == (stage / "scode-candidate").read_bytes()
     assert json.loads((paired / "smoke/fixture.json").read_text())["candidate_sha256"] == rendering["candidate_sha256"]
     driver_build = reused_commands[1]["command"]
-    assert "--release" in driver_build and "--release" in reused_commands[3]["command"]
+    assert "--release" in driver_build
     assert driver_build[driver_build.index("--target-dir") + 1] == str(output / "state/target/rendering/driver")
     paired_driver_log = output / "commands" / f"{before + 1:03d}.log"
     artifacts = [json.loads(line) for line in paired_driver_log.read_text().splitlines() if line.startswith("{")]
     support = [row for row in artifacts if row.get("reason") == "compiler-artifact" and row["target"]["name"] == "shared_support"]
     assert len(support) == 1 and support[0]["fresh"], "Browser repeated the unchanged rendering driver dependency build"
     assert not any(row.get("target", {}).get("name") == "scode" for row in artifacts)
+    # Omitting a required case must execute a real zero-test native process
+    # and fail, rather than accepting a successful exit from a missing test.
+    viewport_source = inputs / "candidate/rust/tests/pty_prompt_viewport.rs"
+    original_viewport = viewport_source.read_bytes()
+    viewport_source.write_text(driver.format(name=viewport_cases[0], origin="candidate", expected="candidate"))
+    missing_viewport_output = output / "missing-viewport-lifecycle"
+    missing_viewport_output.mkdir()
+    before = len(commands)
+    try:
+        with checks.exclusive_benchmark_state(locks):
+            checks.benchmark_locked("browser", inputs / "candidate", missing_viewport_output,
+                                    "fixture-base", command, output / "unused-target")
+    except RuntimeError as error:
+        assert str(error) == f"No actual passing viewport lifecycle test: {viewport_cases[1]}"
+        missing = [(index, row) for index, row in enumerate(commands[before:], before)
+                   if row["command"][1:2] == [viewport_cases[1]]]
+        assert len(missing) == 1 and missing[0][1]["exit_code"] == 0
+        log = output / "commands" / f"{missing[0][0]:03d}.log"
+        assert "test result: ok. 0 passed; 0 failed;" in log.read_text()
+    else:
+        raise AssertionError("A missing viewport lifecycle test was accepted")
+    finally:
+        viewport_source.write_bytes(original_viewport)
     # A changed candidate driver must reach Cargo instead of executing an older binary.
     source_driver = inputs / "candidate/rust/tests/pty_hyperlinks.rs"
     driver_source = source_driver.read_bytes()
@@ -630,6 +668,7 @@ out=Path(a.output);out.mkdir()
     # broken new package must fail; it cannot silently fall back to CLI targets.
     legacy = output / "legacy-inputs"
     shutil.copytree(inputs, legacy)
+    (legacy / "candidate/e2e/terminal-resize/gui-smoke.py").unlink()
     source = legacy / "candidate/rust"
     shutil.rmtree(source / "crates/scode-benchmark-drivers")
     manifest = source / "Cargo.toml"
@@ -643,6 +682,9 @@ out=Path(a.output);out.mkdir()
     assert all(row["command"][row["command"].index("-p") + 1] == "rusty-sudocode-cli"
                for row in commands[before:] if "--test" in row["command"])
     assert json.loads((legacy_output / "smoke/fixture.json").read_text())["candidate_sha256"] == digest
+    legacy_smoke = next(row["command"] for row in commands[before:]
+                        if str(control) in row["command"])
+    assert legacy_smoke[1] == str(control), "An old candidate did not use the runner's GUI harness"
 
     broken = source / "crates/scode-benchmark-drivers"
     broken.mkdir(parents=True)
@@ -673,11 +715,13 @@ out=Path(a.output);out.mkdir()
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
               "cross_profile_normal_release_reused": True, "promotion_identity_refusals": refusals,
               "paired_driver_dependencies_cargo_fresh": True, "candidate_driver_and_dependency_changes_exercised": True,
+              "missing_viewport_lifecycle_refused_after_real_zero_test_execution": True,
               "wrong_driver_digest_refused_before_native_measurement_and_gui": True,
               "wrong_expected_gui_binary_refused_before_driver": True, "linked_measurement_policy_refused": True,
               "target_trees": target_trees, "standalone_drivers_emit_no_cli_binary": True,
               "actual_source_driver_layout": layout,
               "legacy_candidate_supported": True, "broken_standalone_package_refused": True,
+              "legacy_candidate_without_gui_harness_supported": True,
               "expected_broken_package_failure": {"record": str(refusal_path), **refusal},
               "invalid_render_plan_refused_before_build": True,
               "rendering_matrix": matrix, "cache_migration": migration,

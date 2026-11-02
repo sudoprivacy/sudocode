@@ -146,15 +146,17 @@ fn spawn_installed(
     args: &[&str],
 ) -> pty_expect::PtySession {
     let record = env.workspace_root().join("restart arguments.txt");
-    env.spawn_executable_with_env(
+    let mut child = env.spawn_binary_with_env(
         installed,
         args,
         &[
             ("SCODE_MIRROR", mirror),
             ("SCODE_CHECK_UPDATES", "1"),
-            ("SCODE_UPDATE_RECORD", &record.to_string_lossy()),
+            ("SCODE_UPDATE_RECORD", record.to_string_lossy().as_ref()),
         ],
-    )
+    );
+    child.set_default_timeout(common::DEFAULT_TIMEOUT);
+    child
 }
 
 fn prepare_installed(env: &common::TestEnv, installed: &std::path::Path) {
@@ -197,7 +199,8 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
         let args = std::env::args().skip(1).collect::<Vec<_>>().join("|");
         let record = std::path::PathBuf::from(std::env::var("SCODE_UPDATE_RECORD").unwrap());
         std::fs::write(&record, args).unwrap();
-        std::fs::write(record.with_extension("cwd"), std::env::current_dir().unwrap().to_string_lossy().as_bytes()).unwrap();
+        std::fs::write(record.with_extension("context"), format!("{}\n{}",
+            std::env::current_dir().unwrap().display(), std::env::var("HOME").unwrap())).unwrap();
         println!("updated scode fixture");
     }"#,
     )
@@ -256,14 +259,24 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
     assert_eq!(child.expect_eof().unwrap(), 0);
     assert_eq!(std::fs::read(&installed).unwrap(), payload);
     assert_eq!(std::fs::read_to_string(&record).unwrap(), "--model|sonnet");
+    assert_eq!(mirror.requests.load(Ordering::SeqCst), 2);
+    let context = std::fs::read_to_string(record.with_extension("context")).unwrap();
+    let mut context = context.lines();
+    let expected = root.canonicalize().unwrap();
     assert_eq!(
-        std::path::PathBuf::from(std::fs::read_to_string(record.with_extension("cwd")).unwrap())
+        std::path::Path::new(context.next().unwrap())
             .canonicalize()
             .unwrap(),
-        root.canonicalize().unwrap(),
-        "the installed CLI and its replacement must run in the fixture workspace"
+        expected,
+        "updated executable must retain the isolated workspace"
     );
-    assert_eq!(mirror.requests.load(Ordering::SeqCst), 2);
+    assert!(
+        std::path::Path::new(context.next().unwrap())
+            .canonicalize()
+            .unwrap()
+            .starts_with(&expected),
+        "updated executable must retain an isolated HOME"
+    );
 }
 
 #[test]
@@ -287,7 +300,13 @@ fn a_bad_checksum_preserves_the_installed_executable() {
         ]),
     );
     let mut child = spawn_installed(&env, &installed, &mirror.base, &["update", "--yes"]);
-    child.expect("checksum mismatch").unwrap();
+    child.expect("checksum mismatch").unwrap_or_else(|error| {
+        panic!(
+            "checksum refusal: {error}; requests={}\n{}",
+            mirror.requests.load(Ordering::SeqCst),
+            child.render(screen_contents)
+        )
+    });
     assert_ne!(child.expect_eof().unwrap(), 0);
     assert_eq!(std::fs::read(&installed).unwrap(), original);
     assert!(!env.workspace_root().join("restart arguments.txt").exists());
@@ -314,21 +333,31 @@ fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
             ("SCODE_MIRROR", mirror.base.as_str()),
             ("SCODE_CHECK_UPDATES", "1"),
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+            ("SCODE_TRACE_STARTUP", "1"),
         ];
+        let startup_started = Instant::now();
         let mut child = env.spawn_with_env(&[], &options);
-        child.expect("❯").unwrap_or_else(|error| {
+        let startup_output = child.expect("❯").unwrap_or_else(|error| {
             panic!(
                 "terminal startup: {error}\n{}",
                 child.render(screen_contents)
             )
         });
+        let prompt_observed_after = startup_started.elapsed();
+        // Keep both parent observation time and child timings on failure:
+        // a delayed reader can outlast the metadata request's own deadline.
         // The server withholds its reply until the real terminal is usable.
         // A synchronous startup check would block this workflow.
         mirror.release.store(true, Ordering::SeqCst);
         let cache = env.config_home().join("cache/release.json");
         let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
         while !cache.exists() {
-            assert!(Instant::now() < deadline, "metadata cache was not written");
+            assert!(
+                Instant::now() < deadline,
+                "metadata cache was not written: mode={mode}; requests={}; prompt_observed_after={prompt_observed_after:?}\nstartup output:\n{startup_output}\n{}",
+                mirror.requests.load(Ordering::SeqCst),
+                child.render(screen_contents)
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         let record: serde_json::Value =

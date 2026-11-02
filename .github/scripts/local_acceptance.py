@@ -450,6 +450,132 @@ def development_lock_change(before, after, manifests):
     return True
 
 
+def production_dependency_state(ref, workspace):
+    """Read normal/build lock edges from committed manifests, never candidate code."""
+    settings = workspace["workspace"]
+    if settings.get("resolver") != "2" or settings.get("members") != ["crates/*"]:
+        raise ValueError("Unknown workspace dependency layout")
+    inherited = settings.get("dependencies", {})
+    if not isinstance(inherited, dict):
+        raise ValueError("Invalid workspace dependency table")
+    manifests, roots, development, normal_inherited = {}, {}, set(), set()
+    blobs = {}
+    rows = git("ls-tree", "-r", "-z", ref, "--", "rust/crates", "rust/Cargo.lock").stdout.decode("utf-8").split("\0")
+    for row in rows:
+        if not row:
+            continue
+        info, path = row.split("\t", 1)
+        mode, kind, _identity = info.split()
+        if re.fullmatch(r"rust/crates/[^/]+", path) and mode in {"120000", "160000"}:
+            raise ValueError("Indirect workspace member")
+        if path != "rust/Cargo.lock" and not re.fullmatch(r"rust/crates/[^/]+/Cargo.toml", path):
+            continue
+        if mode not in {"100644", "100755"} or kind != "blob":
+            raise ValueError("Indirect workspace manifest")
+        blobs[path] = _identity
+    if "rust/Cargo.lock" not in blobs:
+        raise ValueError("Missing committed Cargo lock")
+    # One immutable-object read avoids spawning Git for every member each
+    # time the public planner/checkpoint evaluates the same dependency scope.
+    contents = git("cat-file", "--batch", data=("\n".join(blobs.values()) + "\n").encode("ascii")).stdout
+    documents, position = {}, 0
+    for path, identity in blobs.items():
+        end = contents.index(b"\n", position)
+        header = contents[position:end].decode("ascii").split()
+        if len(header) != 3 or header[:2] != [identity, "blob"]:
+            raise ValueError("Unexpected committed metadata object")
+        size = int(header[2])
+        position = end + 1
+        if size < 0 or contents[position + size:position + size + 1] != b"\n":
+            raise ValueError("Incomplete committed metadata object")
+        documents[path] = tomllib.loads(contents[position:position + size].decode("utf-8"))
+        position += size + 1
+    if position != len(contents):
+        raise ValueError("Unexpected trailing committed metadata")
+    lock = documents.pop("rust/Cargo.lock")
+    for path, manifest in documents.items():
+        manifests[path] = without_development_dependencies(manifest)
+        package = manifest["package"]
+        version = package.get("version")
+        if version == {"workspace": True}:
+            version = settings["package"]["version"]
+        if not isinstance(package["name"], str) or not isinstance(version, str):
+            raise ValueError("Unknown workspace package identity")
+        identity = package["name"], version, None
+        if identity in roots:
+            raise ValueError("Duplicate workspace package identity")
+        normal = set().union(*(manifest_dependencies(manifest, workspace, name)
+                               for name in ["dependencies", "build-dependencies"]))
+        roots[identity] = normal, manifest_dependencies(manifest, workspace, "dev-dependencies")
+        for table in [manifest, *manifest.get("target", {}).values()]:
+            for name in ["dependencies", "build-dependencies", "dev-dependencies"]:
+                for alias, dependency in table.get(name, {}).items():
+                    if isinstance(dependency, dict) and dependency.get("workspace") is True:
+                        if alias not in inherited:
+                            raise ValueError("Missing inherited dependency")
+                        (development if name == "dev-dependencies" else normal_inherited).add(alias)
+    if not roots:
+        raise ValueError("No committed workspace packages")
+    packages, aliases = {}, {}
+    for package in lock["package"]:
+        identity = package["name"], package["version"], package.get("source")
+        if identity in packages:
+            raise ValueError("Duplicate lock package identity")
+        packages[identity] = package
+        name, version, source = identity
+        spellings = [name, f"{name} {version}"]
+        if source is not None:
+            spellings.append(f"{name} {version} ({source})")
+        for spelling in spellings:
+            aliases.setdefault(spelling, set()).add(identity)
+
+    def resolve(edge):
+        matches = aliases.get(edge, set())
+        if len(matches) != 1:
+            raise ValueError("Missing or ambiguous production lock edge")
+        return next(iter(matches))
+
+    # Validate even unused development edges before discarding their scope.
+    resolved = {identity: {resolve(edge) for edge in package.get("dependencies", [])}
+                for identity, package in packages.items()}
+    reachable, pending = {}, list(roots)
+    while pending:
+        identity = pending.pop()
+        if json.dumps(identity) in reachable:
+            continue
+        package = packages[identity]
+        edges = package.get("dependencies", [])
+        if identity in roots:
+            normal, dev = roots[identity]
+            names = {edge.split()[0] for edge in edges}
+            if names != normal | dev:
+                raise ValueError("Unknown or missing workspace dependency edge")
+            # Lock entries combine dev and normal edges. Retain every matching
+            # name, including alternate versions, rather than guess a binding.
+            edges = [edge for edge in edges if edge.split()[0] in normal]
+        dependencies = ({resolve(edge) for edge in edges} if identity in roots else resolved[identity])
+        record = {key: value for key, value in package.items() if key != "dependencies"}
+        record["dependencies"] = sorted(json.dumps(edge) for edge in dependencies)
+        reachable[json.dumps(identity)] = record
+        pending.extend(dependencies)
+    declaration = copy.deepcopy(workspace)
+    declaration["workspace"].pop("dependencies", None)
+    return ({"workspace": declaration, "manifests": manifests,
+             "inherited": {name: inherited[name] for name in normal_inherited},
+             "lock": {key: value for key, value in lock.items() if key != "package"},
+             "packages": reachable}, development)
+
+
+def unchanged_production_dependencies(base, head, before, after):
+    """Accept shared dev updates only when all normal declarations/resolution agree."""
+    previous, old_development = production_dependency_state(base, before)
+    current, new_development = production_dependency_state(head, after)
+    old = before["workspace"].get("dependencies", {})
+    new = after["workspace"].get("dependencies", {})
+    changed = {name for name in old.keys() | new.keys() if old.get(name) != new.get(name)}
+    return previous == current and changed <= old_development | new_development
+
+
 def production_build_paths(paths, base, head, *, opt_in=None):
     """Discard proven dev-only Cargo inputs for normal product builds only.
 
@@ -470,6 +596,12 @@ def production_build_paths(paths, base, head, *, opt_in=None):
             return tomllib.loads(tracked(ref, path).decode("utf-8"))
         old_workspace = document(base, "rust/Cargo.toml")
         new_workspace = document(head, "rust/Cargo.toml")
+        try:
+            if unchanged_production_dependencies(base, head, old_workspace, new_workspace):
+                return [path for path in paths if path not in metadata]
+        except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError):
+            # Older/custom layouts retain the existing conservative verifier.
+            pass
         if old_workspace != new_workspace or old_workspace.get("workspace", {}).get("resolver") != "2":
             return paths
         ignored = {"rust/Cargo.toml"} & set(metadata)
@@ -523,13 +655,21 @@ def selected(policy, paths, *, base=None, head=None):
               "native workspace validation still runs. Existing target edits or unknown metadata keep full scope.", flush=True)
         print("OPT_IN_TEST_TARGET_SCOPE=" + json.dumps({"base": base, "head": head,
               "unchanged_benchmark_metadata": sorted(opt_in)}), flush=True)
-    return [name for name, rule in policy["checks"].items()
+    names = [name for name, rule in policy["checks"].items()
             if (name != "native-examples" or separate_examples)
             and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
                              else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
                              else paths)))]
+    harness = [path for path in paths if path.startswith("e2e/nexus-a2a/")
+               and not path.lower().endswith((".md", ".html"))]
+    if base and head and harness and "native-workspace" in policy["checks"] and "native-workspace" not in names:
+        print("A2A_HARNESS_SCOPE=" + json.dumps({"changed_harness_inputs": harness,
+              "native_workspace": "omitted_unchanged_product",
+              "required_validation": "real pinned-daemon scripts in the Linux merge queue",
+              "mixed_Rust_inputs_retain_native_workspace": True}), flush=True)
+    return names
 
 
 NATIVE_TARGETS = {
@@ -1206,6 +1346,10 @@ def perform_check(args, attempt):
         receipt["resumed_from"] = resumed
     try:
         with host_acceptance_lease(attempt, head):
+            prepare = getattr(module, "prepare_native_checks", None)
+            if prepare:
+                module.run.prepared_native = prepare(
+                    [name for name in needed if name not in reusable], ROOT, output, run_command)
             for name in needed:
                 if name in reusable:
                     print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)

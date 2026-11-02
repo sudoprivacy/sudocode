@@ -21,6 +21,18 @@ import urllib.request
 from run import Rpc, client_environment
 
 
+class VfsRpcError(AssertionError):
+    """Preserve a typed VFS rejection independently of the transport exit code."""
+
+    def __init__(self, method, response):
+        self.response = response
+        try:
+            self.detail = base64.b64decode(response.get('errorPayload'), validate=True).decode(errors='replace')
+        except (TypeError, ValueError):
+            self.detail = repr(response)
+        super().__init__(f'{method} returned a VFS error: {self.detail}')
+
+
 def sha(path):
     with path.open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
@@ -34,7 +46,7 @@ def wait_until(action, timeout=30):
             value = action()
             if value:
                 return value
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, VfsRpcError) as error:
             last_error = error
         if time.monotonic() >= deadline:
             raise AssertionError(f'Native existing-Box acceptance did not reach its predicate: {last_error}')
@@ -42,6 +54,8 @@ def wait_until(action, timeout=30):
 
 
 def run(args, root):
+    grpcurl_version = subprocess.check_output([str(args.grpcurl), '--version'],
+        stderr=subprocess.STDOUT, text=True, timeout=5).strip()
     if args.daemon is None:
         installation = root / 'installation'
         installation.mkdir()
@@ -86,6 +100,7 @@ def run(args, root):
         env=native_env, stdout=daemon_log, stderr=subprocess.STDOUT)
     children = []
     receipt = {'daemonSha256': sha(args.daemon), 'scodeSha256': sha(args.scode),
+        'grpcurlSha256': sha(args.grpcurl), 'grpcurlVersion': grpcurl_version,
         'liveFleetTouched': False, 'haAccepted': False, 'domainJoinAccepted': False,
         'bindAddr': bind_addr, 'clientEndpoint': endpoint}
 
@@ -109,7 +124,13 @@ def run(args, root):
                 output.write(f'{method} {payload.get("path", payload.get("zone_id", ""))}:\n'.encode())
                 output.write(result.stderr)
             result.check_returncode()
-        return json.loads(result.stdout)
+        response = json.loads(result.stdout)
+        if response.get('isError'):
+            error = VfsRpcError(method, response)
+            with (root / 'grpc-errors.log').open('ab') as output:
+                output.write((json.dumps({'method': method, 'response': error.response, 'error': error.detail}) + '\n').encode())
+            raise error
+        return response
 
     def peer_messaging_resident():
         # Readiness loads the zone that holds /agents before it is published.
@@ -131,7 +152,7 @@ def run(args, root):
             return None
         for path in ['/', peer_prefix, '/conversations']:
             response = grpc('Stat', {'path': path})
-            if response.get('isError') or (path == peer_prefix and not response.get('found')):
+            if path == peer_prefix and not response.get('found'):
                 return None
         return current
 
@@ -173,8 +194,17 @@ def run(args, root):
         before = wait_until(bootstrap_ready)
         assert all(item['nodeId'] == before['root']['nodeId'] for item in before.values())
         marker = base64.b64encode('original durable Box body 中文\x00'.encode()).decode()
+
+        def durable_body_is_readable():
+            # Authenticated transport can precede the restored zone's Raft read
+            # barrier. Retry read-only availability errors under wait_until's
+            # existing startup deadline; a wrong successful body fails at once.
+            response = grpc('Read', {'path': proof_path})
+            assert response.get('content') == marker, response
+            return True
+
         grpc('Write', {'path': proof_path, 'content': marker})
-        assert grpc('Read', {'path': proof_path})['content'] == marker
+        wait_until(durable_body_is_readable)
         profile = {'schemaVersion': 1, 'boxEndpoint': endpoint, 'binary': str(args.daemon),
             'binarySha256': sha(args.daemon), 'dataDir': str(data), 'identityDir': str(identity),
             'nodeId': str(int.from_bytes((data / '.node_id').read_bytes(), 'big')), 'caSha256': sha(data / 'tls/ca.pem'),
@@ -250,8 +280,8 @@ def run(args, root):
         assert not (root / 'wrong-data').exists()
         assert not (services / 'runtimes').exists(), 'Recovery downloaded another native version'
         peer_messaging_resident()
-        assert grpc('Read', {'path': proof_path})['content'] == marker
-        after = membership()
+        durable_body_is_readable()
+        after = wait_until(membership)
         for zone, old in before.items():
             assert after[zone]['nodeId'] == old['nodeId']
             assert after[zone]['config'] == old['config'], (zone, old, after[zone])
@@ -281,8 +311,20 @@ def run(args, root):
         assert restarted['persistedNodeId'] == profile['nodeId']
         assert setup()['service']['instance'] == restarted['instance']
         peer_messaging_resident()
-        assert grpc('Read', {'path': proof_path})['content'] == marker
+        durable_body_is_readable()
         print('PASS: acknowledged exact-target operator termination and ACP recovery/CLI reuse preserve state', flush=True)
+        # Check typed rejections after the immediate recovery reads. These
+        # requests cannot warm or delay the lifecycle acceptance above.
+        for method, payload, expected_code in [
+                ('Read', {'path': proof_path + '-missing'}, -32007),
+                ('Write', {'path': 'relative-lifecycle-proof', 'content': marker}, -32004)]:
+            try:
+                grpc(method, payload)
+            except VfsRpcError as error:
+                assert json.loads(error.detail)['code'] == expected_code, error.detail
+            else:
+                raise AssertionError(f'{method} accepted a request that must be rejected')
+        print('PASS: native missing-file Read and invalid-path Write retain their typed errors', flush=True)
         receipt.update(nodeId=profile['nodeId'], before=before, after=after,
             ownerPid=discovery['supervisor_pid'], nexusPid=discovery['nexus_pid'], status='PASS')
     finally:

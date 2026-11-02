@@ -350,14 +350,16 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
-Unfinished ordinary paragraphs stream above the live status area by default.
+Unfinished ordinary paragraphs and top-level fenced code stream above the live status area by default.
 Finalized text
 moves into native scrollback in the same presentation as preview removal,
 and a draft typed during the response stays available. Parallel tool output
 keeps unfinished Markdown formatting intact. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
-Code, tables, lists, headings and emoji with ambiguous terminal widths use
+Complete code lines retain syntax parser state across deltas; the unfinished
+last line stays literal until its newline arrives. Finalization uses the same
+highlighter as replay. Nested/indented fences, Mermaid diagrams, tables, lists, headings and emoji with ambiguous terminal widths use
 the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
@@ -478,6 +480,17 @@ themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
+Write and Edit share numbered, syntax-highlighted source previews. New files
+show added lines; replacements show removed/added lines with nearby context.
+Running Write previews show the submitted content; completed cards use the
+tool's returned content. Preview lines and characters are bounded before
+highlighting, with explicit omission notices. The complete source is preserved
+in the session and file. Markdown files keep literal Markdown source in these
+tool cards rather than becoming rendered documents.
+When a large tool result is offloaded, the card labels its retained request
+content as an input preview instead of claiming an empty file or guessing
+whether the operation created or replaced it. Replay uses the recorded request;
+the complete tool result remains available through the session's output record.
 On Unix, the default REPL queries the terminal palette once at startup, with
 a shared 250 ms deadline and preservation of queued keys and pastes. Windows
 does not send OSC 10/11 color queries: some console hosts deliver replies as
@@ -494,6 +507,11 @@ Markdown uses Codex's typographic hierarchy: headings and emphasis keep the
 terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
+Tables follow Codex's column allocation: paths and long tokens surrender width
+before prose and compact values. Cells wrap with their styles and links;
+tables that cannot remain readable become labeled key/value records. Layout
+uses the available width when rendering, including replay and plan review.
+Already printed native scrollback keeps the terminal's own resize/reflow behavior.
 
 Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
 show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);
@@ -717,11 +735,19 @@ the footer entry disappears. Existing `/tasks list|get|stop` commands remain
 available for persisted agent manifests.
 
 Shell details update while the parent is idle and include stdout/stderr,
-elapsed time, status, and the actual exit code. The preview retains at most
+labelled runtime, status, and the actual exit code. Long commands wrap across
+up to three preview rows. Output sits in a theme-colored frame that shrinks
+with the terminal; its row range refers to the wrapped, retained output tail.
+Internal blank lines and output colors are preserved, and the stop hint only
+appears for active tasks. The preview retains at most
 24 KiB per task; complete shell output is stored in the private temporary log
 shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
 directory after completion. The session retains at most 50 completed tasks
-in memory. Agent details show current activity and recent output, then their
+in memory, plus active work. The list shows its current entry count; the oldest
+ended tasks leave it automatically as newer tasks finish, without a restart.
+There is no age-based expiration within this limit. This does not delete their
+complete logs. Agent details use the same layout,
+showing current activity and recent output, then their
 final result. These are tasks owned by this session, not a view of other agents
 on the machine.
 

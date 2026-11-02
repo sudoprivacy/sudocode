@@ -42,6 +42,7 @@ features = [
 	"processthreadsapi",
 	"tlhelp32",
 	"winbase",
+	"winerror",
 ]
 
 [features]

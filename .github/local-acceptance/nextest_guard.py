@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -27,6 +28,71 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def macos_observation_acceptance(helper, fixture, binary, output):
+    if sys.platform != "darwin":
+        return None
+    # Exercise the actual psutil C error path; the compiler observer must use
+    # executable paths without invoking this denied argv syscall again.
+    source = output / "procargs-denied.c"
+    source.write_text('''#include <errno.h>
+#include <stddef.h>
+#include <sys/sysctl.h>
+static unsigned int denied_calls = 0;
+unsigned int scode_denied_argv_calls(void) { return denied_calls; }
+static int denied_sysctl(int *name, u_int len, void *oldp, size_t *oldlenp,
+                         void *newp, size_t newlen) {
+    if (len >= 2 && name[0] == CTL_KERN && name[1] == KERN_PROCARGS2) {
+        ++denied_calls;
+        errno = 0;
+        return -1;
+    }
+    return sysctl(name, len, oldp, oldlenp, newp, newlen);
+}
+__attribute__((used)) static struct { const void *replacement; const void *original; }
+interpose __attribute__((section("__DATA,__interpose"))) = {
+    (const void *)denied_sysctl, (const void *)sysctl
+};
+''')
+    library = output / "procargs-denied.dylib"
+    subprocess.run(["clang", "-dynamiclib", str(source), "-o", str(library)], check=True)
+    driver = output / "observe-native.py"
+    driver.write_text('''import ctypes, importlib.util, json, os, sys
+from pathlib import Path
+import psutil
+spec = importlib.util.spec_from_file_location("executor", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+root, binary, output, library = map(Path, sys.argv[2:])
+counter = ctypes.CDLL(str(library)).scode_denied_argv_calls
+counter.restype = ctypes.c_uint
+initial = counter()
+try:
+    psutil.Process(os.getpid()).cmdline()
+except psutil.AccessDenied as error:
+    fault_type = type(error).__name__
+except SystemError as error:
+    assert isinstance(error.__cause__ or error.__context__, PermissionError), error
+    fault_type = type(error).__name__
+else:
+    raise AssertionError("The actual macOS argv fault was not injected")
+after_probe = counter()
+assert after_probe > initial
+code = "import subprocess,sys; subprocess.run([sys.argv[1], 'observe'], check=True)"
+result = helper.run_command([sys.executable, "-c", code, str(binary)], root, output / "observation.log")
+assert result["exit_code"] == 0 and counter() == after_probe, (result, after_probe, counter())
+assert "native-child-receipt" in (output / "observation.log").read_text()
+proof = {"command": result, "argv_fault": {"type": fault_type, "before": initial,
+         "after_probe": after_probe, "after_native_command": counter()}}
+(output / "observation-receipt.json").write_text(json.dumps(proof, indent=2))
+''')
+    subprocess.run([sys.executable, str(driver), str(Path(helper.__file__).resolve()),
+                    str(fixture), str(binary), str(output), str(library)], check=True,
+                   env={**os.environ, "DYLD_INSERT_LIBRARIES": str(library)})
+    result = json.loads((output / "observation-receipt.json").read_text())
+    print("PASS: actual macOS argv fault is active; native commands complete without reading argv", flush=True)
+    return result
 
 
 def git_environment_acceptance(helper, output):
@@ -141,7 +207,9 @@ def main():
     (fixture / "Cargo.lock").write_text(
         'version = 4\n\n[[package]]\nname = "nextest-executor-fixture"\nversion = "0.0.0"\n')
     source = fixture / "src/main.rs"
-    source.write_text('fn main() { println!("native-child-receipt"); }\n')
+    source.write_text('fn main() { if std::env::args().any(|arg| arg == "observe") { '
+                      'std::thread::sleep(std::time::Duration::from_secs(2)); } '
+                      'println!("native-child-receipt"); }\n')
     (fixture / "tests/process.rs").write_text('''#[test]
 fn actual_binary_is_executed() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_nextest-executor-fixture")).output().unwrap();
@@ -167,8 +235,12 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
             return helper.run_command(command, fixture, log, environment)
 
     result = execute(arguments, output / "native-process.log")
-    assert "1 passed, 1 skipped" in (output / "native-process.log").read_text(encoding="utf-8", errors="replace")
+    log = (output / "native-process.log").read_text(encoding="utf-8", errors="replace")
+    log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
+    assert re.search(r"Summary\s+\[[^\]]+\]\s+1 test run: 1 passed(?: \([^)]*\))?, 1 skipped", log), log
     checks.append({"scenario": "native child and ignored guard", "status": "pass", "command": result})
+    observation = macos_observation_acceptance(helper, fixture,
+        output / "target/debug/nextest-executor-fixture", output)
     source.write_text("fn main() { std::process::exit(42); }\n")
     for name, extra, expected in [("native-failure", [], 100),
                                    ("no-matching-cases", ["-E", "test(=missing_case)"], 4)]:
@@ -184,6 +256,7 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
         "version": version, "repository": str(repository), "checks": checks,
         "git_environment": git_environment,
         "unsafe_process_name_fallback_forbidden_during_real_commands": True,
+        "macos_process_observation": observation,
     }, indent=2))
     print(f"nextest executor E2E passed: {len(checks)} real execution/refusal scenarios; {output}")
 

@@ -100,11 +100,33 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
+def workspace_nextest_options(output, grouped):
+    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+    options = nextest_options(output)
+    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+        options[options.index('--test-threads') + 1] = '8'
+    print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
+          + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
+          'counts, legacy/isolated/other profiles retain four.',
+          flush=True)
+    return options
+
+
+def committed_input_paths(root, base):
+    """Read this checkout's committed inputs independently of caller Git bindings."""
+    if not base:
+        raise ValueError("No committed base")
+    return subprocess.check_output(
+        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        stderr=subprocess.PIPE).decode().split("\0")[:-1]
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
     # Complementary CI can pass newer main; exclude changes outside this branch.
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"],
-                                      cwd=root).decode().split("\0")[:-1]
+    changed = committed_input_paths(root, base)
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
     inputs = [path for path in changed if path != "README.md"
@@ -113,6 +135,25 @@ def changed_cli_test_targets(root, base):
     if not inputs or any(not re.fullmatch(pattern, path) or not (root / path).is_file() for path in inputs):
         return None
     return sorted({Path(path).stem for path in inputs})
+
+
+def native_cli_test_package_args(root, base):
+    """Match the native workspace's package selection, including feature union."""
+    try:
+        isolated = changed_cli_test_targets(root, base) is not None
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        isolated = False
+    arguments = ["-p", "rusty-sudocode-cli"] if isolated else ["--workspace"]
+    print("NATIVE_CLI_TEST_GRAPH=" + json.dumps({"packages": arguments, "isolated_cli_tests": isolated}), flush=True)
+    return arguments
+
+
+def native_resize_test_targets(*, windows):
+    """Share the real terminal target inventory with its Cargo graph guard."""
+    targets = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
+    if not windows:
+        targets.append("pty_codex_colors")
+    return targets
 
 
 def test_group_source(names):
@@ -188,6 +229,20 @@ def grouped_workspace_test_targets(root, metadata):
                        "selected_integration_targets": len(targets),
                        "groups": [{"package": package, "target": name, "modules": members}
                                   for (package, name), members in sorted(groups.items())]}
+
+
+def workspace_integration_test_targets(targets):
+    """Retire grouped unit harnesses; preserve older Cargo default exclusions."""
+    if not targets:
+        # An explicit glob enables test=false targets and can force inactive
+        # required-features. Older sources keep their complete default suite.
+        return []
+    if targets[:2] != ["--lib", "--bins"]:
+        raise RuntimeError("Unexpected grouped workspace target plan; no tests started")
+    selected = targets[2:]
+    if not selected or len(selected) % 2 or any(selected[index] != "--test" for index in range(0, len(selected), 2)):
+        raise RuntimeError("Integration target selection must retain explicit nonempty test names")
+    return selected
 
 
 def performance_low_power_mode():
@@ -284,6 +339,35 @@ def stable_performance_power(output):
     return monitor_window()
 
 
+def prepare_windows_terminal(root, output, execute):
+    """Retain the actual installer command/log for the selected resize receipt."""
+    output.mkdir(parents=True, exist_ok=True)
+    terminal = Path.home() / ".cache/sudocode-terminal-host"
+    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+
+
+def terminal_installer_scope(root, base):
+    """Retain fault injection for unknown inputs; Rust-only edits keep real setup."""
+    try:
+        paths = committed_input_paths(root, base)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return {"resolved": False, "fault_injection_required": True, "changed_control_inputs": None}
+    controls = [path for path in paths if not path.startswith("rust/")
+                and path not in {"README.md", "CONTRIBUTING.md", "sudo-code-roadmap.html"}
+                and not (path.startswith("docs/") and path.endswith(".md"))]
+    return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
+
+
+def prepare_native_checks(names, root, output, execute):
+    """Install selected Windows terminal inputs before long native compilation."""
+    prepared = {}
+    if os.name == "nt" and "native-resize" in names:
+        print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
+              "before compilation; original installer checks and terminal tests remain required.", flush=True)
+        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+    return prepared
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -348,7 +432,7 @@ def run(name, root, output, base, execute):
             "targets": tests,
         }, indent=2))
         if tests is not None:
-            arguments = ["--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
+            arguments = ["--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
             print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
@@ -359,11 +443,18 @@ def run(name, root, output, base, execute):
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
             metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
             targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
             (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
             print("Native workspace target selection: " + json.dumps(selection), flush=True)
             print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
-                  "test configurations, examples and benches before long builds and PTY execution. "
-                  "The integrated queue additionally checks original targets with all features.", flush=True)
+                  "targets, examples and benches before long builds and PTY execution. "
+                  "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
+            if targets:
+                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                      "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
+            else:
+                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
             lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
             cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
                   "--", "-D", "warnings")
@@ -371,7 +462,10 @@ def run(name, root, output, base, execute):
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
+            command(str(nextest_binary(output)), "nextest", "run",
+                    *workspace_nextest_options(output, bool(targets)),
+                    "--workspace", "--locked", "--features", "engine-acp/mailbox",
+                    *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
     elif name == "native-examples":
@@ -379,20 +473,38 @@ def run(name, root, output, base, execute):
               "This profile never runs example entry points.", flush=True)
         cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
     elif name == "native-resize":
+        installer_scope = {**terminal_installer_scope(root, base), "windows_host": os.name == "nt"}
+        (output / "installer-scope.json").write_text(json.dumps(installer_scope, indent=2), encoding="utf-8")
+        print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            command(sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal))
-            command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            try:
+                prepared = run.prepared_native.get(name)
+            except AttributeError:
+                prepared = None
+            if prepared:
+                # These are actual commands from this invocation, not a cached
+                # successful profile. Append them to the normal signed receipt.
+                results.extend(prepared)
+            else:
+                results.append(prepare_windows_terminal(root, output, execute))
+            if installer_scope["fault_injection_required"]:
+                command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            else:
+                print("Installer code/executor inputs unchanged: skipping artificial HTTP/cache corruption checks; "
+                      "actual checksum-pinned setup and every real terminal test remain required.", flush=True)
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
-        if os.name != "nt":
-            tests.append("pty_codex_colors")
+        tests = native_resize_test_targets(windows=os.name == "nt")
+        print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
+              "all selected ignored cases and original budgets remain. The standalone default-feature "
+              "debug graph is outside this profile's coverage.", flush=True)
+        package_args = native_cli_test_package_args(root, base)
         for test in tests:
-            cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--test", test,
+            cargo("test", "--locked", *package_args, "--features", "engine-acp/mailbox", "--test", test,
                   "--", "--ignored", "--nocapture")
     elif name == "native-release":
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
@@ -403,13 +515,20 @@ def run(name, root, output, base, execute):
         # SCODE_TEST_BIN still launches the copied normal release executable.
         print("Release acceptance: the native test driver launches the copied release scode; "
               "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
-        cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
+        cargo("test", "--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
         with stable_performance_power(output):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                     "--report", str(output / "startup.json"))
     elif name == "native-services":
-        cargo("build", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
+        # Cargo's test graph unifies dev-dependency features. A normal build
+        # after workspace tests recompiles the CLI and its shared dependencies.
+        # Keep Cargo's freshness check, without executing the driver twice.
+        print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
+              "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
+              "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
+        cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
@@ -418,8 +537,8 @@ def run(name, root, output, base, execute):
         if not bash:
             raise RuntimeError("Git Bash is required for shared-service credential acceptance")
         command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                'python e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"))
+                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
+                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -487,31 +606,36 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
-        "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
-        ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
-        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
-        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
-        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "af1307c285c8fa5be1e2e0475c502bd0c790cd3e55fa7a11abf292d9d7370e09",
-        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
-        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
-        ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
-        ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "1648d8fe4f74e74e86670d58f00941affb4f71430ab76ae37b4401857c0a76e4",
-        "e2e/local-acceptance/run.py": "3ed58826dea55e9ca1734af464b0cb046aff62805c082d2922c8400fdd321f8a",
-        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
-        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
+        ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
+        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
+        ".github/local-acceptance/gate.py": "1a2fa6558ff2d86b970eab3a20d442abb85fe26acd75b53f79cc553f5960bcc4",
+        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
+        ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
+        ".github/local-acceptance/publish.py": "80be60c5a237cacec64d4519805eadf8d412ab1d33bde6058dcf4f47f58ab471",
+        ".github/scripts/local_acceptance.py": "d433bb4401f3727c905a9e4e5e276b053adbf3483b7812b5a82b8d6ae73cb634",
+        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
+        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
+        ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
+        ".github/workflows/local-acceptance.yml": "65854652e5288fef4a9bc14852f9a1bfc0a692fc746af5c236e94ce1c19c8888",
+        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
-        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
+        "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
+        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
+        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
+        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
+        "e2e/local-acceptance/publication_acceptance.py": "f25e3a2159cfb892372b74615bb64a1238ce023da87ff20e5662f1ef0a7af080",
+        "e2e/local-acceptance/release_acceptance.py": "16798841782cf0044d5d37a3d4238709451e54d5ff5dc4e047dc709f5b7b266c",
+        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/run.py": "1e79dbcb72bd62bc4b7e60863e7f2fb225de7649cb419d701d4146cdb0ca740a",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
+        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
     }
 
 
@@ -552,7 +676,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "a952b56f180d7340b31895eb06a4edc3227303ff4b7680d475d5a8fcf8da3327":
+    if actual_scope != "d4a0420c4198f72fc02478644cf850f1c19b5a2786cda7e9e54c42f704077b86":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -565,7 +689,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7"
+    expected = "840594ba60ec7a92ccfc784451fbd0b9ef391eb3492855974b7eefb17b5db9b4"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
@@ -723,6 +847,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
+    if name == "browser":
+        # The executor owns this harness, including for candidates that predate
+        # it. Stage only its Python imports/policy, not another source checkout.
+        for relative in ["e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/benchmark.py",
+                         "e2e/terminal-resize/gui-policy.json"]:
+            path = sources / "runner" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
@@ -1064,6 +1196,11 @@ def compiled_drivers(log, names):
     return {name: executables[0] for name, executables in found.items()}
 
 
+def browser_viewport_cases():
+    """Required native viewport journeys for browser execution and its build fixture."""
+    return ("viewport_browser_interaction", "viewport_browser_resource_exit")
+
+
 def browser_smoke(inputs, output, command):
     """Painted-terminal behaviour against the measured release or a dev build.
 
@@ -1100,14 +1237,17 @@ def browser_smoke(inputs, output, command):
                   "-p", package, "--test", links, "--test", viewport,
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
-    command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
+    smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
+    command(sys.executable, str(smoke), "--driver", drivers[links],
             "--candidate", str(binary), "--output", str(output / "smoke"),
             extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
                    "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
-    command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
-            "-p", package, "--test", viewport, "viewport_browser_interaction",
-            "--", "--ignored", "--exact", "--nocapture",
-            extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+    for case in browser_viewport_cases():
+        log = command(drivers[viewport], case, "--ignored", "--exact", "--nocapture",
+                      extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+        counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))
+        if not counts or sum(int(passed) for passed, _ in counts) == 0 or any(int(failed) for _, failed in counts):
+            raise RuntimeError(f"No actual passing viewport lifecycle test: {case}")
     if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
         raise RuntimeError("Browser candidate changed after validation")
 

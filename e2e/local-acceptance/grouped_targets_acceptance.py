@@ -95,6 +95,20 @@ pub fn record(name: &str) {
     let root = std::path::PathBuf::from(std::env::var_os("SCODE_GROUP_PID_DIR").unwrap());
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join(name), std::process::id().to_string()).unwrap();
+    if let Some(pool) = std::env::var_os("SCODE_GROUP_POOL_DIR") {
+        let pool = std::path::PathBuf::from(pool);
+        let active = pool.join("active");
+        let observed = pool.join("observed");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&observed).unwrap();
+        let marker = active.join(std::process::id().to_string());
+        std::fs::write(&marker, name).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let count = std::fs::read_dir(&active).unwrap().count();
+        std::fs::write(observed.join(name), count.to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::fs::remove_file(marker).unwrap();
+    }
 }
 #[cfg(test)] #[test] fn legacy_library_unit() {
     assert!(std::env::var_os("SCODE_GROUP_UNIT_FAIL").is_none(), "legacy library unit executed");
@@ -238,11 +252,36 @@ pub fn record(name: &str) {
     def execute(arguments, cwd, log, extra=None):
         return helper.run_command(arguments, cwd, log, {**environment, **(extra or {})})
 
-    dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+    explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+    environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
+    try:
+        dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        legacy = profiles.workspace_nextest_options(output, False)
+        assert legacy[legacy.index("--test-threads") + 1] == "4"
+        os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
+        environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
+        limited = profiles.workspace_nextest_options(output, True)
+        command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
+    finally:
+        if explicit_workers is None:
+            os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+        else:
+            os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = explicit_workers
     assert all(row["exit_code"] == 0 for row in dispatched)
     actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
     assert "--lib" not in actual and "--bins" not in actual
     assert actual[-len(integration_arguments):] == integration_arguments
+    expected_workers = 8 if (os.cpu_count() or 0) >= 8 else 4
+    assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
+    observed_workers = {}
+    for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
+                                ("limited-pool", 1, 4)]:
+        observed = output / label / "observed"
+        maximum = max(int(path.read_text()) for path in observed.iterdir())
+        assert lower <= maximum <= upper, (label, maximum)
+        assert len(list(observed.iterdir())) == 7
+        assert not list((output / label / "active").iterdir()), label
+        observed_workers[label] = maximum
     assert {path.name for path in (output / "integration-pids").iterdir()} == {
         "one", "two", "driver", "directory", "other-package", "future", "windows" if os.name == "nt" else "unix"}
     environment.clear()
@@ -388,6 +427,7 @@ pub fn record(name: &str) {
               "older_source_default_suite_and_disabled_target_exclusion_retained": True,
               "old_unit_harness_control_failed": True, "actual_production_dispatch_without_units_passed": True,
               "production_workspace_commands": dispatched,
+              "observed_native_test_process_overlap": observed_workers,
               "exact_case_and_ignore_state_preserved": True, "nextest_process_state_isolated": True,
               "same_process_control_failed_isolation_assertion": True,
               "normal_product_sha256": original_binary, "normal_product_cargo_fresh": True,

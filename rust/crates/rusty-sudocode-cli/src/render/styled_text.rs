@@ -2,7 +2,7 @@
 //! Decode external ANSI once; keep owned styles as data until the output boundary.
 
 use crossterm::style::{Attribute, Color, ContentStyle};
-use std::{ops::Range, sync::Arc};
+use std::{borrow::Cow, ops::Range, sync::Arc};
 use vte::{Params, Perform};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +68,16 @@ impl StyledText {
                 .filter_map(|run| run.hyperlink.as_ref())
                 .map(|link| link.len())
                 .sum::<usize>()
+    }
+
+    /// External plain source cannot carry terminal instructions or source SGR.
+    #[inline]
+    pub(crate) fn plain_source(input: &str) -> Cow<'_, str> {
+        if Self::needs_decoding(input) {
+            Cow::Owned(Self::from_ansi(input).text)
+        } else {
+            Cow::Borrowed(input)
+        }
     }
 
     pub(crate) fn from_ansi(input: &str) -> Self {

@@ -719,11 +719,8 @@ impl TerminalRenderer {
         markdown: &str,
         width: usize,
     ) -> StyledText {
-        // Markdown is external source, not terminal instructions. Decode only
-        // control-bearing input; owned styles stay structured after this seam.
-        let plain =
-            StyledText::needs_decoding(markdown).then(|| StyledText::from_ansi(markdown).text);
-        let normalized = normalize_nested_fences(plain.as_deref().unwrap_or(markdown));
+        let normalized = normalize_nested_fences(markdown);
+        let normalized = markdown_source(&normalized);
         let mut output = StyledText::default();
         let mut state = RenderState {
             max_width: width.max(1),
@@ -1336,6 +1333,37 @@ impl MarkdownStreamState {
             ))
         }
     }
+}
+
+/// Ordinary source stays borrowed; Mermaid owns its diagnostic escaping.
+#[inline]
+fn markdown_source(markdown: &str) -> std::borrow::Cow<'_, str> {
+    if StyledText::needs_decoding(markdown) {
+        std::borrow::Cow::Owned(decode_markdown_source(markdown))
+    } else {
+        std::borrow::Cow::Borrowed(markdown)
+    }
+}
+
+/// Preserve diagram source until its validator can reject and visibly escape
+/// unsafe labels. Only control-bearing documents need this additional parse.
+#[cold]
+fn decode_markdown_source(markdown: &str) -> String {
+    let mut output = String::with_capacity(markdown.len());
+    let mut offset = 0;
+    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
+        let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = event else {
+            continue;
+        };
+        if !mermaid::is_mermaid(&info) {
+            continue;
+        }
+        output.push_str(&StyledText::plain_source(&markdown[offset..range.start]));
+        output.push_str(&markdown[range.clone()]);
+        offset = range.end;
+    }
+    output.push_str(&StyledText::plain_source(&markdown[offset..]));
+    output
 }
 
 /// Pre-process raw markdown so that fenced code blocks whose body contains

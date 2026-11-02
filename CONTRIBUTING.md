@@ -482,7 +482,7 @@ retiring legacy library/binary unit harnesses in line with the test-layer policy
 An audited Windows run contained 1,423 such unit cases and 1,089 integration
 cases; the unit cases contributed 73 summed worker seconds, so their 56.6%
 share of case count is not a 56.6% time saving. Every selected integration/PTY
-case and ignored marker remains; queue all-target/all-feature Clippy,
+case and ignored marker remains; queue all-feature Clippy,
 vendored Mermaid checks and workspace doctests remain. Legacy unit assertions
 are no longer runtime regression gates and gain no e2e coverage credit.
 Real Cargo/nextest controls poison both unit harnesses, require the former full
@@ -494,13 +494,14 @@ targets; a real deliberately failing disabled target protects that boundary.
 Native workspace Clippy uses that same validated group inventory, retaining
 library and binary test configurations, examples, benches and ungrouped enabled
 tests. It avoids linting the 128 covered modules as separate crates on every
-author/complementary host: 91 instead of 211 integration targets in the current
+author/complementary host: 91 instead of 211 integration targets in the audited
 workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
 Ungrouped sources keep `--all-targets`; disabled
-standalone test targets keep their original exclusion. The merge queue still
-checks every original target with all features. This reduces per-host lint
-coverage of differences specific to an original test crate's identity; that
-configuration remains checked in the queue. Real Cargo/Clippy controls inject
+standalone test targets keep their original exclusion. Queue all-feature lint
+also reuses validated groups, retaining uncovered enabled tests and Cargo's
+exclusion of manual `test=false` performance drivers. Lint no longer checks covered modules under
+their original standalone crate identities on the author, complementary hosts
+or queue. Every module still compiles in its group. Real Cargo/Clippy controls inject
 errors into ordinary and test-only library/bin code, grouped/ignored tests,
 shared helpers, examples and benches, and verify disabled-target exclusion.
 No product test case, assertion or deadline changes.
@@ -775,7 +776,7 @@ scoped deployment acceptance still exercises the actual installed system.
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
 the native suites on the combined merge-group tree. Native acceptance retains
-its per-host lint. Strict all-target/all-feature Clippy runs once on Linux,
+its per-host lint. Strict all-feature Clippy runs once on Linux,
 Windows and macOS against the combined queue tree, without a duplicate Linux
 PR job. All-feature-only findings can therefore arrive later in the queue;
 this removes early feedback, not the final three-platform lint requirement.
@@ -783,11 +784,20 @@ The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful
-runs retain every target, feature and `-D warnings` check. An actual three-package
+runs retain every feature, target category and `-D warnings` check; covered
+integration modules compile through their validated groups. An actual three-package
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
-records the actual compiler priorities. It runs once on a PR only when the lint
-workflow, fixture or scope selector changes; queue/main reuse its result.
+records the actual compiler priorities. Additional real compiler controls reject
+errors in either grouped module, examples, benches and library/bin test
+configurations, and refuse noncanonical wrappers. Old/new compiler artifacts
+also prove manual-driver exclusion with deliberately broken manual code. Required output prints
+`QUEUE_CLIPPY_SCOPE`, including all-feature target counts and the actual command.
+The fixture runs once on a PR only when the lint workflow, entry, fixture or scope
+selector changes; queue/main reuse its result.
+Changing the queue entry itself also selects the real all-feature workspace
+lint on all three queue platforms. Real committed PR/push/queue event controls
+verify this trigger and the exclusion of documentation-only changes.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

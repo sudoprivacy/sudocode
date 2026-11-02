@@ -73,6 +73,12 @@ assert package['fixturePolicy']==expected['policy'],'image context used another 
 spec=importlib.util.spec_from_file_location('actual_profiles','/inputs/runner/.github/local-acceptance/checks.py')
 checks=importlib.util.module_from_spec(spec);spec.loader.exec_module(checks)
 observed={'sources':actual,'image_policy':image}
+if set(actual)=={'candidate'}:
+    for name in ['gui-smoke.py','benchmark.py','gui-policy.json']:
+        control=Path('/inputs/runner/e2e/terminal-resize')/name
+        assert control.read_text()==expected['policy'],f'GUI harness used another policy: {name}'
+    assert not (Path('/inputs/candidate/e2e/terminal-resize/gui-smoke.py')).exists()
+    observed['trusted_gui_harness']=True
 def workload(name,root,output,base,command,target):
     # Keep the real main(), run(), output creation and command executor. Only
     # replace the expensive product workload; it must use the supplied output.
@@ -112,6 +118,8 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             "e2e/terminal-resize/package.json": json.dumps({"name": "container-input-fixture", "fixturePolicy": label}),
             "e2e/terminal-resize/package-lock.json": '{"lockfileVersion":3}',
             "e2e/terminal-resize/performance-policy.json": json.dumps({"baseline_commit": baseline}),
+            **{f"e2e/terminal-resize/{name}": label
+               for name in ["gui-smoke.py", "benchmark.py", "gui-policy.json"]},
         }
         for relative, content in files.items():
             path = root / relative
@@ -125,6 +133,10 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     protected = commit("main-policy", baseline)
     git("update-ref", "refs/remotes/origin/main", protected)
     candidate = commit("candidate-policy", protected)
+    # This older candidate predates the newly required runner-owned script.
+    git("rm", "e2e/terminal-resize/gui-smoke.py")
+    git("commit", "-m", "Fixture candidate predates GUI smoke harness")
+    candidate = git("rev-parse", "HEAD")
     (root / "private-untracked.txt").write_text("An untracked fixture must never enter the container.")
     configuration = {"baseline": baseline, "protected": protected, "candidate": candidate,
                      "base_image": base_image, "fixture_label": token, "cache_volume": cache}
@@ -164,6 +176,8 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         observed = json.loads((evidence / "observed.json").read_text())
         assert observed["sources"] == expected["sources"]
         assert observed["profile_output"] == f"container/{profile}"
+        if profile == "browser":
+            assert observed["trusted_gui_harness"]
         assert not (evidence / "scode-candidate").exists(), "Fixture bypassed the production output layout"
         assert provenance["candidate"] == candidate and provenance["policy"] == policy_ref
         assert provenance.get("baseline") == (None if profile == "browser" else
@@ -226,6 +240,9 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             raise AssertionError("Modified measured release was promoted")
         assert sum(docker_operation(row, "run") for row in commands) == before_run
         candidate = commit("next-candidate", protected)
+        git("rm", "e2e/terminal-resize/gui-smoke.py")
+        git("commit", "-m", "Fixture next candidate predates GUI smoke harness")
+        candidate = git("rev-parse", "HEAD")
         before = sum(docker_operation(row, "build") for row in commands)
         launch("different-candidate-does-not-reuse", protected,
                {"policy": "main-policy", "sources": {"candidate": "next-candidate"}}, profile="browser")
@@ -245,6 +262,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             raise AssertionError("A real container using the wrong policy was accepted")
         result = {"status": "PASS", "cases": 8,
             "production_main_and_dispatcher_layout": True, "browser_candidate_only": True,
+            "runner_gui_harness_uses_frozen_policy": True,
             "same_invocation_image_and_release_reused": True, "changed_release_refused_before_container": True,
             "changed_candidate_builds_normally": True,
             "independent_same_context_build_keeps_its_own_tag": True,

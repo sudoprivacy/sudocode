@@ -9,6 +9,30 @@ import sys
 from benchmark import digest, verify_digest
 
 
+def validate_sample(data, sampling):
+    """Require all policy-owned gestures and typing observations from the real GUI."""
+    keys = len(sampling["input_delays_ms"])
+    sample_counts = {"drag_frame_ms": sampling["drag_steps"] * sampling["drag_bursts"]}
+    for phase in ["history", "wait", "stream"]:
+        sample_counts[f"input_{phase}_parsed_ms"] = keys * sampling["parsed_bursts"]
+        sample_counts[f"input_{phase}_frame_ms"] = keys * sampling["painted_bursts"]
+    assert keys >= 20 and sample_counts["input_wait_parsed_ms"] >= 100
+    assert type(sampling["drag_bursts"]) is int and sampling["drag_bursts"] >= 2
+    assert sampling["drag_steps"] >= 12 and sample_counts["drag_frame_ms"] >= 40
+    assert data["status"] == "passed" and data["idle_bytes"] == 0, "invalid browser run"
+    assert data["streaming_selection_preserved"], "missing streaming selection acceptance"
+    assert data["environment"]["sampling"] == sampling, "observer sampling differs from policy"
+    gestures = data["drag_gestures"]
+    assert len(gestures) == sampling["drag_bursts"], "missing complete drag gestures"
+    assert all(len(gesture["samples"]) == sampling["drag_steps"] for gesture in gestures)
+    assert all(gesture["selected"] == data["selected"] for gesture in gestures)
+    assert data["samples"]["drag_frame_ms"] == [value for gesture in gestures for value in gesture["samples"]]
+    assert set(data["samples"]) == set(sample_counts), "missing interaction workload"
+    for name, values in data["samples"].items():
+        assert len(values) == sample_counts[name], "missing interaction samples"
+        assert all(math.isfinite(value) and value >= 0 for value in values), "invalid interaction sample"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ["driver", "candidate", "output"]:
@@ -19,11 +43,6 @@ def main():
         parser.error("choose an empty output directory to preserve previous evidence")
     args.output.mkdir(parents=True, exist_ok=True)
     sampling = json.loads(Path(__file__).with_name("gui-policy.json").read_text())["sampling"]
-    keys = len(sampling["input_delays_ms"])
-    sample_counts = {"drag_frame_ms": sampling["drag_steps"]}
-    for phase in ["history", "wait", "stream"]:
-        sample_counts[f"input_{phase}_parsed_ms"] = keys * sampling["parsed_bursts"]
-        sample_counts[f"input_{phase}_frame_ms"] = keys * sampling["painted_bursts"]
     sample = args.output / "sample.json"
     env = dict(os.environ, SCODE_TEST_BIN=str(args.candidate.resolve()), SCODE_TEST_BACKEND="mock",
                SCODE_GUI_REPORT=str(sample.resolve()), SCODE_TERMINAL_LOG_DIR=str(args.output.resolve()),
@@ -40,12 +59,7 @@ def main():
                                     env=env, stdout=log, stderr=subprocess.STDOUT, timeout=180)
         assert result.returncode == 0, f"browser terminal run failed: {args.output / 'driver.log'}"
         data = json.loads(sample.read_text())
-        assert data["status"] == "passed" and data["idle_bytes"] == 0, "invalid browser run"
-        assert data["streaming_selection_preserved"], "missing streaming selection acceptance"
-        assert set(data["samples"]) == set(sample_counts), "missing interaction workload"
-        for name, values in data["samples"].items():
-            assert len(values) == sample_counts[name], "missing interaction samples"
-            assert all(math.isfinite(value) and value >= 0 for value in values), "invalid interaction sample"
+        validate_sample(data, sampling)
         assert digest(args.candidate) == report["candidate_sha256"], "candidate changed during the run"
         report.update(status="passed", browser=data["browser"], xterm=data["xterm"])
     except (AssertionError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:

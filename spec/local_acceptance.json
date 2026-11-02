@@ -72,7 +72,8 @@
         "rust/crates/rusty-sudocode-cli/tests/pty_review_scrollback.rs",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "e2e/terminal-resize/**",
-        "rust/Cargo.lock"
+        "rust/Cargo.lock",
+        "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs"
       ],
       "exclude": [
         "e2e/terminal-resize/benchmark.py",

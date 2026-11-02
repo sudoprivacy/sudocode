@@ -148,6 +148,14 @@ def native_cli_test_package_args(root, base):
     return arguments
 
 
+def native_resize_test_targets(*, windows):
+    """Share the real terminal target inventory with its Cargo graph guard."""
+    targets = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
+    if not windows:
+        targets.append("pty_codex_colors")
+    return targets
+
+
 def test_group_source(names):
     """Keep opt-in wrappers declarative so selection cannot hide extra Rust code."""
     return ("//! Opt-in acceptance target; original individual Cargo test targets stay available.\n\n"
@@ -490,9 +498,7 @@ def run(name, root, output, base, execute):
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
-        if os.name != "nt":
-            tests.append("pty_codex_colors")
+        tests = native_resize_test_targets(windows=os.name == "nt")
         print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
               "all selected ignored cases and original budgets remain. The standalone default-feature "
               "debug graph is outside this profile's coverage.", flush=True)
@@ -600,35 +606,36 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        "e2e/local-acceptance/publication_acceptance.py": "f25e3a2159cfb892372b74615bb64a1238ce023da87ff20e5662f1ef0a7af080",
-        ".github/local-acceptance/publish.py": "80be60c5a237cacec64d4519805eadf8d412ab1d33bde6058dcf4f47f58ab471",
-        ".github/local-acceptance/gate.py": "1a2fa6558ff2d86b970eab3a20d442abb85fe26acd75b53f79cc553f5960bcc4",
-        ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
+        ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
-        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        ".github/workflows/local-acceptance.yml": "65854652e5288fef4a9bc14852f9a1bfc0a692fc746af5c236e94ce1c19c8888",
-        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
-        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
-        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
-        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
-        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
-        ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
-        ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
-        ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
+        ".github/local-acceptance/gate.py": "1a2fa6558ff2d86b970eab3a20d442abb85fe26acd75b53f79cc553f5960bcc4",
+        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
+        ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
+        ".github/local-acceptance/publish.py": "80be60c5a237cacec64d4519805eadf8d412ab1d33bde6058dcf4f47f58ab471",
         ".github/scripts/local_acceptance.py": "d433bb4401f3727c905a9e4e5e276b053adbf3483b7812b5a82b8d6ae73cb634",
-        "e2e/local-acceptance/run.py": "2bcc3440616639daedf79baf231c7bcd757acddb9304289ead603f700feb82c3",
-        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
-        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
+        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
+        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
+        ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
+        ".github/workflows/local-acceptance.yml": "65854652e5288fef4a9bc14852f9a1bfc0a692fc746af5c236e94ce1c19c8888",
+        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "8c0b83871b77061719df08145fb7be1adf141453100d7178af51e73b940f9f35",
-        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
+        "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
+        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
+        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
+        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
+        "e2e/local-acceptance/publication_acceptance.py": "f25e3a2159cfb892372b74615bb64a1238ce023da87ff20e5662f1ef0a7af080",
+        "e2e/local-acceptance/release_acceptance.py": "16798841782cf0044d5d37a3d4238709451e54d5ff5dc4e047dc709f5b7b266c",
+        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/run.py": "1e79dbcb72bd62bc4b7e60863e7f2fb225de7649cb419d701d4146cdb0ca740a",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
+        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
     }
 
 
@@ -669,7 +676,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "ccab41b2ee59269b5df360f883c938a7914bf4a963862a8a95b5a70c63a52eca":
+    if actual_scope != "d4a0420c4198f72fc02478644cf850f1c19b5a2786cda7e9e54c42f704077b86":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -682,7 +689,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "acf035cdf079cf5bc02c9d77390f57f4c4c3e88828061f857b739362d0127b80"
+    expected = "840594ba60ec7a92ccfc784451fbd0b9ef391eb3492855974b7eefb17b5db9b4"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
@@ -1189,6 +1196,11 @@ def compiled_drivers(log, names):
     return {name: executables[0] for name, executables in found.items()}
 
 
+def browser_viewport_cases():
+    """Required native viewport journeys for browser execution and its build fixture."""
+    return ("viewport_browser_interaction", "viewport_browser_resource_exit")
+
+
 def browser_smoke(inputs, output, command):
     """Painted-terminal behaviour against the measured release or a dev build.
 
@@ -1230,10 +1242,12 @@ def browser_smoke(inputs, output, command):
             "--candidate", str(binary), "--output", str(output / "smoke"),
             extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
                    "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
-    command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
-            "-p", package, "--test", viewport, "viewport_browser_interaction",
-            "--", "--ignored", "--exact", "--nocapture",
-            extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+    for case in browser_viewport_cases():
+        log = command(drivers[viewport], case, "--ignored", "--exact", "--nocapture",
+                      extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+        counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))
+        if not counts or sum(int(passed) for passed, _ in counts) == 0 or any(int(failed) for _, failed in counts):
+            raise RuntimeError(f"No actual passing viewport lifecycle test: {case}")
     if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
         raise RuntimeError("Browser candidate changed after validation")
 

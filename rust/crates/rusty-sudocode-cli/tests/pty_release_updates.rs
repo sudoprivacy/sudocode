@@ -139,10 +139,6 @@ fn payload_archive(bytes: &[u8]) -> (String, Vec<u8>) {
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 fn spawn_installed(
     env: &common::TestEnv,
     installed: &std::path::Path,
@@ -150,15 +146,15 @@ fn spawn_installed(
     args: &[&str],
 ) -> pty_expect::PtySession {
     let record = env.workspace_root().join("restart arguments.txt");
-    let command = format!(
-        "{} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR SUDO_CODE_CONFIG_HOME={} SCODE_MIRROR={} SCODE_CHECK_UPDATES=1 SCODE_UPDATE_RECORD={} {} {}",
-        if cfg!(windows) { "MSYS2_ARG_CONV_EXCL='*'" } else { "" },
-        shell_quote(&env.config_home().to_string_lossy()), shell_quote(mirror),
-        shell_quote(&record.to_string_lossy()), shell_quote(&installed.to_string_lossy()),
-        args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>().join(" ")
+    let mut child = env.spawn_binary_with_env(
+        installed,
+        args,
+        &[
+            ("SCODE_MIRROR", mirror),
+            ("SCODE_CHECK_UPDATES", "1"),
+            ("SCODE_UPDATE_RECORD", record.to_string_lossy().as_ref()),
+        ],
     );
-    let mut child =
-        pty_expect::PtySession::spawn(&common::resolve_sh(), &["-c", &command]).unwrap();
     child.set_default_timeout(common::DEFAULT_TIMEOUT);
     child
 }
@@ -180,7 +176,10 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
         &source,
         r#"fn main() {
         let args = std::env::args().skip(1).collect::<Vec<_>>().join("|");
-        std::fs::write(std::env::var("SCODE_UPDATE_RECORD").unwrap(), args).unwrap();
+        let record = std::path::PathBuf::from(std::env::var("SCODE_UPDATE_RECORD").unwrap());
+        std::fs::write(&record, args).unwrap();
+        std::fs::write(record.with_extension("context"), format!("{}\n{}",
+            std::env::current_dir().unwrap().display(), std::env::var("HOME").unwrap())).unwrap();
         println!("updated scode fixture");
     }"#,
     )
@@ -240,6 +239,23 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
     assert_eq!(std::fs::read(&installed).unwrap(), payload);
     assert_eq!(std::fs::read_to_string(&record).unwrap(), "--model|sonnet");
     assert_eq!(mirror.requests.load(Ordering::SeqCst), 2);
+    let context = std::fs::read_to_string(record.with_extension("context")).unwrap();
+    let mut context = context.lines();
+    let expected = root.canonicalize().unwrap();
+    assert_eq!(
+        std::path::Path::new(context.next().unwrap())
+            .canonicalize()
+            .unwrap(),
+        expected,
+        "updated executable must retain the isolated workspace"
+    );
+    assert!(
+        std::path::Path::new(context.next().unwrap())
+            .canonicalize()
+            .unwrap()
+            .starts_with(&expected),
+        "updated executable must retain an isolated HOME"
+    );
 }
 
 #[test]
@@ -263,7 +279,13 @@ fn a_bad_checksum_preserves_the_installed_executable() {
         ]),
     );
     let mut child = spawn_installed(&env, &installed, &mirror.base, &["update", "--yes"]);
-    child.expect("checksum mismatch").unwrap();
+    child.expect("checksum mismatch").unwrap_or_else(|error| {
+        panic!(
+            "checksum refusal: {error}; requests={}\n{}",
+            mirror.requests.load(Ordering::SeqCst),
+            child.render(screen_contents)
+        )
+    });
     assert_ne!(child.expect_eof().unwrap(), 0);
     assert_eq!(std::fs::read(&installed).unwrap(), original);
     assert!(!env.workspace_root().join("restart arguments.txt").exists());
@@ -290,21 +312,31 @@ fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
             ("SCODE_MIRROR", mirror.base.as_str()),
             ("SCODE_CHECK_UPDATES", "1"),
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+            ("SCODE_TRACE_STARTUP", "1"),
         ];
+        let startup_started = Instant::now();
         let mut child = env.spawn_with_env(&[], &options);
-        child.expect("❯").unwrap_or_else(|error| {
+        let startup_output = child.expect("❯").unwrap_or_else(|error| {
             panic!(
                 "terminal startup: {error}\n{}",
                 child.render(screen_contents)
             )
         });
+        let prompt_observed_after = startup_started.elapsed();
+        // Keep both parent observation time and child timings on failure:
+        // a delayed reader can outlast the metadata request's own deadline.
         // The server withholds its reply until the real terminal is usable.
         // A synchronous startup check would block this workflow.
         mirror.release.store(true, Ordering::SeqCst);
         let cache = env.config_home().join("cache/release.json");
         let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
         while !cache.exists() {
-            assert!(Instant::now() < deadline, "metadata cache was not written");
+            assert!(
+                Instant::now() < deadline,
+                "metadata cache was not written: mode={mode}; requests={}; prompt_observed_after={prompt_observed_after:?}\nstartup output:\n{startup_output}\n{}",
+                mirror.requests.load(Ordering::SeqCst),
+                child.render(screen_contents)
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         let record: serde_json::Value =

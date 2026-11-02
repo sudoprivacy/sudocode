@@ -6,7 +6,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::render::{
-    styled_text::StyledText, ResponseGlyphState, ResponsePosition, TerminalRenderer,
+    code_preview::CodePreview, styled_text::StyledText, ResponseGlyphState, ResponsePosition,
+    TerminalRenderer,
 };
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 8192;
@@ -50,6 +51,7 @@ pub(crate) enum PreviewUpdate {
 #[derive(Default)]
 pub(crate) struct ProsePreview {
     renderer: TerminalRenderer,
+    code: CodePreview,
     source: String,
     position: Option<PreviewPosition>,
     is_dirty: bool,
@@ -122,6 +124,7 @@ impl ProsePreview {
         self.visible = None;
         self.is_dirty = false;
         self.is_frozen = false;
+        self.code = CodePreview::default();
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -134,10 +137,17 @@ impl ProsePreview {
             self.width = width;
             self.is_dirty = false;
             self.rendered = StyledText::default();
-            if let Some(position) = self.position.filter(|_| is_prose(&self.source)) {
-                let markdown = self
-                    .renderer
-                    .render_markdown_with_width(&self.source, width.saturating_sub(2));
+            let markdown = if has_ambiguous_width(&self.source) {
+                None
+            } else {
+                self.code.render(&self.source, &self.renderer).or_else(|| {
+                    is_prose(&self.source).then(|| {
+                        self.renderer
+                            .render_markdown_with_width(&self.source, width.saturating_sub(2))
+                    })
+                })
+            };
+            if let (Some(position), Some(markdown)) = (self.position, markdown) {
                 let mut glyph = ResponseGlyphState::from_position(width, position.response);
                 let mut text = position.gap.to_string();
                 text.push_str(&glyph.apply(&markdown));
@@ -161,9 +171,7 @@ impl ProsePreview {
                     .map(str::len)
                     .sum();
                 let mut visible = StyledText::default();
-                for (style, part) in self.rendered.spans(start..self.rendered.text.len()) {
-                    visible.push(style, part);
-                }
+                visible.append(&self.rendered.slice(start..self.rendered.text.len()));
                 self.visible = Some(Arc::new(visible));
             }
         }
@@ -203,6 +211,17 @@ fn has_prose_lines(source: &str) -> bool {
 fn has_ambiguous_width(source: &str) -> bool {
     !source.is_ascii()
         && source.graphemes(true).any(|grapheme| {
+            // UnicodeWidthStr assigns a nominal width to control strings;
+            // layout handles these as breaks/tab stops, never painted glyphs.
+            if matches!(grapheme, "\n" | "\r" | "\r\n" | "\t") {
+                return false;
+            }
+            // The terminal paints these marks in their own cells, while the
+            // live canvas's Unicode measure merges them. Canonical history
+            // uses the shared corrected width; avoid a mismatched live frame.
+            if grapheme.contains(['\u{FF9E}', '\u{FF9F}']) {
+                return true;
+            }
             let width = grapheme.width();
             // Legacy Windows console hosts can miscount combining sequences
             // even when their Unicode scalar widths sum to the grapheme width.

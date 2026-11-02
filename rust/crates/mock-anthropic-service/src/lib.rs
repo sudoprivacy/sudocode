@@ -574,10 +574,7 @@ async fn handle_connection(
         raw_body,
     });
 
-    if scenario == Scenario::ToolConcurrency
-        && request.stream
-        && !concurrency_batch_complete(&request)
-    {
+    if scenario == Scenario::ToolConcurrency && request.stream {
         let calls = pending_concurrency_calls(&request);
         if calls.iter().any(|call| call.stream_wait_for.is_some()) {
             return stream_gated_concurrency(&mut socket, &request, scenario, &calls).await;
@@ -917,8 +914,8 @@ struct ConcurrencyCall {
 // The PTY fixture supplies the provider's batch, then drives actual tools.
 // It controls arrival order without substituting a fake executor or clock.
 fn pending_concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
-    // Notifications can checkpoint a batch after only some tools were admitted.
-    // Continue from its settled results instead of replaying completed side effects.
+    // A completion can steer a partially admitted stream. Resume its remaining
+    // actions instead of issuing the already completed tool IDs a second time.
     let completed = current_turn_blocks(request)
         .filter_map(|block| match block {
             InputContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
@@ -945,10 +942,20 @@ fn pending_concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
                 .ok();
             }
             let (_, batch) = text.split_once("TOOL_BATCH:")?;
-            serde_json::Deserializer::from_str(batch)
-                .into_iter::<Vec<Value>>()
+            let value = serde_json::Deserializer::from_str(batch)
+                .into_iter::<Value>()
                 .next()?
-                .ok()
+                .ok()?;
+            if let Some(path) = value.get("calls_path").and_then(Value::as_str) {
+                Some(
+                    serde_json::from_str::<Vec<Value>>(
+                        &std::fs::read_to_string(path).expect("tool batch fixture file"),
+                    )
+                    .expect("tool batch fixture JSON"),
+                )
+            } else {
+                serde_json::from_value::<Vec<Value>>(value).ok()
+            }
         })
         .expect("tool_concurrency requires TOOL_BATCH JSON")
         .into_iter()
@@ -1003,10 +1010,6 @@ fn pending_concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
 #[inline]
 fn concurrency_prelude(calls: &[ConcurrencyCall]) -> Option<&str> {
     calls.iter().find_map(|call| call.stream_prelude.as_deref())
-}
-
-fn concurrency_batch_complete(request: &MessageRequest) -> bool {
-    pending_concurrency_calls(request).is_empty()
 }
 
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
@@ -1906,10 +1909,10 @@ fn stream_spinner_activity(_request: &MessageRequest, _scenario: Scenario) -> St
 }
 
 fn stream_tool_concurrency(request: &MessageRequest, _scenario: Scenario) -> String {
-    if concurrency_batch_complete(request) {
+    let calls = pending_concurrency_calls(request);
+    if calls.is_empty() {
         final_text_sse("Concurrency batch done.")
     } else {
-        let calls = pending_concurrency_calls(request);
         let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
         let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
         let uses: Vec<_> = calls
@@ -2655,10 +2658,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             "progress progress progress progress progress resumed",
         ),
         Scenario::ToolConcurrency => {
-            if concurrency_batch_complete(request) {
+            let calls = pending_concurrency_calls(request);
+            if calls.is_empty() {
                 text_message_response("msg_concurrency_done", "Concurrency batch done.")
             } else {
-                let calls = pending_concurrency_calls(request);
                 let uses: Vec<_> = calls
                     .iter()
                     .map(|call| ToolUseMessage {

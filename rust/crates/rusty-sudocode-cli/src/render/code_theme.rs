@@ -64,6 +64,27 @@ pub(super) fn inline_color(light: bool, support: ColorSupport) -> Color {
     color.map_or(Color::Reset, |color| foreground(color, support))
 }
 
+/// Table labels use the same syntax scopes as Codex's Markdown table header.
+pub(super) fn table_header_color(light: bool, support: ColorSupport) -> Color {
+    static DARK: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
+    static LIGHT: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
+    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
+        return Color::Reset;
+    }
+    let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
+        with_theme(light, |theme| {
+            let highlighter = Highlighter::new(theme);
+            ["entity.name.type", "support.type", "variable"]
+                .iter()
+                .find_map(|name| {
+                    let scope = Scope::new(name).ok()?;
+                    highlighter.style_mod_for_stack(&[scope]).foreground
+                })
+        })
+    });
+    color.map_or(Color::Reset, |color| foreground(color, support))
+}
+
 fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Color {
     if support == ColorSupport::Ansi256 {
         return Color::AnsiValue(super::rgb_to_ansi256(color.r, color.g, color.b));
@@ -106,13 +127,26 @@ pub(super) fn highlight(
 ) -> Option<StyledText> {
     if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16)
         || code.is_empty()
-        || code.len() > 512 * 1024
-        || code.lines().count() > 10_000
-        || code.lines().any(|line| line.len() > 4 * 1024)
+        || !within_limits(code)
     {
         return None;
     }
     let mut highlighter = HighlightLines::new(syntax(language)?, theme(light));
+    highlight_chunk(&mut highlighter, code, support)
+}
+
+pub(super) fn within_limits(code: &str) -> bool {
+    code.len() <= 512 * 1024
+        && code.lines().count() <= 10_000
+        && code.lines().all(|line| line.len() <= 4 * 1024)
+}
+
+/// Shared conversion for finalized blocks and append-only live code previews.
+fn highlight_chunk(
+    highlighter: &mut HighlightLines<'_>,
+    code: &str,
+    support: ColorSupport,
+) -> Option<StyledText> {
     let mut output = StyledText::default();
     for line in LinesWithEndings::from(code) {
         for (style, text) in highlighter.highlight_line(line, syntax_set()).ok()? {
@@ -120,8 +154,6 @@ pub(super) fn highlight(
                 foreground_color: Some(foreground(style.foreground, support)),
                 ..ContentStyle::default()
             };
-            // Codex retains bold, but deliberately omits syntax italics,
-            // underlines and the theme background in terminal code blocks.
             if style.font_style.contains(FontStyle::BOLD) {
                 content_style.attributes.set(Attribute::Bold);
             }
@@ -129,4 +161,73 @@ pub(super) fn highlight(
         }
     }
     Some(output)
+}
+
+/// A Send handle to one bounded parser cache on the painting thread.
+/// Oniguruma's capture region is not Send. Keep it where it is used rather
+/// than moving parser internals through the shared UI context or using unsafe.
+pub(super) struct StreamingCodeHighlighter {
+    id: u64,
+    language: String,
+    light: bool,
+    support: ColorSupport,
+}
+
+struct CachedParser {
+    id: u64,
+    bytes: usize,
+    parser: HighlightLines<'static>,
+}
+thread_local! {
+    static STREAM_PARSER: std::cell::RefCell<Option<CachedParser>> = const { std::cell::RefCell::new(None) };
+}
+
+impl StreamingCodeHighlighter {
+    pub(super) fn new(language: &str, light: bool, support: ColorSupport) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            language: language.to_string(),
+            light,
+            support,
+        }
+    }
+
+    pub(super) fn append(&mut self, prefix: &str, added: &str) -> Option<StyledText> {
+        if matches!(self.support, ColorSupport::NoColor | ColorSupport::Ansi16) {
+            return None;
+        }
+        STREAM_PARSER.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache
+                .as_ref()
+                .is_none_or(|cache| cache.id != self.id || cache.bytes != prefix.len())
+            {
+                let mut parser = HighlightLines::new(syntax(&self.language)?, theme(self.light));
+                // Reconstruct only after another context/thread owned the one cache slot.
+                for line in LinesWithEndings::from(prefix) {
+                    parser.highlight_line(line, syntax_set()).ok()?;
+                }
+                *cache = Some(CachedParser {
+                    id: self.id,
+                    bytes: prefix.len(),
+                    parser,
+                });
+            }
+            let cache = cache.as_mut()?;
+            let output = highlight_chunk(&mut cache.parser, added, self.support)?;
+            cache.bytes += added.len();
+            Some(output)
+        })
+    }
+}
+impl Drop for StreamingCodeHighlighter {
+    fn drop(&mut self) {
+        let _ = STREAM_PARSER.try_with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.as_ref().is_some_and(|cache| cache.id == self.id) {
+                *cache = None;
+            }
+        });
+    }
 }

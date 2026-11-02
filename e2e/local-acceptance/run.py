@@ -26,7 +26,7 @@ def fixture_environment():
     environment = {key: value for key, value in os.environ.items() if key not in names
                    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
     environment["PYTHONIOENCODING"] = "utf-8"
-    return environment
+    return {**environment, "NO_COLOR": "1"}
 
 
 FIXTURE_ENV = fixture_environment()
@@ -556,8 +556,10 @@ def enforcement_acceptance(*, profile_compat_only=False, publication_only=False)
             '    if name in {"rendering", "browser"}:\n'
             '        raise RuntimeError(browser_only_helper())\n'
             '    return [execute([shared_python(), "-c", '
-            '"from pathlib import Path; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
-            'root, output / "actual-process.log")]\n'
+            '"import os; from pathlib import Path; assert os.environ.get(\'NO_COLOR\') is None, \'NO_COLOR inherited into acceptance child\'; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
+            'root, output / "actual-process.log"), '
+            'execute([shared_python(), "-c", "import os; assert os.environ.get(\'NO_COLOR\') == \'1\', \'explicit color opt-out was lost\'"], '
+            'root, output / "explicit-optout.log", {"NO_COLOR": "1"})]\n'
         )
         (work / "spec").mkdir()
         (work / "spec/local_acceptance.json").write_text(json.dumps({
@@ -610,6 +612,8 @@ def enforcement_acceptance(*, profile_compat_only=False, publication_only=False)
         receipt = json.loads(base64.b64decode(envelope["payload"]))
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
+        assert len(receipt['checks']['real-process']) == 2
+        assert receipt['checks']['real-process'][1]['exit_code'] == 0
 
         if not profile_compat_only:
             from publication_acceptance import verify_publication

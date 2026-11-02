@@ -500,8 +500,9 @@ earliest recorded local time remains in the resumed receipt. This removes repeat
 without reducing product checks.</p>
 <p>Acceptance-contract changes run the complete Git/SSH decision matrix in a
 private local Docker container, with a pinned Rust/Python-capable image. The
-author OS retains the real checkpoint/failure/resume smoke and native nextest
-enforcement fixture. Full Windows/macOS negative-hook decision matrices are no
+author OS and complementary native CI hosts retain the real checkpoint/failure/resume
+smoke and native nextest enforcement fixture; Windows also checks native color
+initialization. Full Windows/macOS negative-hook decision matrices are no
 longer repeated natively; that OS-specific infrastructure coverage is reduced.
 The full Linux matrix retains its cases, while product native checks and the
 complementary CI platforms remain unchanged. Guard image/entrypoint inputs bind

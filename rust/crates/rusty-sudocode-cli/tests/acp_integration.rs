@@ -4731,6 +4731,9 @@ async fn acp_session_override_keeps_process_level_append() {
         body.find(SESSION_OVERRIDE) < body.find(PROCESS_APPEND),
         "the replacement comes first, the append stays after it; body: {body}"
     );
+
+    client.shutdown().await;
+    workspace.cleanup();
 }
 
 /// Built-in identity block: present on the default prompt, gone under override.

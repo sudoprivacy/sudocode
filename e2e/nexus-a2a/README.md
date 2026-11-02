@@ -23,6 +23,20 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
 
+The seven independent reader/stall/receiver-seat fault cases run with the
+repository's checksum-pinned nextest runner and at most four test workers.
+They keep their original real daemon, lease clocks, assertions and deadlines;
+daemon restart and SIGSTOP remain serial. The batch requires all seven ignored
+case names before execution and all seven successful JUnit results afterward.
+Retries are disabled. The first failure cancels this independent batch;
+the outer harness still closes its owned private daemon. Cancelled cases are
+not passes. This path requires Python 3, like the acceptance tooling.
+`mailbox_faults_acceptance.py --output FRESH_DIRECTORY` exercises the executor
+using real Cargo/native control processes; it adds no daemon coverage.
+Harness-only edits are validated by the real Linux queue journey and the
+author's realistic harness acceptance. They omit unrelated native workspace
+Cargo/PTY reruns; mixed Rust changes still require those native suites.
+
 The funded offline script uses a private `SUDO_CODE_CONFIG_HOME` containing the
 normal proxy configuration, `SCODE_LIVE_AUTH_PROFILE`, and `SCODE_LIVE_MODEL`.
 It starts the pinned daemon with mTLS, waits for its writable data plane, and

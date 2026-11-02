@@ -523,13 +523,21 @@ def selected(policy, paths, *, base=None, head=None):
               "native workspace validation still runs. Existing target edits or unknown metadata keep full scope.", flush=True)
         print("OPT_IN_TEST_TARGET_SCOPE=" + json.dumps({"base": base, "head": head,
               "unchanged_benchmark_metadata": sorted(opt_in)}), flush=True)
-    return [name for name, rule in policy["checks"].items()
+    names = [name for name, rule in policy["checks"].items()
             if (name != "native-examples" or separate_examples)
             and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
                              else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
                              else paths)))]
+    harness = [path for path in paths if path.startswith("e2e/nexus-a2a/")
+               and not path.lower().endswith((".md", ".html"))]
+    if base and head and harness and "native-workspace" in policy["checks"] and "native-workspace" not in names:
+        print("A2A_HARNESS_SCOPE=" + json.dumps({"changed_harness_inputs": harness,
+              "native_workspace": "omitted_unchanged_product",
+              "required_validation": "real pinned-daemon scripts in the Linux merge queue",
+              "mixed_Rust_inputs_retain_native_workspace": True}), flush=True)
+    return names
 
 
 NATIVE_TARGETS = {
@@ -1206,6 +1214,10 @@ def perform_check(args, attempt):
         receipt["resumed_from"] = resumed
     try:
         with host_acceptance_lease(attempt, head):
+            prepare = getattr(module, "prepare_native_checks", None)
+            if prepare:
+                module.run.prepared_native = prepare(
+                    [name for name in needed if name not in reusable], ROOT, output, run_command)
             for name in needed:
                 if name in reusable:
                     print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)

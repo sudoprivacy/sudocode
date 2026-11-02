@@ -100,6 +100,19 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
+def workspace_nextest_options(output, grouped):
+    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+    options = nextest_options(output)
+    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+        options[options.index('--test-threads') + 1] = '8'
+    print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
+          + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
+          'counts, legacy/isolated/other profiles retain four.',
+          flush=True)
+    return options
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
     # Complementary CI can pass newer main; exclude changes outside this branch.
@@ -188,6 +201,20 @@ def grouped_workspace_test_targets(root, metadata):
                        "selected_integration_targets": len(targets),
                        "groups": [{"package": package, "target": name, "modules": members}
                                   for (package, name), members in sorted(groups.items())]}
+
+
+def workspace_integration_test_targets(targets):
+    """Retire grouped unit harnesses; preserve older Cargo default exclusions."""
+    if not targets:
+        # An explicit glob enables test=false targets and can force inactive
+        # required-features. Older sources keep their complete default suite.
+        return []
+    if targets[:2] != ["--lib", "--bins"]:
+        raise RuntimeError("Unexpected grouped workspace target plan; no tests started")
+    selected = targets[2:]
+    if not selected or len(selected) % 2 or any(selected[index] != "--test" for index in range(0, len(selected), 2)):
+        raise RuntimeError("Integration target selection must retain explicit nonempty test names")
+    return selected
 
 
 def performance_low_power_mode():
@@ -284,6 +311,23 @@ def stable_performance_power(output):
     return monitor_window()
 
 
+def prepare_windows_terminal(root, output, execute):
+    """Retain the actual installer command/log for the selected resize receipt."""
+    output.mkdir(parents=True, exist_ok=True)
+    terminal = Path.home() / ".cache/sudocode-terminal-host"
+    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+
+
+def prepare_native_checks(names, root, output, execute):
+    """Install selected Windows terminal inputs before long native compilation."""
+    prepared = {}
+    if os.name == "nt" and "native-resize" in names:
+        print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
+              "before compilation; original installer checks and terminal tests remain required.", flush=True)
+        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+    return prepared
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -359,11 +403,18 @@ def run(name, root, output, base, execute):
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
             metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
             targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
             (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
             print("Native workspace target selection: " + json.dumps(selection), flush=True)
             print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
-                  "test configurations, examples and benches before long builds and PTY execution. "
+                  "targets, examples and benches before long builds and PTY execution. "
                   "The integrated queue additionally checks original targets with all features.", flush=True)
+            if targets:
+                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                      "unit harnesses are not executed. Queue all-target/all-feature lint and workspace doctests remain.", flush=True)
+            else:
+                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
             lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
             cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
                   "--", "-D", "warnings")
@@ -371,7 +422,10 @@ def run(name, root, output, base, execute):
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
+            command(str(nextest_binary(output)), "nextest", "run",
+                    *workspace_nextest_options(output, bool(targets)),
+                    "--workspace", "--locked", "--features", "engine-acp/mailbox",
+                    *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
     elif name == "native-examples":
@@ -381,7 +435,16 @@ def run(name, root, output, base, execute):
     elif name == "native-resize":
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            command(sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal))
+            try:
+                prepared = run.prepared_native.get(name)
+            except AttributeError:
+                prepared = None
+            if prepared:
+                # These are actual commands from this invocation, not a cached
+                # successful profile. Append them to the normal signed receipt.
+                results.extend(prepared)
+            else:
+                results.append(prepare_windows_terminal(root, output, execute))
             command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
@@ -409,7 +472,14 @@ def run(name, root, output, base, execute):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                     "--report", str(output / "startup.json"))
     elif name == "native-services":
-        cargo("build", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
+        # Cargo's test graph unifies dev-dependency features. A normal build
+        # after workspace tests recompiles the CLI and its shared dependencies.
+        # Keep Cargo's freshness check, without executing the driver twice.
+        print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
+              "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
+              "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
+        cargo("test", "--no-run", "--locked", "-p", "rusty-sudocode-cli",
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
@@ -418,8 +488,8 @@ def run(name, root, output, base, execute):
         if not bash:
             raise RuntimeError("Git Bash is required for shared-service credential acceptance")
         command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                'python e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"))
+                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
+                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -488,8 +558,8 @@ def native_guard_files():
     return {
         **preflight_guard_files(),
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
-        "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
+        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
+        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
@@ -497,18 +567,19 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "6101b32cf9fb5ea60fe93cd5289d3544637c40a0ccf6b4c9a3935feff70ce38a",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "af1307c285c8fa5be1e2e0475c502bd0c790cd3e55fa7a11abf292d9d7370e09",
-        ".github/scripts/vfs_search_cache.py": "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879",
-        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "dd36a4816f8fb9f000f8aaf0d210102398f527c6c7c7581b762e9614b8fd1656",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "4119e4c3425c3250e4c5cf8740dd12044ab27baa8aa1829157fd2c84b301e6a9",
+        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
+        ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/native_guard.py": "9bf3949f935f108c20dc22bc438d9e81f736dd194f816c5ac3b444940c284058",
         ".github/local-acceptance/nextest_guard.py": "b12d88b6d091253c83917ba2741be442e0e5134806cdc3e5d0e1fa6d6eefc0be",
-        ".github/scripts/local_acceptance.py": "1648d8fe4f74e74e86670d58f00941affb4f71430ab76ae37b4401857c0a76e4",
-        "e2e/local-acceptance/run.py": "3ed58826dea55e9ca1734af464b0cb046aff62805c082d2922c8400fdd321f8a",
+        ".github/scripts/local_acceptance.py": "f8b63718a7030658428686dd2eedac57346b4b8150b044986f12ca07766e9717",
+        "e2e/local-acceptance/run.py": "c3cdad7819bd597529e847c63945b329e451c4926a42f8fe98f38f5540ee5ac4",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
+        "e2e/local-acceptance/release_acceptance.py": "d9983bad5480673d49153ed94944593c0f07efb7db64369581d3476ff7923858",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
     }
@@ -551,7 +622,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "a952b56f180d7340b31895eb06a4edc3227303ff4b7680d475d5a8fcf8da3327":
+    if actual_scope != "ccab41b2ee59269b5df360f883c938a7914bf4a963862a8a95b5a70c63a52eca":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

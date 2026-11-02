@@ -500,9 +500,11 @@ Ungrouped sources keep `--all-targets`; disabled
 standalone test targets keep their original exclusion. Queue all-feature lint
 retains `--all-targets` for ordinary/shared changes, checking original standalone
 crate identities. Only committed isolated CLI test edits use the same native
-scope predicate: changed original targets and their canonical containing groups,
-plus all library/bin test configurations, examples and benches. Unchanged unrelated
-integration targets are not linted again for that test-only class. Missing base
+scope predicate: changed original targets and their canonical containing groups.
+Unchanged unrelated integration, library/bin test, example and bench roots are
+not linted again for that test-only class. The full workspace all-feature
+dependency graph remains; a real cross-member feature counterexample rejects
+isolated package selection that drops a required dependency feature. Missing base
 history, dirty/untracked inputs, unknown or unregistered targets retain full lint.
 `QUEUE_CLIPPY_SCOPE` reports the exact mode/reason, counts and command.
 Real Cargo/Clippy controls inject
@@ -788,8 +790,8 @@ The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful
-runs retain every feature, normal target category and `-D warnings` check;
-ordinary source changes retain all integration targets, and isolated test edits
+runs retain every feature and `-D warnings` check; ordinary source changes retain
+all target categories, and isolated test edits
 select changed originals plus their groups. An actual three-package
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and

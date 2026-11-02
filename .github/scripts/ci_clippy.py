@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def lint_plan(repository, base=None):
-    """Keep all features and normal targets; narrow only committed isolated tests."""
+    """Keep the workspace feature graph; narrow only committed isolated tests."""
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--locked", "--all-features", "--format-version", "1"],
         cwd=repository / "rust"))
@@ -52,7 +52,7 @@ def lint_plan(repository, base=None):
             if changed and set(changed) <= eligible:
                 groups = [group for group in selection["groups"] if set(group["modules"]) & set(changed)]
                 selected = sorted(set(changed) | {group["target"] for group in groups})
-                target_args = ["--lib", "--bins", "--examples", "--benches"]
+                target_args = []
                 for name in selected:
                     target_args += ["--test", name]
                 scope.update(mode="changed-cli-tests", changed_tests=changed, groups=groups,
@@ -76,8 +76,9 @@ def main():
     command += ["--", "-D", "warnings"]
     scope["command"] = command
     print("QUEUE_CLIPPY_SCOPE=" + json.dumps(scope), flush=True)
-    print("Queue lint retains all features, library/bin test configurations, examples, benches and manual-target exclusions. "
-          "Ordinary/shared inputs retain all-targets. Isolated committed CLI test edits select original targets plus "
+    print("Queue lint retains the workspace all-feature graph and manual-target exclusions. "
+          "Ordinary/shared inputs retain all-targets, including library/bin tests, examples and benches. "
+          "Isolated committed CLI test edits select original targets plus "
           "their validated groups; unchanged unrelated integration crates are omitted. No product case or timeout changes.", flush=True)
     return subprocess.call(command, cwd=repository / "rust")
 

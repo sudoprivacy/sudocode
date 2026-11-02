@@ -133,6 +133,15 @@ def run(output):
     bench.write_text('fn main() { lint_first::feature_path(); }\n')
     binary = project / "second/src/main.rs"
     binary.write_text('fn main() {}\n')
+    # A normal dependency's extra API is enabled by another workspace member.
+    # Retaining --workspace must preserve that graph even with few test roots.
+    manifest.write_text(manifest.read_text() + '\n[dependencies]\nlint-second={path="../../second"}\n')
+    third_manifest = project / "third/Cargo.toml"
+    third_manifest.write_text(third_manifest.read_text() + '\n[dependencies]\nlint-second={path="../second",features=["extra"]}\n')
+    first_library = first / "src/lib.rs"
+    first_library.write_text(first_library.read_text() + '\n#[cfg(feature="extra")]\npub fn require_shared_extra() { lint_second::feature_path(); }\n')
+    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=project, env=environment,
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def workspace_git(*arguments):
         return subprocess.check_output(["git", *arguments], cwd=project.parent, env=environment,
@@ -160,10 +169,15 @@ def run(output):
     assert scope["integration_targets_declared"] == 5, scope
     assert scope["integration_targets_before"] == 3 and scope["integration_targets_selected"] == 2, scope
     targets = {row["target"]["name"] for row in grouped["artifacts"]}
-    assert {"acceptance_first", "covered_a", "demo", "sample", "lint-second"} <= targets, targets
-    assert not {"covered_b", "unrelated", "manual_driver"} & targets, targets
+    assert {"acceptance_first", "covered_a", "lint_first", "lint_second"} <= targets, targets
+    assert not {"covered_b", "unrelated", "manual_driver", "demo", "sample", "lint-second", "lint_third"} & targets, targets
     assert all("extra" in row["features"] for row in grouped["artifacts"]), grouped
     assert {row["profile"]["test"] for row in grouped["artifacts"]} == {False, True}, grouped
+    wrong_package = invoke("lost-workspace-feature-refused",
+        ["cargo", "clippy", "--locked", "-p", "lint-first", "--all-features", "--test", "covered_a",
+         "--message-format=json", "--", "-D", "warnings"], output / "fast-target")
+    assert wrong_package["exit_code"] != 0, wrong_package
+    assert "feature_path" in (output / "lost-workspace-feature-refused.stdout.log").read_text(encoding="utf-8")
 
     # Inspect real old/new compiler artifacts: declaration count alone includes
     # disabled groups/manual drivers and overstates the former lint inventory.
@@ -268,6 +282,7 @@ def run(output):
               "original_all_targets": original_targets, "grouped_manual_excluded": manual_excluded,
               "ordinary_full_targets": ordinary, "unavailable_base": unavailable,
               "dirty_worktree_full_targets": dirty,
+              "isolated_package_loses_required_feature": wrong_package,
               "real_git_selections": selections,
               "scope": "Actual Git/workflow/Cargo/Clippy processes. Isolated originals plus groups, ordinary/shared/full fallback, all-feature first-error behavior, examples/benches/lib-bin test configurations and manual exclusions are exercised. Only unchanged unrelated integration targets are omitted for isolated committed CLI test edits. Infrastructure only; no product PTY or production latency credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

@@ -784,9 +784,11 @@ three-platform comparison on identical Rust inputs took 353 seconds versus
 348 seconds before, so it did not establish a time saving. Ordinary/shared
 source changes retain <code>--all-targets</code>. Committed isolated CLI test
 edits reuse the native selector and canonical wrapper validator: changed
-original targets and containing groups, with all features, library/bin test
-configurations, examples and benches retained. Unchanged unrelated integration
-targets are omitted only for this class. Missing base history, dirty/untracked
+original targets and containing groups, with the full workspace all-feature
+dependency graph retained. Unchanged unrelated integration, library/bin test,
+example and bench roots are omitted only for this class. A real cross-member
+feature counterexample rejects a package-only command that loses the required
+dependency feature. Missing base history, dirty/untracked
 inputs, unknown or unregistered targets retain full lint. Invalid wrappers fail.
 The three manual <code>test=false</code> drivers retain Cargo's prior exclusion.
 Required <code>QUEUE_CLIPPY_SCOPE</code> output reports mode, reason, counts and

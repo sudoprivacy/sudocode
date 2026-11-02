@@ -167,6 +167,35 @@ fn send_calls(env: &TestEnv, session: &mut PtySession, calls: &[Value]) {
     session.send("\r").unwrap();
 }
 
+fn assert_tools_dispatched_once(env: &TestEnv, expected: usize) {
+    if !env.is_mock() {
+        return;
+    }
+    let mut observed = 0;
+    for body in env.captured_message_bodies() {
+        let request: Value = serde_json::from_str(&body).unwrap();
+        let blocks = wire_requests::request_tool_blocks(&request);
+        let ids = blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.len(),
+            ids.iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "a checkpoint must not replay tools completed earlier in this batch"
+        );
+        observed = observed.max(ids.len());
+    }
+    assert_eq!(
+        observed, expected,
+        "every requested task was dispatched once"
+    );
+}
+
 fn shell(id: &str, command: &str, description: &str) -> Value {
     json!({"id":id,"name":"Bash","input":{"command":command,"description":description,"run_in_background":true}})
 }
@@ -1375,4 +1404,5 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
     );
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
+    assert_tools_dispatched_once(&env, calls.len() + 2);
 }

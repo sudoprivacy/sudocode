@@ -717,11 +717,19 @@ the footer entry disappears. Existing `/tasks list|get|stop` commands remain
 available for persisted agent manifests.
 
 Shell details update while the parent is idle and include stdout/stderr,
-elapsed time, status, and the actual exit code. The preview retains at most
+labelled runtime, status, and the actual exit code. Long commands wrap across
+up to three preview rows. Output sits in a theme-colored frame that shrinks
+with the terminal; its row range refers to the wrapped, retained output tail.
+Internal blank lines and output colors are preserved, and the stop hint only
+appears for active tasks. The preview retains at most
 24 KiB per task; complete shell output is stored in the private temporary log
 shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
 directory after completion. The session retains at most 50 completed tasks
-in memory. Agent details show current activity and recent output, then their
+in memory, plus active work. The list shows its current entry count; the oldest
+ended tasks leave it automatically as newer tasks finish, without a restart.
+There is no age-based expiration within this limit. This does not delete their
+complete logs. Agent details use the same layout,
+showing current activity and recent output, then their
 final result. These are tasks owned by this session, not a view of other agents
 on the machine.
 

@@ -163,7 +163,7 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
 }
 
 impl ColorSupport {
-    fn color(self, color: Color) -> Color {
+    pub(crate) fn color(self, color: Color) -> Color {
         match (self, color) {
             (Self::NoColor, _) => Color::Reset,
             (Self::Ansi16, Color::Rgb { .. }) => Color::Reset,

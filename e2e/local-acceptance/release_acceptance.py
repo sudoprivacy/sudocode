@@ -71,6 +71,65 @@ def color_environment(output):
     return records
 
 
+def service_graph(profiles, root, output, target, execute, driver):
+    """Exercise Cargo freshness and native dispatch; RPC coverage stays in the real journeys."""
+    scripts = root / "e2e/shared-services"
+    scripts.mkdir(parents=True)
+    process = '''import argparse, json, subprocess
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('--scode', type=Path, required=True)
+p.add_argument('--artifacts', type=Path, required=True)
+p.add_argument('--grpcurl')
+a = p.parse_args()
+actual = subprocess.check_output([str(a.scode), 'service-graph-probe'], text=True).strip()
+assert actual == 'debug=true,flavor=dev,mailbox=true', actual
+a.artifacts.mkdir(parents=True)
+(a.artifacts / 'native-child.json').write_text(json.dumps({'actual': actual}))
+'''
+    for name in ["run.py", "existing_box.py"]:
+        (scripts / name).write_text(process, encoding="utf-8")
+    bash = root / "e2e/nexus-a2a"
+    bash.mkdir(parents=True)
+    # This fixture tests native artifact selection, not gRPC. The real profile
+    # separately runs both unchanged private-Node journeys before publication.
+    (bash / "lib.sh").write_text('grpcurl_bin() { printf fixture-unused-rpc; }\n'
+                                'native_path() { printf "%s" "$1"; }\n', encoding="utf-8")
+    binary = target / "debug" / ("scode.exe" if os.name == "nt" else "scode")
+    before = [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
+    records = profiles.run("native-services", root, output / "services", "fixture-base", execute)
+    assert len(records) == 3, "Cargo verification and both service processes remain required"
+    assert "Compiling " not in (output / "services/000.log").read_text(encoding="utf-8")
+    assert before == [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
+    for name in ["services", "existing-box"]:
+        assert json.loads((output / "services" / name / "native-child.json").read_text())["actual"] == (
+            "debug=true,flavor=dev,mailbox=true")
+    previous = os.environ["CARGO_TARGET_DIR"]
+    try:
+        os.environ["CARGO_TARGET_DIR"] = str(output / "standalone-target")
+        standalone = profiles.run("native-services", root, output / "standalone", "fixture-base", execute)
+    finally:
+        os.environ["CARGO_TARGET_DIR"] = previous
+    assert len(standalone) == 3
+    assert "Compiling " in (output / "standalone/000.log").read_text(encoding="utf-8")
+    source = root / "rust/src/main.rs"
+    original = source.read_bytes()
+    try:
+        source.write_bytes(original + b'\ncompile_error!("changed candidate must rebuild before services");\n')
+        try:
+            profiles.run("native-services", root, output / "stale", "fixture-base", execute)
+            raise AssertionError("A stale existing binary hid invalid current source")
+        except RuntimeError:
+            failure = json.loads((output / "stale/000.command.json").read_text(encoding="utf-8"))
+            assert failure["exit_code"] == 101, failure
+            assert "changed candidate must rebuild before services" in (output / "stale/000.log").read_text(encoding="utf-8")
+            assert not (output / "stale/001.log").exists(), "Services ran before current-source compilation succeeded"
+    finally:
+        source.write_bytes(original)
+    return {"warm_commands": records, "standalone_commands": standalone,
+            "same_binary_and_driver": before, "stale_source_exit": failure["exit_code"]}
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     profiles = load("release_profiles", SOURCE / ".github/local-acceptance/checks.py")
@@ -95,6 +154,11 @@ engine-acp={path="engine-acp"}
 shared-support={path="support",features=["dev"]}
 ''',
         "rust/src/main.rs": '''fn main() {
+    if std::env::args().nth(1).as_deref() == Some("service-graph-probe") {
+        println!("debug={},flavor={},mailbox={}", cfg!(debug_assertions),
+            shared_support::flavor(), engine_acp::MAILBOX);
+        return;
+    }
     let structured = std::env::args().nth(1).as_deref() == Some("version");
     if std::env::var_os("SCODE_TRACE_STARTUP").is_some() {
         eprintln!("startup phase=console elapsed_us=1 cumulative_us=1");
@@ -189,13 +253,24 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         negative = json.loads((output / "wrong-artifact.command.json").read_text(encoding="utf-8"))
         assert negative["exit_code"] == 101, negative
         assert "debug=true,flavor=dev" in (output / "wrong-artifact.log").read_text(encoding="utf-8")
+    os.environ["CARGO_TARGET_DIR"] = str(target)
+    try:
+        services = service_graph(profiles, root, output, target, execute, driver)
+    finally:
+        if previous is None:
+            os.environ.pop("CARGO_TARGET_DIR", None)
+        else:
+            os.environ["CARGO_TARGET_DIR"] = previous
     color_records = color_environment(output / "color-environment")
     (output / "result.json").write_text(json.dumps({
         "status": "PASS", "commands": commands, "release_sha256": digest,
         "color_environment_commands": color_records,
+        "service_graph": services,
         "driver_sha256": before[1], "startup": startup_report,
         "scope": "Real Cargo/native release executor fixture; not product PTY or provider coverage."}, indent=2), encoding="utf-8")
-    print(f"PASS: normal release child, reused driver, startup budget, wrong-artifact refusal and inherited/explicit color settings after Cargo/SDK setup; {output}", flush=True)
+    print(f"PASS: normal release child, reused driver, startup budget, wrong-artifact refusal, "
+          f"service graph reuse/standalone/stale-source guards and inherited/explicit color settings "
+          f"after Cargo/SDK setup; {output}", flush=True)
 
 
 if __name__ == "__main__":

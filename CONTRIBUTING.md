@@ -702,6 +702,20 @@ regressions and every selected terminal test still run. Completed resize
 checkpoints are reused without another preparation step. This changes failure
 ordering, not test coverage or deadlines.
 
+Native service journeys use the workspace's dev/mailbox feature graph. Cargo
+verifies or builds the `pty_model_stream_close` driver with `--no-run`, then
+the two original Python service harnesses launch the resulting debug `scode`.
+This avoids switching back to a separate normal dependency graph after workspace
+acceptance. It also builds correctly when run alone and refuses stale binaries
+when current source fails compilation. No driver tests execute twice. Service
+cases, RPCs, deadlines and cleanup stay unchanged; these journeys no longer
+cover the standalone default-feature debug graph. Selected normal release
+acceptance retains its separate product graph. The mandatory executor output
+prints this scope, and its real Cargo/native-process fixture checks warm reuse,
+standalone construction and refusal before services when current source fails.
+Both service harnesses use the executor's explicit Python interpreter, including
+the Git Bash call; an unversioned `python` alias is not required on Linux.
+
 `spec/local_acceptance.json` selects required targets, and the protected runner's
 `acceptance_plan` drives both the hook and CI. Push output and CI summaries print
 the local/CI responsibilities and an `ACCEPTANCE_PLAN` JSON record. The signed

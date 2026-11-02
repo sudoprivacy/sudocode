@@ -472,7 +472,14 @@ def run(name, root, output, base, execute):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                     "--report", str(output / "startup.json"))
     elif name == "native-services":
-        cargo("build", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
+        # Cargo's test graph unifies dev-dependency features. A normal build
+        # after workspace tests recompiles the CLI and its shared dependencies.
+        # Keep Cargo's freshness check, without executing the driver twice.
+        print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
+              "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
+              "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
+        cargo("test", "--no-run", "--locked", "-p", "rusty-sudocode-cli",
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
@@ -481,8 +488,8 @@ def run(name, root, output, base, execute):
         if not bash:
             raise RuntimeError("Git Bash is required for shared-service credential acceptance")
         command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                'python e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"))
+                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
+                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -572,7 +579,7 @@ def native_guard_files():
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
+        "e2e/local-acceptance/release_acceptance.py": "d9983bad5480673d49153ed94944593c0f07efb7db64369581d3476ff7923858",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
     }

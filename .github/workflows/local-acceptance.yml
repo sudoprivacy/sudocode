@@ -27,6 +27,7 @@ jobs:
       needed: ${{ steps.proof.outputs.needed }}
       matrix: ${{ steps.proof.outputs.matrix }}
       policy_ref: ${{ steps.proof.outputs.policy_ref }}
+      base_sha: ${{ steps.proof.outputs.base_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,7 +105,7 @@ jobs:
       - name: Run the same native commands on the missing platform
         env:
           ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
-          ACCEPTANCE_BASE: ${{ github.event.pull_request.base.sha }}
+          ACCEPTANCE_BASE: ${{ needs.proof.outputs.base_sha }}
           ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
         run: python ../.trusted-acceptance/.github/local-acceptance/cross_platform.py
       - uses: actions/upload-artifact@v4

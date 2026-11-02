@@ -274,6 +274,13 @@ Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runti
 refusal; they add no product journey credit. The actual cache footprint and
 cold/warm product timings must be measured before claiming a lifecycle saving.
 
+The PR proof and completed-run publisher verify against their frozen checkout of
+protected main. A PR API or event base SHA can lag that branch. The verified
+receipt's actual merge base drives the complementary hosts as well; those jobs
+do not independently select a base from the event. Queue verification retains
+the merge group's exact base. Git/SSH/process acceptance covers stale API bases
+and refuses a signed receipt for the wrong actual base.
+
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
 while its profiles run; a second invocation prints the holder from

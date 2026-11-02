@@ -503,10 +503,10 @@ def plan_acceptance(directory):
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
 
 
-def enforcement_acceptance(*, profile_compat_only=False):
+def enforcement_acceptance(*, profile_compat_only=False, publication_only=False):
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
-        if not profile_compat_only:
+        if not profile_compat_only and not publication_only:
             scope_acceptance(directory)
             performance_scope_acceptance(directory)
             plan_acceptance(directory)
@@ -614,6 +614,14 @@ def enforcement_acceptance(*, profile_compat_only=False):
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
         assert len(receipt['checks']['real-process']) == 2
         assert receipt['checks']['real-process'][1]['exit_code'] == 0
+
+        if not profile_compat_only:
+            from publication_acceptance import verify_publication
+            verify_publication(directory, work, FIXTURE_ENV)
+            if publication_only:
+                print("TARGETED_PUBLICATION_ONLY: actual publisher/HTTP/Git/SSH checked; "
+                      "remaining scopes were not run. This is not full acceptance.")
+                return
 
         from profile_compat_acceptance import verify_profile_compatibility
         verify_profile_compatibility(directory, work, command)
@@ -754,11 +762,14 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-child", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--profile-compat-only", action="store_true",
+    partial = parser.add_mutually_exclusive_group()
+    partial.add_argument("--profile-compat-only", action="store_true",
                         help="Debug real profile Git/SSH compatibility only; not full acceptance")
+    partial.add_argument("--publication-only", action="store_true",
+                         help="Debug actual publisher/HTTP/Git/SSH ordering only; not full acceptance")
     args = parser.parse_args()
     if args.fixture_child:
-        enforcement_acceptance(profile_compat_only=args.profile_compat_only)
+        enforcement_acceptance(profile_compat_only=args.profile_compat_only, publication_only=args.publication_only)
         return
     with tempfile.TemporaryDirectory(prefix="scode-hook-parent-") as temporary:
         parent = Path(temporary)
@@ -777,6 +788,8 @@ def main():
         child = [sys.executable, str(Path(__file__).resolve()), "--fixture-child"]
         if args.profile_compat_only:
             child.append("--profile-compat-only")
+        elif args.publication_only:
+            child.append("--publication-only")
         result = subprocess.run(child,
                                 cwd=parent, env=environment)
         assert result.returncode == 0, "Acceptance failed with a real inherited hook environment"

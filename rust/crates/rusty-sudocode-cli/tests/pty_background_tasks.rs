@@ -200,6 +200,29 @@ fn shell(id: &str, command: &str, description: &str) -> Value {
     json!({"id":id,"name":"Bash","input":{"command":command,"description":description,"run_in_background":true}})
 }
 
+/// The full-output path in the open details of a task whose output shows `text`.
+fn details_log_path(session: &PtySession, text: &str) -> String {
+    // The output rows and the full-output path render in one frame, but a
+    // screen read under load can land before the frame is completely written.
+    let full_output = |view: &str| {
+        view.lines()
+            .find_map(|line| line.trim().strip_prefix("Full output: "))
+            .filter(|path| {
+                std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|ext| ext == "log")
+            })
+            .map(str::to_string)
+    };
+    let view = common::expect_screen_rows(
+        session,
+        |view| view.contains(text) && full_output(view).is_some(),
+        Duration::from_secs(90),
+        "task details with the full output path",
+    );
+    full_output(&view).unwrap()
+}
+
 fn screen(session: &PtySession, text: &str) -> String {
     screen_with_budget(session, text, Duration::from_secs(90))
 }
@@ -1248,11 +1271,8 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
             .any(|line| line.trim() == "FIRST_LOG_EVIDENCE"),
         "preview is a tail, not an unbounded log"
     );
-    let path = panel
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Full output: "))
-        .unwrap();
-    let path = std::path::Path::new(path);
+    let path = details_log_path(&session, "  LAST_LOG_EVIDENCE");
+    let path = std::path::Path::new(&path);
     assert_eq!(
         path.parent().unwrap().canonicalize().unwrap(),
         std::env::temp_dir()
@@ -1327,12 +1347,7 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
     session.send("/ps\r").unwrap();
     screen(&session, "2 in this session");
     session.send("\x1b[B\r").unwrap();
-    let old = screen(&session, "  OLD_TASK_LOG");
-    let log = old
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Full output: "))
-        .unwrap()
-        .to_string();
+    let log = details_log_path(&session, "  OLD_TASK_LOG");
     // Keep the old task selected, but return control to the ordinary prompt.
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");

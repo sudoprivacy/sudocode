@@ -654,6 +654,16 @@ real Git/Cargo/native guards model an extra workspace member and verify both
 full and isolated modes. Normal release product builds keep their original
 graph. This changes dependency-graph reuse, without adding product journey
 credit or reducing any selected terminal case or performance budget.</p>
+<p><strong>Drain PTY teardown without waiting for its own master (2026-11-02).</strong>
+The pinned <code>pty-expect</code> revision closes the master after terminating
+and reaping the child, then joins the independent reader. Previously an active
+Windows ConPTY exhausted its 500 ms reaper budget while retaining the handle
+that kept its output open. Five real Windows samples fell from 506–510 ms to
+10.5–11.0 ms. The existing cleanup budget and child ownership rules remain.
+The upstream three-platform native suite, final-output integrity, child reaping
+and macOS fresh-controller regressions passed. A new Windows regression rejects
+waiting out the reaper budget on every sample. It protects the test harness;
+it adds no product journey credit and does not establish a whole-suite speedup.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -1053,6 +1063,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Existing terminal cases count once. Git/Cargo/process scope and warm
       artifact guards add no product journey credit.</td>
       <td><code>native-resize</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native PTY disposal</td>
+      <td>Real Windows ConPTY teardown releases the master before waiting for
+      its reader. The upstream three-platform suite retains final-output,
+      child-reaping and concurrent lifecycle checks, including fresh macOS
+      controllers. The existing 500 ms reaper budget remains.</td>
+      <td>Native harness regression only; existing scode journeys count once.
+      A Windows five-sample latency check rejects the previous mandatory wait.
+      No assertion, deadline or selected product case is removed.</td>
+      <td><code>pty-expect/tests/drop_drain.rs</code> / upstream three-platform CI</td>
     </tr>
     <tr>
       <td>Native service lifecycle and artifact selection</td>

@@ -142,7 +142,7 @@ p.mkdir(parents=True, exist_ok=True)
 '''
     for name in ["setup_windows.py", "check_windows_setup.py"]:
         (terminal / name).write_text(installer, encoding="utf-8")
-    names = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback", "pty_codex_colors"]
+    names = profiles.native_resize_test_targets(windows=False)
     tests = root / "rust/crates/rusty-sudocode-cli/tests"
     tests.mkdir(parents=True)
     manifest = root / "rust/Cargo.toml"
@@ -221,7 +221,7 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
         if os.name == "nt":
             assert (directory / "markers/setup_windows").exists(), "Real setup selection was removed"
         commands = [row for row in requested if row[0] == "cargo"]
-        expected = names[:3] if os.name == "nt" else names
+        expected = profiles.native_resize_test_targets(windows=os.name == "nt")
         assert [row[row.index("--test") + 1] for row in commands] == expected
         for row in commands:
             assert ("--workspace" in row) != isolated, row

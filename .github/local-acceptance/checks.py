@@ -148,6 +148,14 @@ def native_cli_test_package_args(root, base):
     return arguments
 
 
+def native_resize_test_targets(*, windows):
+    """Share the real terminal target inventory with its Cargo graph guard."""
+    targets = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
+    if not windows:
+        targets.append("pty_codex_colors")
+    return targets
+
+
 def test_group_source(names):
     """Keep opt-in wrappers declarative so selection cannot hide extra Rust code."""
     return ("//! Opt-in acceptance target; original individual Cargo test targets stay available.\n\n"
@@ -490,9 +498,7 @@ def run(name, root, output, base, execute):
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
-        if os.name != "nt":
-            tests.append("pty_codex_colors")
+        tests = native_resize_test_targets(windows=os.name == "nt")
         print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
               "all selected ignored cases and original budgets remain. The standalone default-feature "
               "debug graph is outside this profile's coverage.", flush=True)
@@ -620,7 +626,7 @@ def native_guard_files():
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/release_acceptance.py": "8c0b83871b77061719df08145fb7be1adf141453100d7178af51e73b940f9f35",
+        "e2e/local-acceptance/release_acceptance.py": "16798841782cf0044d5d37a3d4238709451e54d5ff5dc4e047dc709f5b7b266c",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/run.py": "8ee09e4d81727d152a25b3fa3f6c58e5617684739577c091ad816688464d17b0",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",

@@ -89,6 +89,61 @@ fn expect_finalized_with_draft(session: &PtySession, marker: &str, draft: &str) 
 }
 
 #[test]
+fn control_bearing_markdown_preserves_preview_history_and_draft() {
+    for cols in [120, 48] {
+        let env = TestEnv::new_mock("prose-source-controls");
+        let mut session = start(&env, cols);
+        let marker = common::turn_status_marker(&session);
+        let prompt = common::terminal_host::prose_prompt(
+            &env,
+            "ProseStart before \x1b[2Jafter \x1b[31mControlToken\x1b[0m and **bold words**. ProseDone.",
+            serde_json::json!({"chunk_chars": 1, "delay_ms": 2}),
+        );
+        session.send(&format!("{prompt}\r")).unwrap();
+        common::expect_screen(
+            &session,
+            |screen| {
+                screen.contains("ProseStart before after ControlToken")
+                    && screen.contains("ProseDone.")
+                    && env.workspace_root().join("prose-ready").exists()
+            },
+            common::DEFAULT_TIMEOUT,
+            "split source controls do not erase or color the live preview",
+        );
+        session.send(HANDOFF_DRAFT).unwrap();
+        common::expect_input_line(
+            &session,
+            HANDOFF_DRAFT,
+            common::DEFAULT_TIMEOUT,
+            "draft remains available during control-bearing prose",
+        );
+        let before = body_rows(&session);
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        expect_finalized_with_draft(&session, &marker, HANDOFF_DRAFT);
+        assert_eq!(
+            before,
+            body_rows(&session),
+            "control decoding survives handoff"
+        );
+        session.render(|screen| {
+            let raw = screen.raw();
+            let (row, text) = raw
+                .rows(0, raw.size().1)
+                .enumerate()
+                .find(|(_, text)| text.contains("ControlToken"))
+                .expect("control-bearing token remains visible");
+            let col = text.find("ControlToken").unwrap();
+            let cell = raw
+                .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
+                .unwrap();
+            assert_eq!(format!("{:?}", cell.fgcolor()), "Default");
+            assert!(!cell.bold(), "source SGR must not replace Markdown styles");
+        });
+        finish(&mut session);
+    }
+}
+
+#[test]
 fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
     for cols in [120, 48] {
         let env = TestEnv::new_mock("prose-handoff");

@@ -719,7 +719,11 @@ impl TerminalRenderer {
         markdown: &str,
         width: usize,
     ) -> StyledText {
-        let normalized = normalize_nested_fences(markdown);
+        // Markdown is external source, not terminal instructions. Decode only
+        // control-bearing input; owned styles stay structured after this seam.
+        let plain =
+            StyledText::needs_decoding(markdown).then(|| StyledText::from_ansi(markdown).text);
+        let normalized = normalize_nested_fences(plain.as_deref().unwrap_or(markdown));
         let mut output = StyledText::default();
         let mut state = RenderState {
             max_width: width.max(1),

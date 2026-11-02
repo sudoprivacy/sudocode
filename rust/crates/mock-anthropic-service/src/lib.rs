@@ -574,11 +574,8 @@ async fn handle_connection(
         raw_body,
     });
 
-    if scenario == Scenario::ToolConcurrency
-        && request.stream
-        && !concurrency_batch_complete(&request)
-    {
-        let calls = concurrency_calls(&request);
+    if scenario == Scenario::ToolConcurrency && request.stream {
+        let calls = remaining_concurrency_calls(&request);
         if calls.iter().any(|call| call.stream_wait_for.is_some()) {
             return stream_gated_concurrency(&mut socket, &request, scenario, &calls).await;
         }
@@ -996,10 +993,15 @@ fn concurrency_prelude(calls: &[ConcurrencyCall]) -> Option<&str> {
     calls.iter().find_map(|call| call.stream_prelude.as_deref())
 }
 
-fn concurrency_batch_complete(request: &MessageRequest) -> bool {
-    concurrency_calls(request).iter().all(|call| current_turn_blocks(request).any(|block| {
+/// Batch calls without a result in the current turn. A runtime that yields to
+/// new input mid-response keeps the calls it already admitted, so the next
+/// sample continues with only the rest, as a provider would.
+fn remaining_concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
+    let mut calls = concurrency_calls(request);
+    calls.retain(|call| !current_turn_blocks(request).any(|block| {
         matches!(block, InputContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.id)
-    }))
+    }));
+    calls
 }
 
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
@@ -1899,10 +1901,10 @@ fn stream_spinner_activity(_request: &MessageRequest, _scenario: Scenario) -> St
 }
 
 fn stream_tool_concurrency(request: &MessageRequest, _scenario: Scenario) -> String {
-    if concurrency_batch_complete(request) {
+    let calls = remaining_concurrency_calls(request);
+    if calls.is_empty() {
         final_text_sse("Concurrency batch done.")
     } else {
-        let calls = concurrency_calls(request);
         let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
         let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
         let uses: Vec<_> = calls
@@ -2648,10 +2650,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             "progress progress progress progress progress resumed",
         ),
         Scenario::ToolConcurrency => {
-            if concurrency_batch_complete(request) {
+            let calls = remaining_concurrency_calls(request);
+            if calls.is_empty() {
                 text_message_response("msg_concurrency_done", "Concurrency batch done.")
             } else {
-                let calls = concurrency_calls(request);
                 let uses: Vec<_> = calls
                     .iter()
                     .map(|call| ToolUseMessage {

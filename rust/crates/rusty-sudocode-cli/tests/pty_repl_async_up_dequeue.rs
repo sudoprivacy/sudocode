@@ -54,12 +54,18 @@ fn up_arrow_on_empty_buffer_dequeues_last_queued_input() {
     sess.send("\x1b[A").expect("send Up-arrow key sequence");
 
     // The queue already emitted MARKER. Read the current input row so stale
-    // PTY bytes cannot stand in for a successful dequeue.
-    common::expect_input_line(
+    // PTY bytes cannot stand in for a successful dequeue. The queued chip must
+    // also disappear: copying into the draft would submit the same input twice.
+    common::expect_screen(
         &sess,
-        MARKER,
+        |screen| {
+            common::input_line_of(screen) == MARKER
+                && !screen
+                    .lines()
+                    .any(|line| line.contains("↳ queued:") && line.contains(MARKER))
+        },
         common::DEFAULT_TIMEOUT,
-        "Up recalls the queued marker into the input row",
+        "Up moves the queued marker into the input row and removes its queued chip",
     );
 
     // Clear the recalled draft first; otherwise /exit becomes steering input

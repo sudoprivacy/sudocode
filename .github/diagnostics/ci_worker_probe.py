@@ -32,6 +32,15 @@ def object_json(path, key):
     raise RuntimeError(f"No actual {key} JSON in {path}")
 
 
+def successful_summary(text, active, ignored):
+    """Require complete success while allowing nextest's informational slow count."""
+    return re.search(
+        rf"Summary\s+\[\s*([\d.]+)s\]\s+{active} tests run: {active} passed"
+        rf"(?: \(\d+ slow\))?, {ignored} skipped\s*$", text,
+        flags=re.MULTILINE,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
@@ -46,11 +55,13 @@ def main():
     target = Path(layout.resolve(Path(os.environ["GITHUB_WORKSPACE"]), root / "rust")["target"])
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     assert subprocess.check_output(["git", "status", "--porcelain"], cwd=root) == b""
-    environment = {"SCODE_TEST_BACKEND": "mock", "CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "1"}
+    environment = {"SCODE_TEST_BACKEND": "mock", "CARGO_TARGET_DIR": str(target),
+                   "CARGO_BUILD_JOBS": str((os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1)}
     record = {"head": head, "started_at": datetime.now(timezone.utc).isoformat(),
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
-              "baseline_run": 41450784797, "baseline_job": 125295385686,
-              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Reuse the already-required same-source Mac four-worker CI as baseline instead of repeating it. Different VMs: timings are observations, not a controlled causal speedup. No acceptance signature or paid API call."}
+              "baseline_run": 41450784797,
+              "baseline_job": 125295385626 if platform.system() == "Linux" else None,
+              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Reuse already-required same-source four-worker CI where available instead of repeating it. Different VMs: timings are observations, not a controlled causal speedup. Windows has no same-source four-worker baseline. No acceptance signature or paid API call."}
     started = time.monotonic()
 
     def invoke(command, log):
@@ -60,6 +71,9 @@ def main():
         return {str(path): hashlib.file_digest(path.open("rb"), "sha256").hexdigest() for path in sorted(paths)}
 
     try:
+        if os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true":
+            invoke(["netsh", "int", "ipv4", "set", "dynamicport", "tcp", "start=10000", "num=55535"],
+                   "host-setup.log")
         tool = checks.nextest_binary(output)
         record["nextest"] = str(tool)
         invoke(["cargo", "metadata", "--format-version=1", "--locked", "--features", "engine-acp/mailbox"], "metadata.log")
@@ -91,8 +105,9 @@ def main():
                     ignored += 1
                 else:
                     expected.add((identity, name))
-        # Captured83c735 had1139 active/72 ignored; the source adds two HTTP cases.
-        assert len(expected) == 1141 and ignored == 72, (len(expected), ignored)
+        # Bind this private field to the actual platform inventories of eaae424.
+        inventories = {"Darwin": (1141, 72), "Linux": (1151, 73), "Windows": (1092, 69)}
+        assert (len(expected), ignored) == inventories[platform.system()], (len(expected), ignored)
         paths = set()
 
         def collect(value):
@@ -110,6 +125,7 @@ def main():
         collect(binaries)
         paths.add(target / "debug" / ("scode.exe" if os.name == "nt" else "scode"))
         paths.update((target / "debug/deps").glob("*.dylib"))
+        paths.update((target / "debug/deps").glob("*.dll"))
         assert len(paths) >= 80, len(paths)
         before = hashes(paths)
         record["binary_hashes"] = before
@@ -118,16 +134,23 @@ def main():
         actual_sets = []
         for workers in [8]:
             print(f"REAL_WORKER_FIELD workers={workers} cases={len(expected)} ignored={ignored}", flush=True)
-            row = invoke([str(tool), "nextest", "run", "--config-file", str(config), "--profile", "default",
-                          "--ignore-default-filter", "--test-threads", str(workers), "--retries", "0",
-                          "--max-fail", "1:wait", "--no-tests", "fail", *reused], f"workers-{workers}.log")
+            try:
+                row = invoke([str(tool), "nextest", "run", "--config-file", str(config), "--profile", "default",
+                              "--ignore-default-filter", "--test-threads", str(workers), "--retries", "0",
+                              "--max-fail", "1:wait", "--no-tests", "fail", *reused], f"workers-{workers}.log")
+            finally:
+                record["binary_hashes_after"] = hashes(paths)
+            phase = {"workers": workers, **row}
+            record["phases"].append(phase)
+            (output / "partial-result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", (output / f"workers-{workers}.log").read_text(encoding="utf-8", errors="replace"))
             cases = {(m[1], m[2]) for m in re.finditer(r"\bPASS\s+\[\s*[\d.]+s\]\s+\(\s*\d+/\d+\)\s+(\S+)\s+([^\r\n]+)", text)}
             assert cases == expected, {"missing": sorted(expected - cases), "extra": sorted(cases - expected)}
-            assert re.search(rf"{len(expected)} tests run: {len(expected)} passed, {ignored} skipped", text), text[-1500:]
-            assert hashes(paths) == before, "A measured binary changed"
+            summary = successful_summary(text, len(expected), ignored)
+            assert summary, text[-1500:]
+            assert record["binary_hashes_after"] == before, "A measured binary changed"
             actual_sets.append(cases)
-            record["phases"].append({"workers": workers, "cases": len(cases), **row})
+            phase.update(cases=len(cases), test_seconds=float(summary[1]))
             (output / "partial-result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             print(f"REAL_WORKER_RESULT workers={workers} seconds={row['elapsed_seconds']}", flush=True)
         assert actual_sets == [expected]
@@ -140,7 +163,7 @@ def main():
     finally:
         record.update(seconds=time.monotonic() - started, finished_at=datetime.now(timezone.utc).isoformat())
         (output / "result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
-        print(json.dumps({key: value for key, value in record.items() if key not in {"binary_hashes", "target_selection"}}), flush=True)
+        print(json.dumps({key: value for key, value in record.items() if key not in {"binary_hashes", "binary_hashes_after", "target_selection"}}), flush=True)
 
 
 if __name__ == "__main__":

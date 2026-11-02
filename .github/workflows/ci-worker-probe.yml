@@ -9,7 +9,11 @@ permissions:
 
 jobs:
   measure:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
@@ -52,7 +56,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-workers-macos-eight
+          name: native-workers-${{ matrix.os }}-eight
           path: ${{ runner.temp }}/native-workers
           if-no-files-found: error
           retention-days: 7

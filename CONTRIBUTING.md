@@ -339,6 +339,10 @@ streaming, the prompt viewport scrolls and selects, and an idle terminal receive
 no output. Measurement-only inputs (`benchmark.py`, `performance-policy.json`,
 `gui-smoke.py`, `gui-policy.json` and the retired `gui-benchmark.py`) do not select
 the native workspace or resize suites, which never execute them.
+The GUI controller, its Python import and sampling policy travel with the runner
+from the frozen protected policy. Older candidate snapshots do not need to contain
+new acceptance scripts; the CLI and native browser drivers still come from the
+candidate. No baseline or full trusted source checkout is added to browser runs.
 When rendering precedes browser smoke in the same acceptance process, browser
 reuses its immutable Docker image and copied normal release. The key binds the
 output namespace, candidate, protected policy and image context; the consumer

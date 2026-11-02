@@ -793,6 +793,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
+    if name == "browser":
+        # The executor owns this harness, including for candidates that predate
+        # it. Stage only its Python imports/policy, not another source checkout.
+        for relative in ["e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/benchmark.py",
+                         "e2e/terminal-resize/gui-policy.json"]:
+            path = sources / "runner" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
@@ -1170,7 +1178,8 @@ def browser_smoke(inputs, output, command):
                   "-p", package, "--test", links, "--test", viewport,
                   "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
-    command(sys.executable, str(terminal / "gui-smoke.py"), "--driver", drivers[links],
+    smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
+    command(sys.executable, str(smoke), "--driver", drivers[links],
             "--candidate", str(binary), "--output", str(output / "smoke"),
             extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
                    "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})

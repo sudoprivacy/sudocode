@@ -16,7 +16,7 @@ use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedThemeName;
 
 use super::styled_text::StyledText;
-use super::{color_math, terminal_palette, ColorSupport, TextRole};
+use super::{color_math, ColorSupport};
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
@@ -40,27 +40,21 @@ pub(super) fn theme(light: bool) -> &'static Theme {
     selected.get_or_init(|| with_theme(light, Clone::clone))
 }
 
-/// UI accents come from the same syntax asset, resolved together without
-/// retaining an unused grammar catalog or every embedded theme in memory.
-pub(super) fn role_color(role: TextRole, light: bool, support: ColorSupport) -> Color {
+/// Raw syntax assets; UI roles and terminal fallbacks belong to ColorTheme.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(super) enum SyntaxAccent {
+    Inline,
+    Type,
+    String,
+    Number,
+    Function,
+}
+
+pub(super) fn accent(kind: SyntaxAccent, light: bool) -> Option<(u8, u8, u8)> {
     type Accents = [Option<syntect::highlighting::Color>; 5];
     static DARK: OnceLock<Accents> = OnceLock::new();
     static LIGHT: OnceLock<Accents> = OnceLock::new();
-
-    let (index, fallback) = match role {
-        TextRole::Code => (0, Color::Reset),
-        TextRole::Model => (1, Color::DarkCyan),
-        TextRole::Path => (2, Color::DarkGreen),
-        TextRole::Usage => (3, Color::DarkGreen),
-        TextRole::Branch => (4, Color::DarkBlue),
-        _ => unreachable!("only syntax-backed roles enter the syntax adapter"),
-    };
-    if support == ColorSupport::NoColor {
-        return Color::Reset;
-    }
-    if support == ColorSupport::Ansi16 {
-        return fallback;
-    }
     let colors = if light { &LIGHT } else { &DARK }.get_or_init(|| {
         with_theme(light, |theme| {
             let highlighter = Highlighter::new(theme);
@@ -82,43 +76,7 @@ pub(super) fn role_color(role: TextRole, light: bool, support: ColorSupport) -> 
             })
         })
     });
-    colors[index].map_or(fallback, |color| {
-        // Inline code keeps the syntax asset's exact foreground, just like
-        // fenced code and Codex. Only UI metadata is softened/contrast-adjusted.
-        if index == 0 {
-            return foreground(color, support);
-        }
-        // Codex's status accents retain 85% saturation; no faint attribute.
-        let luma =
-            (77 * u16::from(color.r) + 150 * u16::from(color.g) + 29 * u16::from(color.b)) / 256;
-        let soften = |channel| {
-            u8::try_from((u16::from(channel) * 85 + luma * 15 + 50) / 100)
-                .expect("softened channel")
-        };
-        let rgb = (soften(color.r), soften(color.g), soften(color.b));
-        color_math::foreground(rgb, terminal_palette::background(), support)
-    })
-}
-
-/// Table labels use the same syntax scopes as Codex's Markdown table header.
-pub(super) fn table_header_color(light: bool, support: ColorSupport) -> Color {
-    static DARK: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    static LIGHT: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
-        return Color::Reset;
-    }
-    let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
-        with_theme(light, |theme| {
-            let highlighter = Highlighter::new(theme);
-            ["entity.name.type", "support.type", "variable"]
-                .iter()
-                .find_map(|name| {
-                    let scope = Scope::new(name).ok()?;
-                    highlighter.style_mod_for_stack(&[scope]).foreground
-                })
-        })
-    });
-    color.map_or(Color::Reset, |color| foreground(color, support))
+    colors[kind as usize].map(|color| (color.r, color.g, color.b))
 }
 
 fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Color {

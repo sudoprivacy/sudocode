@@ -22,6 +22,7 @@ pub enum TextRole {
     Warning,
     Notice,
     Code,
+    TableHeader,
     Quote,
     ListMarker,
     Model,
@@ -87,7 +88,7 @@ impl ColorTheme {
                     style.foreground_color = Some(color);
                 }
             }
-            if role == TextRole::Strong {
+            if matches!(role, TextRole::Strong | TextRole::TableHeader) {
                 style.attributes.set(Attribute::Bold);
             } else if role == TextRole::Reasoning {
                 style.attributes.set(Attribute::Dim);
@@ -177,19 +178,56 @@ impl ColorTheme {
                     readable(preferred)
                 }
             }
-            TextRole::Code => code_theme::role_color(role, self.light_background, support),
-            TextRole::Info => {
-                if limited {
-                    Color::DarkCyan
-                } else {
-                    code_theme::role_color(TextRole::Code, self.light_background, support)
-                }
-            }
             TextRole::ListMarker => Color::Blue,
-            TextRole::Model | TextRole::Path | TextRole::Usage | TextRole::Branch => {
-                code_theme::role_color(role, self.light_background, support)
-            }
+            TextRole::Code
+            | TextRole::Info
+            | TextRole::TableHeader
+            | TextRole::Model
+            | TextRole::Path
+            | TextRole::Usage
+            | TextRole::Branch => self.syntax_color(role, support),
         }
+    }
+
+    fn syntax_color(self, role: TextRole, support: ColorSupport) -> Color {
+        use code_theme::SyntaxAccent;
+        let (accent, fallback) = match role {
+            TextRole::Code => (SyntaxAccent::Inline, Color::Reset),
+            TextRole::Info => (SyntaxAccent::Inline, Color::DarkCyan),
+            TextRole::TableHeader => (SyntaxAccent::Type, Color::Reset),
+            TextRole::Model => (SyntaxAccent::Type, Color::DarkCyan),
+            TextRole::Path => (SyntaxAccent::String, Color::DarkGreen),
+            TextRole::Usage => (SyntaxAccent::Number, Color::DarkGreen),
+            TextRole::Branch => (SyntaxAccent::Function, Color::DarkBlue),
+            _ => unreachable!("only syntax-backed roles enter the syntax palette"),
+        };
+        if support == ColorSupport::Ansi16 {
+            return fallback;
+        }
+        let Some((r, g, b)) = code_theme::accent(accent, self.light_background) else {
+            return if role == TextRole::Info {
+                Color::Reset
+            } else {
+                fallback
+            };
+        };
+        if matches!(
+            role,
+            TextRole::Code | TextRole::Info | TextRole::TableHeader
+        ) {
+            return support.color(Color::Rgb { r, g, b });
+        }
+        // Metadata follows Codex's 85% saturation, without the faint attribute.
+        let luma = (77 * u16::from(r) + 150 * u16::from(g) + 29 * u16::from(b)) / 256;
+        let soften = |channel| {
+            u8::try_from((u16::from(channel) * 85 + luma * 15 + 50) / 100)
+                .expect("softened channel")
+        };
+        color_math::foreground(
+            (soften(r), soften(g), soften(b)),
+            terminal_palette::background(),
+            support,
+        )
     }
 
     /// ANSI is a serialization boundary, never the internal style model.

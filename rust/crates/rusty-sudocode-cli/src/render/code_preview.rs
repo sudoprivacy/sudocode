@@ -19,7 +19,12 @@ pub(crate) struct CodePreview {
 }
 
 impl CodePreview {
-    pub(crate) fn render(&mut self, source: &str, renderer: &TerminalRenderer) -> Option<String> {
+    pub(crate) fn render(
+        &mut self,
+        source: &str,
+        renderer: &TerminalRenderer,
+    ) -> Option<StyledText> {
+        let source = StyledText::plain_source(source);
         let (opener, body) = source.split_once('\n')?;
         let marker = super::parse_fence_opener(opener)?;
         // Nested/indented fences keep the canonical parser's normalization.
@@ -63,14 +68,12 @@ impl CodePreview {
             }
             self.complete_bytes += added.len();
         }
-        let mut output = String::new();
-        self.complete
-            .write_ansi(0..self.complete.text.len(), &mut output);
-        output.push_str(&body[self.complete_bytes..]);
-        if !output.ends_with('\n') {
-            output.push('\n');
+        let mut output = self.complete.clone();
+        output.plain(&body[self.complete_bytes..]);
+        if !output.text.ends_with('\n') {
+            output.plain("\n");
         }
-        output.push('\n');
+        output.plain("\n");
         Some(output)
     }
 }

@@ -90,13 +90,20 @@ fn expect_finalized_with_draft(session: &PtySession, marker: &str, draft: &str) 
 
 #[test]
 fn control_bearing_markdown_preserves_preview_history_and_draft() {
-    for cols in [120, 48] {
+    for (cols, fenced) in [(120, false), (48, false), (120, true), (48, true)] {
         let env = TestEnv::new_mock("prose-source-controls");
         let mut session = start(&env, cols);
         let marker = common::turn_status_marker(&session);
+        let document = "ProseStart before \x1b[2Jafter \x1b[31mControlToken\x1b[0m and **bold words**. ProseDone.";
+        let document = if fenced {
+            // Unknown syntax remains plain while exercising the open-fence cache.
+            format!("```not-a-registered-language\n{document}")
+        } else {
+            document.to_string()
+        };
         let prompt = common::terminal_host::prose_prompt(
             &env,
-            "ProseStart before \x1b[2Jafter \x1b[31mControlToken\x1b[0m and **bold words**. ProseDone.",
+            &document,
             serde_json::json!({"chunk_chars": 1, "delay_ms": 2}),
         );
         session.send(&format!("{prompt}\r")).unwrap();

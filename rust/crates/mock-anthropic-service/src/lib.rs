@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -578,7 +578,7 @@ async fn handle_connection(
         && request.stream
         && !concurrency_batch_complete(&request)
     {
-        let calls = concurrency_calls(&request);
+        let calls = pending_concurrency_calls(&request);
         if calls.iter().any(|call| call.stream_wait_for.is_some()) {
             return stream_gated_concurrency(&mut socket, &request, scenario, &calls).await;
         }
@@ -916,7 +916,15 @@ struct ConcurrencyCall {
 
 // The PTY fixture supplies the provider's batch, then drives actual tools.
 // It controls arrival order without substituting a fake executor or clock.
-fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
+fn pending_concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
+    // Notifications can checkpoint a batch after only some tools were admitted.
+    // Continue from its settled results instead of replaying completed side effects.
+    let completed = current_turn_blocks(request)
+        .filter_map(|block| match block {
+            InputContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     request
         .messages
         .iter()
@@ -944,6 +952,7 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
         })
         .expect("tool_concurrency requires TOOL_BATCH JSON")
         .into_iter()
+        .filter(|call| !completed.contains(call["id"].as_str().expect("call id")))
         .map(|call| ConcurrencyCall {
             stream_wait_for: call["stream_wait_for"].as_str().map(str::to_string),
             stream_fail_after: call["stream_fail_after"].as_bool().unwrap_or(false),
@@ -997,9 +1006,7 @@ fn concurrency_prelude(calls: &[ConcurrencyCall]) -> Option<&str> {
 }
 
 fn concurrency_batch_complete(request: &MessageRequest) -> bool {
-    concurrency_calls(request).iter().all(|call| current_turn_blocks(request).any(|block| {
-        matches!(block, InputContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.id)
-    }))
+    pending_concurrency_calls(request).is_empty()
 }
 
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
@@ -1902,7 +1909,7 @@ fn stream_tool_concurrency(request: &MessageRequest, _scenario: Scenario) -> Str
     if concurrency_batch_complete(request) {
         final_text_sse("Concurrency batch done.")
     } else {
-        let calls = concurrency_calls(request);
+        let calls = pending_concurrency_calls(request);
         let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
         let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
         let uses: Vec<_> = calls
@@ -2651,7 +2658,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             if concurrency_batch_complete(request) {
                 text_message_response("msg_concurrency_done", "Concurrency batch done.")
             } else {
-                let calls = concurrency_calls(request);
+                let calls = pending_concurrency_calls(request);
                 let uses: Vec<_> = calls
                     .iter()
                     .map(|call| ToolUseMessage {

@@ -102,8 +102,8 @@ def run(output):
     assert all("extra" in row["features"] for row in artifacts), artifacts
     assert {row["profile"]["test"] for row in artifacts} == {False, True}, artifacts
 
-    # The actual queue command now compiles the groups instead of compiling
-    # every covered module twice. Manual drivers keep all-target lint coverage.
+    # The queue replaces original test crates with validated groups, preserving
+    # Cargo's existing exclusion of manual test=false targets.
     spec = importlib.util.spec_from_file_location("clippy_fixture_groups", SOURCE / ".github/local-acceptance/checks.py")
     recipes = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recipes)
@@ -131,19 +131,32 @@ def run(output):
     assert grouped["exit_code"] == 0, grouped
     scope = grouped["scope"]
     assert scope["mode"] == "grouped-workspace" and scope["covered_original_targets"] == 2, scope
-    assert scope["manual_targets_retained"] == ["manual_driver"], scope
-    assert scope["integration_targets_before"] == 4 and scope["integration_targets_selected"] == 2, scope
+    assert scope["manual_targets_excluded"] == ["manual_driver"], scope
+    assert scope["integration_targets_declared"] == 4, scope
+    assert scope["integration_targets_before"] == 2 and scope["integration_targets_selected"] == 1, scope
     targets = {row["target"]["name"] for row in grouped["artifacts"]}
-    assert {"acceptance_first", "manual_driver", "demo", "sample", "lint-second"} <= targets, targets
-    assert not {"covered_a", "covered_b"} & targets, targets
+    assert {"acceptance_first", "demo", "sample", "lint-second"} <= targets, targets
+    assert not {"covered_a", "covered_b", "manual_driver"} & targets, targets
     assert all("extra" in row["features"] for row in grouped["artifacts"]), grouped
     assert {row["profile"]["test"] for row in grouped["artifacts"]} == {False, True}, grouped
 
+    # Inspect real old/new compiler artifacts: declaration count alone includes
+    # disabled groups/manual drivers and overstates the former lint inventory.
+    manual_source = manual.read_text()
+    manual.write_text('compile_error!("manual driver must stay excluded");\n')
+    original_targets = invoke("original-all-targets", selected, output / "fast-target")
+    assert original_targets["exit_code"] == 0, original_targets
+    originals = {row["target"]["name"] for row in original_targets["artifacts"]}
+    assert {"covered_a", "covered_b"} <= originals, originals
+    assert not {"acceptance_first", "manual_driver"} & originals, originals
+    manual_excluded = invoke("grouped-manual-excluded", command, output / "fast-target", compiler_expected=False)
+    assert manual_excluded["exit_code"] == 0, manual_excluded
+    assert manual_excluded["artifacts"] and all(row["fresh"] for row in manual_excluded["artifacts"]), manual_excluded
+    manual.write_text(manual_source)
     controls = []
     for label, path, cfg in [
         ("group-first-module", first / "tests/covered_a.rs", "feature=\"extra\""),
         ("group-second-module", first / "tests/covered_b.rs", "feature=\"extra\""),
-        ("manual-test-false", manual, "feature=\"extra\""),
         ("example", example, "feature=\"extra\""),
         ("bench", bench, "feature=\"extra\""),
         ("library-test-configuration", first / "src/lib.rs", "all(test, feature=\"extra\")"),
@@ -169,7 +182,8 @@ def run(output):
     result = {"status": "PASS", "first_failure": fast, "previous_keep_going": continuing,
               "clean_workspace": passing,
               "grouped_workspace": grouped, "grouped_restored": grouped_final, "controls": controls,
-              "scope": "Actual workflow entry and Cargo/Clippy processes. Legacy full-target fallback, all-feature first-error behavior, every grouped module, manual driver, example, bench and library/bin test configuration are exercised. Original standalone covered-module identities are omitted. Infrastructure only; no product PTY or production latency credit."}
+              "original_all_targets": original_targets, "grouped_manual_excluded": manual_excluded,
+              "scope": "Actual workflow entry and Cargo/Clippy processes. Legacy full-target fallback, all-feature first-error behavior, every grouped module, example, bench and library/bin test configuration are exercised. Old/new compiler artifacts prove manual-driver exclusions. Original standalone covered-module identities are omitted. Infrastructure only; no product PTY or production latency credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({"status": "PASS", "failed_packages_before": 3, "failed_packages_after": 1,
                       "passing_packages": 3, "evidence": str(output)}))

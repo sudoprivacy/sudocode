@@ -769,8 +769,8 @@ modules through their wrappers once: 91 instead of 211 integration targets in
 the current workspace, 56.9% fewer. Library/bin test configurations, enabled
 ungrouped tests, examples and benches remain selected. Ungrouped sources retain
 <code>--all-targets</code>; disabled standalone tests keep their original exclusion.
-Queue all-feature lint also uses validated groups and retains every uncovered
-manual driver. Lint no longer repeats covered modules under their original
+Queue all-feature lint also uses validated groups, retaining uncovered enabled
+tests and Cargo's manual-target exclusions. Lint no longer checks covered modules under their original
 standalone crate identities on the author, complementary hosts or queue.
 Every module still compiles in its group. Real Cargo/Clippy regression
 compares actual target inventories and injected diagnostics in ordinary and
@@ -780,18 +780,21 @@ deadlines are unchanged; this fixture adds no product journey coverage.
 No production latency saving is claimed before comparable measurements.</p>
 <p><strong>Queue lint deduplication (2026-11-02).</strong> The queue reuses the
 native Cargo metadata and canonical wrapper validator. Current all-feature
-integration targets fall from 222 to 94: 128 covered original targets no longer
-compile a second time. The three separate <code>test=false</code> benchmark
-drivers remain selected, as do library/bin test configurations, examples,
-benches and every uncovered integration target. Sources without validated
+integration targets fall from 211 to 91: eight groups replace 128 standalone
+test crates. The 222 declarations include eleven disabled group/manual targets,
+so declaration count alone overstates the former lint inventory. The three
+separate <code>test=false</code> benchmark drivers retain their prior exclusion.
+Library/bin test configurations, examples, benches and every uncovered enabled
+integration target remain selected. Sources without validated
 groups retain <code>--all-targets</code>; invalid declarations fail. Required
 output prints <code>QUEUE_CLIPPY_SCOPE</code> and the actual command. Real
 Cargo/Clippy controls inject feature-only errors into both grouped modules,
-the manual driver, example, bench and library/bin test configurations; the
-original first-failure control remains. This reduces duplicate lint targets,
+the example, bench and library/bin test configurations; old/new compiler
+artifacts verify that deliberately broken manual drivers remain excluded.
+The original first-failure control remains. This reduces compiler targets,
 not product test cases or timeout budgets. Standalone crate identity coverage
 is reduced for the covered modules; no whole-lifecycle speedup is inferred
-from the 57.7% target-count reduction.</p>
+from the 56.9% target-count reduction.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the
@@ -1037,9 +1040,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       selected queue lint and bind its three platforms, queue-only scheduling
       and independent main cache publishers to the current workflow. These
       queue lint controls also execute the actual Python entry and Cargo/Clippy,
-      reject feature-only warnings in both grouped modules, retain manual
-      <code>test=false</code> drivers, examples, benches and library/bin test
-      configurations, and refuse invalid wrapper declarations. Covered original
+      reject feature-only warnings in both grouped modules, retain examples,
+      benches and library/bin test
+      configurations, preserve manual <code>test=false</code> exclusions with
+      real old/new compiler artifacts, and refuse invalid wrapper declarations. Covered original
       integration crates no longer compile separately in all-feature queue lint.
       These
       executor checks add no product journey coverage. Author-hook and native

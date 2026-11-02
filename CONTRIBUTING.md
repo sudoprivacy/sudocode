@@ -498,8 +498,8 @@ author/complementary host: 91 instead of 211 integration targets in the audited
 workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
 Ungrouped sources keep `--all-targets`; disabled
 standalone test targets keep their original exclusion. Queue all-feature lint
-also reuses validated groups, retaining uncovered manual drivers, including
-`test=false` performance drivers. Lint no longer repeats covered modules under
+also reuses validated groups, retaining uncovered enabled tests and Cargo's
+exclusion of manual `test=false` performance drivers. Lint no longer checks covered modules under
 their original standalone crate identities on the author, complementary hosts
 or queue. Every module still compiles in its group. Real Cargo/Clippy controls inject
 errors into ordinary and test-only library/bin code, grouped/ignored tests,
@@ -789,8 +789,9 @@ integration modules compile through their validated groups. An actual three-pack
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
 records the actual compiler priorities. Additional real compiler controls reject
-errors in either grouped module, manual drivers, examples, benches and library/bin
-test configurations, and refuse noncanonical wrappers. Required output prints
+errors in either grouped module, examples, benches and library/bin test
+configurations, and refuse noncanonical wrappers. Old/new compiler artifacts
+also prove manual-driver exclusion with deliberately broken manual code. Required output prints
 `QUEUE_CLIPPY_SCOPE`, including all-feature target counts and the actual command.
 The fixture runs once on a PR only when the lint workflow, entry, fixture or scope
 selector changes; queue/main reuse its result.

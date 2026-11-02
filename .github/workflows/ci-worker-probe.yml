@@ -1,0 +1,58 @@
+name: Private native worker comparison
+
+on:
+  push:
+    branches: [diagnostics/ci-workers-macos-20261102]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: driver
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 83c73556d9f99c335f905d36e9ec29427fe6bb54
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve existing cache paths
+        id: cache
+        run: python candidate/.github/local-acceptance/cache_layout.py --source candidate/rust --github-output
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.cache.outputs.workspaces }}
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Install process observer
+        run: python -m pip install psutil jsonschema
+      - name: Measure identical full suites with eight then four workers
+        run: python driver/.github/diagnostics/ci_worker_probe.py --source candidate --output "${{ runner.temp }}/native-workers"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-workers-macos
+          path: ${{ runner.temp }}/native-workers
+          if-no-files-found: error
+          retention-days: 7

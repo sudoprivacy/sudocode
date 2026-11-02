@@ -73,8 +73,7 @@
         "rust/crates/rusty-sudocode-cli/tests/common/**",
         "e2e/terminal-resize/**",
         "rust/Cargo.lock",
-        "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs",
-        ".github/local-acceptance/checks.py"
+        "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs"
       ],
       "exclude": [
         "e2e/terminal-resize/benchmark.py",

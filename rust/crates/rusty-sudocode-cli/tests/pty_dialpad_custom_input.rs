@@ -19,6 +19,58 @@ mod common;
 use std::time::Duration;
 
 use common::TestEnv;
+use pty_expect::PtySession;
+use serde_json::Value;
+
+#[inline]
+fn expect_mock_feedback(env: &TestEnv, sess: &mut PtySession, expected: &str) {
+    sess.expect("write_plan roundtrip complete:")
+        .expect("the model must respond after receiving the submitted feedback");
+    let has_feedback = env.captured_message_bodies().iter().any(|body| {
+        let request: Value = serde_json::from_str(body).expect("parse captured model request");
+        let Some(messages) = request["messages"].as_array() else {
+            return false;
+        };
+        messages.iter().any(|message| {
+            let Some(blocks) = message["content"].as_array() else {
+                return false;
+            };
+            blocks.iter().any(|block| {
+                if block["type"] != "tool_result" {
+                    return false;
+                }
+                let content = &block["content"];
+                let parts = content
+                    .as_array()
+                    .map_or(std::slice::from_ref(content), Vec::as_slice);
+                parts.iter().any(|part| {
+                    let result = if part["type"] == "json" {
+                        Some(part["value"].clone())
+                    } else {
+                        part.as_str()
+                            .or_else(|| part["text"].as_str())
+                            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    };
+                    result.is_some_and(|value| value["feedback"].as_str() == Some(expected))
+                })
+            })
+        })
+    });
+    assert!(
+        has_feedback,
+        "the actual API tool result must contain the entire feedback: {expected:?}"
+    );
+}
+
+#[inline]
+fn exit_after_feedback(env: &TestEnv, sess: &mut PtySession) {
+    sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
+    let result = sess.expect_eof();
+    if env.is_mock() {
+        assert_eq!(result.expect("exit after delivered feedback"), 0);
+    }
+}
 
 #[test]
 fn dialpad_custom_input_row_accepts_typed_text_in_place() {
@@ -66,6 +118,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
     // char). The mock echoes the tool result verbatim; live re-plans on it.
     sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     if env.is_mock() {
+        expect_mock_feedback(&env, &mut sess, marker);
         sess.expect(marker)
             .expect("the full typed comment must reach the model, not a single char");
     } else {
@@ -74,9 +127,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
         let _ = sess.expect("Choose an action");
     }
 
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
-    let _ = sess.expect_eof();
+    exit_after_feedback(&env, &mut sess);
 }
 
 /// Bracketed paste into the `DialPad` `[+]` row must work — including multi-line
@@ -129,6 +180,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
 
     sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     if env.is_mock() {
+        expect_mock_feedback(&env, &mut sess, &payload);
         // The tool result echoes the feedback verbatim — the full pasted text
         // (both marker lines) must be present, proving paste reached the buffer
         // and expanded on submit (not lost, not left as a placeholder).
@@ -138,7 +190,5 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
             .expect("pasted line B must reach the model");
     }
 
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
-    let _ = sess.expect_eof();
+    exit_after_feedback(&env, &mut sess);
 }

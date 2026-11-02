@@ -45,6 +45,21 @@ cargo_in_workspace() {
   (cd "$RUST_DIR" && cargo "$@")
 }
 
+# Windows can expose a non-working python3 app alias. Require an actual Python
+# 3 interpreter before starting the batch, while keeping Unix's usual spelling.
+python3_bin() {
+  local candidate
+  for candidate in "${PYTHON:-}" python3 python; do
+    [ -n "$candidate" ] || continue
+    if [ "$("$candidate" -c 'import sys; print(sys.version_info.major)' 2>/dev/null)" = 3 ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "!! Python 3 is required for mailbox fault acceptance; install it or set PYTHON to its executable" >&2
+  return 1
+}
+
 # ── Auth-on bring-up, shared by every A2A harness ──────────────────────────────
 #
 # scode is cert-only: it dials mTLS with a minted credential and never plaintext,

@@ -6,6 +6,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -17,8 +19,40 @@ PRODUCT = {"native-release", "native-services", "native-cohost"}
 def workflow_scope(output, environment):
     """Execute the actual workflow guards and bind their conditional steps."""
     output.mkdir()
+    bash = shutil.which("bash", path=environment.get("PATH"))
+    if os.name == "nt":
+        # CreateProcess can resolve a bare bash against the parent's PATH,
+        # selecting WSL even when the explicit child environment lists Git first.
+        git = shutil.which("git", path=environment.get("PATH"))
+        candidates = [Path(git).resolve().parent / "bash.exe",
+                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
+        bash = next((str(path) for path in candidates if path.is_file()), None)
+    if not bash:
+        raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     lines = workflow.splitlines()
+    # Bind the real native guard cases below to the production queue wiring.
+    # The PR must not allocate a duplicate lint matrix, while the final gate
+    # must continue to wait for all three native platforms.
+    lint = re.search(r"^  clippy-workspace:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+    predicate = lint.split("    if: >-\n", 1)[1].split("    needs:", 1)[0]
+    assert " ".join(predicate.split()) == (
+        "!inputs.live_only && !inputs.cache_only && "
+        "needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' && "
+        "github.event_name == 'merge_group'"), predicate
+    assert "        os: [ubuntu-latest, windows-latest, macos-latest]" in lint
+    assert "      fail-fast: true" in lint
+    gate = re.search(r"^  integrated-acceptance:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+    assert "    if: always() && github.event_name == 'merge_group'" in gate
+    assert "    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]" in gate
+    branches = workflow.split("  push:\n    branches:\n", 1)[1].split("    paths:", 1)[0]
+    assert {line.strip() for line in branches.splitlines() if line.strip().startswith("- ")} == {
+        "- 'gaebal/**'", "- 'omx-issue-*'"}, branches
+    assert "  pull_request:\n" in workflow and "  merge_group:\n" in workflow
+    assert "full_preflight" not in workflow, "Every remaining event must retain full metadata checks"
+    for filename in ["ci-dependency-cache.yml", "ci-vfs-search-cache.yml"]:
+        publisher = (SOURCE / ".github/workflows" / filename).read_text(encoding="utf-8")
+        assert "  push:\n    branches: [main]\n" in publisher, filename
 
     def step(name):
         matches = [index for index, line in enumerate(lines) if line == "      - name: " + name]
@@ -35,9 +69,16 @@ def workflow_scope(output, environment):
                  "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
-    for name in ["A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
+    assert "      a2a_required: ${{ steps.scope.outputs.a2a_required }}" in lines
+    for name in ["Install native durability fault injector", "A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
                  "Auth-on A2A — the node decides who a message is from"]:
-        assert not any(line.startswith("        if:") for line in step(name)), name
+        assert [line for line in step(name) if line.startswith("        if:")] == [
+            "        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'"], name
+    assert "        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(
+        "Retain native syscall fault evidence")
+    for name in ["Explain selected daemon acceptance", "Require native daemon acceptance and zero workspace warnings"]:
+        assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(name)
+        assert "          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}" in step(name)
 
     def script(name):
         block = step(name)
@@ -55,31 +96,53 @@ def workflow_scope(output, environment):
     for name, source in scripts.items():
         (output / f"{name}.sh").write_text(source, encoding="utf-8")
     cases = [
-        ("explain", "true", "true", "success", True),
-        ("explain", "false", "true", "success", True),
-        ("explain", "", "true", "success", False),
-        ("required", "true", "true", "success", True),
-        ("required", "false", "true", "success", True),
-        ("required", "false", "false", "skipped", True),
-        ("required", "true", "false", "skipped", False),
-        ("required", "", "true", "success", False),
-        ("required", "false", "true", "skipped", False),
-        ("required", "true", "true", "failure", False),
+        ("explain", "true", "true", "true", "success", True),
+        ("explain", "false", "true", "true", "success", True),
+        ("explain", "true", "false", "true", "success", True),
+        ("explain", "", "true", "true", "success", False),
+        ("explain", "true", "", "true", "success", False),
+        ("required", "true", "true", "true", "success", True),
+        ("required", "false", "true", "true", "success", True),
+        ("required", "true", "false", "true", "success", True),
+        ("required", "false", "false", "false", "skipped", True),
+        ("required", "true", "false", "false", "skipped", False),
+        ("required", "false", "true", "false", "skipped", False),
+        ("required", "false", "false", "true", "success", False),
+        ("required", "", "true", "true", "success", False),
+        ("required", "true", "", "true", "success", False),
+        ("required", "false", "true", "true", "skipped", False),
+        ("required", "true", "true", "true", "failure", False),
     ]
+    cases = [(name, {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
+                     "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual}, succeeds)
+             for name, a2a, cohost, daemon, actual, succeeds in cases]
+    cases.extend(("required", {"A2A_REQUIRED": "false", "COHOST_REQUIRED": "false",
+                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped", **values}, succeeds)
+                 for values, succeeds in [
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success"}, True),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "failure"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "skipped"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "cancelled"}, False),
+                     ({"CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "success"}, False),
+                     ({"CLIPPY_REQUIRED": "", "CLIPPY_RESULT": "skipped"}, False),
+                     ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success", "PIN_RESULT": "failure"}, False),
+                 ])
     records = []
-    for index, (name, cohost, daemon, actual, succeeds) in enumerate(cases):
-        values = {"COHOST_REQUIRED": cohost, "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual,
-                  "PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped"}
-        result = subprocess.run(["bash", "-c", scripts[name]], env={**environment, **values},
-                                capture_output=True, text=True, encoding="utf-8")
+    for index, (name, overrides, succeeds) in enumerate(cases):
+        values = {"PIN_RESULT": "success", "CLIPPY_REQUIRED": "false", "CLIPPY_RESULT": "skipped", **overrides}
+        result = subprocess.run([bash, "-c", scripts[name]], env={**environment, **values}, capture_output=True)
         log = output / f"{index:02}.log"
-        log.write_text(result.stdout + result.stderr, encoding="utf-8")
+        # Native setup failures can use a different encoding. Retain their raw
+        # output so a decoder exception never hides the actual command result.
+        log.write_bytes(result.stdout + result.stderr)
         assert (result.returncode == 0) == succeeds, (values, result.stdout, result.stderr)
         records.append({"script": name, "values": values, "exit_code": result.returncode,
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
     return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
-            "CLI_daemon_journeys_unconditional_inside_required_job": True}
+            "CLI_and_cohost_steps_bound_to_independent_selectors": True,
+            "three_platform_lint_required_once_on_queue": True,
+            "main_preflight_removed_and_independent_cache_publishers_retained": True}
 
 
 def run(output):
@@ -199,9 +262,15 @@ def run(output):
         names = set(plan["local_checks"])
         assert names & PRODUCT == set(expected), (label, text)
         assert "native-workspace" in names, (label, text)
-        assert {"rendering", "browser"} <= names, (label, text)
+        # Ordinary dependency metadata omits performance; actual CLI/driver
+        # changes require local rendering and the functional browser smoke.
+        changed = command("git", "diff", "--name-only", "--no-renames", diff_base, "HEAD").splitlines()
+        smoke = {"rendering", "browser"} if any(path.startswith(("rust/crates/rusty-sudocode-cli/src/",
+                                                    "rust/crates/scode-benchmark-drivers/"))
+                                   for path in changed) else set()
+        assert {"rendering", "browser"} & names == smoke, (label, text)
         cases.append({"label": label, "base": diff_base, "head": command("git", "rev-parse", "HEAD"),
-                      "product_checks": sorted(names & PRODUCT), "native_tests_and_performance_retained": True})
+                      "product_checks": sorted(names & PRODUCT), "native_tests_retained": True})
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 
@@ -224,6 +293,7 @@ def run(output):
                                    GITHUB_OUTPUT=str(result_path))
                 result = json.loads(command(sys.executable, repository / ".github/scripts/ci_input_scope.py"))
                 assert result["daemon_required"] == str(daemon).lower(), result
+                assert result["a2a_required"] == str(daemon).lower(), result
                 assert result["cohost_required"] == str(cohost_required).lower(), result
                 emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
                 assert emitted["cohost_required"] == result["cohost_required"], emitted
@@ -270,7 +340,7 @@ def run(output):
     command("git", "rm", "rust/crates/rusty-sudocode-cli/src/lib.rs")
     binary_head = commit("Removing a prior CLI library also retains co-host scope")
     expect("a removed CLI library is not mistaken for an unchanged binary boundary", library_head,
-           {"native-release", "native-services"})
+           {"native-services"})
     ci_scope(library_head, True)
     cohost_manifest = (repository / "rust/crates/cohost/Cargo.toml").read_text()
     write("rust/crates/cohost/Cargo.toml", cohost_manifest +
@@ -314,7 +384,7 @@ def run(output):
         ("normal lock package changed", "rust/Cargo.lock", positive_lock.replace('name = "runtime"\nversion = "0.1.0"', 'name = "runtime"\nversion = "0.2.0"'), PRODUCT),
         ("ambiguous additional lock version", "rust/Cargo.lock", positive_lock + '\n[[package]]\nname="runtime"\nversion="0.2.0"\n', PRODUCT),
         ("lock format changed", "rust/Cargo.lock", positive_lock.replace('version = 4', 'version = 3'), PRODUCT),
-        ("source stays a normal product input", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT),
+        ("ordinary runtime source keeps services without the separate release build", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT - {"native-release"}),
         ("CLI build script keeps conservative co-host scope", "rust/crates/rusty-sudocode-cli/build.rs",
          'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-release", "native-services"}),
         ("release assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-release"}),
@@ -332,7 +402,7 @@ def run(output):
             assert text != positive_lock, label
         commit("Scope boundary " + str(index))
         expect(label, base, expected)
-        if label in {"source stays a normal product input", "CLI build script keeps conservative co-host scope",
+        if label in {"ordinary runtime source keeps services without the separate release build", "CLI build script keeps conservative co-host scope",
                      "normal dependency features", "build dependency", "normal lock package changed"}:
             ci_scope(base, True)
         elif label == "standalone benchmark driver metadata":
@@ -340,7 +410,7 @@ def run(output):
     command("git", "switch", "--detach", changed)
     command("git", "mv", "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/renamed.rs")
     commit("Keep both sides of a renamed source")
-    expect("renamed product source stays required", base, PRODUCT)
+    expect("renamed ordinary source keeps services without the separate release build", base, PRODUCT - {"native-release"})
     command("git", "switch", "--detach", changed)
     assert not command("git", "status", "--porcelain")
     # An earlier broader receipt/checkpoint must retain actual completed work

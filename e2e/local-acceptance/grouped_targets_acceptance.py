@@ -39,12 +39,15 @@ def run(output, repository, executable, options):
 
     def command(*args, cwd=root / "rust", success=True):
         log = output / "commands" / f"{len(commands):03}.log"
+        if not success:
+            print("EXPECTED_NEGATIVE_CONTROL: the next process must fail; its original error is retained.", flush=True)
         try:
             result = helper.run_command(args, cwd, log, environment)
         except RuntimeError:
             if success:
                 raise
             result = json.loads(log.with_suffix(".command.json").read_text())
+            print("PASS: expected negative process refused the controlled input.", flush=True)
         else:
             if not success:
                 raise AssertionError("Expected the real process to fail: " + str(args))
@@ -64,13 +67,26 @@ def run(output, repository, executable, options):
         git("commit", "-m", message)
         return git("rev-parse", "HEAD")
 
-    workspace = '[workspace]\nmembers=["crates/rusty-sudocode-cli","crates/helper"]\nresolver="2"\n'
+    workspace = '[workspace]\nmembers=["crates/rusty-sudocode-cli","crates/helper","crates/engine-acp"]\nresolver="2"\n'
     manifest = ('[package]\nname="group-product"\nversion="0.0.0"\nedition="2021"\n'
-                '[dev-dependencies]\ngroup-helper={path="../helper"}\n')
+                '[dev-dependencies]\ngroup-helper={path="../helper"}\n'
+                '\n[[test]]\nname="manual_disabled"\npath="tests/manual_disabled.rs"\ntest=false\n')
     package = "rust/crates/rusty-sudocode-cli/"
     write("rust/Cargo.toml", workspace)
     write(package + "Cargo.toml", manifest)
-    write(package + "src/main.rs", 'fn main() { println!("product-42"); }\n')
+    binary_source = '''fn main() { println!("product-42"); }
+#[cfg(test)] #[test] fn legacy_binary_unit() {
+    assert!(std::env::var_os("SCODE_GROUP_UNIT_FAIL").is_none(), "legacy binary unit executed");
+    group_helper::record("legacy-bin-unit");
+}
+'''
+    write(package + "src/main.rs", binary_source)
+    write("rust/crates/engine-acp/Cargo.toml", '[package]\nname="engine-acp"\nversion="0.0.0"\nedition="2021"\n[features]\nmailbox=[]\n')
+    write("rust/crates/engine-acp/src/lib.rs", 'pub fn marker() -> u8 { 42 }\n')
+    for path in ["scripts/generate_cache_metrics.py", "scripts/check_cache_usage_fixtures.py", "e2e/build-metadata/run.py"]:
+        write(path, 'print("fixture metadata validated")\n')
+    write("rust/vendor/codex-mermaid/Cargo.toml", '[workspace]\n[package]\nname="fixture-mermaid"\nversion="0.0.0"\nedition="2021"\n')
+    write("rust/vendor/codex-mermaid/src/lib.rs", 'pub fn marker() -> u8 { 42 }\n')
     write("rust/crates/helper/Cargo.toml", '[package]\nname="group-helper"\nversion="0.0.0"\nedition="2021"\n')
     write("rust/crates/helper/src/lib.rs", '''use std::sync::atomic::{AtomicUsize, Ordering};
 static CASES: AtomicUsize = AtomicUsize::new(0);
@@ -79,6 +95,24 @@ pub fn record(name: &str) {
     let root = std::path::PathBuf::from(std::env::var_os("SCODE_GROUP_PID_DIR").unwrap());
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join(name), std::process::id().to_string()).unwrap();
+    if let Some(pool) = std::env::var_os("SCODE_GROUP_POOL_DIR") {
+        let pool = std::path::PathBuf::from(pool);
+        let active = pool.join("active");
+        let observed = pool.join("observed");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&observed).unwrap();
+        let marker = active.join(std::process::id().to_string());
+        std::fs::write(&marker, name).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let count = std::fs::read_dir(&active).unwrap().count();
+        std::fs::write(observed.join(name), count.to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::fs::remove_file(marker).unwrap();
+    }
+}
+#[cfg(test)] #[test] fn legacy_library_unit() {
+    assert!(std::env::var_os("SCODE_GROUP_UNIT_FAIL").is_none(), "legacy library unit executed");
+    record("legacy-lib-unit");
 }
 ''')
     common = '''pub fn native(name: &str) {
@@ -99,6 +133,7 @@ pub fn record(name: &str) {
 #[cfg(unix)] #[test] fn platform_case() { common::native("unix"); }
 ''')
     write(package + "tests/kept_driver.rs", 'mod common;\n#[test] fn native_driver() { common::native("driver"); }\n')
+    write(package + "tests/manual_disabled.rs", '#[test] fn manual_only() { panic!("disabled manual target executed"); }\n')
     write(package + "tests/acceptance_reserved/main.rs",
           '#[test] fn directory_target() { group_helper::record("directory"); }\n')
     write("rust/crates/helper/tests/independent.rs", '#[test] fn independent_package() { group_helper::record("other-package"); }\n')
@@ -109,8 +144,9 @@ pub fn record(name: &str) {
     git("config", "user.email", "groups@example.invalid")
     git("config", "core.autocrlf", "false")
     command("cargo", "generate-lockfile", "--offline")
+    command("cargo", "generate-lockfile", "--offline", "--manifest-path", "vendor/codex-mermaid/Cargo.toml")
     base = commit("Baseline individual integration targets")
-    write(package + "src/main.rs", 'fn main() { println!("product-42"); } // Source change before grouping.\n')
+    write(package + "src/main.rs", binary_source + '// Source change before grouping.\n')
     ungrouped = commit("Change native source without grouping")
     text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"), "plan", "--base", base,
                    "--policy-ref", base, "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
@@ -137,10 +173,12 @@ pub fn record(name: &str) {
                 continue
         raise AssertionError("Real nextest did not return its complete inventory")
 
-    def normalize(value, plan):
+    def normalize(value, plan, integration_only=False):
         groups = {row["target"]: row["modules"] for row in plan.get("groups", [])}
         result = set()
         for suite in value["rust-suites"].values():
+            if integration_only and suite["kind"] != "test":
+                continue
             binary = suite["binary-name"]
             for name, case in suite["testcases"].items():
                 original, test = binary, name
@@ -159,6 +197,16 @@ pub fn record(name: &str) {
     original_binary, _ = product()
     original = inventory([])
     original_cases = normalize(original, {})
+    original_integrations = normalize(original, {}, integration_only=True)
+    fallback = inventory(profiles.workspace_integration_test_targets([]))
+    assert normalize(fallback, {}) == original_cases
+    assert {suite["kind"] for suite in original["rust-suites"].values() if suite["testcases"]} >= {"lib", "bin", "test"}
+    assert not any(suite["binary-name"] == "manual_disabled" for suite in fallback["rust-suites"].values())
+    # Explicit target selection overrides test=false. Preserve the original
+    # default on old sources rather than accidentally turning manual tests on.
+    disabled = command(str(executable), "nextest", "run", *options, "--workspace", "--locked",
+                       "--test", "manual_disabled", success=False)
+    assert "disabled manual target executed" in disabled.read_text(encoding="utf-8")
     group_name = "acceptance_fixture"
     wrapper = package + f"tests/acceptance_groups/{group_name}.rs"
     declaration = f'\n[[test]]\nname="{group_name}"\npath="tests/acceptance_groups/{group_name}.rs"\ntest=false\n'
@@ -186,7 +234,62 @@ pub fn record(name: &str) {
     command(str(executable), "nextest", "run", *options, "--workspace", "--locked", *grown_arguments)
     pid_files = sorted((output / "pids").iterdir())
     assert {path.name for path in pid_files} == {"one", "two", "driver", "directory", "other-package", "future",
-                                              "windows" if os.name == "nt" else "unix"}
+                                              "legacy-lib-unit", "legacy-bin-unit", "windows" if os.name == "nt" else "unix"}
+    integration_arguments = profiles.workspace_integration_test_targets(grown_arguments)
+    assert normalize(inventory(integration_arguments), grown_plan) == normalize(inventory(grown_arguments), grown_plan, integration_only=True)
+    # The old full selection actually executes both legacy unit harnesses.
+    # Under the new production dispatcher, the same poisoned units must never
+    # execute, while all original/grown integration cases still run normally.
+    old_environment = dict(environment)
+    environment.update(SCODE_GROUP_UNIT_FAIL="1", SCODE_GROUP_PID_DIR=str(output / "unit-negative-pids"))
+    negative = command(str(executable), "nextest", "run", *options, "--workspace", "--locked", *grown_arguments, success=False)
+    assert any(message in negative.read_text(encoding="utf-8")
+               for message in ["legacy library unit executed", "legacy binary unit executed"])
+    environment["SCODE_GROUP_PID_DIR"] = str(output / "integration-pids")
+    formatter_inputs = {path: path.read_bytes() for path in (root / "rust/crates").rglob("*.rs")}
+    command("cargo", "fmt", "--all")
+
+    def execute(arguments, cwd, log, extra=None):
+        return helper.run_command(arguments, cwd, log, {**environment, **(extra or {})})
+
+    explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+    environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
+    try:
+        dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        legacy = profiles.workspace_nextest_options(output, False)
+        assert legacy[legacy.index("--test-threads") + 1] == "4"
+        os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
+        environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
+        limited = profiles.workspace_nextest_options(output, True)
+        command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
+    finally:
+        if explicit_workers is None:
+            os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+        else:
+            os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = explicit_workers
+    assert all(row["exit_code"] == 0 for row in dispatched)
+    actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
+    assert "--lib" not in actual and "--bins" not in actual
+    assert actual[-len(integration_arguments):] == integration_arguments
+    expected_workers = 8 if (os.cpu_count() or 0) >= 8 else 4
+    assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
+    observed_workers = {}
+    for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
+                                ("limited-pool", 1, 4)]:
+        observed = output / label / "observed"
+        maximum = max(int(path.read_text()) for path in observed.iterdir())
+        assert lower <= maximum <= upper, (label, maximum)
+        assert len(list(observed.iterdir())) == 7
+        assert not list((output / label / "active").iterdir()), label
+        observed_workers[label] = maximum
+    assert {path.name for path in (output / "integration-pids").iterdir()} == {
+        "one", "two", "driver", "directory", "other-package", "future", "windows" if os.name == "nt" else "unix"}
+    environment.clear()
+    environment.update(old_environment)
+    # The following Git scope controls compare with the unformatted original
+    # fixture base. Keep production-dispatch setup out of their source delta.
+    for path, contents in formatter_inputs.items():
+        path.write_bytes(contents)
     command("cargo", "test", "--locked", "-p", "group-product", "--test", "kept_driver", "--", "--exact", "native_driver")
     command("cargo", "test", "--locked", "-p", "group-product", "--test", "first", "--", "--exact", "native_one")
     refusals = []
@@ -233,14 +336,72 @@ pub fn record(name: &str) {
                        "--policy-ref", base, "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
         planned = json.loads(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ACCEPTANCE_PLAN=")))
         checks = set(planned["local_checks"])
-        costly = {"native-release", "native-services", "native-cohost", "rendering", "browser"}
+        costly = {"native-release", "native-services", "native-cohost"}
         assert (checks & costly == set()) if expected else (costly - {"native-cohost"}) <= checks, (label, text)
+        # Manifests and test-group wrappers are not browser terminal inputs.
+        assert "browser" not in checks, (label, text)
+        assert "rendering" not in checks, (label, text)
         assert "native-workspace" in checks
         if expected:
             assert "native-examples" in checks, text
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)
+    # Reproduce complementary CI's raw newer-main base with actual diverging
+    # commits. The PR changes one original integration target; main-only files
+    # must not turn it into a full-workspace run.
+    grouped_scope_head = git("rev-parse", "HEAD")
+    git("switch", "-c", "isolated-native-test")
+    write(package + "tests/kept_driver.rs", (root / (package + "tests/kept_driver.rs")).read_text()
+          + "// Isolated PR test edit.\n")
+    isolated_head = commit("Change one native integration target")
+    git("switch", "main")
+    write(".github/workflows/main-only.yml", "name: Main-only acceptance change\n")
+    write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
+    newer_main = commit("Advance main independently of the test branch")
+    git("switch", "isolated-native-test")
+    selected = profiles.changed_cli_test_targets(root, newer_main)
+    assert selected == ["kept_driver"], f"Newer-main-only changes widened isolated native scope: {selected}"
+    assert profiles.changed_cli_test_targets(root, git("merge-base", newer_main, "HEAD")) == selected
+    previous_pids = environment["SCODE_GROUP_PID_DIR"]
+    environment["SCODE_GROUP_PID_DIR"] = str(output / "isolated-target-pids")
+    selected_args = [argument for name in selected for argument in ["--test", name]]
+    command("cargo", "test", "--locked", "-p", "group-product", *selected_args)
+    assert {path.name for path in (output / "isolated-target-pids").iterdir()} == {"driver"}
+    environment["SCODE_GROUP_PID_DIR"] = previous_pids
+    behind_main = {"newer_main": newer_main, "head": isolated_head, "selected": selected,
+                   "actual_native_targets": ["driver"], "conservative_cases": []}
+    for index, (label, path) in enumerate([
+        ("shared test helper", package + "tests/common/mod.rs"),
+        ("production source", package + "src/main.rs"),
+        ("unknown external input", "spec/future-fixture.json"),
+    ]):
+        git("switch", "-c", f"mixed-native-{index}", isolated_head)
+        file = root / path
+        write(path, (file.read_text() if file.exists() else "") + "// Changed actual branch input.\n")
+        head = commit("Keep full scope for " + label)
+        assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        behind_main["conservative_cases"].append({"case": label, "head": head})
+        if index == 0:
+            environment["SCODE_GROUP_PID_DIR"] = str(output / "mixed-target-pids")
+            command(str(executable), "nextest", "run", *options, "--workspace", "--locked", *grown_arguments)
+            assert {path.name for path in (output / "mixed-target-pids").iterdir()} == {path.name for path in pid_files}
+            environment["SCODE_GROUP_PID_DIR"] = previous_pids
+    for label, operation in [("deleted target", "delete"), ("test renamed into production", "rename")]:
+        git("switch", "-c", "native-" + operation, isolated_head)
+        if operation == "delete":
+            git("rm", package + "tests/kept_driver.rs")
+        else:
+            git("mv", package + "tests/kept_driver.rs", package + "src/moved.rs")
+        head = commit(label)
+        assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        behind_main["conservative_cases"].append({"case": label, "head": head})
+    git("switch", "isolated-native-test")
+    write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
+    head = commit("Keep actual branch source changes even when main has identical bytes")
+    assert profiles.changed_cli_test_targets(root, newer_main) is None
+    behind_main["conservative_cases"].append({"case": "coincident main and PR source bytes", "head": head})
+    git("switch", "-c", "grouping-controls", grouped_scope_head)
     for label, replacement, workspace_text, remove in [
         ("Enabled target keeps ordinary scope", declaration.replace('test=false', 'test=true'), workspace, False),
         ("Unknown target fields keep ordinary scope", declaration + 'harness=false\n', workspace, False),
@@ -261,11 +422,18 @@ pub fn record(name: &str) {
             write(wrapper, canonical)
         scope(label, False)
     result = {"status": "PASS", "original_cases": original_cases, "grown_cases": grown,
+              "every_integration_case_and_ignore_state_retained_without_unit_harnesses": True,
+              "fallback_original_integration_cases": original_integrations,
+              "older_source_default_suite_and_disabled_target_exclusion_retained": True,
+              "old_unit_harness_control_failed": True, "actual_production_dispatch_without_units_passed": True,
+              "production_workspace_commands": dispatched,
+              "observed_native_test_process_overlap": observed_workers,
               "exact_case_and_ignore_state_preserved": True, "nextest_process_state_isolated": True,
               "same_process_control_failed_isolation_assertion": True,
               "normal_product_sha256": original_binary, "normal_product_cargo_fresh": True,
               "original_named_driver_and_developer_target_passed": True,
               "invalid_group_refusals": refusals, "scope_cases": scope_cases, "ungrouped_plan": ungrouped_plan,
+              "behind_main": behind_main,
               "commands": commands,
               "scope": "Real Git commits/public planner, Cargo metadata/builds, original and grouped nextest inventories, actual per-case native child processes and independent process-state assertions. Tiny infrastructure fixtures, no product PTY/provider coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

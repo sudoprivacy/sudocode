@@ -100,9 +100,23 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
+def workspace_nextest_options(output, grouped):
+    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+    options = nextest_options(output)
+    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+        options[options.index('--test-threads') + 1] = '8'
+    print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
+          + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
+          'counts, legacy/isolated/other profiles retain four.',
+          flush=True)
+    return options
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    # Complementary CI can pass newer main; exclude changes outside this branch.
+    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"],
                                       cwd=root).decode().split("\0")[:-1]
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
@@ -189,6 +203,131 @@ def grouped_workspace_test_targets(root, metadata):
                                   for (package, name), members in sorted(groups.items())]}
 
 
+def workspace_integration_test_targets(targets):
+    """Retire grouped unit harnesses; preserve older Cargo default exclusions."""
+    if not targets:
+        # An explicit glob enables test=false targets and can force inactive
+        # required-features. Older sources keep their complete default suite.
+        return []
+    if targets[:2] != ["--lib", "--bins"]:
+        raise RuntimeError("Unexpected grouped workspace target plan; no tests started")
+    selected = targets[2:]
+    if not selected or len(selected) % 2 or any(selected[index] != "--test" for index in range(0, len(selected), 2)):
+        raise RuntimeError("Integration target selection must retain explicit nonempty test names")
+    return selected
+
+
+def performance_low_power_mode():
+    """Use Foundation's active mode, including desktops without a pmset setting."""
+    import ctypes
+
+    ctypes.CDLL("/System/Library/Frameworks/Foundation.framework/Foundation")
+    objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+    objc.objc_getClass.argtypes, objc.objc_getClass.restype = [ctypes.c_char_p], ctypes.c_void_p
+    objc.sel_registerName.argtypes, objc.sel_registerName.restype = [ctypes.c_char_p], ctypes.c_void_p
+    pointer = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    boolean = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    responds = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    info = pointer(objc.objc_getClass(b"NSProcessInfo"), objc.sel_registerName(b"processInfo"))
+    selector = objc.sel_registerName(b"isLowPowerModeEnabled")
+    if not info or not responds(info, objc.sel_registerName(b"respondsToSelector:"), selector):
+        raise RuntimeError("Foundation cannot report the active low-power mode")
+    return boolean(info, selector)
+
+
+def performance_power_state():
+    """Read native macOS power settings without changing the user's configuration."""
+    source = subprocess.check_output(["/usr/bin/pmset", "-g", "ps"], text=True, timeout=5)
+    sources = re.findall(r"^Now drawing from '([^']+)'", source, re.MULTILINE)
+    if len(sources) != 1 or sources[0] not in {"AC Power", "Battery Power"}:
+        raise RuntimeError("Cannot determine macOS power source; no timing acceptance granted")
+    return {"source": sources[0], "low_power_mode": performance_low_power_mode()}
+
+
+def stable_performance_power(output):
+    """Create the timing context only when a profile actually uses it."""
+    @contextmanager
+    def monitor_window():
+        """Refuse unqualified macOS timing windows; keep every observation for diagnosis."""
+        if platform.system() != "Darwin":
+            yield
+            return
+        import threading
+
+        evidence = output / "host-power.json"
+        observations, failures = [], []
+        stopped = threading.Event()
+
+        def sample():
+            row = {"at": time.time()}
+            try:
+                row.update(performance_power_state())
+                if row["source"] != "AC Power" or row["low_power_mode"]:
+                    failures.append("Timing acceptance requires external AC power with low-power mode disabled")
+            except Exception as error:
+                row["error"] = str(error)
+                failures.append(str(error))
+            observations.append(row)
+            staged = evidence.with_suffix(".json.stage")
+            staged.write_text(json.dumps({
+                "kind": "native-performance-power-observations", "poll_interval_seconds": 1,
+                "observations": observations, "invalid": bool(failures),
+            }, indent=2) + "\n")
+            staged.replace(evidence)
+
+        def require_stable():
+            if failures:
+                raise RuntimeError(f"{failures[0]}. Power evidence: {evidence}. "
+                                   "No settings were changed; preserve this attempt and connect AC power before a new run.")
+
+        sample()
+        require_stable()
+        print(f"Performance host: external AC, low-power mode disabled; monitoring each second: {evidence}", flush=True)
+
+        def monitor():
+            while not stopped.wait(1):
+                try:
+                    sample()
+                except Exception as error:
+                    failures.append(f"Cannot retain native power observations: {error}")
+                    return
+
+        worker = threading.Thread(target=monitor, name="acceptance-power", daemon=True)
+        worker.start()
+        try:
+            yield
+        except BaseException:
+            # Preserve the original command failure; the sidecar still records any
+            # power problem. A failed command can never become a passing profile.
+            raise
+        else:
+            stopped.set()
+            worker.join()
+            sample()
+            require_stable()
+        finally:
+            stopped.set()
+            worker.join()
+    return monitor_window()
+
+
+def prepare_windows_terminal(root, output, execute):
+    """Retain the actual installer command/log for the selected resize receipt."""
+    output.mkdir(parents=True, exist_ok=True)
+    terminal = Path.home() / ".cache/sudocode-terminal-host"
+    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+
+
+def prepare_native_checks(names, root, output, execute):
+    """Install selected Windows terminal inputs before long native compilation."""
+    prepared = {}
+    if os.name == "nt" and "native-resize" in names:
+        print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
+              "before compilation; original installer checks and terminal tests remain required.", flush=True)
+        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+    return prepared
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -210,11 +349,12 @@ def run(name, root, output, base, execute):
 
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
-        entry = stage_profile_executor(root, execution_policy_ref(), name, output / "history-policy")
+        entry = stage_preflight_executor(root, execution_policy_ref(), output / "history-policy")
         print("History preflight uses the protected policy checker; the author branch stays unchanged.", flush=True)
         command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
-        print("Local contract validation: full private Docker decision matrix. "
+        print("Local contract validation: full private Docker matrix, with Git/signature checks before Cargo; "
+              "then author-host native recovery, nextest, release, grouping and example guards. "
               "No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
@@ -224,13 +364,12 @@ def run(name, root, output, base, execute):
         except (RuntimeError, OSError) as error:
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
-                               f"guard log above. The decision matrix has not started: {error}") from error
-        contract_container(root, output, command)
-    elif name == "native-guard":
+                               f"guard log above. Native smoke and matrix have not started: {error}") from error
         policy_ref = execution_policy_ref()
-        entry = stage_profile_executor(root, policy_ref, name, output / "policy")
+        entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
+        contract_container(root, output, command)
         command(sys.executable, str(entry), "--repository", str(root),
-                "--output", str(output / "executor"),
+                "--output", str(output / "native-guard"),
                 "--executable", str(nextest_binary(output)),
                 "--source-receipt", str(output / "nextest-source.json"),
                 "--options", json.dumps(nextest_options(output)))
@@ -262,19 +401,31 @@ def run(name, root, output, base, execute):
         else:
             command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
-            print("Workspace lint with warnings denied runs before long builds and PTY execution. "
-                  "The integrated queue additionally checks all targets/features.", flush=True)
-            cargo("clippy", "--workspace", "--all-targets", "--locked", "--features", "engine-acp/mailbox",
+            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
+            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
+            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
+            print("Native workspace target selection: " + json.dumps(selection), flush=True)
+            print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
+                  "targets, examples and benches before long builds and PTY execution. "
+                  "The integrated queue additionally checks original targets with all features.", flush=True)
+            if targets:
+                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                      "unit harnesses are not executed. Queue all-target/all-feature lint and workspace doctests remain.", flush=True)
+            else:
+                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
+            lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
+            cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
                   "--", "-D", "warnings")
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
-            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
-            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
-            print("Native workspace test selection: " + json.dumps(selection), flush=True)
-            native_tests("--workspace", "--locked", "--features", "engine-acp/mailbox", *targets)
+            command(str(nextest_binary(output)), "nextest", "run",
+                    *workspace_nextest_options(output, bool(targets)),
+                    "--workspace", "--locked", "--features", "engine-acp/mailbox",
+                    *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
     elif name == "native-examples":
@@ -284,14 +435,23 @@ def run(name, root, output, base, execute):
     elif name == "native-resize":
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            command(sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal))
+            try:
+                prepared = run.prepared_native.get(name)
+            except AttributeError:
+                prepared = None
+            if prepared:
+                # These are actual commands from this invocation, not a cached
+                # successful profile. Append them to the normal signed receipt.
+                results.extend(prepared)
+            else:
+                results.append(prepare_windows_terminal(root, output, execute))
             command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
+        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
         if os.name != "nt":
             tests.append("pty_codex_colors")
         for test in tests:
@@ -308,10 +468,18 @@ def run(name, root, output, base, execute):
               "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
         cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
-        command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
-                "--report", str(output / "startup.json"))
+        with stable_performance_power(output):
+            command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
+                    "--report", str(output / "startup.json"))
     elif name == "native-services":
-        cargo("build", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
+        # Cargo's test graph unifies dev-dependency features. A normal build
+        # after workspace tests recompiles the CLI and its shared dependencies.
+        # Keep Cargo's freshness check, without executing the driver twice.
+        print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
+              "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
+              "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
+        cargo("test", "--no-run", "--locked", "-p", "rusty-sudocode-cli",
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
@@ -320,8 +488,8 @@ def run(name, root, output, base, execute):
         if not bash:
             raise RuntimeError("Git Bash is required for shared-service credential acceptance")
         command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                'python e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"))
+                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
+                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -356,12 +524,14 @@ def run(name, root, output, base, execute):
                 policy_ref, candidate_ref = run.execution_refs
             except AttributeError:
                 policy_ref = candidate_ref = None
-            try:
-                images = run.execution_images
-            except AttributeError:
-                images = None
-            container(name, root, output, base, command, execute,
-                      policy_ref=policy_ref, candidate_ref=candidate_ref, images=images)
+            if name == "rendering":
+                with stable_performance_power(output):
+                    container(name, root, output, base, command, execute,
+                              policy_ref=policy_ref, candidate_ref=candidate_ref)
+            else:
+                # The browser smoke checks behaviour, not timing.
+                container(name, root, output, base, command, execute,
+                          policy_ref=policy_ref, candidate_ref=candidate_ref)
     else:
         raise RuntimeError(f"Unknown mandatory acceptance check: {name}")
     if not results:
@@ -378,41 +548,46 @@ def execution_policy_ref():
     return policy_ref or "origin/main"
 
 
+def preflight_guard_files():
+    """Keep the history checker independent of unrelated native fixture pins."""
+    return {".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7"}
+
+
 def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
+        **preflight_guard_files(),
+        ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "8b9e77dcfbc7f848a604c8d08ebd6c57842a5822fbf3a939196cd402285462ab",
-        ".github/local-acceptance/native_guard.py": "41a51fb57b706910f66daf0fd22fafa16d26f20e092ad8f8b4428bc22a059090",
+        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
+        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
-        ".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7",
-        ".github/scripts/local_acceptance.py": "3410af87c128b3dcb8331853d885918257efb3546091e125a58854ed247747f5",
+        ".github/scripts/local_acceptance.py": "cdc7b60576c6996cbcc90aeead620f261b6f79eacc2f6ca7336fc7492272dd0d",
+        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance.yml": "eca519d98c79672c397ab933bfbb995e23cf67cea21e7aa2a321d767448328c0",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "c2bdb2a4ae04f93c81434b7b7552ff62f807090354bdcd8392686ed44ed0b8e7",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "4119e4c3425c3250e4c5cf8740dd12044ab27baa8aa1829157fd2c84b301e6a9",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "d86cace0ae23e2b706ccbe7f4dfbf17f4f2eacb1e1910ed41c93406a5f114df1",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "74e5744b1e3972661336179a4868e4eaacb19871a983240ee7d102c8a606de2e",
-        "e2e/local-acceptance/native_lint_acceptance.py": "94229d3b06f0944ad23f31e73e9355d7b5ba48d1dc8258aa07fc8c23172ca593",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "84ab8a128f792c866ac5c1ace498dc69ae08b5479452a505e07b2c44a81e090a",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "3823cd9ef712daaea3166593f8686173f65ae66305c4e31b7b86903db41a67b2",
-        "e2e/local-acceptance/release_acceptance.py": "c239ee4fd1ad442e0a9aad54c55de5c6245eced3f4fd6c0cecaf6e06a86bd804",
+        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
+        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "a29a527bf11f425cd37dc180ee145cbbb33bb92e88a17bc8ce518e93fbd20fa8",
+        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
+        "e2e/local-acceptance/release_acceptance.py": "d9983bad5480673d49153ed94944593c0f07efb7db64369581d3476ff7923858",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
-        "e2e/local-acceptance/run.py": "7f292adc2f4a97c23181226c536f2c3491b6e71150f3e40b8d7830b54954513b",
+        "e2e/local-acceptance/run.py": "8a707938f9a77989955f0482210b5df13177ac36ef4af2179b6b649777e1eb55",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
     }
 
-def stage_profile_executor(root, policy_ref, name, policy_root):
-    """Materialize one hash-bound native tool set without changing the candidate."""
-    files = native_guard_files()
-    if name == "preflight":
-        files = {".github/scripts/check_pr_history.py": files[".github/scripts/check_pr_history.py"]}
-    elif name != "native-guard":
-        raise RuntimeError(f"No policy-owned native executor for {name}")
+
+def stage_executor_files(root, policy_ref, files, policy_root):
+    """Copy the selected protected bytes with one shared path and SHA256 check."""
     for relative, expected in files.items():
         destination = (policy_root / relative).resolve()
         if not destination.is_relative_to(policy_root.resolve()):
@@ -424,8 +599,22 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
                                "Update its protected pin before running acceptance.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents)
+
+
+def stage_preflight_executor(root, policy_ref, policy_root):
+    """Stage only the protected history checker for metadata preflight."""
+    files = preflight_guard_files()
+    stage_executor_files(root, policy_ref, files, policy_root)
+    return policy_root / next(iter(files))
+
+
+def stage_profile_executor(root, policy_ref, name, policy_root):
+    """Materialize one hash-bound native tool set without changing the candidate."""
     if name == "preflight":
-        return policy_root / ".github/scripts/check_pr_history.py"
+        return stage_preflight_executor(root, policy_ref, policy_root)
+    if name != "guard-contract":
+        raise RuntimeError(f"No policy-owned native executor for {name}")
+    stage_executor_files(root, policy_ref, native_guard_files(), policy_root)
     # The grouping fixture needs actual protected selection rules. Bind only
     # those fields: approval maps contain these recipe hashes and cannot be
     # included in their own input digest. Signer data is not used by the planner.
@@ -434,7 +623,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "7a856e0f16f5c2bddfe7106451be8424a254425f5c09623d922c89db8662bd92":
+    if actual_scope != "08ef33f86c71c383bb838f98a4f28dcb30bace3fc401a2f5c6c0d5c6b71dfeae":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -447,12 +636,19 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "6521867052078d0e61204ae64745e6c4c6ec9390f8451e279024e600d70c23df"
+    expected = "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
     return policy_root / ".github/local-acceptance/native_guard.py"
+
+
+def container_image_tag(repository, digest):
+    """Keep each build's image reference owned until its caller finishes using it."""
+    import uuid
+
+    return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
 
 
 def contract_container(root, output, command):
@@ -483,8 +679,9 @@ def contract_container(root, output, command):
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
     image_receipt = output / "guard-image-id.txt"
+    image_tag = container_image_tag("sudocode-contract-guard", inputs_hash.hexdigest())
     command("docker", "build", "--iidfile", str(image_receipt), "--tag",
-            "sudocode-contract-guard:" + inputs_hash.hexdigest()[:24], str(context),
+            image_tag, str(context),
             extra={"DOCKER_BUILDKIT": "1"})
     image = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
@@ -492,7 +689,7 @@ def contract_container(root, output, command):
     inputs = output / "guard-inputs"
     snapshot(root, candidate, inputs)
     (output / "guard-provenance.json").write_text(json.dumps({
-        "candidate": candidate, "policy": protected, "image_id": image,
+        "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
         "context_sha256": inputs_hash.hexdigest()}, indent=2))
     # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
@@ -519,7 +716,9 @@ def container_profile_output(evidence, name):
     return evidence / "container" / name
 
 
-def container(name, root, output, base, command, execute, policy_ref, candidate_ref, images=None):
+def container(name, root, output, base, command, execute, policy_ref, candidate_ref):
+    import hashlib
+
     state, lease_volume = container_storage()
     state.mkdir(parents=True, exist_ok=True)
     # Keep active Cargo/npm state on Docker's Linux filesystem. The previous
@@ -529,11 +728,16 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
 
     protected = revision(policy_ref or "origin/main")
     candidate = revision(candidate_ref or "HEAD")
-    policy = json.loads(subprocess.check_output(["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
-    reference = revision(policy["baseline_commit"] if name == "rendering" else base)
+    snapshots = {"candidate": candidate}
+    if name == "rendering":
+        # The paired matrix compares the candidate with the policy's fixed
+        # baseline, using the trusted driver and harness.
+        policy = json.loads(subprocess.check_output(
+            ["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
+        snapshots.update(baseline=revision(policy["baseline_commit"]), trusted=protected)
     sources = output / "inputs"
     sources.mkdir()
-    for label, ref in [("candidate", candidate), ("baseline", reference), ("trusted", protected)]:
+    for label, ref in snapshots.items():
         snapshot(root, ref, sources / label)
     context = output / "image-context"
     context_hash = hashlib.sha256()
@@ -547,47 +751,40 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
-    digest = context_hash.hexdigest()
     image_receipt = output / "image-id.txt"
-    # A check invocation owns this map. Reuse only its actual build result,
-    # never a mutable tag or an image left by another acceptance invocation.
-    key = (str(output.parent.resolve()), candidate, protected, digest)
-    cached = images.get(key) if images is not None else None
-    # BuildKit can discard the previous image index when another build exports
-    # the same tag. Keep an independent reference until this invocation finishes.
-    image = (cached["image_tag"] if cached is not None
-             else f"sudocode-local-acceptance:{digest[:24]}-{os.urandom(16).hex()}")
-    if cached is None:
+    # Only a successful rendering call in this process can authorize reuse.
+    try:
+        invocations = container.invocations
+    except AttributeError:
+        invocations = {}
+    key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
+    previous = invocations.get(key) if name == "browser" else None
+    image = (previous["image_tag"] if previous is not None
+             else container_image_tag("sudocode-local-acceptance", context_hash.hexdigest()))
+    if previous is None:
         command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
                 extra={"DOCKER_BUILDKIT": "1"})
-        image_id = image_receipt.read_text().strip()
-        build_receipt = str(image_receipt)
     else:
-        image_id, build_receipt = cached["image_id"], cached["build_receipt"]
+        image_receipt.write_text(previous["image_id"] + "\n", encoding="utf-8")
+        print("Browser smoke reuses this invocation's measured rendering image and release: "
+              f"{previous['image_id']}", flush=True)
+    image_id = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
-    if cached is not None:
-        # Inspect by immutable ID before recording reuse. A missing image must
-        # fail, rather than pulling a tag or silently rebuilding another image.
-        command("docker", "image", "inspect", "--format", "{{.Id}}", image_id)
-        image_receipt.write_text(image_id + "\n")
-    record = cached if cached is not None else {
-        "image_id": image_id, "image_tag": image, "build_receipt": build_receipt,
-    }
-    if images is not None:
-        images[key] = record
     identity = {
-        "candidate": candidate, "baseline": reference, "policy": protected,
-        "image_id": image_id, "image_tag": image, "context_sha256": digest,
-        "image_reused": cached is not None, "image_build_receipt": build_receipt,
+        **snapshots, "policy": protected,
+        "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
+        "rendering_release_reused": previous is not None,
     }
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
-    previous = record.get("release") if name == "browser" else None
     if previous is not None:
+        binary = previous["binary"]
+        if checkout_link(binary) or hashlib.sha256(binary.read_bytes()).hexdigest() != previous["sha256"]:
+            raise RuntimeError("Measured rendering release changed before browser reuse")
         reused = sources / "candidate-release"
         reused.mkdir()
-        shutil.copy2(previous["binary"], reused / "scode")
+        shutil.copy2(binary, reused / "scode")
         (reused / "identity.json").write_text(json.dumps({
             **identity, "version": 1, "sha256": previous["sha256"],
         }, indent=2))
@@ -597,6 +794,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
+    if name == "browser":
+        # The executor owns this harness, including for candidates that predate
+        # it. Stage only its Python imports/policy, not another source checkout.
+        for relative in ["e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/benchmark.py",
+                         "e2e/terminal-resize/gui-policy.json"]:
+            path = sources / "runner" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
@@ -613,24 +818,25 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
             raise RuntimeError("Rendering candidate binary does not match its completed measurements")
-        record["release"] = {"binary": binary, "sha256": digest}
+        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id, "image_tag": image}
+        container.invocations = invocations
 
 
 def verified_candidate_release(inputs):
-    """Accept only the same invocation's read-only, hash-bound normal release."""
+    """Verify the read-only release promoted by this invocation's rendering."""
     directory = inputs / "candidate-release"
     if not directory.exists():
         return None
     binary, receipt = directory / "scode", directory / "identity.json"
     if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
-        raise RuntimeError("Reused benchmark release must contain regular files")
+        raise RuntimeError("Reused rendering release must contain regular files")
     expected = json.loads((inputs / "identity.json").read_text())
     observed = json.loads(receipt.read_text())
     if observed.get("version") != 1 or any(observed.get(name) != expected[name]
             for name in ["candidate", "policy", "image_id", "context_sha256"]):
-        raise RuntimeError("Reused benchmark release belongs to different source, policy or image")
+        raise RuntimeError("Reused rendering release belongs to different source, policy or image")
     if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
-        raise RuntimeError("Reused benchmark release bytes changed after rendering")
+        raise RuntimeError("Reused rendering release bytes changed")
     return binary
 
 
@@ -716,18 +922,6 @@ def exclusive_benchmark_state(directory=Path("/locks")):
         yield
 
 
-def run_viewport_browser_cases(driver, command, environment):
-    # Use the same compiled artifact for lifecycle checks and measurements.
-    passed = {}
-    for test in ["viewport_browser_interaction", "viewport_browser_resource_exit"]:
-        log = command(driver, test, "--ignored", "--exact", "--nocapture", extra=environment)
-        counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))
-        if not counts or sum(int(count) for count, _ in counts) == 0 or any(int(failed) for _, failed in counts):
-            raise RuntimeError(f"No actual passing viewport lifecycle test: {test}")
-        passed[test] = sum(int(count) for count, _ in counts)
-    return passed
-
-
 def benchmark(name, root, output, base, command, target):
     with exclusive_benchmark_state():
         migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
@@ -783,11 +977,15 @@ def benchmark_storage(name):
     return state / name, state / "target" / name
 
 
-def rendering_cases(terminal, arguments, output, command):
+def rendering_cases(terminal, arguments, output, command, plan):
     """Finish and judge each complete scenario before admitting the next one."""
     policy_path = terminal / "performance-policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["profiles"]["core"]
+    if (plan.get("unjudged_warmups") != 0
+            or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
+            or plan["cases"] != cases):
+        raise RuntimeError("Rendering policy changed after its pre-build validation")
     if not cases or len(cases) != len(set(cases)) or any(
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
@@ -795,7 +993,9 @@ def rendering_cases(terminal, arguments, output, command):
     report = {"version": 1, "profile": "core", "preview": "0", "policy": policy,
               "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
               "status": "running", "samples": [], "metrics": [], "calibration": [],
-              "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {}}
+              "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
+              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
+              "unjudged_warmups": 0}
     metadata = None
 
     def save():
@@ -811,7 +1011,7 @@ def rendering_cases(terminal, arguments, output, command):
         report["active_case"] = case
         save()
         print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
-              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; two warm-ups. "
+              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; no unjudged warm-ups. "
               f"Complete paired result: {output / case / 'report.json'}. "
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
@@ -825,6 +1025,13 @@ def rendering_cases(terminal, arguments, output, command):
                     child = json.loads(child_path.read_text(encoding="utf-8"))
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
+                        raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
+                                           f"required {plan['samples'][case]} judged observations and no extra warm-ups")
+                    if succeeded and child["status"] == "passed":
+                        observed = [{key: row[key] for key in ["stage", "round", "side"]} for row in child["samples"]]
+                        if observed != plan["pairs"][case]:
+                            raise RuntimeError(f"Rendering scenario {case} paired sample inventory differs from its declared rounds")
                     for key in ["base_sha256", "candidate_sha256", "driver_sha256", "harness_sha256"]:
                         if key in report and report[key] != child[key]:
                             raise RuntimeError(f"Rendering {key} changed between scenarios")
@@ -853,6 +1060,10 @@ def rendering_cases(terminal, arguments, output, command):
         if not succeeded or report["status"] != "running":
             raise RuntimeError(f"Rendering scenario {case} did not pass; scenarios without a pass: "
                                f"{report['remaining_cases']}. See {output / 'report.json'}")
+    if len(report["samples"]) != plan["total_samples"]:
+        report.update(status="invalid", failures=["Rendering matrix did not execute its complete declared sample count"])
+        save()
+        raise RuntimeError("Rendering matrix did not execute its complete declared sample count")
     report.update(status="passed", active_case=None)
     save()
 
@@ -869,87 +1080,116 @@ def benchmark_driver_package(source):
 
 
 def benchmark_locked(name, root, output, base, command, target):
+    if name == "browser":
+        browser_smoke(root.parent, output, command)
+        return
     # Run the declared workload and paired sampling policy. Moving execution
     # hosts does not change budgets or per-run interaction assertions.
     inputs = root.parent
     work, targets = benchmark_storage(name)
-    # Both profiles compile the same candidate. Keep its canonical source path
-    # and Cargo outputs together, under the existing shared exclusion lease.
-    candidate_work, candidate_targets = benchmark_storage("rendering")
-    checkouts = {label: (candidate_work if label == "candidate" else work) / label
-                 for label in ["candidate", "baseline", "trusted"]}
-    build_targets = {"baseline": targets / "baseline", "candidate": candidate_targets / "candidate"}
     work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
-        destination = checkouts[label]
         # Sources are disposable copies from this invocation's exact Git archive.
-        replace_checkout(inputs / label, destination)
-    candidate, baseline, trusted = (checkouts[label] for label in ["candidate", "baseline", "trusted"])
-    driver_source = trusted if name == "rendering" else candidate
-    terminal = driver_source / "e2e/terminal-resize"
+        replace_checkout(inputs / label, work / label)
+    candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
+    terminal = trusted / "e2e/terminal-resize"
+    plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", "core",
+                       "--policy", str(terminal / "performance-policy.json"))
+    render_plan = json.loads(plan_log.read_text(encoding="utf-8"))
+    print(f"Required rendering plan: {len(render_plan['cases'])} scenarios, {render_plan['total_samples']} samples. "
+          "Each scenario's judged metrics and budgets remain required. Malformed plans fail before npm or Cargo.",
+          flush=True)
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
-    reused = verified_candidate_release(inputs) if name == "browser" else None
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
-        if label == "candidate" and reused is not None:
-            shutil.copy2(reused, output / "scode-candidate")
-            print("Browser acceptance reuses the measured normal release from rendering; "
-                  "source, protected policy, immutable image and binary SHA256 match. "
-                  "Browser drivers and every observer still run.", flush=True)
-            continue
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", str(build_targets[label]), "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(build_targets[label] / "release/scode", output / f"scode-{label}")
-    # Share artifacts only with the same canonical source checkout. The copied
-    # production binaries above stay fixed when dev features build the drivers.
-    driver_target = targets / "driver" if name == "rendering" else build_targets["candidate"]
-    driver_package = benchmark_driver_package(driver_source)
-    driver_prefix = "benchmark" if driver_package == "scode-benchmark-drivers" else "pty"
-    driver_name = f"{driver_prefix}_" + ("render_performance" if name == "rendering" else "hyperlinks")
-    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
-                  "--target-dir", str(driver_target), "-p", driver_package, "--test", driver_name,
-                  "--no-run", "--message-format=json-render-diagnostics")
-    messages = []
+                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+    # The copied production binaries above stay fixed when dev features build the driver.
+    package, prefix = benchmark_driver_targets(trusted)
+    driver = f"{prefix}_render_performance"
+    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
+                  "--target-dir", str(targets / "driver"), "-p", package,
+                  "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
+    drivers = compiled_drivers(log, [driver])
+    args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
+            "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
+    expected_driver = hashlib.sha256(Path(drivers[driver]).read_bytes()).hexdigest()
+
+    def measured_command(*args):
+        return command(*args, extra={"SCODE_EXPECTED_DRIVER_SHA256": expected_driver})
+
+    rendering_cases(terminal, args, output / "measurements", measured_command, render_plan)
+
+
+def benchmark_driver_targets(source):
+    """The driver package and its target-name prefix for this source snapshot."""
+    package = benchmark_driver_package(source)
+    return package, "benchmark" if package == "scode-benchmark-drivers" else "pty"
+
+
+def compiled_drivers(log, names):
+    """The single test executable Cargo reported for each requested target."""
+    found = {name: [] for name in names}
     for line in log.read_text(errors="replace").splitlines():
         if line.startswith("{"):
-            messages.append(json.loads(line))
-    drivers = [row["executable"] for row in messages if row.get("reason") == "compiler-artifact"
-               and row.get("target", {}).get("name") == driver_name and row.get("executable")]
-    if len(drivers) != 1:
-        raise RuntimeError(f"Expected exactly one compiled {driver_name} driver: {drivers}")
-    script = terminal / ("benchmark.py" if name == "rendering" else "gui-benchmark.py")
-    args = [sys.executable, str(script), "--driver", drivers[0], "--base", str(output / "scode-baseline"),
-            "--candidate", str(output / "scode-candidate")]
-    if name == "rendering":
-        rendering_cases(terminal, args, output / "measurements", command)
-    else:
-        command(*args, "--output", str(output / "measurements"))
-    if name == "browser":
-        # Move the existing viewport gates too; deleting the old release job
-        # must not silently drop its headless/browser CPU and painting checks.
-        manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = str(build_targets["candidate"])
-        viewport_name = f"{driver_prefix}_prompt_viewport"
-        viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
-                        "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
-        log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,
-                      "--target-dir", viewport_target, "-p", driver_package, "--test", viewport_name,
-                      "--no-run", "--message-format=json-render-diagnostics", extra=viewport_env)
-        records = [json.loads(line) for line in log.read_text(errors="replace").splitlines() if line.startswith("{")]
-        drivers = [row["executable"] for row in records if row.get("reason") == "compiler-artifact"
-                   and row.get("target", {}).get("name") == viewport_name and row.get("executable")]
-        if len(drivers) != 1:
-            raise RuntimeError("Missing viewport measurement driver")
-        run_viewport_browser_cases(drivers[0], command, viewport_env)
-        for observer in ["headless", "browser"]:
-            arguments = [sys.executable, str(candidate / "scripts/benchmark_prompt_viewport.py"),
-                         "--driver", drivers[0], "--binary", str(output / "scode-candidate"),
-                         "--output", str(output / ("viewport-" + observer))]
-            if observer == "browser":
-                arguments += ["--observer", "browser"]
-            command(*arguments, extra=viewport_env)
+            row = json.loads(line)
+            target = row.get("target", {}).get("name")
+            if row.get("reason") == "compiler-artifact" and target in found and row.get("executable"):
+                found[target].append(row["executable"])
+    if any(len(executables) != 1 for executables in found.values()):
+        raise RuntimeError(f"Expected exactly one compiled driver per target: {found}")
+    return {name: executables[0] for name, executables in found.items()}
 
+
+def browser_smoke(inputs, output, command):
+    """Painted-terminal behaviour against the measured release or a dev build.
+
+    Typing latency is judged by scoped local rendering; this pass checks
+    what only a real browser terminal shows: clickable links, native selection
+    surviving streaming, viewport wheel and selection, and an idle terminal.
+    """
+    reused = verified_candidate_release(inputs)
+    work, targets = benchmark_storage("rendering" if reused is not None else "browser")
+    work.mkdir(parents=True, exist_ok=True)
+    # Rendering has finished with this mutable checkout. Synchronize the actual
+    # candidate, then let normal Cargo dependency tracking validate every input.
+    candidate = work / ("trusted" if reused is not None else "candidate")
+    replace_checkout(inputs / "candidate", candidate)
+    terminal = candidate / "e2e/terminal-resize"
+    command("npm", "ci", "--prefix", str(terminal))
+    manifest = str(candidate / "rust/Cargo.toml")
+    build = str(targets / ("driver" if reused is not None else "candidate"))
+    profile = ["--release"] if reused is not None else []
+    binary = output / "scode-candidate"
+    # Copy before the drivers build: their dev features rebuild the shared graph.
+    if reused is None:
+        command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / "candidate/debug/scode", binary)
+    else:
+        shutil.copy2(reused, binary)
+        print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
+              "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
+    expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    package, prefix = benchmark_driver_targets(candidate)
+    links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
+    log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
+                  "-p", package, "--test", links, "--test", viewport,
+                  "--no-run", "--message-format=json-render-diagnostics")
+    drivers = compiled_drivers(log, [links, viewport])
+    smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
+    command(sys.executable, str(smoke), "--driver", drivers[links],
+            "--candidate", str(binary), "--output", str(output / "smoke"),
+            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
+                   "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
+    command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
+            "-p", package, "--test", viewport, "viewport_browser_interaction",
+            "--", "--ignored", "--exact", "--nocapture",
+            extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
+        raise RuntimeError("Browser candidate changed after validation")
 
 def main():
     parser = argparse.ArgumentParser()

@@ -523,13 +523,21 @@ def selected(policy, paths, *, base=None, head=None):
               "native workspace validation still runs. Existing target edits or unknown metadata keep full scope.", flush=True)
         print("OPT_IN_TEST_TARGET_SCOPE=" + json.dumps({"base": base, "head": head,
               "unchanged_benchmark_metadata": sorted(opt_in)}), flush=True)
-    return [name for name, rule in policy["checks"].items()
+    names = [name for name, rule in policy["checks"].items()
             if (name != "native-examples" or separate_examples)
             and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
                    for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
                              else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
                              else paths)))]
+    harness = [path for path in paths if path.startswith("e2e/nexus-a2a/")
+               and not path.lower().endswith((".md", ".html"))]
+    if base and head and harness and "native-workspace" in policy["checks"] and "native-workspace" not in names:
+        print("A2A_HARNESS_SCOPE=" + json.dumps({"changed_harness_inputs": harness,
+              "native_workspace": "omitted_unchanged_product",
+              "required_validation": "real pinned-daemon scripts in the Linux merge queue",
+              "mixed_Rust_inputs_retain_native_workspace": True}), flush=True)
+    return names
 
 
 NATIVE_TARGETS = {
@@ -588,9 +596,16 @@ def acceptance_plan(policy, names, author):
 def report_plan(plan):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
-    performance = [name for name in ["rendering", "browser"] if name in plan["local_checks"]]
+    performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; indirect performance effects outside the selected inputs are not measured."))
+    release = "native-release" in plan["local_checks"] or any("native-release" in job["checks"] for job in plan["ci"])
+    lines.append("Native release build/startup: " + ("selected on the author and complementary native hosts." if release else
+                 "not selected; native optimized stream/resume behavior and the 100 ms startup budget are outside this run's scope.")
+                 + " Trigger scope: Cargo/build/vendor inputs, CLI entry/startup/parser, runtime config, stream-capture test or startup harness. "
+                   "Ordinary functional checks and selected Linux release rendering keep their own scopes.")
+    lines.append("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]
+                 else "No browser terminal input changed.")
     for job in plan["ci"]:
         lines.append(f"CI {', '.join(NATIVE_TARGETS[target]['label'] for target in job['targets'])}: "
                      f"{', '.join(job['checks'])} ({job['os']})")
@@ -599,6 +614,8 @@ def report_plan(plan):
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
+          "ordinary_source_optimized_native_coverage_reduced": True}, separators=(",", ":")), flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write("## Acceptance responsibilities\n\n" + "\n".join("- " + line for line in lines) + "\n")
@@ -866,17 +883,28 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
             compatible = False
     if not compatible:
         required_policy = value("rev-parse", policy_ref)
+        # CI diagnostics can outlive another protected-main update. Preserve
+        # explicit experimental/candidate snapshots, but refresh mainline rules.
+        mainline = git("merge-base", "--is-ancestor", required_policy, "origin/main", check=False).returncode == 0
+        recovery_policy = "origin/main" if mainline else required_policy
+        recovery_base = "origin/main" if mainline else base
         print("LOCAL_ACCEPTANCE_RECOVERY=" + json.dumps({
             "version": 1, "run_on": "original author native host",
             "ci_proof_host_is_not_the_author_test_host": True,
             "runner": "<git-common-dir>/local-acceptance-hooks/local_acceptance.py",
-            "args": ["check", "--head", head, "--base", base,
-                     "--policy-ref", required_policy, "--publish", "--remote", "origin"],
-            "next": "Publish refreshed signed evidence, then rerun the acceptance workflow",
+            "observed_required_policy": required_policy,
+            "policy_source": "current protected main" if mainline else "requested immutable snapshot",
+            "prepare": [["git", "fetch", "--no-tags", "origin",
+                         "+refs/heads/main:refs/remotes/origin/main"]] if mainline else [],
+            "args": ["check", "--head", head, "--base", recovery_base,
+                     "--policy-ref", recovery_policy, "--publish", "--remote", "origin"],
+            "next": "On the original author host, run prepare first, then runner with args; "
+                    "publish refreshed signed evidence and rerun the acceptance workflow",
         }), file=sys.stderr, flush=True)
         raise RuntimeError(
             f"Acceptance commands changed; refresh/publish on the AUTHOR native host "
-            f"for required policy {required_policy}, then rerun CI")
+            f"using {'freshly fetched protected main' if mainline else 'the requested snapshot'} "
+            f"(observed policy {required_policy}); follow LOCAL_ACCEPTANCE_RECOVERY, then rerun CI")
     check_contract_changes(head, base, policy_ref)
     if not completed_only and not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
@@ -1187,6 +1215,10 @@ def perform_check(args, attempt):
         receipt["resumed_from"] = resumed
     try:
         with host_acceptance_lease(attempt, head):
+            prepare = getattr(module, "prepare_native_checks", None)
+            if prepare:
+                module.run.prepared_native = prepare(
+                    [name for name in needed if name not in reusable], ROOT, output, run_command)
             for name in needed:
                 if name in reusable:
                     print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)

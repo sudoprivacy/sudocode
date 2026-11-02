@@ -53,6 +53,10 @@ if os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true":
             root, output / "host-setup/001.log")
     os.environ["RUST_TEST_NOCAPTURE"] = "1"
 
+prepare = getattr(checks, "prepare_native_checks", None)
+if prepare:
+    checks.run.prepared_native = prepare(native_checks, root, output, execute)
+
 for name in native_checks:
     checks.run(name, root, output / name,
                os.environ["ACCEPTANCE_BASE"], execute)

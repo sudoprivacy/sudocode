@@ -498,10 +498,16 @@ author/complementary host: 91 instead of 211 integration targets in the audited
 workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
 Ungrouped sources keep `--all-targets`; disabled
 standalone test targets keep their original exclusion. Queue all-feature lint
-also reuses validated groups, retaining uncovered enabled tests and Cargo's
-exclusion of manual `test=false` performance drivers. Lint no longer checks covered modules under
-their original standalone crate identities on the author, complementary hosts
-or queue. Every module still compiles in its group. Real Cargo/Clippy controls inject
+retains `--all-targets` for ordinary/shared changes, checking original standalone
+crate identities. Only committed isolated CLI test edits use the same native
+scope predicate: changed original targets and their canonical containing groups.
+Unchanged unrelated integration, library/bin test, example and bench roots are
+not linted again for that test-only class. The full workspace all-feature
+dependency graph remains; a real cross-member feature counterexample rejects
+isolated package selection that drops a required dependency feature. Missing base
+history, dirty/untracked inputs, unknown or unregistered targets retain full lint.
+`QUEUE_CLIPPY_SCOPE` reports the exact mode/reason, counts and command.
+Real Cargo/Clippy controls inject
 errors into ordinary and test-only library/bin code, grouped/ignored tests,
 shared helpers, examples and benches, and verify disabled-target exclusion.
 No product test case, assertion or deadline changes.
@@ -784,8 +790,9 @@ The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful
-runs retain every feature, target category and `-D warnings` check; covered
-integration modules compile through their validated groups. An actual three-package
+runs retain every feature and `-D warnings` check; ordinary source changes retain
+all target categories, and isolated test edits
+select changed originals plus their groups. An actual three-package
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
 records the actual compiler priorities. Additional real compiler controls reject
@@ -798,6 +805,13 @@ selector changes; queue/main reuse its result.
 Changing the queue entry itself also selects the real all-feature workspace
 lint on all three queue platforms. Real committed PR/push/queue event controls
 verify this trigger and the exclusion of documentation-only changes.
+Draft snapshots use a separate concurrency group and explicit run title. They
+cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
+workflows allocate no publisher runner. A newer applicable ready run and its
+current attempt still own the result, including failures; required jobs and
+SSH signatures remain verified. Publisher output explains an ignored event
+on the mandatory execution path. Real child-process/HTTP/Git/SSH controls cover
+both event orders, queued drafts, failed ready runs and signature corruption.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

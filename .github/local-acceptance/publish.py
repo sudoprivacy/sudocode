@@ -15,6 +15,11 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
+def applicable_run(run):
+    """A draft snapshot never ran the required proof and cannot own readiness."""
+    return run.get("display_title") != "Draft local acceptance" and run.get("conclusion") != "skipped"
+
+
 def main():
     source = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -24,10 +29,16 @@ def main():
     if source.get("run_attempt") != run["run_attempt"]:
         print("Old workflow attempt; publish nothing")
         return
+    if not applicable_run(run):
+        print("Draft/skipped snapshot did not run required checks; publish no acceptance status. "
+              "The applicable ready-for-review or merge-group run must finish.")
+        return
     head = run["head_sha"]
     newer = gate.pages(f"repos/{repository}/actions/workflows/local-acceptance.yml/runs?head_sha={head}&event={run['event']}", "workflow_runs")
-    if any(item["id"] > run["id"] for item in newer):
-        print("A newer acceptance run owns this head; publish nothing")
+    owners = [item for item in newer if item["id"] > run["id"] and applicable_run(item)]
+    if owners:
+        print("A newer applicable acceptance run owns this head: "
+              + ", ".join(str(item["id"]) for item in owners) + "; publish nothing")
         return
     if run["event"] == "pull_request":
         pulls = [pull for pull in gate.pages(f"repos/{repository}/pulls?state=open&base=main")

@@ -49,7 +49,8 @@ def main():
     environment = {"SCODE_TEST_BACKEND": "mock", "CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "1"}
     record = {"head": head, "started_at": datetime.now(timezone.utc).isoformat(),
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
-              "scope": "Private actual native integration suite, identical captured binaries and cases, original deadlines, no retries. Eight runs first, so its result cannot benefit from the four-worker run warming executables. No acceptance signature or paid API call."}
+              "baseline_run": 41450784797, "baseline_job": 125295385686,
+              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Reuse the already-required same-source Mac four-worker CI as baseline instead of repeating it. Different VMs: timings are observations, not a controlled causal speedup. No acceptance signature or paid API call."}
     started = time.monotonic()
 
     def invoke(command, log):
@@ -90,7 +91,8 @@ def main():
                     ignored += 1
                 else:
                     expected.add((identity, name))
-        assert len(expected) >= 1089, len(expected)
+        # Captured83c735 had1139 active/72 ignored; the source adds two HTTP cases.
+        assert len(expected) == 1141 and ignored == 72, (len(expected), ignored)
         paths = set()
 
         def collect(value):
@@ -114,7 +116,7 @@ def main():
         record.update(expected_active_cases=len(expected), ignored_cases=ignored)
         (output / "configuration.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         actual_sets = []
-        for workers in [8, 4]:
+        for workers in [8]:
             print(f"REAL_WORKER_FIELD workers={workers} cases={len(expected)} ignored={ignored}", flush=True)
             row = invoke([str(tool), "nextest", "run", "--config-file", str(config), "--profile", "default",
                           "--ignore-default-filter", "--test-threads", str(workers), "--retries", "0",
@@ -128,10 +130,10 @@ def main():
             record["phases"].append({"workers": workers, "cases": len(cases), **row})
             (output / "partial-result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             print(f"REAL_WORKER_RESULT workers={workers} seconds={row['elapsed_seconds']}", flush=True)
-        assert actual_sets[0] == actual_sets[1]
+        assert actual_sets == [expected]
         assert subprocess.check_output(["git", "status", "--porcelain"], cwd=root) == b""
-        record.update(status="PASS", identical_actual_cases_and_binaries=True,
-                      runtime_ratio_8_over_4=record["phases"][0]["elapsed_seconds"] / record["phases"][1]["elapsed_seconds"])
+        record.update(status="PASS", full_inventory_matches_actual_cases=True,
+                      captured_binaries_unchanged_during_measurement=True)
     except BaseException as error:
         record.update(status="FAIL", error=repr(error))
         raise

@@ -417,10 +417,15 @@ receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays re
 in CI preflight; editing it alone skips unrelated native product builds.
 Development-only Cargo manifest/lock changes do not select normal release,
 service, co-host or daemon builds. The shared selector reads committed Git/TOML:
-resolver 2 and workspace settings must stay unchanged, manifest edits must be
-limited to dev dependencies, and existing lock packages/normal edges must stay
-unchanged. New versions of an existing package name, deleted lock nodes and
-unknown/malformed metadata keep the ordinary scope. Native workspace/lint,
+resolver 2 and normal workspace settings must stay unchanged. For the standard
+`crates/*` workspace, shared dev dependency revisions and versions may change
+when every normal/build declaration and its reachable lock records and resolved
+edges remain identical. Aliases, optional dependencies and target-specific
+tables participate in that proof. Removed or replaced dev-only lock nodes are
+allowed; changed normal resolutions, missing/ambiguous edges and unsupported
+metadata retain the ordinary scope. Committed blobs are read in one Git batch,
+without executing candidate code. Older/custom layouts retain the existing
+conservative verifier for direct dev-only additions. Native workspace/lint,
 provider, resize and statistical performance scopes stay unchanged. Other
 source or assertion changes still select their checks. Required output prints
 `BUILD_INPUT_SCOPE` and CI's `normal_product_ignored` paths. Python without the

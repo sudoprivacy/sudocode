@@ -655,6 +655,16 @@ real Git/Cargo/native guards model an extra workspace member and verify both
 full and isolated modes. Normal release product builds keep their original
 graph. This changes dependency-graph reuse, without adding product journey
 credit or reducing any selected terminal case or performance budget.</p>
+<p><strong>Drain PTY teardown without waiting for its own master (2026-11-02).</strong>
+The pinned <code>pty-expect</code> revision closes the master after terminating
+and reaping the child, then joins the independent reader. Previously an active
+Windows ConPTY exhausted its 500 ms reaper budget while retaining the handle
+that kept its output open. Five real Windows samples fell from 506–510 ms to
+10.5–11.0 ms. The existing cleanup budget and child ownership rules remain.
+The upstream three-platform native suite, final-output integrity, child reaping
+and macOS fresh-controller regressions passed. A new Windows regression rejects
+waiting out the reaper budget on every sample. It protects the test harness;
+it adds no product journey credit and does not establish a whole-suite speedup.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when
@@ -908,9 +918,14 @@ prove the 10% latency target or detect main changes after the check.</p>
 
 <p>Normal release, service, co-host and daemon build selection shares one
 Git/TOML comparison for development-only Cargo metadata. Resolver 2, workspace
-settings and normal/build dependency declarations must stay unchanged; existing
-lock packages/normal edges cannot change. New versions of existing names,
-deleted nodes and malformed/unknown metadata retain the ordinary scope. Rust
+settings and normal/build dependency declarations must stay unchanged. In the
+standard <code>crates/*</code> workspace, shared development dependency revisions
+and versions may change only when all reachable normal/build lock records and
+resolved edges remain identical. Aliases, optional and target-specific entries
+are included. Removed/replaced dev-only nodes are allowed; changed normal
+resolutions, missing/ambiguous edges and unsupported metadata retain ordinary
+scope. One Git batch reads immutable metadata blobs; candidate code is not
+executed. Older/custom layouts retain the conservative direct-addition verifier. Rust
 sources and changed release/service assertions retain their own input rules.
 Native workspace/lint, provider, resize and both performance scopes remain.
 The mandatory interface prints ignored normal-build inputs. Earlier broader
@@ -920,6 +935,17 @@ and still-required failures remain blocking. Real Git/Cargo/process/SSH regressi
 cover these boundaries, dev-feature isolation, unchanged normal binary bytes,
 legacy receipts and actual failed-profile recovery. This reduces redundant
 execution for qualifying inputs; it is not measured proof of the 10% target.</p>
+<p><strong>Shared workspace development dependency updates (2026-11-02).</strong>
+The same selector serves author-local, complementary native and daemon CI
+decisions. Real Git/Cargo/native workflows update a local Git dependency's
+revision and package version, execute the new test driver, and verify unchanged
+normal binary bytes. Normal, build, target and transitive consumers retain the
+product gates and actually reject broken dependency code. Existing broader
+signed receipts/checkpoints, failure history and original timing remain valid
+only for still-required checks. These infrastructure controls add no product
+journey credit. In the preceding dependency update, local release/services/cohost
+cost 1,057.2 seconds of a 1,690.6-second invocation; that identifies work this
+classification can omit, not a controlled whole-lifecycle speedup.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
 
@@ -1009,7 +1035,13 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       helper changes still require fresh evidence. Every pinned native input is
       checked through real Git: unrelated pins leave metadata preflight unchanged,
       while history-checker changes invalidate it. A real old-checkout preflight
-      runs against the changed protected native policy.</td>
+      runs against the changed protected native policy. Shared workspace dev
+      dependency revisions/versions are checked through committed normal/build
+      declarations and reachable lock edges, including aliases and targets.
+      Real Git/Cargo workflows run the updated driver, preserve normal binary
+      bytes, and refuse broken normal/build/target/transitive dependencies.
+      Native test and performance scopes remain selected; unchanged normal
+      product profiles may be omitted for these proven metadata-only inputs.</td>
       <td>No; these protect the executor and add no product journey coverage.</td>
       <td><code>e2e/local-acceptance/</code></td>
     </tr>
@@ -1054,6 +1086,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Existing terminal cases count once. Git/Cargo/process scope and warm
       artifact guards add no product journey credit.</td>
       <td><code>native-resize</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native PTY disposal</td>
+      <td>Real Windows ConPTY teardown releases the master before waiting for
+      its reader. The upstream three-platform suite retains final-output,
+      child-reaping and concurrent lifecycle checks, including fresh macOS
+      controllers. The existing 500 ms reaper budget remains.</td>
+      <td>Native harness regression only; existing scode journeys count once.
+      A Windows five-sample latency check rejects the previous mandatory wait.
+      No assertion, deadline or selected product case is removed.</td>
+      <td><code>pty-expect/tests/drop_drain.rs</code> / upstream three-platform CI</td>
     </tr>
     <tr>
       <td>Native service lifecycle and artifact selection</td>

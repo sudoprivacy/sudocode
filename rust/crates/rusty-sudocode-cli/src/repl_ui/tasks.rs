@@ -11,7 +11,7 @@ use engine_core::cache_ttl::TtlChoice;
 use engine_events::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
 /// One projection of task events for the status row and footer. Reading state
 /// belongs to this browser; execution state always comes from the producer.
@@ -136,6 +136,7 @@ pub(super) enum TaskFocus {
 
 /// Rows of the cache-TTL panel, top to bottom.
 const TTL_CHOICES: [TtlChoice; 3] = [TtlChoice::OneHour, TtlChoice::FiveMinutes, TtlChoice::Auto];
+const COMMAND_PREVIEW_ROWS: usize = 3;
 
 struct Entry {
     task: BackgroundTask,
@@ -144,6 +145,7 @@ struct Entry {
     received: Instant,
     wrapped_width: usize,
     wrapped: Vec<StyledText>,
+    command_rows: Option<(usize, Vec<String>)>,
 }
 
 #[derive(Default)]
@@ -176,6 +178,9 @@ impl TaskBrowser {
                     || (self.focus == TaskFocus::Detail
                         && self.selected.as_deref() == Some(&task.id));
                 if let Some(entry) = self.entries.get_mut(&task.id) {
+                    if entry.command_rows.is_some() && entry.task.command != task.command {
+                        entry.command_rows = None;
+                    }
                     if entry.task.output != task.output {
                         entry.output = None;
                         entry.wrapped_width = 0;
@@ -194,6 +199,7 @@ impl TaskBrowser {
                             received: Instant::now(),
                             wrapped_width: 0,
                             wrapped: Vec::new(),
+                            command_rows: None,
                         },
                     );
                 }
@@ -460,6 +466,12 @@ impl TaskBrowser {
             ansi_fg(theme().primary)
         )];
         if self.focus == TaskFocus::List {
+            let _ = write!(
+                lines[0],
+                "{} · {} in this session{RESET}",
+                theme().muted_fg(),
+                self.rows.len()
+            );
             let rows = max_rows.saturating_sub(2).clamp(1, 18);
             if self.rows.is_empty() {
                 lines.push("  No background tasks in this session".into());
@@ -510,92 +522,232 @@ impl TaskBrowser {
             .as_ref()
             .and_then(|id| self.entries.get_mut(id))
         {
-            let task = &entry.task;
-            lines.push(format!(
-                "{}{}{RESET} · {}{}{RESET}",
-                theme().peer_sender_fg(),
-                fit(&plain(&task.title), width.saturating_sub(18)),
-                ansi_fg(status_color(task.status)),
-                task.status.label()
-            ));
-            if let Some(command) = &task.command {
-                lines.push(fit(&format!("$ {}", plain(command)), width));
-            }
-            let details = format!(
-                "{}s{}{}",
-                (task.elapsed_ms.saturating_add(if task.status.is_active() {
-                    u64::try_from(entry.received.elapsed().as_millis()).unwrap_or(u64::MAX)
-                } else {
-                    0
-                })) / 1000,
-                task.exit_code
-                    .map_or(String::new(), |code| format!(" · exit {code}")),
-                if task.activity.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {}", plain(&task.activity))
-                }
-            );
-            lines.push(format!("{}{details}{RESET}", theme().muted_fg()));
-            let content_width = width.saturating_sub(2).max(1);
-            // Hidden output stays raw and bounded. Decode only when inspecting
-            // this task, then reuse it across keys, ticks and resizes.
-            let output = entry
-                .output
-                .get_or_insert_with(|| StyledText::from_ansi(&task.output));
-            if entry.wrapped_width != content_width {
-                entry.wrapped.clear();
-                let mut offset = 0;
-                for line in output.text.split('\n') {
-                    entry.wrapped.extend(
-                        wrap_line(output, offset..offset + line.len(), content_width, 0)
-                            .into_iter()
-                            .map(|(row, _)| row),
-                    );
-                    offset += line.len() + 1;
-                }
-                entry.wrapped_width = content_width;
-            }
-            let output_lines = &entry.wrapped;
-            // Fixed task metadata, optional full-output link and navigation
-            // remain outside the output viewport, just like question choices.
-            let rows = max_rows
-                .saturating_sub(lines.len() + usize::from(task.output_path.is_some()) + 1)
-                .clamp(1, 18);
-            let end = output_lines
-                .len()
-                .saturating_sub(self.scroll.min(output_lines.len().saturating_sub(1)));
-            let start = end.saturating_sub(rows);
-            if output.text.is_empty() {
-                lines.push(format!(
-                    "{}  Waiting for output…{RESET}",
-                    theme().muted_fg()
-                ));
-            } else {
-                lines.extend(output_lines[start..end].iter().map(|line| {
-                    let mut out = String::from("  ");
-                    line.write_ansi(0..line.text.len(), &mut out);
-                    out.push_str(RESET);
-                    out
-                }));
-            }
-            if let Some(path) = &task.output_path {
-                lines.push(format!(
-                    "{}{}{RESET}",
-                    theme().muted_fg(),
-                    fit(&format!("Full output: {path}"), width)
-                ));
-            }
-            lines.push(format!(
-                "{}↑/↓ scroll · k stop · Esc task list{RESET}",
-                theme().muted_fg()
-            ));
+            lines.extend(entry.detail_panel(width, max_rows, &mut self.scroll));
         }
         lines
             .into_iter()
             .map(|line| truncate_to_width(&line, width))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+impl Entry {
+    /// Format the inspected task from producer state and cached output.
+    fn detail_panel(&mut self, width: usize, max_rows: usize, scroll: &mut usize) -> Vec<String> {
+        let task = &self.task;
+        let support = crate::render::ColorSupport::detect();
+        let muted = ansi_fg(support.color(theme().muted));
+        let border = ansi_fg(support.color(theme().border));
+        let compact = max_rows
+            < 7 + usize::from(task.command.is_some())
+                + usize::from(!task.activity.is_empty())
+                + usize::from(task.output_path.is_some());
+        let kind = match task.kind {
+            BackgroundTaskKind::Terminal => "Shell details",
+            BackgroundTaskKind::Agent => "Agent details",
+        };
+        let mut lines = vec![format!(
+            "{}{kind}{RESET} · {}{}{RESET}",
+            ansi_fg(support.color(theme().primary)),
+            theme().peer_sender_fg(),
+            fit(&plain(&task.title), width.saturating_sub(kind.len() + 3)),
+        )];
+        let elapsed = task.elapsed_ms.saturating_add(if task.status.is_active() {
+            u64::try_from(self.received.elapsed().as_millis()).unwrap_or(u64::MAX)
+        } else {
+            0
+        });
+        let runtime = runtime_label(elapsed / 1000);
+        let exit = task
+            .exit_code
+            .map_or(String::new(), |code| format!(" · exit {code}"));
+        let mut status = format!(
+            "{muted}Status:   {}{}{exit}{RESET}",
+            ansi_fg(support.color(status_color(task.status))),
+            task.status.label(),
+        );
+        if compact {
+            let _ = write!(status, "{muted} · {runtime}{RESET}");
+        }
+        lines.push(status);
+        if !compact {
+            lines.push(format!("{muted}Runtime:  {RESET}{runtime}"));
+        }
+        if let Some(command) = &task.command {
+            let command_width = width.saturating_sub(10).max(1);
+            // Cache at most three command rows across output and clock updates.
+            if self.command_rows.as_ref().map(|(w, _)| *w) != Some(command_width) {
+                let text = StyledText::from_ansi(&fit(
+                    &plain(command),
+                    command_width.saturating_mul(COMMAND_PREVIEW_ROWS),
+                ));
+                let wrapped = wrap_line(&text, 0..text.text.len(), command_width, 0);
+                let clipped = wrapped.len() > COMMAND_PREVIEW_ROWS;
+                let mut rows: Vec<_> = wrapped
+                    .into_iter()
+                    .take(COMMAND_PREVIEW_ROWS)
+                    .map(|(row, _)| row.text)
+                    .collect();
+                if clipped {
+                    let last = &mut rows[COMMAND_PREVIEW_ROWS - 1];
+                    *last = fit(&format!("{last}…"), command_width);
+                }
+                self.command_rows = Some((command_width, rows));
+            }
+            let rows = &self.command_rows.as_ref().expect("command rows prepared").1;
+            let command_budget = max_rows
+                .saturating_sub(
+                    8 + usize::from(!task.activity.is_empty())
+                        + usize::from(task.output_path.is_some()),
+                )
+                .clamp(1, COMMAND_PREVIEW_ROWS);
+            let count = rows.len().min(command_budget);
+            for (index, row) in rows.iter().take(count).enumerate() {
+                let label = if index == 0 {
+                    "Command:  "
+                } else {
+                    "          "
+                };
+                let row = if index + 1 == count && count < rows.len() {
+                    fit(&format!("{row}…"), command_width)
+                } else {
+                    row.clone()
+                };
+                lines.push(format!("{muted}{label}{RESET}{row}"));
+            }
+        }
+        if !task.activity.is_empty() {
+            lines.push(format!("{muted}Activity: {RESET}{}", plain(&task.activity)));
+        }
+
+        // The shared InputSlot allocator owns height. Borders yield first in
+        // a short window; controls and the full-output path remain outside it.
+        let trailing = usize::from(task.output_path.is_some()) + 1;
+        let framed = width >= 12 && max_rows >= 1 + lines.len() + trailing + 3;
+        let captioned = framed || max_rows >= 1 + lines.len() + trailing + 2;
+        // Desired-height measurement and the allocated projection share one
+        // wrap width, even when the latter has to drop its frame.
+        let content_width = width.saturating_sub(if width >= 12 { 6 } else { 2 }).max(1);
+        let output = self
+            .output
+            .get_or_insert_with(|| StyledText::from_ansi(&task.output));
+        if self.wrapped_width != content_width {
+            self.wrapped.clear();
+            let mut offset = 0;
+            // A final newline terminates a record; internal blank lines count.
+            for line in output
+                .text
+                .strip_suffix('\n')
+                .unwrap_or(&output.text)
+                .split('\n')
+            {
+                self.wrapped.extend(
+                    wrap_line(output, offset..offset + line.len(), content_width, 0)
+                        .into_iter()
+                        .map(|(row, _)| row),
+                );
+                offset += line.len() + 1;
+            }
+            self.wrapped_width = content_width;
+        }
+        let rows = max_rows
+            .saturating_sub(
+                1 + lines.len() + trailing + if framed { 2 } else { usize::from(captioned) },
+            )
+            .clamp(1, 18);
+        let visible_scroll = (*scroll).min(self.wrapped.len().saturating_sub(rows));
+        // The first projection measures desired height before allocation. It
+        // must not change navigation using a viewport the user never sees.
+        if max_rows != usize::MAX {
+            *scroll = visible_scroll;
+        }
+        let end = self.wrapped.len().saturating_sub(visible_scroll);
+        let start = end.saturating_sub(rows);
+        let label = if output.text.is_empty() {
+            "Output".to_string()
+        } else {
+            format!(
+                "Output tail · rows {}–{end}/{}",
+                start + 1,
+                self.wrapped.len()
+            )
+        };
+        if framed {
+            let label = fit(&label, width.saturating_sub(5));
+            lines.push(format!(
+                "{RESET}{border}╭─ {label} {}╮{RESET}",
+                "─".repeat(width.saturating_sub(display_width(&label) + 5)),
+            ));
+        } else if captioned {
+            lines.push(format!("{muted}{label}{RESET}"));
+        }
+        for row in &self.wrapped[start..end] {
+            // Reset both sides: bold/colored output must not style the frame.
+            let mut line = if framed {
+                format!("{RESET}{border}│{RESET}  ")
+            } else {
+                String::from("  ")
+            };
+            if output.text.is_empty() {
+                let message = if task.status.is_active() {
+                    "Waiting for output…"
+                } else {
+                    "No output"
+                };
+                let _ = write!(line, "{muted}{}{RESET}", fit(message, content_width));
+                if framed {
+                    line.push_str(
+                        &" ".repeat(content_width.saturating_sub(display_width(message))),
+                    );
+                }
+            } else {
+                row.write_ansi(0..row.text.len(), &mut line);
+                line.push_str(RESET);
+                if framed {
+                    line.push_str(
+                        &" ".repeat(content_width.saturating_sub(display_width(&row.text))),
+                    );
+                }
+            }
+            if framed {
+                let _ = write!(line, "  {border}│{RESET}");
+            }
+            lines.push(line);
+        }
+        if framed {
+            lines.push(format!("{RESET}{border}╰{}╯{RESET}", "─".repeat(width - 2)));
+        }
+        if let Some(path) = &task.output_path {
+            lines.push(format!(
+                "{muted}{}{RESET}",
+                fit(&format!("Full output: {path}"), width)
+            ));
+        }
+        lines.push(format!(
+            "{muted}↑/↓ scroll{} · Esc task list{RESET}",
+            if task.status.is_active() {
+                " · k stop"
+            } else {
+                ""
+            },
+        ));
+        lines
+    }
+}
+
+fn runtime_label(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!(
+            "{}h {}m {}s",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
     }
 }
 

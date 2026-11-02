@@ -7,6 +7,7 @@ use common::TestEnv;
 use pty_expect::PtySession;
 use serde_json::{json, Value};
 use std::{
+    cell::RefCell,
     fmt::Write as _,
     fs,
     time::{Duration, Instant},
@@ -34,13 +35,45 @@ fn task_env(label: &str) -> (TestEnv, ReleaseOnDrop) {
     (env, release)
 }
 
-fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
-    common::expect_screen_rows_settled(
+fn expect_stable_region<F>(session: &PtySession, budget: Duration, context: &str, region: F)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // Match the shared four-poll guard's 100ms, while allowing unrelated status
+    // animation. None resets the wait, so a transient empty redraw cannot pass.
+    let previous = RefCell::new(None::<(String, Instant)>);
+    common::expect_screen_rows(
         session,
-        |rows| rows.contains('\u{276f}') && common::input_line_of(rows).is_empty(),
+        |rows| {
+            let mut previous = previous.borrow_mut();
+            if let Some(current) = region(rows) {
+                if let Some((last, since)) = previous.as_ref() {
+                    if *last == current {
+                        return since.elapsed() >= Duration::from_millis(100);
+                    }
+                }
+                *previous = Some((current, Instant::now()));
+            } else {
+                *previous = None;
+            }
+            false
+        },
         budget,
         context,
     );
+}
+
+fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
+    expect_stable_region(session, budget, context, |rows| {
+        if !common::input_line_of(rows).is_empty() {
+            return None;
+        }
+        rows.lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains('\u{276f}'))
+            .last()
+            .map(|(index, line)| format!("{index}:{line}"))
+    });
 }
 
 fn expect_parent_complete(session: &PtySession, before: &str) {
@@ -132,6 +165,35 @@ fn send_calls(env: &TestEnv, session: &mut PtySession, calls: &[Value]) {
         "input",
     );
     session.send("\r").unwrap();
+}
+
+fn assert_tools_dispatched_once(env: &TestEnv, expected: usize) {
+    if !env.is_mock() {
+        return;
+    }
+    let mut observed = 0;
+    for body in env.captured_message_bodies() {
+        let request: Value = serde_json::from_str(&body).unwrap();
+        let blocks = wire_requests::request_tool_blocks(&request);
+        let ids = blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.len(),
+            ids.iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "a checkpoint must not replay tools completed earlier in this batch"
+        );
+        observed = observed.max(ids.len());
+    }
+    assert_eq!(
+        observed, expected,
+        "every requested task was dispatched once"
+    );
 }
 
 fn shell(id: &str, command: &str, description: &str) -> Value {
@@ -405,7 +467,7 @@ fn background_status_theme(background: &str, no_color: bool) {
         "resize retained draft",
     );
     session.send("\x15").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "clear draft");
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "clear draft");
     let marker = common::turn_status_marker(&session);
     fs::write(env.workspace_root().join("release"), "go").unwrap();
     common::expect_turn_complete_after(
@@ -500,15 +562,16 @@ fn urgent_tip_shares_the_footer_and_survives_task_browsing_and_resize() {
         "task counts and urgent advice share one footer",
     );
     session.resize(40, 40).unwrap();
-    common::expect_screen_settled(
+    expect_stable_region(
         &session,
-        |s| {
-            s.rsplit_once('─').is_some_and(|(_, footer)| {
-                footer.contains("REVIEW_JOB") && footer.trim().lines().count() == 1
-            })
-        },
         common::DEFAULT_TIMEOUT,
         "urgent advice survives narrow footer",
+        |rows| {
+            rows.rsplit_once('─').and_then(|(_, footer)| {
+                (footer.contains("REVIEW_JOB") && footer.trim().lines().count() == 1)
+                    .then(|| footer.to_owned())
+            })
+        },
     );
     session.resize(40, 100).unwrap();
     expect_input_ready(&session, common::DEFAULT_TIMEOUT, "wide input restored");
@@ -645,7 +708,7 @@ fn start_agent(env: &TestEnv, automatic: bool) -> PtySession {
         ],
     );
     session.resize(40, 100).unwrap();
-    common::expect_input_line_cleared(&session, Duration::from_secs(30), "ready");
+    expect_input_ready(&session, Duration::from_secs(30), "ready");
     let before = common::turn_status_marker(&session);
     let prompt = env.prompt(&format!("Use agent_spawn with agent Verification and run_in_background {}. Its task is to run `while [ ! -f ci-ready ]; do sleep 0.2; done; cat ci-result.txt` and return the exact file content. After spawning finish your turn immediately. Do not poll or wait in the parent. Report any completion notification verbatim.", !automatic), "subagent_workflow");
     session.send(&format!("{prompt}\r")).unwrap();
@@ -918,7 +981,7 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "browser closed");
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "browser closed");
     let prompt = session.render(common::screen_contents);
     let separator = "─".repeat(120);
     let input = prompt
@@ -937,7 +1000,7 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
         "prompt remains responsive",
     );
     session.send("\x15").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "draft cleared");
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "draft cleared");
     session.send("\x1b[BFAST_INPUT_FROM_FOOTER").unwrap();
     common::expect_input_line(
         &session,
@@ -1134,7 +1197,7 @@ fn release_background_task_input_measurement() {
         session.send("\x1b").unwrap();
         screen(&session, "Enter details");
         session.send("\x1b").unwrap();
-        common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "detail closed");
+        expect_input_ready(&session, common::DEFAULT_TIMEOUT, "detail closed");
     }
     fs::write(env.workspace_root().join("release"), "go").unwrap();
     session.send("/exit\r").unwrap();
@@ -1341,4 +1404,5 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
     );
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
+    assert_tools_dispatched_once(&env, calls.len() + 2);
 }

@@ -543,6 +543,21 @@ A real Cargo/native-process regression checks warm driver reuse, exact release
 artifact identity and rejection of a debug executable substituted for it.
 This removes a duplicate compilation graph; it does not claim a measured
 end-to-end percentage improvement.</p>
+<p><strong>Share the native service build graph (2026-11-02).</strong> Native
+service acceptance verifies/builds the existing workspace dev/mailbox test graph
+with <code>--no-run</code>, then runs both original service harnesses against its
+debug <code>scode</code>. Cargo still checks current source; no driver cases run
+twice. This removes the switch back to a separate normal dependency graph.
+The standalone default-feature debug graph is no longer covered by these service
+journeys; selected normal release acceptance retains its product graph. Service
+cases, RPCs, assertions, deadlines and cleanup remain. The mandatory command
+prints the scope change. Real Cargo/native-process guards check warm reuse,
+standalone construction and refusal of stale artifacts after a source error;
+they add no product e2e coverage credit. On one unchanged Windows source tree,
+the baseline spent 163.5 of 307.0 seconds compiling the separate graph; the
+revised run spent 16.9 of 159.8 seconds verifying/building the available workspace
+graph. Both original service suites passed. This warm reuse observation is not
+a controlled cold-build comparison or a whole-PR saving.</p>
 <p><strong>Scope native optimized builds (2026-11-01).</strong> The separate
 native release profile runs for Cargo/build/vendor inputs, CLI entry/startup/parser
 modules, runtime configuration, its stream-capture test and startup harness.
@@ -998,6 +1013,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>The existing stream/resume PTY journey counts once. Optimized variants
       and startup measurements add no extra unique journey credit.</td>
       <td><code>native-release</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native service lifecycle and artifact selection</td>
+      <td>Both existing private-Node service journeys run on the workspace
+      dev/mailbox debug graph on selected native hosts. The standalone
+      default-feature debug graph is outside this profile. Cargo verifies
+      current source, including standalone builds and rejection of stale
+      executables after compilation errors.</td>
+      <td>Existing service journeys count once. Build reuse and compiler failure
+      guards add no extra unique journey credit.</td>
+      <td><code>native-services</code> / <code>release_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Co-host build and identity</td>

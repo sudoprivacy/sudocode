@@ -1251,6 +1251,55 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
 }
 
 #[test]
+fn completion_during_a_partial_tool_stream_does_not_relaunch_finished_shells() {
+    let env = TestEnv::new_mock("background-partial-stream-no-replay");
+    let _release = ReleaseOnDrop(env.workspace_root().to_path_buf());
+    let mut calls = (0..3)
+        .map(|index| {
+            shell(
+                &format!("launch-{index}"),
+                &format!("echo ONCE_{index} >> launches.txt; echo done > done-{index}"),
+                &format!("Launch {index} once"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let release = env.workspace_root().join("release");
+    calls[0]["stream_wait_for"] = json!(release.to_string_lossy());
+    calls[0]["stream_pause_at"] = json!("tool_stop");
+    let mut session = spawn_for_calls(&env, &calls);
+    session.resize(40, 100).unwrap();
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "ready");
+    let before = common::turn_status_marker(&session);
+    send_calls(&env, &mut session, &calls);
+    // The first shell finishes while the provider still holds its next tool.
+    // Require the completion to reach the model before releasing that stream.
+    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+    while env.captured_message_count() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "completion did not reach the model during the partial stream"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    fs::write(release, "go").unwrap();
+    expect_parent_complete(&session, &before);
+    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+    while (0..3).any(|index| !env.workspace_root().join(format!("done-{index}")).exists()) {
+        assert!(
+            Instant::now() < deadline,
+            "the remaining shells did not run"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let launches = fs::read_to_string(env.workspace_root().join("launches.txt")).unwrap();
+    let mut launches = launches.lines().collect::<Vec<_>>();
+    launches.sort_unstable();
+    assert_eq!(launches, ["ONCE_0", "ONCE_1", "ONCE_2"]);
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+#[test]
 fn completed_task_history_prunes_in_the_open_session_without_losing_running_work() {
     let (env, _release) = task_env("background-history-retention");
     let mut session = start(

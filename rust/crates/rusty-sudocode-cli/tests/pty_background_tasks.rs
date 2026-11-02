@@ -224,9 +224,9 @@ fn assert_background_activity(session: &PtySession, view: &str, background: &str
         let (activity, metadata) = if no_color {
             ("Default", "Default")
         } else if background == "0;15" {
-            ("Idx(94)", "Idx(241)")
+            ("Rgb(148, 93, 5)", "Rgb(118, 118, 118)")
         } else {
-            ("Idx(214)", "Idx(247)")
+            ("Rgb(245, 158, 11)", "Rgb(158, 158, 158)")
         };
         // ConPTY may retain the preceding style on invisible separator spaces.
         // Assert every visible metadata glyph, including the separator itself.

@@ -469,7 +469,7 @@ impl TaskBrowser {
             let _ = write!(
                 lines[0],
                 "{} · {} in this session{RESET}",
-                theme().muted_fg(),
+                theme().fg_seq(TextRole::Secondary),
                 self.rows.len()
             );
             let rows = max_rows.saturating_sub(2).clamp(1, 18);
@@ -536,9 +536,8 @@ impl Entry {
     /// Format the inspected task from producer state and cached output.
     fn detail_panel(&mut self, width: usize, max_rows: usize, scroll: &mut usize) -> Vec<String> {
         let task = &self.task;
-        let support = crate::render::ColorSupport::detect();
-        let muted = ansi_fg(support.color(theme().muted));
-        let border = ansi_fg(support.color(theme().border));
+        let muted = theme().fg_seq(TextRole::Secondary);
+        let border = theme().fg_seq(TextRole::Border);
         let compact = max_rows
             < 7 + usize::from(task.command.is_some())
                 + usize::from(!task.activity.is_empty())
@@ -549,8 +548,8 @@ impl Entry {
         };
         let mut lines = vec![format!(
             "{}{kind}{RESET} · {}{}{RESET}",
-            ansi_fg(support.color(theme().primary)),
-            theme().peer_sender_fg(),
+            theme().fg_seq(TextRole::Brand),
+            theme().fg_seq(TextRole::Accent),
             fit(&plain(&task.title), width.saturating_sub(kind.len() + 3)),
         )];
         let elapsed = task.elapsed_ms.saturating_add(if task.status.is_active() {
@@ -564,7 +563,7 @@ impl Entry {
             .map_or(String::new(), |code| format!(" · exit {code}"));
         let mut status = format!(
             "{muted}Status:   {}{}{exit}{RESET}",
-            ansi_fg(support.color(status_color(task.status))),
+            ansi_fg(status_color(task.status)),
             task.status.label(),
         );
         if compact {

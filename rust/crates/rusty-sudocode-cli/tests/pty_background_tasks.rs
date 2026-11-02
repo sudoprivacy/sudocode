@@ -442,9 +442,9 @@ fn expect_completed_status_detail(session: &mut PtySession, background: &str, no
         if no_color {
             "Default"
         } else if background == "0;15" {
-            "Idx(241)"
+            "Rgb(118, 118, 118)"
         } else {
-            "Idx(248)"
+            "Rgb(158, 158, 158)"
         },
     );
     let panel = session.render(common::screen_contents);
@@ -862,7 +862,12 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
             "echo 'RESIZE_OUTPUT 中文 🚀'; echo; echo AFTER_EMPTY_LINE; while [ ! -f release ]; do sleep 0.1; done # wrapped-command-中文-🚀-with-a-long-tail-for-resizing",
             "A long background terminal title with 中文 and a wide emoji 🚀",
         )],
-        &[("COLORFGBG", "15;0"), ("NO_COLOR", "")],
+        &[
+            ("COLORFGBG", "15;0"),
+            ("NO_COLOR", ""),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
     );
     screen(&session, "1 terminal");
     open(&mut session);
@@ -879,11 +884,11 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
         common::DEFAULT_TIMEOUT,
         "output preserves its internal empty row and wide characters",
     );
-    assert_detail_frame(&session, "Idx(248)");
+    assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.resize(30, 45).unwrap();
     screen(&session, "  RESIZE_OUTPUT");
     screen(&session, "Command:");
-    assert_detail_frame(&session, "Idx(248)");
+    assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.resize(12, 45).unwrap();
     common::expect_screen_rows_settled(
         &session,
@@ -914,7 +919,7 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
         common::DEFAULT_TIMEOUT,
         "resizing preserves the command across its hanging continuation rows",
     );
-    assert_detail_frame(&session, "Idx(248)");
+    assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();

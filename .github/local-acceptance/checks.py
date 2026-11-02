@@ -678,7 +678,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7"
+    expected = "acf035cdf079cf5bc02c9d77390f57f4c4c3e88828061f857b739362d0127b80"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

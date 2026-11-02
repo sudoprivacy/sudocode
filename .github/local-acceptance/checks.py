@@ -113,11 +113,20 @@ def workspace_nextest_options(output, grouped):
     return options
 
 
+def committed_input_paths(root, base):
+    """Read this checkout's committed inputs independently of caller Git bindings."""
+    if not base:
+        raise ValueError("No committed base")
+    return subprocess.check_output(
+        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        stderr=subprocess.PIPE).decode().split("\0")[:-1]
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
     # Complementary CI can pass newer main; exclude changes outside this branch.
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"],
-                                      cwd=root).decode().split("\0")[:-1]
+    changed = committed_input_paths(root, base)
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
     inputs = [path for path in changed if path != "README.md"
@@ -126,6 +135,17 @@ def changed_cli_test_targets(root, base):
     if not inputs or any(not re.fullmatch(pattern, path) or not (root / path).is_file() for path in inputs):
         return None
     return sorted({Path(path).stem for path in inputs})
+
+
+def native_cli_test_package_args(root, base):
+    """Match the native workspace's package selection, including feature union."""
+    try:
+        isolated = changed_cli_test_targets(root, base) is not None
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        isolated = False
+    arguments = ["-p", "rusty-sudocode-cli"] if isolated else ["--workspace"]
+    print("NATIVE_CLI_TEST_GRAPH=" + json.dumps({"packages": arguments, "isolated_cli_tests": isolated}), flush=True)
+    return arguments
 
 
 def test_group_source(names):
@@ -321,12 +341,7 @@ def prepare_windows_terminal(root, output, execute):
 def terminal_installer_scope(root, base):
     """Retain fault injection for unknown inputs; Rust-only edits keep real setup."""
     try:
-        if not base:
-            raise ValueError("No committed base")
-        paths = subprocess.check_output(
-            ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
-            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-            stderr=subprocess.PIPE).decode().split("\0")[:-1]
+        paths = committed_input_paths(root, base)
     except (OSError, ValueError, subprocess.CalledProcessError):
         return {"resolved": False, "fault_injection_required": True, "changed_control_inputs": None}
     controls = [path for path in paths if not path.startswith("rust/")
@@ -409,7 +424,7 @@ def run(name, root, output, base, execute):
             "targets": tests,
         }, indent=2))
         if tests is not None:
-            arguments = ["--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
+            arguments = ["--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
             print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
@@ -481,8 +496,9 @@ def run(name, root, output, base, execute):
         print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
               "all selected ignored cases and original budgets remain. The standalone default-feature "
               "debug graph is outside this profile's coverage.", flush=True)
+        package_args = native_cli_test_package_args(root, base)
         for test in tests:
-            cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", test,
+            cargo("test", "--locked", *package_args, "--features", "engine-acp/mailbox", "--test", test,
                   "--", "--ignored", "--nocapture")
     elif name == "native-release":
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
@@ -493,7 +509,7 @@ def run(name, root, output, base, execute):
         # SCODE_TEST_BIN still launches the copied normal release executable.
         print("Release acceptance: the native test driver launches the copied release scode; "
               "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
-        cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
+        cargo("test", "--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
         with stable_performance_power(output):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
@@ -505,7 +521,7 @@ def run(name, root, output, base, execute):
         print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
               "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
               "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
-        cargo("test", "--no-run", "--locked", "-p", "rusty-sudocode-cli",
+        cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
@@ -606,7 +622,7 @@ def native_guard_files():
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
-        "e2e/local-acceptance/release_acceptance.py": "e31a4107cfc2f7096da25aac0247c31e303f0eb554427e68e07058f158a1c6c0",
+        "e2e/local-acceptance/release_acceptance.py": "8c0b83871b77061719df08145fb7be1adf141453100d7178af51e73b940f9f35",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
     }

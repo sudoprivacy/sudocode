@@ -143,11 +143,18 @@ p.mkdir(parents=True, exist_ok=True)
     for name in ["setup_windows.py", "check_windows_setup.py"]:
         (terminal / name).write_text(installer, encoding="utf-8")
     names = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback", "pty_codex_colors"]
+    tests = root / "rust/crates/rusty-sudocode-cli/tests"
+    tests.mkdir(parents=True)
+    manifest = root / "rust/Cargo.toml"
+    declarations = "".join(f'\n[[test]]\nname="{name}"\npath="crates/rusty-sudocode-cli/tests/{name}.rs"\n' for name in names)
+    manifest.write_text(manifest.read_text(encoding="utf-8") + declarations, encoding="utf-8")
     for name in names:
-        (root / "rust/tests" / (name + ".rs")).write_text('''#[test]
+        (tests / (name + ".rs")).write_text('''#[test]
 #[ignore = "controlled real native child"]
 fn selected_native_case() {
     assert!(engine_acp::MAILBOX, "resize must retain the workspace feature graph");
+    let expected = std::env::var("SCODE_EXPECT_WORKSPACE_GRAPH").unwrap() == "1";
+    assert_eq!(shared_support::workspace_graph(), expected, "package selection changed feature union");
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_scode"))
         .arg("service-graph-probe").output().unwrap();
     assert!(child.status.success());
@@ -176,7 +183,7 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
     (root / "rust/src/ordinary.rs").write_text("// Ordinary Rust input.\n", encoding="utf-8")
     (root / "README.md").write_text("Ordinary documentation.\n", encoding="utf-8")
     ordinary = commit()
-    arguments = ["cargo", "test", "--no-run", "--locked", "-p", "rusty-sudocode-cli",
+    arguments = ["cargo", "test", "--no-run", "--locked", "--workspace",
                  "--features", "engine-acp/mailbox"]
     for name in names:
         arguments += ["--test", name]
@@ -185,7 +192,7 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
     before = (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
     observations = []
 
-    def check(label, reference, required):
+    def check(label, reference, required, isolated=False):
         directory = output / label
         requested = []
 
@@ -195,7 +202,8 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
             # This infrastructure fixture controls only dependency acquisition.
             actual = [str(binary), "service-graph-probe"] if str(args[0]) == "npm" else args
             return execute(actual, cwd, log, {**(env or {}),
-                "SCODE_RESIZE_FIXTURE_MARKERS": str(directory / "markers")})
+                "SCODE_RESIZE_FIXTURE_MARKERS": str(directory / "markers"),
+                "SCODE_EXPECT_WORKSPACE_GRAPH": "0" if isolated else "1"})
 
         previous = {key: os.environ.get(key) for key in ["GIT_DIR", "GIT_WORK_TREE"]}
         os.environ.update(GIT_DIR=str(SOURCE / ".git"), GIT_WORK_TREE=str(SOURCE))
@@ -216,6 +224,7 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
         expected = names[:3] if os.name == "nt" else names
         assert [row[row.index("--test") + 1] for row in commands] == expected
         for row in commands:
+            assert ("--workspace" in row) != isolated, row
             assert row[row.index("--features") + 1] == "engine-acp/mailbox"
             assert row[-3:] == ["--", "--ignored", "--nocapture"]
         for index, row in enumerate(records):
@@ -225,7 +234,7 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
                 assert "1 passed; 0 failed; 0 ignored" in text and "1 filtered out" in text, text
                 assert "Compiling " not in text, "Warm resize driver was rebuilt"
         assert before == (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
-        observations.append({"case": label, "scope": scope, "commands": records})
+        observations.append({"case": label, "scope": scope, "isolated_cli_tests": isolated, "commands": records})
 
     check("resize-rust-docs", base, False)
     extra = root / "unknown-installer-helper.py"
@@ -234,9 +243,18 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
     unknown = commit()
     check("resize-unknown", ordinary, True)
     extra.rename(root / "rust/src/renamed.rs")
-    commit()
+    renamed = commit()
     check("resize-renamed", unknown, True)
     check("resize-unresolved", "missing-acceptance-base", True)
+    source = tests / "pty_chrome_resize.rs"
+    source.write_text(source.read_text(encoding="utf-8") + "\n// Isolated CLI test input.\n", encoding="utf-8")
+    commit()
+    isolated = list(arguments)
+    position = isolated.index("--workspace")
+    isolated[position:position + 1] = ["-p", "rusty-sudocode-cli"]
+    execute(isolated, root / "rust", output / "resize-isolated-warm.log")
+    before = (binary.stat().st_mtime_ns, hashlib.sha256(binary.read_bytes()).hexdigest())
+    check("resize-isolated-cli", renamed, False, isolated=True)
     return {"observations": observations, "same_warm_binary": before,
             "native_targets": names[:3] if os.name == "nt" else names,
             "scope": "Git/Cargo/process enforcement only; installer/npm acquisition is controlled, no product journey credit."}
@@ -254,7 +272,7 @@ name="rusty-sudocode-cli"
 version="0.0.1"
 edition="2021"
 [workspace]
-members=["support", "engine-acp"]
+members=["support", "engine-acp", "auxiliary"]
 resolver="2"
 [[bin]]
 name="scode"
@@ -285,8 +303,12 @@ shared-support={path="support",features=["dev"]}
 }
 ''',
         "rust/support/Cargo.toml": '[package]\nname="shared-support"\nversion="0.0.1"\nedition="2021"\n'
-            '[features]\nnormal=[]\ndev=[]\n',
-        "rust/support/src/lib.rs": 'pub fn flavor() -> &\'static str { if cfg!(feature="dev") { "dev" } else { "normal" } }\n',
+            '[features]\nnormal=[]\ndev=[]\nworkspace-graph=[]\n',
+        "rust/support/src/lib.rs": 'pub fn flavor() -> &\'static str { if cfg!(feature="dev") { "dev" } else { "normal" } }\n'
+            'pub fn workspace_graph() -> bool { cfg!(feature="workspace-graph") }\n',
+        "rust/auxiliary/Cargo.toml": '[package]\nname="auxiliary"\nversion="0.0.1"\nedition="2021"\n'
+            '[dependencies]\nshared-support={path="../support",features=["workspace-graph"]}\n',
+        "rust/auxiliary/src/lib.rs": 'pub fn uses_workspace_graph() -> bool { shared_support::workspace_graph() }\n',
         "rust/engine-acp/Cargo.toml": '[package]\nname="engine-acp"\nversion="0.0.1"\nedition="2021"\n'
             '[features]\nmailbox=[]\n',
         "rust/engine-acp/src/lib.rs": 'pub const MAILBOX: bool = cfg!(feature="mailbox");\n',
@@ -294,6 +316,7 @@ shared-support={path="support",features=["dev"]}
 fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
     assert!(cfg!(debug_assertions), "Only the driver uses the test profile");
     assert!(engine_acp::MAILBOX, "Reuse the same native workspace feature graph");
+    assert!(shared_support::workspace_graph(), "Preserve features enabled by other workspace members");
     assert_eq!(shared_support::flavor(), "dev");
     let binary = std::env::var_os("SCODE_TEST_BIN").expect("Explicit release artifact required");
     assert_ne!(std::path::Path::new(&binary), std::path::Path::new(env!("CARGO_BIN_EXE_scode")));
@@ -325,7 +348,7 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         return execute(["cargo", *args], rust, output / (name + ".log"))
 
     cargo("generate-lockfile", name="lockfile")
-    cargo("test", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
+    cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
           "--no-run", "--message-format=json-render-diagnostics", name="workspace-driver")
     artifacts = [json.loads(line) for line in (output / "workspace-driver.log").read_text(encoding="utf-8").splitlines()
                  if line.startswith("{")]

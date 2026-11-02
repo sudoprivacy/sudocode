@@ -643,6 +643,17 @@ these observations do not prove whole-PR savings. Real Git/Cargo/native-process
 guards verify inherited Git isolation, ordinary/unknown/renamed/unresolved input
 scope, warm artifacts and ignored-only target selection. Their controlled
 dependency-acquisition boundaries add no product journey credit.</p>
+<p><strong>Preserve package selection with the feature graph (2026-11-02).</strong>
+Resize, service and release-driver tests use one package selector: full native
+acceptance keeps <code>--workspace</code>, while isolated CLI-test acceptance
+keeps <code>-p rusty-sudocode-cli</code>. Matching the mailbox flag alone was
+insufficient: a real trial still rebuilt CLI artifacts because other workspace
+members enabled additional dependency features. The original failed reuse
+assertion is retained. <code>NATIVE_CLI_TEST_GRAPH</code> reports the selection;
+real Git/Cargo/native guards model an extra workspace member and verify both
+full and isolated modes. Normal release product builds keep their original
+graph. This changes dependency-graph reuse, without adding product journey
+credit or reducing any selected terminal case or performance budget.</p>
 <p>
 The protected publisher verifies completed jobs directly; the redundant hosted
 summary job is removed. Scheduling-only edits reuse signed local results when

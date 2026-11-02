@@ -720,6 +720,15 @@ check input transitions, inherited Git bindings, warm reuse and ignored-only
 target selection; their controlled dependency-acquisition boundaries add no
 product journey coverage.
 
+Resize, service and release-driver tests share the native workspace's package
+selection as well as its mailbox feature. Full acceptance uses `--workspace`;
+an isolated CLI-test scope retains `-p rusty-sudocode-cli`. Other selected
+workspace members can enable additional dependency features, so matching the
+mailbox flag alone does not preserve the graph. `NATIVE_CLI_TEST_GRAPH` reports
+the chosen packages. The shared committed-input reader ignores inherited Git
+bindings and keeps unresolved scope conservative. The normal release product
+build remains separately selected and uses its original package graph.
+
 Native service journeys use the workspace's dev/mailbox feature graph. Cargo
 verifies or builds the `pty_model_stream_close` driver with `--no-run`, then
 the two original Python service harnesses launch the resulting debug `scode`.

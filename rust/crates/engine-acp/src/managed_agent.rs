@@ -75,11 +75,18 @@ impl HostedSessionFactory for Factory {
         Ok((Arc::new(engine), cwd))
     }
 
-    fn state_changed(&self, state: engine_core::EngineState, reason: Option<String>) {
+    fn state_changed(&self, state: engine_core::EngineState) {
+        let reason = match state {
+            engine_core::EngineState::AwaitingInput(reason) => Some(match reason {
+                engine_core::engine_events::InputReason::Permission => "permission".into(),
+                engine_core::engine_events::InputReason::Question => "question".into(),
+            }),
+            _ => None,
+        };
         let state = match state {
             engine_core::EngineState::Idle => AgentState::Ready,
             engine_core::EngineState::Running => AgentState::Busy,
-            engine_core::EngineState::AwaitingInput => AgentState::AwaitingInput,
+            engine_core::EngineState::AwaitingInput(_) => AgentState::AwaitingInput,
         };
         (self.observer)(state, reason);
     }

@@ -159,6 +159,27 @@ fn spawn_installed(
     child
 }
 
+fn prepare_installed(env: &common::TestEnv, installed: &std::path::Path) {
+    std::fs::copy(common::scode_bin(), installed).unwrap();
+    // Validate each staged executable once before the interactive workflow.
+    // macOS can spend >10s loading a fresh debug copy before main (sampled at
+    // _dyld_start), even though --version itself takes milliseconds. Process
+    // launch has a separate e2e/startup benchmark; this journey checks updating
+    // a working installation, with unchanged prompt/download/restart budgets.
+    let version = std::process::Command::new(installed)
+        .arg("--version")
+        .current_dir(env.workspace_root())
+        .env("SUDO_CODE_CONFIG_HOME", env.config_home())
+        .env_remove("SCODE_GLOBAL_CONFIG_DIR")
+        .env_remove("SCODE_PROJECT_CONFIG_DIR")
+        .output()
+        .expect("run the staged executable's version command");
+    assert!(
+        version.status.success() && version.stdout.starts_with(b"scode "),
+        "staged executable did not report its version: {version:?}"
+    );
+}
+
 #[test]
 fn selecting_update_installs_the_checked_archive_and_restarts_with_original_arguments() {
     use sha2::{Digest, Sha256};
@@ -170,7 +191,7 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
         "installed scode"
     };
     let installed = root.join(exe_name);
-    std::fs::copy(common::scode_bin(), &installed).unwrap();
+    prepare_installed(&env, &installed);
     let source = root.join("replacement.rs");
     std::fs::write(
         &source,
@@ -264,7 +285,7 @@ fn a_bad_checksum_preserves_the_installed_executable() {
     let installed = env
         .workspace_root()
         .join(if cfg!(windows) { "scode.exe" } else { "scode" });
-    std::fs::copy(common::scode_bin(), &installed).unwrap();
+    prepare_installed(&env, &installed);
     let original = std::fs::read(&installed).unwrap();
     let (name, archive) = payload_archive(b"tampered release bytes");
     let mirror = Mirror::with_files(

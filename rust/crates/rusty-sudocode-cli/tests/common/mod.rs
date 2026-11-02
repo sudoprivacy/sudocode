@@ -196,6 +196,20 @@ where
     F: Fn(&str) -> bool,
 {
     let deadline = Instant::now() + at_least(budget);
+    expect_screen_before_view(sess, pred, deadline, budget, context, contents)
+}
+
+fn expect_screen_before_view<F>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     loop {
         let screen = sess.render(contents);
         if pred(&screen) {
@@ -255,6 +269,20 @@ where
     F: Fn(&str) -> bool,
 {
     let deadline = Instant::now() + at_least(budget);
+    expect_screen_settled_before_view(sess, pred, deadline, budget, context, contents)
+}
+
+fn expect_screen_settled_before_view<F>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let mut previous: Option<String> = None;
     let mut stable = 0u32;
     let mut satisfied = false;
@@ -333,14 +361,17 @@ pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, contex
 /// shares that row and it reads `────…────❯ abc!`.
 #[must_use]
 pub fn input_line_of(screen: &str) -> String {
-    screen
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let marker = line.rfind(PROMPT_MARKER)?;
-            Some(line[marker + PROMPT_MARKER.len()..].trim().to_string())
-        })
+    input_after_prompt(screen)
+        .and_then(|input| input.lines().next())
         .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// The live editor starts after the last prompt; chrome geometry differs
+/// between rustyline and iocraft and cannot define whether input arrived.
+fn input_after_prompt(screen: &str) -> Option<&str> {
+    screen.rsplit_once(PROMPT_MARKER).map(|(_, input)| input)
 }
 
 /// Current `InputSlot` and `FooterSlot`, excluding obsolete UI that an extreme
@@ -429,7 +460,7 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
         sess,
         // A process that has not painted its prompt yet also has an empty
         // screen. It must not accept keystrokes as a ready REPL.
-        |screen| screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty(),
+        is_ready_for_input,
         budget,
         &format!("{context}: the input line never cleared"),
     );
@@ -439,8 +470,11 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
 /// and ordinary whitespace differences.
 #[must_use]
 pub fn screen_contains(screen: &str, text: &str) -> bool {
-    let compact = |value: &str| value.split_whitespace().collect::<String>();
-    compact(screen).contains(&compact(text))
+    compact_screen_text(screen).contains(&compact_screen_text(text))
+}
+
+fn compact_screen_text(value: &str) -> String {
+    value.split_whitespace().collect()
 }
 
 /// How long a live turn may take before a gate calls it a failure.
@@ -484,6 +518,57 @@ pub fn turn_status_identity(screen: &str) -> String {
 #[must_use]
 pub fn turn_status_marker(sess: &PtySession) -> String {
     turn_status_identity(&sess.render(screen_contents))
+}
+
+/// Submit and complete one turn within a single deadline for readiness, input
+/// acknowledgement, response completion and the final settled editor.
+///
+/// Capture the completed-turn marker after this acknowledgement, before Enter.
+/// A marker read while resumed history is still painting can precede an old
+/// result line and incorrectly identify that replay as a newly completed turn.
+/// Match every typed character from the live prompt, using physical rows to
+/// preserve wrapped drafts independently of either renderer's chrome layout.
+pub fn run_turn(sess: &mut PtySession, text: &str, budget: Duration, context: &str) {
+    assert!(!text.is_empty() && !text.contains(['\r', '\n']));
+    let deadline = Instant::now() + budget;
+    expect_input_line_cleared_before(sess, deadline, budget, context);
+    sess.send(text).unwrap();
+    expect_screen_before_view(
+        sess,
+        |screen| {
+            input_after_prompt(screen).is_some_and(|input| {
+                compact_screen_text(input).starts_with(&compact_screen_text(text))
+            })
+        },
+        deadline,
+        budget,
+        &format!("{context}: the live editor did not acknowledge the submitted line"),
+        screen_rows,
+    );
+    let marker = turn_status_marker(sess);
+    sess.send("\r").unwrap();
+    expect_turn_complete_before(sess, &marker, "", deadline, budget, context);
+    expect_input_line_cleared_before(sess, deadline, budget, "turn completed");
+}
+
+fn is_ready_for_input(screen: &str) -> bool {
+    screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty()
+}
+
+fn expect_input_line_cleared_before(
+    sess: &PtySession,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+) {
+    expect_screen_settled_before_view(
+        sess,
+        is_ready_for_input,
+        deadline,
+        budget,
+        &format!("{context}: the input line never cleared"),
+        screen_contents,
+    );
 }
 
 /// Block until the turn submitted after `marker` was taken has finished AND the
@@ -535,6 +620,17 @@ pub fn expect_turn_complete_with_input(
     context: &str,
 ) {
     let deadline = Instant::now() + budget;
+    expect_turn_complete_before(sess, marker, expected_input, deadline, budget, context);
+}
+
+fn expect_turn_complete_before(
+    sess: &PtySession,
+    marker: &str,
+    expected_input: &str,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+) {
     loop {
         let screen = sess.render(screen_contents);
         let status = turn_status_line(&screen);

@@ -100,6 +100,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         .expect("\u{276f}")
         .expect("the second REPL should start");
     expect_on_screen(&mut second, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line_cleared(&second, BUDGET, "redelivery prompt ready");
     assert_eq!(
         position(),
         0,

@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use super::live_nexus::backend as live_backend;
 use super::{
-    append, assistant, commit, complete_compacted_branch, finish_turn, payloads, text, wait_for,
-    Fixture, ToolChild,
+    append, assistant, commit, complete_compacted_branch, finish_turn, payloads, start_native_tool,
+    text, wait_for, Fixture,
 };
 
 fn seed(log: &mut HistoryLog) -> Session {
@@ -48,7 +48,7 @@ fn live_shared_history_preserves_contexts_while_sibling_tool_runs() {
             thought_signature: None,
         }]),
     );
-    let mut tool = ToolChild::spawn(&fixture.0);
+    let mut tool = start_native_tool(&fixture.0);
     wait_for(&fixture.0.join("tool-started"));
     let mut b = HistoryLog::new(
         live_backend()
@@ -89,7 +89,7 @@ fn live_shared_history_preserves_contexts_while_sibling_tool_runs() {
     );
     assert!(!fixture.0.join("actual-tool-result").exists());
     std::fs::write(fixture.0.join("tool-release"), b"continue").unwrap();
-    assert!(tool.0.wait().unwrap().success());
+    assert!(tool.wait().unwrap().success());
     let output = std::fs::read_to_string(fixture.0.join("actual-tool-result")).unwrap();
     let result_id = append(
         &mut a,

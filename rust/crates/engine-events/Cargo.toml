@@ -17,8 +17,8 @@ publish.workspace = true
 # `EngineEvent`s lives in `engine-core`, one layer up. A `runtime ->
 # engine-events` edge would form a cycle.
 runtime = { path = "../runtime" }
-serde_json = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

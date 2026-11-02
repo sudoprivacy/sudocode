@@ -386,9 +386,14 @@ hooks, approval, or an execution slot; amber while running; the code theme's
 green on success; and red on failure. Frame strokes use normal weight without
 dimming so corners align with vertical borders across terminal fonts.
 Colors adapt to dark/light backgrounds and terminal
-color depth. `ColorTheme` is the single semantic color interface; its `info`
-role (including Thinking/Reasoning) and successful tool borders share one
-soft-green definition. Syntax-backed colors load on demand and stay cached.
+color depth. `ColorTheme` resolves semantic text roles into complete styles for
+transcript, chrome and input surfaces. Brand accents and the activity logo use
+Sudoprivacy amber (#F59E0B), with a darker shade on light backgrounds. Error and
+success roles use the terminal's regular red and green slots, as Codex does;
+the emulator owns their exact RGB values. Informational marks and successful
+tool borders share the syntax theme's soft green. Thinking/Reasoning labels use
+the terminal foreground; stalled activity uses the warning role. Syntax-backed
+roles and terminal capabilities are resolved once and cached.
 Tool names use the shared Codex blue accent. Titles occupy one
 row and use an ellipsis when they exceed the available width. Running titles
 reflow on resize; completed titles remain as printed in terminal scrollback.
@@ -459,19 +464,29 @@ labels and punctuation, with every count in bold terminal foreground, including
 zero. Ordinary task descriptions also retain the terminal foreground instead
 of a slot-wide grey; active labels remain bold and completed labels retain dim
 strikethrough. Amber is reserved for accent/activity, not neutral quantities.
-Per-turn status uses the same
-theme-selected muted foreground without an additional dim attribute; cache
-health indicators keep their semantic colors. Emphasis and color are scoped
+Per-turn status uses syntax-derived accents for the model and usage, with
+secondary labels and separators. The footer's workspace path and branch use
+accents from that same syntax asset. Cache health indicators keep their semantic
+colors. None of these accents adds a dim attribute. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
 Ordinary footer tips use the theme's readable muted foreground, actionable
-recommendations use its primary accent, and urgent tips use its warning role,
+recommendations use its subdued notice role, and urgent tips use its warning role,
 without an additional dim attribute; separators use the border role. The input draft
 retains the terminal foreground. A slot's initial color is decoded as text
 state, not applied again as a fallback to every span: ANSI foreground/full
 resets restore the terminal default instead of silently inheriting a parent
 color. The same structured spans feed the live UI and transcript adapters.
-No-color chrome does not force a palette color.
+No-color chrome does not force a palette color. Secondary text blends the
+reported terminal foreground and background and maintains readable contrast.
+On explicit selection surfaces, role colors are checked against the selected
+background. ANSI status colors remain terminal-owned.
+
+Markdown, code, links, tables and chrome share structured text runs. Live prose
+and question documents consume those runs directly; native scrollback serializes
+ANSI only at the terminal boundary. External program output still has one ANSI
+decoder. There is no second Markdown implementation for the live canvas, and
+these presentation changes do not alter stored messages or model input.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and

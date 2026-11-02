@@ -61,7 +61,7 @@ pub(crate) fn wrap_line(
     wrap_line_with_indent(source, range, width, initial_col, 0)
 }
 
-fn wrap_line_with_indent(
+pub(crate) fn wrap_line_with_indent(
     source: &StyledText,
     range: Range<usize>,
     width: usize,

@@ -2,7 +2,9 @@
 //! tui/src/render/highlight.rs and tui/src/markdown_render.rs. Both renderers
 //! use the same two-face grammar/theme bundle; only the terminal adapter differs.
 //! This is an internal syntax adapter and asset cache, not another UI theme.
-//! Semantic UI color selection belongs to `ColorTheme`.
+//! Semantic UI color selection belongs to `ColorTheme`. Metadata scope selection
+//! and softening follow Codex a09812981d, tui/src/bottom_pane/status_line_style.rs.
+//! See third_party/codex for the upstream Apache-2.0 license.
 
 use std::sync::OnceLock;
 
@@ -14,7 +16,7 @@ use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedThemeName;
 
 use super::styled_text::StyledText;
-use super::{color_math, ColorSupport};
+use super::{color_math, terminal_palette, ColorSupport, TextRole};
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
@@ -38,30 +40,64 @@ pub(super) fn theme(light: bool) -> &'static Theme {
     selected.get_or_init(|| with_theme(light, Clone::clone))
 }
 
-/// Inline code uses the Markdown scope from the same theme as fenced code.
-pub(super) fn inline_color(light: bool, support: ColorSupport) -> Color {
-    static DARK: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    static LIGHT: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
+/// UI accents come from the same syntax asset, resolved together without
+/// retaining an unused grammar catalog or every embedded theme in memory.
+pub(super) fn role_color(role: TextRole, light: bool, support: ColorSupport) -> Color {
+    type Accents = [Option<syntect::highlighting::Color>; 5];
+    static DARK: OnceLock<Accents> = OnceLock::new();
+    static LIGHT: OnceLock<Accents> = OnceLock::new();
+
+    let (index, fallback) = match role {
+        TextRole::Code => (0, Color::Reset),
+        TextRole::Model => (1, Color::DarkCyan),
+        TextRole::Path => (2, Color::DarkGreen),
+        TextRole::Usage => (3, Color::DarkGreen),
+        TextRole::Branch => (4, Color::DarkBlue),
+        _ => unreachable!("only syntax-backed roles enter the syntax adapter"),
+    };
+    if support == ColorSupport::NoColor {
         return Color::Reset;
     }
-    let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
-        // Status and inline text need only this color. Do not retain a syntax
-        // theme/catalog until an actual code block requests highlighting.
+    if support == ColorSupport::Ansi16 {
+        return fallback;
+    }
+    let colors = if light { &LIGHT } else { &DARK }.get_or_init(|| {
         with_theme(light, |theme| {
             let highlighter = Highlighter::new(theme);
-            [
-                "markup.inline.raw.string.markdown",
-                "markup.raw.inline.markdown",
-            ]
-            .iter()
-            .find_map(|name| {
-                let scope = Scope::new(name).ok()?;
-                highlighter.style_mod_for_stack(&[scope]).foreground
+            let scopes: [&[&str]; 5] = [
+                &[
+                    "markup.inline.raw.string.markdown",
+                    "markup.raw.inline.markdown",
+                ],
+                &["entity.name.type", "support.type", "variable"],
+                &["string", "markup.underline.link"],
+                &["constant.numeric", "constant"],
+                &["entity.name.function", "entity.name.tag"],
+            ];
+            scopes.map(|scopes| {
+                scopes.iter().find_map(|name| {
+                    let scope = Scope::new(name).ok()?;
+                    highlighter.style_mod_for_stack(&[scope]).foreground
+                })
             })
         })
     });
-    color.map_or(Color::Reset, |color| foreground(color, support))
+    colors[index].map_or(fallback, |color| {
+        let rgb = if index == 0 {
+            (color.r, color.g, color.b)
+        } else {
+            // Codex's status accents retain 85% saturation; no faint attribute.
+            let luma =
+                (77 * u16::from(color.r) + 150 * u16::from(color.g) + 29 * u16::from(color.b))
+                    / 256;
+            let soften = |channel| {
+                u8::try_from((u16::from(channel) * 85 + luma * 15 + 50) / 100)
+                    .expect("softened channel")
+            };
+            (soften(color.r), soften(color.g), soften(color.b))
+        };
+        color_math::foreground(rgb, terminal_palette::background(), support)
+    })
 }
 
 fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Color {

@@ -416,9 +416,9 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 pub(crate) fn colorize_unified_diff(diff: &str) -> String {
     let t = theme();
     let bold = BOLD;
-    let info = ansi_fg(t.info());
-    let added = ansi_fg(t.diff_added);
-    let removed = ansi_fg(t.diff_removed);
+    let info = t.fg_seq(crate::render::TextRole::Info);
+    let added = t.fg_seq(crate::render::TextRole::Added);
+    let removed = t.fg_seq(crate::render::TextRole::Removed);
     let mut out = String::with_capacity(diff.len() + diff.lines().count() * 8);
     for line in diff.split_inclusive('\n') {
         let trailing_newline = line.ends_with('\n');
@@ -885,9 +885,9 @@ mod tests {
     fn colorize_diff_paints_added_and_removed_lines() {
         use crate::render::{ansi_fg, theme, BOLD, RESET};
         let t = theme();
-        let added = ansi_fg(t.diff_added);
-        let removed = ansi_fg(t.diff_removed);
-        let info = ansi_fg(t.info());
+        let added = t.fg_seq(crate::render::TextRole::Added);
+        let removed = t.fg_seq(crate::render::TextRole::Removed);
+        let info = t.fg_seq(crate::render::TextRole::Info);
 
         let diff = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n unchanged\n";
         let painted = colorize_unified_diff(diff);

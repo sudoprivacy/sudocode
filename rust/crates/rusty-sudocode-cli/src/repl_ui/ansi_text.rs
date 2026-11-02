@@ -1,5 +1,7 @@
 mod adapter;
 
+#[cfg(test)]
+use crate::render::TextRole;
 pub(super) use adapter::{ui_color, AnsiText, RichText};
 
 use crate::render::styled_text::StyledText;
@@ -162,7 +164,7 @@ mod tests {
                     let label_color = (span.text.starts_with('↳')
                         && crate::render::ColorSupport::detect()
                             != crate::render::ColorSupport::NoColor)
-                        .then(|| ui_color(crate::render::theme().muted))
+                        .then(|| ui_color(crate::render::theme().color(TextRole::Secondary)))
                         .flatten();
                     assert_eq!(span.color, label_color);
                     assert_eq!(span.weight, Weight::Normal);

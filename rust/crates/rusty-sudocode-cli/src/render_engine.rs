@@ -21,8 +21,8 @@ use crate::cli::format::{
     format_auto_compaction_notice, format_compaction_notice, format_tool_result,
 };
 use crate::render::{
-    layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
-    SpinnerRef, TerminalRenderer, DIM, RESET,
+    layout_policy::LayoutPolicy, query_terminal_width, theme, MarkdownStreamState,
+    ResponseGlyphState, SpinnerRef, TerminalRenderer, TextRole, DIM, RESET,
 };
 use crate::repl_ui::prose_preview::{
     PreviewDelta, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
@@ -501,7 +501,7 @@ impl EngineEventRenderer {
                 // reasoning closes its dim block rather than letting the error
                 // line inherit the dim attribute.
                 self.finish_response();
-                self.write_block(&message, OutputBlock::Notice);
+                self.write_block(&theme().style(TextRole::Error).apply(&message).to_string(), OutputBlock::Notice);
                 self.finish_turn();
                 RenderOutcome::Done
             }

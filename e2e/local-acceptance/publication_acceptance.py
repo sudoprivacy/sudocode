@@ -20,6 +20,8 @@ def verify_publication(directory, work, clean_environment):
     draft = "github.event_name == 'pull_request' && github.event.pull_request.draft"
     assert "run-name: ${{ " + draft + " && 'Draft local acceptance' || 'Local acceptance' }}" in workflow
     assert "group: acceptance-${{ github.event.pull_request.number || github.ref }}-${{ " + draft + " && 'draft' || 'ready' }}" in workflow
+    assert "base_sha: ${{ steps.proof.outputs.base_sha }}" in workflow
+    assert "ACCEPTANCE_BASE: ${{ needs.proof.outputs.base_sha }}" in workflow
     publisher = (SOURCE / ".github/workflows/local-acceptance-publish.yml").read_text(encoding="utf-8")
     assert "if: (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group') && github.event.workflow_run.conclusion != 'skipped'" in publisher
 
@@ -106,12 +108,14 @@ def verify_publication(directory, work, clean_environment):
 
     cases = []
 
-    def invoke(label, source, runs, *, expected=None, success=True, proof="success", attempt=1):
+    def invoke(label, source, runs, *, expected=None, success=True, proof="success", attempt=1,
+               gate_only=False, verified_base=None):
         state.update(runs={item["id"]: item for item in runs}, posts=[], proof=proof)
         event = output / (label + ".json")
-        event.write_text(json.dumps({"workflow_run": {"id": source, "run_attempt": attempt}}))
+        event.write_text(json.dumps({"pull_request": pull} if gate_only else
+                                    {"workflow_run": {"id": source, "run_attempt": attempt}}))
         result = subprocess.run([sys.executable, str(bootstrap), f"http://127.0.0.1:{server.server_port}",
-                                 str(verifier / ".github/local-acceptance/publish.py")], cwd=verifier,
+                                 str(verifier / ".github/local-acceptance" / ("gate.py" if gate_only else "publish.py"))], cwd=verifier,
             env={**clean_environment, "GITHUB_REPOSITORY": "acceptance/fixture", "GITHUB_EVENT_PATH": str(event),
                  "GITHUB_OUTPUT": str(output / (label + ".outputs")), "GITHUB_RUN_ID": "300",
                  "GH_TOKEN": "fixture-no-real-token"}, capture_output=True)
@@ -119,6 +123,9 @@ def verify_publication(directory, work, clean_environment):
         (output / (label + ".stderr.log")).write_bytes(result.stderr)
         assert (result.returncode == 0) == success, result.stdout.decode() + result.stderr.decode()
         assert [item["state"] for item in state["posts"]] == ([] if expected is None else [expected]), state
+        if verified_base is not None:
+            outputs = (output / (label + ".outputs")).read_text(encoding="utf-8")
+            assert f"base_sha={verified_base}\n" in outputs, outputs
         cases.append({"case": label, "exit_code": result.returncode, "published": expected})
         print("PUBLICATION_E2E_CASE=" + json.dumps(cases[-1]), flush=True)
 
@@ -141,11 +148,38 @@ def verify_publication(directory, work, clean_environment):
         assert "Invalid SSH acceptance signature" in refusal, refusal
         git("update-ref", "refs/notes/local-acceptance", original_note_ref, cwd=origin)
         invoke("restored-real-note-passes", 104, [run(104)], expected="success")
+        # Model a protected main that has incorporated an ancestor of this PR,
+        # while the PR API still reports its old base. Run/sign real commands
+        # against that actual new base; do not edit or re-sign an old receipt.
+        advanced = git("rev-parse", head + "^")
+        assert advanced != trusted and git("merge-base", advanced, head) == advanced
+        git("update-ref", "refs/heads/main", advanced, cwd=origin)
+        git("fetch", "--quiet", "origin", "main", cwd=work)
+        git("checkout", "--quiet", "--detach", advanced, cwd=verifier)
+        result = subprocess.run([sys.executable, str(work / ".github/scripts/local_acceptance.py"),
+                                 "check", "--head", head, "--base", advanced, "--policy-ref", advanced,
+                                 "--output", str(output / "advanced-base-acceptance"), "--publish", "--remote", "origin"],
+                                cwd=work, env=clean_environment, capture_output=True)
+        (output / "advanced-base-acceptance.stdout.log").write_bytes(result.stdout)
+        (output / "advanced-base-acceptance.stderr.log").write_bytes(result.stderr)
+        assert result.returncode == 0, result.stdout.decode() + result.stderr.decode()
+        receipt = json.loads((output / "advanced-base-acceptance/receipt.json").read_text(encoding="utf-8"))
+        assert receipt["base"] == advanced and receipt["head"] == head
+        invoke("stale-api-base-direct-gate", 105, [], gate_only=True, verified_base=advanced)
+        invoke("stale-api-base-publisher", 105, [run(105)], expected="success", verified_base=advanced)
+        git("update-ref", "refs/notes/local-acceptance", original_note_ref, cwd=origin)
+        invoke("old-real-base-receipt-refused", 106, [run(106)], expected="failure", success=False)
+        refusal = ((output / "old-real-base-receipt-refused.stdout.log").read_text(encoding="utf-8")
+                   + (output / "old-real-base-receipt-refused.stderr.log").read_text(encoding="utf-8"))
+        assert "Acceptance used a different PR base" in refusal, refusal
     finally:
         git("update-ref", "refs/notes/local-acceptance", original_note_ref, cwd=origin)
+        git("update-ref", "refs/notes/local-acceptance", original_note_ref, cwd=work)
+        git("update-ref", "refs/heads/main", trusted, cwd=origin)
+        git("fetch", "--quiet", "origin", "main", cwd=work)
         server.shutdown()
         thread.join()
         server.server_close()
     (output / "result.json").write_text(json.dumps({"status": "PASS", "cases": cases,
         "scope": "Actual publisher child processes and loopback HTTP API with real Git fetches and SSH notes. Candidate code is not run; no live GitHub authority or product journey credit."}, indent=2) + "\n", encoding="utf-8")
-    print("PASS: draft/ready ordering, current ownership and real SSH publisher refusal")
+    print("PASS: draft/ready ordering, frozen protected base, current ownership and real SSH publisher refusal")

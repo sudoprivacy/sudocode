@@ -38,11 +38,18 @@ fn showcase(env: &TestEnv, background: &str, no_color: bool) -> PtySession {
         common::DEFAULT_TIMEOUT,
         "pasted input",
     );
+    let marker = common::turn_status_marker(&sess);
     sess.send("\r").expect("submit");
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "completed reference turn",
+    );
     common::expect_screen(
         &sess,
-        |screen| screen.contains("Color reference done.") && screen.contains("ctx "),
-        common::LIVE_TURN_BUDGET,
+        |screen| screen.contains("Color reference done."),
+        common::DEFAULT_TIMEOUT,
         "completed reference response",
     );
     sess

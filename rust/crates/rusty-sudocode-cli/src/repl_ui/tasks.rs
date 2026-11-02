@@ -1,5 +1,6 @@
 //! Task browser with bounded, lazily decoded output and event-driven repaint.
 use super::choice_text::ChoiceText;
+use crate::render::TextRole;
 use crate::render::{
     ansi_fg,
     styled_text::StyledText,
@@ -38,7 +39,6 @@ impl TaskSummary {
         completed_turn: Option<u32>,
         frame: usize,
     ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
-        let colors = theme().activity_colors(false);
         let active = self.running + self.stopping;
         let (full, short, color) = if self.unconfirmed > 0 {
             (
@@ -47,25 +47,25 @@ impl TaskSummary {
                     quantity(self.unconfirmed, "background task")
                 ),
                 format!("{} unconfirmed", self.unconfirmed),
-                theme().activity_colors(true).label,
+                theme().color(TextRole::Warning),
             )
         } else if self.failed > 0 {
             (
                 format!("{} failed", quantity(self.failed, "background task")),
                 format!("{} failed", self.failed),
-                theme().error,
+                theme().color(TextRole::Error),
             )
         } else if self.stopping > 0 {
             (
                 format!("Stopping {}…", quantity(self.stopping, "background task")),
                 format!("{} stopping", self.stopping),
-                colors.logo,
+                theme().color(TextRole::Brand),
             )
         } else if self.running > 0 {
             (
                 format!("{} still running", quantity(self.running, "task")),
                 format!("{} running", self.running),
-                colors.logo,
+                theme().color(TextRole::Brand),
             )
         } else {
             return None;
@@ -95,7 +95,7 @@ impl TaskSummary {
             let mut text = StyledText::default();
             if let Some(logo) = logo {
                 text.push(
-                    style(colors.logo),
+                    style(theme().color(TextRole::Brand)),
                     &truncate_to_width(&format!("{logo} "), width),
                 );
             }
@@ -103,7 +103,7 @@ impl TaskSummary {
                 style(color),
                 &truncate_to_width(label, width.saturating_sub(logo_width)),
             );
-            text.push(style(colors.metadata), metadata);
+            text.push(style(theme().color(TextRole::Secondary)), metadata);
             std::sync::Arc::new(text)
         };
         let summary = render(&short, "");
@@ -463,13 +463,13 @@ impl TaskBrowser {
         }
         let mut lines = vec![format!(
             "{}Background tasks{RESET}",
-            ansi_fg(theme().primary)
+            theme().fg_seq(TextRole::Brand)
         )];
         if self.focus == TaskFocus::List {
             let _ = write!(
                 lines[0],
                 "{} · {} in this session{RESET}",
-                theme().muted_fg(),
+                theme().fg_seq(TextRole::Secondary),
                 self.rows.len()
             );
             let rows = max_rows.saturating_sub(2).clamp(1, 18);
@@ -505,7 +505,7 @@ impl TaskBrowser {
                 let title = fit(&plain(&task.title), width.saturating_sub(28));
                 lines.push(format!(
                     "{marker} {}{title}{RESET} · {kind} · {status}{}",
-                    theme().peer_sender_fg(),
+                    theme().fg_seq(TextRole::Accent),
                     if !entry.read && !task.status.is_active() {
                         " · new"
                     } else {
@@ -515,7 +515,7 @@ impl TaskBrowser {
             }
             lines.push(format!(
                 "{}↑/↓ select · Enter details · k stop · Esc back{RESET}",
-                theme().muted_fg()
+                theme().fg_seq(TextRole::Secondary)
             ));
         } else if let Some(entry) = self
             .selected
@@ -536,9 +536,8 @@ impl Entry {
     /// Format the inspected task from producer state and cached output.
     fn detail_panel(&mut self, width: usize, max_rows: usize, scroll: &mut usize) -> Vec<String> {
         let task = &self.task;
-        let support = crate::render::ColorSupport::detect();
-        let muted = ansi_fg(support.color(theme().muted));
-        let border = ansi_fg(support.color(theme().border));
+        let muted = theme().fg_seq(TextRole::Secondary);
+        let border = theme().fg_seq(TextRole::Border);
         let compact = max_rows
             < 7 + usize::from(task.command.is_some())
                 + usize::from(!task.activity.is_empty())
@@ -549,8 +548,8 @@ impl Entry {
         };
         let mut lines = vec![format!(
             "{}{kind}{RESET} · {}{}{RESET}",
-            ansi_fg(support.color(theme().primary)),
-            theme().peer_sender_fg(),
+            theme().fg_seq(TextRole::Brand),
+            theme().fg_seq(TextRole::Accent),
             fit(&plain(&task.title), width.saturating_sub(kind.len() + 3)),
         )];
         let elapsed = task.elapsed_ms.saturating_add(if task.status.is_active() {
@@ -564,7 +563,7 @@ impl Entry {
             .map_or(String::new(), |code| format!(" · exit {code}"));
         let mut status = format!(
             "{muted}Status:   {}{}{exit}{RESET}",
-            ansi_fg(support.color(status_color(task.status))),
+            ansi_fg(status_color(task.status)),
             task.status.label(),
         );
         if compact {
@@ -758,7 +757,7 @@ impl TaskBrowser {
         let Some(advice) = &self.ttl_advice else {
             return String::new();
         };
-        let muted = theme().muted_fg();
+        let muted = theme().fg_seq(TextRole::Secondary);
         let mode = if advice.auto {
             let target = advice.auto_target();
             if target == advice.effective_seconds {
@@ -773,7 +772,7 @@ impl TaskBrowser {
         };
         let mut lines = vec![format!(
             "{}Prompt cache TTL{RESET}{muted} · now {}{mode}{RESET}",
-            ansi_fg(theme().primary),
+            theme().fg_seq(TextRole::Brand),
             ttl_label(advice.effective_seconds),
         )];
         if advice.has_saving {
@@ -872,12 +871,14 @@ fn tokens(count: u64) -> String {
 
 fn status_color(status: BackgroundTaskStatus) -> crossterm::style::Color {
     match status {
-        BackgroundTaskStatus::Running => theme().info(),
+        BackgroundTaskStatus::Running => theme().color(TextRole::Info),
         BackgroundTaskStatus::Stopping | BackgroundTaskStatus::ExecutionUnconfirmed => {
-            theme().warning
+            theme().color(TextRole::Warning)
         }
-        BackgroundTaskStatus::Completed => theme().tool_borders().success,
-        BackgroundTaskStatus::Failed | BackgroundTaskStatus::Cancelled => theme().error,
+        BackgroundTaskStatus::Completed => theme().color(TextRole::Info),
+        BackgroundTaskStatus::Failed | BackgroundTaskStatus::Cancelled => {
+            theme().color(TextRole::Error)
+        }
     }
 }
 fn plain(text: &str) -> String {

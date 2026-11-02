@@ -89,6 +89,68 @@ fn expect_finalized_with_draft(session: &PtySession, marker: &str, draft: &str) 
 }
 
 #[test]
+fn control_bearing_markdown_preserves_preview_history_and_draft() {
+    for (cols, fenced) in [(120, false), (48, false), (120, true), (48, true)] {
+        let env = TestEnv::new_mock("prose-source-controls");
+        let mut session = start(&env, cols);
+        let marker = common::turn_status_marker(&session);
+        let document = "ProseStart before \x1b[2Jafter \x1b[31mControlToken\x1b[0m and **bold words**. ProseDone.";
+        let document = if fenced {
+            // Unknown syntax remains plain while exercising the open-fence cache.
+            format!("```not-a-registered-language\n{document}")
+        } else {
+            document.to_string()
+        };
+        let prompt = common::terminal_host::prose_prompt(
+            &env,
+            &document,
+            serde_json::json!({"chunk_chars": 1, "delay_ms": 2}),
+        );
+        session.send(&format!("{prompt}\r")).unwrap();
+        common::expect_screen(
+            &session,
+            |screen| {
+                screen.contains("ProseStart before after ControlToken")
+                    && screen.contains("ProseDone.")
+                    && env.workspace_root().join("prose-ready").exists()
+            },
+            common::DEFAULT_TIMEOUT,
+            "split source controls do not erase or color the live preview",
+        );
+        session.send(HANDOFF_DRAFT).unwrap();
+        common::expect_input_line(
+            &session,
+            HANDOFF_DRAFT,
+            common::DEFAULT_TIMEOUT,
+            "draft remains available during control-bearing prose",
+        );
+        let before = body_rows(&session);
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        expect_finalized_with_draft(&session, &marker, HANDOFF_DRAFT);
+        assert_eq!(
+            before,
+            body_rows(&session),
+            "control decoding survives handoff"
+        );
+        session.render(|screen| {
+            let raw = screen.raw();
+            let (row, text) = raw
+                .rows(0, raw.size().1)
+                .enumerate()
+                .find(|(_, text)| text.contains("ControlToken"))
+                .expect("control-bearing token remains visible");
+            let col = text.find("ControlToken").unwrap();
+            let cell = raw
+                .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
+                .unwrap();
+            assert_eq!(format!("{:?}", cell.fgcolor()), "Default");
+            assert!(!cell.bold(), "source SGR must not replace Markdown styles");
+        });
+        finish(&mut session);
+    }
+}
+
+#[test]
 fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
     for cols in [120, 48] {
         let env = TestEnv::new_mock("prose-handoff");
@@ -446,6 +508,47 @@ fn live_prose_is_visible_and_input_remains_usable() {
         "input after real prose turn",
     );
     finish(&mut session);
+}
+
+#[test]
+#[ignore = "requires the pinned real terminal host; run explicitly for rendering acceptance"]
+fn wide_grid_and_narrow_records_match_codex_snapshots() {
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/codex_tables.json")).unwrap();
+    for case in reference["cases"].as_array().unwrap() {
+        let env = TestEnv::new_mock("codex-table-reference");
+        let root = env.workspace_root();
+        let document = format!(
+            "{}\n\nTableSnapshotDone.",
+            case["markdown"].as_str().unwrap()
+        );
+        let prompt = common::terminal_host::prose_prompt(
+            &env,
+            &document,
+            serde_json::json!({
+                "start_ready": root.join("table-start-ready"),
+                "start_release": root.join("table-start-release"),
+                "chunk_chars": document.chars().count(),
+            }),
+        );
+        // vt100 truncates rows on resize. Use the same reflowing terminal and
+        // completed-frame barrier as native prose acceptance instead.
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/prose.cjs");
+        let output = common::terminal_host::run_script(
+            &env,
+            &["--auth", "api-key", "--model", "sonnet"],
+            case["name"].as_str().unwrap(),
+            serde_json::json!({
+                "scenario": "table_snapshots",
+                "cols": 100, "rows": 90, "prompt": prompt, "case": case,
+                "timeoutMs": common::DEFAULT_TIMEOUT.as_millis(),
+            }),
+            &script,
+        );
+        common::terminal_host::assert_success(&output);
+        assert_persisted_text(&env, &document);
+    }
 }
 
 #[test]

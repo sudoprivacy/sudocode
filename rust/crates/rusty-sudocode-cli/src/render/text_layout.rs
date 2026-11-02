@@ -19,11 +19,7 @@ fn strip_ansi(input: &str) -> Cow<'_, str> {
 pub(crate) fn single_line(input: &str) -> Cow<'_, str> {
     // Reuse the decoder's fast-path predicate: C0 controls also need removal
     // when there is no ESC byte. Ordinary progress text stays borrowed.
-    let plain = if StyledText::needs_decoding(input) {
-        Cow::Owned(StyledText::from_ansi(input).text)
-    } else {
-        Cow::Borrowed(input)
-    };
+    let plain = StyledText::plain_source(input);
     if plain.contains(['\n', '\r', '\t']) {
         Cow::Owned(plain.replace(['\n', '\r', '\t'], " "))
     } else {
@@ -68,7 +64,7 @@ pub(crate) fn wrap_line(
     wrap_line_with_indent(source, range, width, initial_col, 0)
 }
 
-fn wrap_line_with_indent(
+pub(crate) fn wrap_line_with_indent(
     source: &StyledText,
     range: Range<usize>,
     width: usize,

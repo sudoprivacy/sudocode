@@ -38,11 +38,18 @@ fn showcase(env: &TestEnv, background: &str, no_color: bool) -> PtySession {
         common::DEFAULT_TIMEOUT,
         "pasted input",
     );
+    let marker = common::turn_status_marker(&sess);
     sess.send("\r").expect("submit");
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "completed reference turn",
+    );
     common::expect_screen(
         &sess,
-        |screen| screen.contains("Color reference done.") && screen.contains("ctx "),
-        common::LIVE_TURN_BUDGET,
+        |screen| screen.contains("Color reference done."),
+        common::DEFAULT_TIMEOUT,
         "completed reference response",
     );
     sess
@@ -166,6 +173,51 @@ fn light_default_matches_codex_reference() {
 #[test]
 fn no_color_preserves_code_without_theme_escapes() {
     assert_reference(false, true);
+}
+
+#[test]
+fn provider_errors_use_regular_red_and_leave_the_next_draft_readable() {
+    for (background, no_color) in [("15;0", false), ("0;15", false), ("15;0", true)] {
+        let env = TestEnv::new_mock("semantic-provider-error");
+        let mut sess = env.spawn_with_env(
+            &["--permission-mode", "read-only"],
+            &[
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                ("COLORFGBG", background),
+                ("NO_COLOR", if no_color { "1" } else { "" }),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor"),
+            ],
+        );
+        sess.resize(50, 120).unwrap();
+        common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "ready for error");
+        // The shared transport rejects a request without a fixture scenario
+        // with a real, non-retryable HTTP 400. Exercise EngineEvent::Error.
+        sess.send("Request without a parity scenario\r").unwrap();
+        common::expect_screen_settled(
+            &sess,
+            |screen| screen.contains("missing parity scenario"),
+            common::LIVE_TURN_BUDGET,
+            "provider error is visible",
+        );
+        assert_cell(
+            &sess,
+            "missing parity scenario",
+            if no_color { "Default" } else { "Idx(1)" },
+            "Default",
+        );
+        sess.send("AfterErrorDraft").unwrap();
+        common::expect_input_line(
+            &sess,
+            "AfterErrorDraft",
+            common::DEFAULT_TIMEOUT,
+            "type after error",
+        );
+        assert_cell(&sess, "AfterErrorDraft", "Default", "Default");
+        sess.send("\x15").unwrap();
+        common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear draft");
+        finish(&mut sess);
+    }
 }
 
 fn colored_session(env: &TestEnv, light: bool) -> PtySession {
@@ -697,9 +749,9 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     let queued = if no_color {
         "Default"
     } else if light {
-        "Idx(241)"
+        "Rgb(118, 118, 118)"
     } else {
-        "Idx(247)"
+        "Rgb(158, 158, 158)"
     };
     expect_tool_border(&sess, &header, queued);
     assert_running_title_resizes(&mut sess, &header, light, no_color);
@@ -777,7 +829,7 @@ fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
         common::DEFAULT_TIMEOUT,
         "denied Bash result",
     );
-    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(9)");
+    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(1)");
     finish(&mut sess);
 }
 

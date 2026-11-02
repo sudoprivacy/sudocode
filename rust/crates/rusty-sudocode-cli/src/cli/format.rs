@@ -2,6 +2,7 @@
 
 mod a2a;
 mod plan;
+use crate::render::TextRole;
 pub(super) use a2a::summary_preview;
 
 use std::fmt::Write as _;
@@ -15,8 +16,8 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) use crate::render::text_layout::display_width;
 use crate::render::text_layout::{truncate_to_width, wrap_ansi_to_width};
 
-use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
+use crate::render::{styled_text::StyledText, StyledLine};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
@@ -237,32 +238,30 @@ fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         .join("\n")
 }
 
-/// Wrap one chunk of extended-thinking text in the dim attribute.
-///
-/// Deliberately one self-contained `DIM`…`RESET` pair per call rather than a
-/// single run held open across a whole reasoning block. The live path receives
-/// thinking as deltas that split mid-word, and [`ResponseGlyphState::apply`]
-/// injects its margin at every line start — so a run left open across a delta
-/// boundary would be closed by whichever writer comes next. Per-chunk pairs are
-/// idempotent under both, at the cost of one escape pair per delta.
-///
-/// [`ResponseGlyphState::apply`]: crate::render::ResponseGlyphState::apply
-#[inline]
-pub(crate) fn dim_thinking(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    format!("{DIM}{text}{RESET}")
+/// Reasoning is styled prose, never parsed as Markdown. Both live and replay
+/// consume this representation; terminal adapters alone serialize ANSI.
+pub(crate) fn dim_thinking_styled(text: &str) -> StyledText {
+    StyledText::from_ansi_with_style(text, theme().style(TextRole::Reasoning))
 }
 
-/// Header that opens a reasoning block.
-///
-/// Without it dim text is ambiguous — it reads as a faded *answer* rather than
-/// as reasoning, and a turn that opens on thinking would look like the model
-/// started replying in the wrong style.
+pub(crate) fn thinking_header_styled() -> StyledText {
+    let mut text = dim_thinking_styled("✻ Thinking…");
+    text.plain("\n");
+    text
+}
+
+#[inline]
+pub(crate) fn dim_thinking(text: &str) -> String {
+    let mut output = String::new();
+    dim_thinking_styled(text).write_ansi_lines(&mut output);
+    output
+}
+
 #[inline]
 pub(crate) fn thinking_header() -> String {
-    format!("{DIM}✻ Thinking…{RESET}\n")
+    let mut output = String::new();
+    thinking_header_styled().write_ansi_lines(&mut output);
+    output
 }
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant
@@ -733,7 +732,10 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
             rendered.push('\n');
         }
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
-            let styled = crate::render::prompt_style(false).apply(body).to_string();
+            let styled = crate::render::theme()
+                .prompt_style(false)
+                .apply(body)
+                .to_string();
             rendered.push_str(
                 &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
             );
@@ -1057,14 +1059,13 @@ pub(crate) fn render_tool_card_with_width(
 ) -> String {
     use crate::render::left_frame;
 
-    let colors = theme().tool_borders();
-    let color = match status {
-        ToolStatus::Queued => colors.queued,
-        ToolStatus::Running => colors.running,
-        ToolStatus::Ok => colors.success,
-        ToolStatus::Error => colors.error,
-        ToolStatus::Review => colors.queued,
-    };
+    let color = theme().color(match status {
+        ToolStatus::Queued => TextRole::Secondary,
+        ToolStatus::Running => TextRole::Brand,
+        ToolStatus::Ok => TextRole::Info,
+        ToolStatus::Error => TextRole::Error,
+        ToolStatus::Review => TextRole::Secondary,
+    });
     // Keep the full identity cached so a running card reveals more on resize.
     let header = content.header.replace(['\n', '\r', '\t'], " ");
     let is_truncated = display_width(&header) > left_frame::header_width(term_width);
@@ -1123,12 +1124,12 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
         content.body = if summary.is_empty() {
             None
         } else {
-            let removed = ansi_fg(theme().diff_removed);
+            let removed = theme().fg_seq(TextRole::Removed);
             Some(format!("{removed}{summary}{RESET}"))
         };
     }
     if let (Some(feedback), false) = (hook_feedback, is_error) {
-        let hf = ansi_fg(theme().hook_feedback);
+        let hf = theme().fg_seq(TextRole::Notice);
         let feedback_body = format!("{hf}{feedback}{RESET}");
         content.body = Some(match content.body {
             Some(body) => format!("{body}\n{feedback_body}"),
@@ -1190,7 +1191,7 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
 /// One theme role for every tool identity, independent of execution status.
 fn tool_label(name: &str) -> String {
     let name = ToolKind::visible_name(name);
-    format!("{}{name}{RESET}", theme().tool_name_fg())
+    format!("{}{name}{RESET}", theme().fg_seq(TextRole::Accent))
 }
 
 /// The card for a shell tool (`Bash`, `PowerShell`): the command, what happened
@@ -1778,7 +1779,7 @@ fn render_diff_window(
     };
 
     let t = theme();
-    let muted = ansi_fg(t.muted);
+    let muted = t.fg_seq(TextRole::Secondary);
     out.push(format!(
         "{muted}@@ -{},{} +{},{} @@{RESET}",
         edit_start_line_1based,
@@ -2333,34 +2334,35 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let write_pct = efficiency.write_share_pct.unwrap_or(0.0).round() as u64;
 
-    let theme = crate::render::theme();
-    let hit_color = if hit_pct >= 80 {
-        theme.success
+    let hit_role = if hit_pct >= 80 {
+        TextRole::Success
     } else if hit_pct >= 40 {
-        theme.warning
+        TextRole::Warning
     } else {
-        theme.error
+        TextRole::Error
     };
     let mut segment = StyledLine::muted();
-    segment.push_colored(format!("\u{26a1}{hit_pct}%"), hit_color);
+    segment.push_role(format!("\u{26a1}{hit_pct}%"), hit_role);
     segment.push(" ");
-    // Write rate: muted normally, red on a spike (a cache break).
     let write = format!("\u{270e}{write_pct}%");
-    if write_pct >= 25 {
-        segment.push_colored(write, theme.error);
-    } else {
-        segment.push(write);
-    }
+    segment.push_role(
+        write,
+        if write_pct >= 25 {
+            TextRole::Error
+        } else {
+            TextRole::Secondary
+        },
+    );
 
     Some(segment)
 }
 
-/// Render the muted per-turn status line shown after each interactive turn.
+/// Render the semantic per-turn status line shown after each interactive turn.
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
 /// token count, estimated cost (when pricing for the model is known), elapsed
 /// wall-clock time for the turn, and context-window occupancy. The workspace's
-/// branch lives in the footer instead: it is state, not a per-turn figure. Labels use the theme's muted foreground;
+/// branch lives in the footer instead: it is state, not a per-turn figure. Model and usage use syntax-derived accents; labels stay secondary;
 /// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
@@ -2385,14 +2387,14 @@ pub(crate) fn turn_status_line_with_context_estimate(
         account,
     } = status;
 
-    let mut segments: Vec<String> = Vec::with_capacity(8);
-    segments.push(format!("[{model}]"));
+    let mut segments: Vec<(TextRole, String)> = Vec::with_capacity(8);
+    segments.push((TextRole::Model, format!("[{model}]")));
     // Next to the model: together they answer "who served this turn, and on
     // whose account".
     if let Some(account) = account.filter(|a| !a.is_empty()) {
-        segments.push(format!("acct {account}"));
+        segments.push((TextRole::Secondary, format!("acct {account}")));
     }
-    segments.push(format!("turn {turn}"));
+    segments.push((TextRole::Secondary, format!("turn {turn}")));
 
     // Cost and tokens carry BOTH the last turn (`+`) and the session total
     // (`Σ`), so the line reads the same live or resumed: `+` is "just now", `Σ`
@@ -2401,19 +2403,22 @@ pub(crate) fn turn_status_line_with_context_estimate(
     let turn_cost = cost_for(usage, model);
     let cum_cost = cost_for(cumulative_usage, model);
     if let Some(cost) = combine_turn_and_cumulative(turn_cost.as_deref(), cum_cost.as_deref()) {
-        segments.push(cost);
+        segments.push((TextRole::Usage, cost));
     }
     let turn_tokens = format!("+{}", format_token_count(usage.total_tokens()));
     let cum_tokens = format!(
         "\u{3a3}{}",
         format_token_count(cumulative_usage.total_tokens())
     );
-    segments.push(format!("{turn_tokens} {cum_tokens} tokens"));
+    segments.push((
+        TextRole::Usage,
+        format!("{turn_tokens} {cum_tokens} tokens"),
+    ));
 
     // Wall-clock: the last turn (`+Ns`) and the session total (`Σs`). Both are
     // omitted on a resume where no duration was persisted.
     if let Some(dur) = combine_durations(elapsed, cumulative_duration) {
-        segments.push(dur);
+        segments.push((TextRole::Secondary, dur));
     }
 
     // Context-window usage: current occupancy / model window. Uses the same
@@ -2423,11 +2428,16 @@ pub(crate) fn turn_status_line_with_context_estimate(
             if estimated_context {
                 segment = segment.replacen("ctx ", "ctx ≈", 1);
             }
-            segments.push(segment);
+            segments.push((TextRole::Usage, segment));
         }
     }
     let mut line = StyledLine::muted();
-    line.push(segments.join(" · "));
+    for (index, (role, text)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            line.push(" · ");
+        }
+        line.push_role(text, role);
+    }
     // KV-cache efficiency: hit rate + write rate over the most recent turn's
     // prompt total.
     if let Some(segment) = format_cache_efficiency_segment(usage) {
@@ -2566,10 +2576,10 @@ pub(crate) fn format_permission_prompt_box(
     let border = "─".repeat(inner_width + 2);
 
     let t = theme();
-    let grey = ansi_fg(t.muted);
+    let grey = t.fg_seq(TextRole::Secondary);
     let reset = RESET;
-    let bold_yellow = ansi_bold_fg(t.warning);
-    let bold_info = ansi_bold_fg(t.info());
+    let bold_yellow = ansi_bold_fg(t.color(TextRole::Warning));
+    let bold_info = ansi_bold_fg(t.color(TextRole::Info));
     let dim = DIM;
 
     let mut out = String::new();
@@ -2627,8 +2637,8 @@ pub(crate) fn format_tool_timeline(
     }
     let count = entries.len();
     let t = theme();
-    let success_fg = ansi_fg(t.success);
-    let error_fg = ansi_fg(t.error);
+    let success_fg = t.fg_seq(TextRole::Success);
+    let error_fg = t.fg_seq(TextRole::Error);
     let parts: Vec<String> = entries
         .into_iter()
         .map(|(name, ok)| {
@@ -2733,7 +2743,7 @@ const CONTEXT_RESERVED_NAME: &str = "Autocompact buffer";
 struct ContextCategory<'a> {
     name: &'a str,
     tokens: usize,
-    color: Color,
+    role: TextRole,
 }
 
 /// Compact token count in Claude Code's `/context` style: `249`, `4.2k`,
@@ -2796,37 +2806,37 @@ pub(crate) fn format_context_report(
         ContextCategory {
             name: "System prompt",
             tokens: usage.system_prompt_tokens,
-            color: Color::DarkYellow,
+            role: TextRole::Brand,
         },
         ContextCategory {
             name: "System tools",
             tokens: usage.system_tools_tokens(),
-            color: Color::Blue,
+            role: TextRole::Accent,
         },
         ContextCategory {
             name: "MCP tools",
             tokens: usage.mcp_tools_tokens(),
-            color: Color::Cyan,
+            role: TextRole::Model,
         },
         ContextCategory {
             name: "Agent types",
             tokens: usage.agent_types_tokens,
-            color: Color::Green,
+            role: TextRole::Info,
         },
         ContextCategory {
             name: "Memory files",
             tokens: usage.memory_files_tokens,
-            color: Color::Magenta,
+            role: TextRole::Branch,
         },
         ContextCategory {
             name: "Skills",
             tokens: usage.skills_tokens,
-            color: Color::Yellow,
+            role: TextRole::Notice,
         },
         ContextCategory {
             name: "Messages",
             tokens: usage.message_tokens,
-            color: Color::DarkMagenta,
+            role: TextRole::Usage,
         },
     ];
     let visible: Vec<&ContextCategory<'_>> = categories.iter().filter(|c| c.tokens > 0).collect();
@@ -2883,7 +2893,10 @@ pub(crate) fn format_context_report(
                 1.0
             };
             let glyph = if fullness >= 0.7 { "⛁" } else { "⛀" };
-            squares.push(format!("{}{glyph}{reset}", paint(category.color)));
+            squares.push(format!(
+                "{}{glyph}{reset}",
+                paint(theme().color(category.role))
+            ));
         }
     }
     let reserved_squares = if reserved > 0 {
@@ -2896,7 +2909,10 @@ pub(crate) fn format_context_report(
         squares.push(format!("{dim}⛶{reset}"));
     }
     while squares.len() < total_squares {
-        squares.push(format!("{}⛝{reset}", paint(Color::DarkGrey)));
+        squares.push(format!(
+            "{}⛝{reset}",
+            paint(theme().color(TextRole::Secondary))
+        ));
     }
     let grid_rows: Vec<String> = squares
         .chunks(grid_width)
@@ -2928,7 +2944,7 @@ pub(crate) fn format_context_report(
     for category in &visible {
         legend.push(format!(
             "{}⛁{reset} {}: {dim}{} tokens ({:.1}%){reset}",
-            paint(category.color),
+            paint(theme().color(category.role)),
             category.name,
             format_context_tokens(category.tokens),
             context_percent(category.tokens, window)
@@ -2944,7 +2960,7 @@ pub(crate) fn format_context_report(
     if reserved > 0 {
         legend.push(format!(
             "{}⛝{reset} {dim}{CONTEXT_RESERVED_NAME}: {} tokens ({:.1}%){reset}",
-            paint(Color::DarkGrey),
+            paint(theme().color(TextRole::Secondary)),
             format_context_tokens(reserved),
             context_percent(reserved, window)
         ));

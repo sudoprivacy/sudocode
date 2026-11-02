@@ -5,6 +5,7 @@
 //! only decides how the exchange looks in a terminal: the echoed input line
 //! and the `⎿`-connected output block under it.
 
+use crate::render::TextRole;
 pub use commands::bash_mode::{failure_blocks, history_blocks, parse_bang_command, run};
 use runtime::{ContentBlock, ConversationMessage, MessageRole};
 
@@ -35,12 +36,12 @@ pub fn messages_from_blocks(blocks: Vec<ContentBlock>) -> Vec<ConversationMessag
 /// scrollback.
 #[must_use]
 pub fn render_input_line(command: &str) -> String {
-    use crate::render::{ansi_fg, theme, RESET};
+    use crate::render::{theme, RESET};
     let t = theme();
     format!(
         "{bg}{bang}!{RESET}{bg} {command}{RESET}",
         bg = t.code_bg_seq(),
-        bang = ansi_fg(t.error),
+        bang = t.fg_seq(TextRole::Error),
     )
 }
 
@@ -53,9 +54,9 @@ pub fn render_output_block(
     stderr: &str,
     exit_status: Option<&runtime::ShellStatus>,
 ) -> String {
-    use crate::render::{ansi_fg, theme, DIM, RESET};
+    use crate::render::{theme, DIM, RESET};
     let t = theme();
-    let err = ansi_fg(t.error);
+    let err = t.fg_seq(TextRole::Error);
     let mut lines: Vec<String> = stdout
         .lines()
         .map(str::to_string)

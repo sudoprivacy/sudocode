@@ -2,7 +2,9 @@
 //! tui/src/render/highlight.rs and tui/src/markdown_render.rs. Both renderers
 //! use the same two-face grammar/theme bundle; only the terminal adapter differs.
 //! This is an internal syntax adapter and asset cache, not another UI theme.
-//! Semantic UI color selection belongs to `ColorTheme`.
+//! Semantic UI color selection belongs to `ColorTheme`. Metadata scope selection
+//! and softening follow Codex a09812981d, tui/src/bottom_pane/status_line_style.rs.
+//! See third_party/codex for the upstream Apache-2.0 license.
 
 use std::sync::OnceLock;
 
@@ -38,51 +40,43 @@ pub(super) fn theme(light: bool) -> &'static Theme {
     selected.get_or_init(|| with_theme(light, Clone::clone))
 }
 
-/// Inline code uses the Markdown scope from the same theme as fenced code.
-pub(super) fn inline_color(light: bool, support: ColorSupport) -> Color {
-    static DARK: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    static LIGHT: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
-        return Color::Reset;
-    }
-    let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
-        // Status and inline text need only this color. Do not retain a syntax
-        // theme/catalog until an actual code block requests highlighting.
-        with_theme(light, |theme| {
-            let highlighter = Highlighter::new(theme);
-            [
-                "markup.inline.raw.string.markdown",
-                "markup.raw.inline.markdown",
-            ]
-            .iter()
-            .find_map(|name| {
-                let scope = Scope::new(name).ok()?;
-                highlighter.style_mod_for_stack(&[scope]).foreground
-            })
-        })
-    });
-    color.map_or(Color::Reset, |color| foreground(color, support))
+/// Raw syntax assets; UI roles and terminal fallbacks belong to ColorTheme.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(super) enum SyntaxAccent {
+    Inline,
+    Type,
+    String,
+    Number,
+    Function,
 }
 
-/// Table labels use the same syntax scopes as Codex's Markdown table header.
-pub(super) fn table_header_color(light: bool, support: ColorSupport) -> Color {
-    static DARK: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    static LIGHT: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
-        return Color::Reset;
-    }
-    let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
+pub(super) fn accent(kind: SyntaxAccent, light: bool) -> Option<(u8, u8, u8)> {
+    type Accents = [Option<syntect::highlighting::Color>; 5];
+    static DARK: OnceLock<Accents> = OnceLock::new();
+    static LIGHT: OnceLock<Accents> = OnceLock::new();
+    let colors = if light { &LIGHT } else { &DARK }.get_or_init(|| {
         with_theme(light, |theme| {
             let highlighter = Highlighter::new(theme);
-            ["entity.name.type", "support.type", "variable"]
-                .iter()
-                .find_map(|name| {
+            let scopes: [&[&str]; 5] = [
+                &[
+                    "markup.inline.raw.string.markdown",
+                    "markup.raw.inline.markdown",
+                ],
+                &["entity.name.type", "support.type", "variable"],
+                &["string", "markup.underline.link"],
+                &["constant.numeric", "constant"],
+                &["entity.name.function", "entity.name.tag"],
+            ];
+            scopes.map(|scopes| {
+                scopes.iter().find_map(|name| {
                     let scope = Scope::new(name).ok()?;
                     highlighter.style_mod_for_stack(&[scope]).foreground
                 })
+            })
         })
     });
-    color.map_or(Color::Reset, |color| foreground(color, support))
+    colors[kind as usize].map(|color| (color.r, color.g, color.b))
 }
 
 fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Color {

@@ -5,9 +5,6 @@
 
 mod common;
 
-#[path = "support/terminal_palette.rs"]
-mod terminal_palette;
-
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -454,7 +451,10 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let colors = if no_color {
         ["Default".to_owned(), "Default".to_owned()]
     } else {
-        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
+        [
+            "Rgb(118, 118, 118)".to_owned(),
+            "Rgb(158, 158, 158)".to_owned(),
+        ]
     };
     let muted = &colors[usize::from(background == "15;0")];
     let vars = [

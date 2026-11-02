@@ -4,6 +4,9 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 
 exports.run = async function run(host, config) {
+  if (config.scenario === 'table_snapshots') {
+    return require('../../../../../e2e/terminal-resize/tables.cjs').run(host, config);
+  }
   const { child, terminal, snapshot, viewport, settle, frame, resize, onPresentation } = host;
   const hasSavedHistory = ['prose_resize', 'prose_queued_resize', 'prose_finish_resize'].includes(config.scenario);
   const isCode = ['code_resize', 'code_queued_resize'].includes(config.scenario);

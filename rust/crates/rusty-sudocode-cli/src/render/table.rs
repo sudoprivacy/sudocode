@@ -2,8 +2,8 @@
 //! Source: openai/codex 970111f6cb, markdown_render.rs and table_key_value.rs.
 //! Copyright 2026 OpenAI. Apache-2.0; see third_party/codex.
 
-use super::{code_theme, styled_text::StyledText, text_layout, ColorSupport, ColorTheme};
-use crossterm::style::{ContentStyle, Stylize};
+use super::{styled_text::StyledText, text_layout, ColorSupport, ColorTheme, TextRole};
+use crossterm::style::ContentStyle;
 use pulldown_cmark::Alignment;
 
 const FIELD_LEADING_PADDING: usize = 1;
@@ -32,12 +32,8 @@ struct TableColumnMetrics {
     kind: TableColumnKind,
 }
 
-#[derive(Default)]
-struct Cell(StyledText);
-impl Cell {
-    fn new(text: &str) -> Self {
-        Self(StyledText::from_ansi(text))
-    }
+struct Cell<'a>(&'a StyledText);
+impl Cell<'_> {
     fn plain_text(&self) -> &str {
         &self.0.text
     }
@@ -53,41 +49,35 @@ impl Cell {
 fn display_width(text: &str) -> usize {
     text_layout::display_width(text)
 }
-fn wrap_cell(cell: &Cell, width: usize) -> Vec<StyledText> {
-    text_layout::wrap_words(&cell.0, width)
+fn wrap_cell(cell: &Cell<'_>, width: usize) -> Vec<StyledText> {
+    text_layout::wrap_words(cell.0, width)
 }
 
 pub(super) fn render(
-    headers: &[String],
-    rows: &[Vec<String>],
+    headers: &[StyledText],
+    rows: &[Vec<StyledText>],
     alignments: &[Alignment],
     width: usize,
-    theme: &ColorTheme,
+    theme: ColorTheme,
     support: ColorSupport,
-) -> String {
+) -> StyledText {
     if headers.is_empty() && rows.is_empty() {
-        return String::new();
+        return StyledText::default();
     }
     let columns = headers
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    let normalize = |row: &[String]| {
-        (0..columns)
-            .map(|column| Cell::new(row.get(column).map_or("", String::as_str)))
-            .collect::<Vec<_>>()
-    };
-    let header = normalize(headers);
-    let rows = rows.iter().map(|row| normalize(row)).collect::<Vec<_>>();
+    let empty = StyledText::default();
+    let header = normalize_cells(headers, columns, &empty);
+    let rows = rows
+        .iter()
+        .map(|row| normalize_cells(row, columns, &empty))
+        .collect::<Vec<_>>();
     let metrics = Table::collect_table_column_metrics(&header, &rows, columns);
     let available =
         width.saturating_sub(columns * CELL_PADDING * 2 + columns.saturating_sub(1) * COLUMN_GAP);
-    let header_style = ContentStyle::default()
-        .with(code_theme::table_header_color(
-            theme.light_background,
-            support,
-        ))
-        .bold();
-    let separator_style = ContentStyle::default().with(support.color(theme.border));
+    let header_style = theme.style_for(TextRole::TableHeader, support);
+    let separator_style = theme.style_for(TextRole::Border, support);
     let widths = Table::compute_column_widths(&metrics, Some(available));
     let record = widths
         .as_ref()
@@ -116,7 +106,7 @@ pub(super) fn render(
                         let mut rendered = StyledText::default();
                         if line_index == 0 {
                             rendered.push(ContentStyle::default(), " ");
-                            append_header(&mut rendered, &label.0, header_style);
+                            append_header(&mut rendered, label.0, header_style);
                             rendered.push(
                                 ContentStyle::default(),
                                 &" ".repeat(label_width.saturating_sub(label.width()) + FIELD_GAP),
@@ -161,20 +151,31 @@ pub(super) fn render(
         let mut line = StyledText::default();
         for cell in &header {
             line.push(ContentStyle::default(), "| ");
-            line.append(&cell.0);
+            line.append(cell.0);
             line.push(ContentStyle::default(), " ");
         }
         line.push(ContentStyle::default(), "|");
         output.extend(text_layout::wrap_words(&line, width));
     }
-    let mut ansi = String::new();
+    let mut text = StyledText::default();
     for (index, line) in output.iter().enumerate() {
         if index > 0 {
-            ansi.push('\n');
+            text.plain("\n");
         }
-        line.write_ansi(0..line.text.len(), &mut ansi);
+        text.append(line);
     }
-    ansi
+    text
+}
+
+#[inline]
+fn normalize_cells<'a>(
+    row: &'a [StyledText],
+    columns: usize,
+    empty: &'a StyledText,
+) -> Vec<Cell<'a>> {
+    (0..columns)
+        .map(|column| Cell(row.get(column).unwrap_or(empty)))
+        .collect()
 }
 
 fn append_header(output: &mut StyledText, cell: &StyledText, header: ContentStyle) {
@@ -200,7 +201,7 @@ fn table_rule(widths: &[usize], ch: char, style: ContentStyle) -> StyledText {
     line
 }
 fn render_row(
-    row: &[Cell],
+    row: &[Cell<'_>],
     widths: &[usize],
     alignments: &[Alignment],
     header: Option<ContentStyle>,
@@ -251,7 +252,7 @@ fn render_row(
 
 struct Table;
 impl Table {
-    fn cell_display_width(cell: &Cell) -> usize {
+    fn cell_display_width(cell: &Cell<'_>) -> usize {
         cell.width()
     }
     fn longest_token_width(text: &str) -> usize {
@@ -300,8 +301,8 @@ impl Table {
         Some(widths)
     }
     fn collect_table_column_metrics(
-        header: &[Cell],
-        rows: &[Vec<Cell>],
+        header: &[Cell<'_>],
+        rows: &[Vec<Cell<'_>>],
         column_count: usize,
     ) -> Vec<TableColumnMetrics> {
         let mut metrics = Vec::with_capacity(column_count);
@@ -448,7 +449,7 @@ impl Table {
     }
 }
 fn should_render_records(
-    rows: &[Vec<Cell>],
+    rows: &[Vec<Cell<'_>>],
     column_widths: &[usize],
     metrics: &[TableColumnMetrics],
 ) -> bool {
@@ -489,7 +490,7 @@ fn should_render_records(
     affected_rows >= threshold
 }
 fn expansive_cells_are_starved(
-    row: &[Cell],
+    row: &[Cell<'_>],
     column_widths: &[usize],
     metrics: &[TableColumnMetrics],
 ) -> bool {

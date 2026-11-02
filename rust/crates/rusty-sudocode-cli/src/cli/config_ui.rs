@@ -5,12 +5,13 @@
 //! showing fields + current values; selecting a leaf dispatches to the
 //! appropriate InputSlot variant for editing.
 
+use crate::render::TextRole;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use runtime::config_schema::{self, ConfigInputKind, FieldSchema, FieldType};
 
-use crate::render::{ansi_fg, theme, DIM, RESET};
+use crate::render::{theme, DIM, RESET};
 use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::{LiveCli, SlashSelectionHandler};
 
@@ -244,7 +245,7 @@ fn handle_leaf_edit(
                 )),
                 Err(e) => out.println(&format!(
                     "{}Error writing config: {e}{}",
-                    ansi_fg(theme().error),
+                    theme().fg_seq(TextRole::Error),
                     RESET
                 )),
             }
@@ -302,7 +303,7 @@ fn handle_leaf_edit(
                         )),
                         Err(e) => out.println(&format!(
                             "{}Error writing config: {e}{}",
-                            ansi_fg(theme().error),
+                            theme().fg_seq(TextRole::Error),
                             RESET
                         )),
                     }
@@ -367,7 +368,7 @@ fn handle_leaf_edit(
                         )),
                         Err(e) => out.println(&format!(
                             "{}Error writing config: {e}{}",
-                            ansi_fg(theme().error),
+                            theme().fg_seq(TextRole::Error),
                             RESET
                         )),
                     }

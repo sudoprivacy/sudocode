@@ -142,20 +142,21 @@ impl ProsePreview {
             } else {
                 self.code.render(&self.source, &self.renderer).or_else(|| {
                     is_prose(&self.source).then(|| {
-                        self.renderer
-                            .render_markdown_with_width(&self.source, width.saturating_sub(2))
+                        self.renderer.render_markdown_styled_with_width(
+                            &self.source,
+                            width.saturating_sub(2),
+                        )
                     })
                 })
             };
             if let (Some(position), Some(markdown)) = (self.position, markdown) {
                 let mut glyph = ResponseGlyphState::from_position(width, position.response);
-                let mut text = position.gap.to_string();
-                text.push_str(&glyph.apply(&markdown));
+                self.rendered.plain(position.gap);
+                self.rendered.append(&glyph.apply_styled(&markdown));
                 // MixedText's measure uses str::lines: the last terminator
                 // advances the cursor but owns no extra row. Keep both
                 // paragraph terminators so history and the canvas each own
                 // the same blank separator row.
-                self.rendered = StyledText::from_ansi(&text);
             }
         }
         if is_changed || self.row_budget != row_budget {
@@ -171,7 +172,7 @@ impl ProsePreview {
                     .map(str::len)
                     .sum();
                 let mut visible = StyledText::default();
-                visible.append(&self.rendered.slice(start..self.rendered.text.len()));
+                visible.append_range(&self.rendered, start..self.rendered.text.len());
                 self.visible = Some(Arc::new(visible));
             }
         }

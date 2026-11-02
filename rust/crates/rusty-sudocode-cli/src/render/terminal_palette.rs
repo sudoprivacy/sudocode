@@ -29,6 +29,11 @@ pub(crate) fn initialize() {
 }
 
 #[inline]
+pub(super) fn foreground() -> Option<Rgb> {
+    COLORS.get().copied().flatten().map(|(fg, _)| fg)
+}
+
+#[inline]
 pub(super) fn background() -> Option<Rgb> {
     COLORS.get().copied().flatten().map(|(_, bg)| bg)
 }

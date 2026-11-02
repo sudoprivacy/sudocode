@@ -6,81 +6,62 @@
 
 use std::fmt;
 
-use crossterm::style::{Color, ContentStyle, Stylize};
+use crossterm::style::{ContentStyle, Stylize};
 
-use super::{theme, RESET};
+use super::{styled_text::StyledText, theme, TextRole};
 
 #[derive(Clone, Debug)]
 pub(crate) struct StyledLine {
     base: ContentStyle,
-    spans: Vec<(ContentStyle, String)>,
+    text: StyledText,
 }
 
 impl StyledLine {
     pub(crate) fn structured(&self) -> super::styled_text::StyledText {
-        let mut text = super::styled_text::StyledText::default();
-        for (style, content) in &self.spans {
-            text.push(*style, content);
-        }
-        text
+        self.text.clone()
     }
 
     /// Low-emphasis chrome uses the theme's muted foreground, not faint on
     /// top of an already muted color. This is shared by summaries and status.
     pub(crate) fn muted() -> Self {
         Self {
-            base: ContentStyle::new().with(theme().muted),
-            spans: Vec::new(),
+            base: theme().style(TextRole::Secondary),
+            text: StyledText::default(),
         }
     }
 
-    pub(crate) fn push(&mut self, text: impl Into<String>) {
-        self.push_style(text.into(), self.base);
+    #[inline]
+    pub(crate) fn push(&mut self, text: impl AsRef<str>) {
+        self.text.push(self.base, text.as_ref());
     }
 
-    pub(crate) fn push_bold(&mut self, text: impl Into<String>) {
-        self.push_style(text.into(), self.base.bold());
+    pub(crate) fn push_bold(&mut self, text: impl AsRef<str>) {
+        self.text.push(self.base.bold(), text.as_ref());
     }
 
     /// Quantities use terminal-owned foreground emphasis, not a brand/status
     /// color or the surrounding muted label style. Zero has the same role.
     pub(crate) fn push_count(&mut self, count: usize) {
-        self.push_style(count.to_string(), ContentStyle::new().bold());
+        self.text
+            .push(theme().style(TextRole::Strong), &count.to_string());
     }
 
-    pub(crate) fn push_colored(&mut self, text: impl Into<String>, color: Color) {
-        self.push_style(text.into(), self.base.with(color));
+    #[inline]
+    pub(crate) fn push_role(&mut self, text: impl AsRef<str>, role: TextRole) {
+        self.text.push(theme().style(role), text.as_ref());
     }
 
     pub(crate) fn append(&mut self, other: Self) {
-        for (style, text) in other.spans {
-            self.push_style(text, style);
+        if self.text.text.is_empty() {
+            self.text = other.text;
+        } else {
+            self.text.append(&other.text);
         }
-    }
-
-    // Text arguments are unstyled content. Compose rich fragments with append,
-    // not by embedding a serialized StyledLine in another span's text.
-    fn push_style(&mut self, text: String, style: ContentStyle) {
-        if text.is_empty() {
-            return;
-        }
-        if let Some((previous_style, previous_text)) = self.spans.last_mut() {
-            if *previous_style == style {
-                previous_text.push_str(&text);
-                return;
-            }
-        }
-        self.spans.push((style, text));
     }
 }
 
 impl fmt::Display for StyledLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (style, text) in &self.spans {
-            // Establish a complete style even if the preceding output was dim
-            // or bold. Crossterm owns attribute/color encoding and cleanup.
-            write!(f, "{RESET}{}", style.apply(text))?;
-        }
-        Ok(())
+        self.text.fmt_ansi(0..self.text.text.len(), f)
     }
 }

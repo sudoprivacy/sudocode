@@ -28,6 +28,7 @@ mod startup;
 mod stderr_capture;
 mod windows_console;
 
+use crate::render::TextRole;
 use engine_acp::AcpError;
 use engine_core::{
     EngineApiClient, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
@@ -144,9 +145,7 @@ use engine_host::{
 };
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
-use render::{
-    ansi_bold_fg, ansi_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET,
-};
+use render::{theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET};
 use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
@@ -2498,19 +2497,23 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                             match cli.handle_repl_command(command) {
                                 Ok(true) => {
                                     if let Err(e) = cli.persist_session() {
-                                        eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
+                                        eprintln!(
+                                            "{}{e}{}",
+                                            theme().fg_seq(TextRole::Error),
+                                            RESET
+                                        );
                                     }
                                 }
                                 Ok(false) => {}
                                 Err(e) => {
-                                    eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
+                                    eprintln!("{}{e}{}", theme().fg_seq(TextRole::Error), RESET);
                                 }
                             }
                             continue;
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            eprintln!("{}{error}{}", ansi_fg(theme().error), RESET);
+                            eprintln!("{}{error}{}", theme().fg_seq(TextRole::Error), RESET);
                             continue;
                         }
                     }
@@ -2526,13 +2529,13 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     ) {
                         cli.record_prompt_history(&trimmed);
                         if let Err(e) = cli.run_turn_interactive(&prompt) {
-                            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
+                            eprintln!("{}{e}{}", theme().fg_seq(TextRole::Error), RESET);
                         }
                         continue;
                     }
                     cli.record_prompt_history(&trimmed);
                     if let Err(e) = cli.run_turn_interactive(&trimmed) {
-                        eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
+                        eprintln!("{}{e}{}", theme().fg_seq(TextRole::Error), RESET);
                     }
                 }
                 input::ReadOutcome::Exit => {
@@ -2819,7 +2822,7 @@ fn run_pending_peer_turns(
             Ok(()) => {
                 let _ = receipt.send(());
             }
-            Err(e) => eprintln!("{}{e}{}", ansi_fg(theme().error), RESET),
+            Err(e) => eprintln!("{}{e}{}", theme().fg_seq(TextRole::Error), RESET),
         }
     }
 }
@@ -2917,7 +2920,11 @@ fn show_effort_selection(
                 Ok(())
             })();
             if let Err(error) = result {
-                out.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
+                out.println(&format!(
+                    "{}{error}{}",
+                    theme().fg_seq(TextRole::Error),
+                    RESET
+                ));
             }
             None
         },
@@ -4027,7 +4034,11 @@ fn run_repl_iocraft_dispatch(
                     }
                     let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
                     if let Err(e) = cli_lock.persist_session() {
-                        repl_output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                        repl_output.println(&format!(
+                            "{}{e}{}",
+                            theme().fg_seq(TextRole::Error),
+                            RESET
+                        ));
                     }
                     break;
                 }
@@ -4123,7 +4134,7 @@ fn run_repl_iocraft_dispatch(
                         );
                         repl_output.println(&format!(
                             "{}A turn is running; finish or cancel before changing session settings.\n{controls}{RESET}",
-                            theme().muted_fg(),
+                            theme().fg_seq(TextRole::Secondary),
                         ));
                         continue;
                     }
@@ -4203,7 +4214,7 @@ fn run_repl_iocraft_dispatch(
                                             if let Err(e) = cli_lock.persist_session() {
                                                 out.println(&format!(
                                                     "{}{e}{}",
-                                                    ansi_fg(theme().error),
+                                                    theme().fg_seq(TextRole::Error),
                                                     RESET
                                                 ));
                                             }
@@ -4211,7 +4222,7 @@ fn run_repl_iocraft_dispatch(
                                         Ok(false) => {}
                                         Err(e) => out.println(&format!(
                                             "{}{e}{}",
-                                            ansi_fg(theme().error),
+                                            theme().fg_seq(TextRole::Error),
                                             RESET
                                         )),
                                     }
@@ -4277,7 +4288,7 @@ fn run_repl_iocraft_dispatch(
                                     if let Err(e) = cli_lock.persist_session() {
                                         repl_output.println(&format!(
                                             "{}{e}{}",
-                                            ansi_fg(theme().error),
+                                            theme().fg_seq(TextRole::Error),
                                             RESET
                                         ));
                                     }
@@ -4285,7 +4296,7 @@ fn run_repl_iocraft_dispatch(
                                 Ok(false) => {}
                                 Err(e) => repl_output.println(&format!(
                                     "{}{e}{}",
-                                    ansi_fg(theme().error),
+                                    theme().fg_seq(TextRole::Error),
                                     RESET
                                 )),
                             }
@@ -4313,7 +4324,7 @@ fn run_repl_iocraft_dispatch(
                         Err(error) => {
                             repl_output.println(&format!(
                                 "{}{error}{}",
-                                ansi_fg(theme().error),
+                                theme().fg_seq(TextRole::Error),
                                 RESET
                             ));
                             true
@@ -4550,7 +4561,11 @@ fn spawn_iocraft_turn(
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
+                    output.println(&format!(
+                        "{}{error}{}",
+                        theme().fg_seq(TextRole::Error),
+                        RESET
+                    ));
                 }
             }
             let _ = done_tx.send(CoordinatorEvent::TurnComplete);
@@ -5033,8 +5048,8 @@ impl LiveCli {
                 .unwrap_or_default();
 
         let t = theme();
-        let logo_fg = ansi_fg(t.logo);
-        let accent_fg = ansi_fg(t.logo_accent);
+        let logo_fg = t.fg_seq(TextRole::Brand);
+        let accent_fg = t.fg_seq(TextRole::Accent);
         let logo = format!(
             "{logo_fg}\
 ███████╗██╗   ██╗██████╗  ██████╗ \n\
@@ -5063,7 +5078,7 @@ impl LiveCli {
         let max_width = lines.iter().map(|l| strip_ansi_width(l)).max().unwrap_or(0);
         let box_width = max_width + 2; // 1 space padding on each side
 
-        let grey = t.border_fg();
+        let grey = t.fg_seq(TextRole::Border);
         let reset = RESET;
 
         let top = format!("{grey}╭{}╮{reset}", "─".repeat(box_width));
@@ -5427,7 +5442,6 @@ impl LiveCli {
         let mut spinner = SpinnerHandle::new(
             render::activity::WORKING_LABEL,
             Some(model.as_str()),
-            TerminalRenderer::new().color_theme(),
             token_budget,
         );
         let spinner_ref = spinner.spinner_ref();
@@ -5608,7 +5622,7 @@ impl LiveCli {
             Some(tc) if tc.cancelled => {
                 output.println(&format!(
                     "{}\u{23f9} Cancelled{}",
-                    ansi_fg(theme().error),
+                    theme().fg_seq(TextRole::Error),
                     RESET
                 ));
                 self.print_turn_status_line(&model, turn_start.elapsed(), Some(output), Some(ui));
@@ -6084,12 +6098,16 @@ impl LiveCli {
         if let Some(error) = push_error {
             self.out_println(format!(
                 "{}failed to record ! command in the transcript: {error}{}",
-                ansi_fg(theme().error),
+                theme().fg_seq(TextRole::Error),
                 RESET
             ));
         }
         if let Err(error) = self.persist_session() {
-            self.out_println(format!("{}{error}{}", ansi_fg(theme().error), RESET));
+            self.out_println(format!(
+                "{}{error}{}",
+                theme().fg_seq(TextRole::Error),
+                RESET
+            ));
         }
     }
 

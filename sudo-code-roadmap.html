@@ -798,6 +798,15 @@ behavior. Entry changes still exercise the real three-platform workspace in the
 queue; PR/push/queue event controls verify that trigger and docs-only exclusion.
 No functional case, assertion or timeout changes. Target counts alone do not
 establish whole-lifecycle savings.</p>
+<p><strong>Draft/ready ordering (2026-11-02).</strong> Draft snapshots use a
+separate concurrency group and explicit run title. A late draft event cannot
+cancel or supersede ready acceptance. Wholly skipped snapshots allocate no
+publisher runner. Publication still waits for the latest applicable ready/queue
+run and current attempt, verifies required jobs and real SSH evidence, and
+retains genuine failures. Required output explains ignored draft/old events.
+Nine real publisher child-process/HTTP/Git/SSH scenarios cover both orders,
+queued newer drafts, failed newer ready runs, stale attempts and corrupt notes.
+The controls protect CI protocol behavior and add no product journey credit.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
 target selection omits them. Grouped or unknown sources therefore select the
@@ -1050,6 +1059,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       Committed isolated CLI test edits select changed originals plus their
       containing groups. Ordinary/shared changes and dirty or unavailable-base
       inputs retain full all-feature lint; actual compiler artifacts verify each mode.
+      Actual publisher processes with HTTP, Git fetches and SSH notes also
+      exercise draft/ready ordering, current failure ownership and corrupt-note
+      refusal. Workflow wiring preserves separate draft concurrency and skips
+      publisher runners for wholly skipped source workflows.
       These
       executor checks add no product journey coverage. Author-hook and native
       launcher controls reject failed prerequisites before profile execution.

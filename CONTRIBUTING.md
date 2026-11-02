@@ -805,6 +805,13 @@ selector changes; queue/main reuse its result.
 Changing the queue entry itself also selects the real all-feature workspace
 lint on all three queue platforms. Real committed PR/push/queue event controls
 verify this trigger and the exclusion of documentation-only changes.
+Draft snapshots use a separate concurrency group and explicit run title. They
+cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
+workflows allocate no publisher runner. A newer applicable ready run and its
+current attempt still own the result, including failures; required jobs and
+SSH signatures remain verified. Publisher output explains an ignored event
+on the mandatory execution path. Real child-process/HTTP/Git/SSH controls cover
+both event orders, queued drafts, failed ready runs and signature corruption.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

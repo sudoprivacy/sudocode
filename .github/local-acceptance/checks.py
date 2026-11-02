@@ -488,8 +488,8 @@ def run(name, root, output, base, execute):
         if not bash:
             raise RuntimeError("Git Bash is required for shared-service credential acceptance")
         command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                'python e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"))
+                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
+                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.

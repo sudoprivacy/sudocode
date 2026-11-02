@@ -713,6 +713,8 @@ cover the standalone default-feature debug graph. Selected normal release
 acceptance retains its separate product graph. The mandatory executor output
 prints this scope, and its real Cargo/native-process fixture checks warm reuse,
 standalone construction and refusal before services when current source fails.
+Both service harnesses use the executor's explicit Python interpreter, including
+the Git Bash call; an unversioned `python` alias is not required on Linux.
 
 `spec/local_acceptance.json` selects required targets, and the protected runner's
 `acceptance_plan` drives both the hook and CI. Push output and CI summaries print

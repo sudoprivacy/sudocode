@@ -2227,7 +2227,7 @@ fn stream_bash_stdout_roundtrip(request: &MessageRequest, _scenario: Scenario) -
 }
 
 fn stream_bash_interrupt_long_running(request: &MessageRequest, _scenario: Scenario) -> String {
-    match latest_tool_result(request) {
+    match current_turn_tool_result(request) {
         Some((tool_output, _)) => final_text_sse(&format!(
             "bash interrupt unexpectedly continued: {tool_output}"
         )),
@@ -2957,7 +2957,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"command": "printf 'alpha from bash'", "timeout": 30000}),
             ),
         },
-        Scenario::BashInterruptLongRunning => match latest_tool_result(request) {
+        Scenario::BashInterruptLongRunning => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_bash_interrupt_unexpected_final",
                 &format!("bash interrupt unexpectedly continued: {tool_output}"),

@@ -329,7 +329,31 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         const result=spawnSync(argv[0],argv.slice(1),{cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
         receipt.machineInstallation={argv,status:result.status,stdout:result.stdout,stderr:result.stderr,
           error:result.error?.message,scope:'only this private fixture home and command entry'};
+        if(process.platform==='win32'){
+          // Installation can register its Task before a later step fails.
+          // Reconcile the canonical private plan before any success assertion
+          // or stdout parsing, while preserving the original installer error.
+          try{
+            const journalFile=autojoinConfig+'.installation.json';
+            if(fs.existsSync(journalFile)){
+              const partial=JSON.parse(fs.readFileSync(journalFile,'utf8'));
+              if(partial.ownerTask){
+                const privateRoot=fs.realpathSync(root)+path.sep;
+                assert(fs.realpathSync(autojoinConfig).startsWith(privateRoot));
+                assert(fs.realpathSync(autojoinConfig+'.windows-owner.xml').startsWith(privateRoot));
+                const expected=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
+                assert.deepEqual(partial.ownerTask,expected,'Only the canonical private owner Task may be cleaned up');
+                windowsOwnerPreparation=expected;
+                receipt.windowsOwnerTask={...expected,
+                  registered:partial.completed?.includes('ownerTaskRegistration')===true,
+                  registrationInFlight:partial.inFlight==='ownerTaskRegistration',
+                  scope:'validated private installer Task plan; actual Task ownership rechecked during cleanup'};
+              }
+            }
+          }catch(error){receipt.windowsOwnerCaptureError=String(error);}
+        }
         assert.equal(result.status,0,'one installation command must succeed');
+        assert(!receipt.windowsOwnerCaptureError,receipt.windowsOwnerCaptureError);
         const installed=JSON.parse(result.stdout);
         assert.equal(installed.installed,true);assert.equal(installed.commandEntry,commandEntry);
         assert.equal(installed.a2aJourneyVerified,false,'setup alone must not claim an A2A journey');
@@ -338,9 +362,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         receipt.machineInstallation.journal={phase:journal.phase,completed:journal.completed,
           backupKind:journal.backup.kind,commandEntrySha256:journal.commandEntrySha256};
         if(process.platform==='win32'){
-          windowsOwnerPreparation=journal.ownerTask;
           assert(windowsOwnerPreparation,'the installer must prepare the existing canonical Windows Task');
-          receipt.windowsOwnerTask={...windowsOwnerPreparation,registered:true,scope:'private installer-owned Task only'};
           const powershell=path.join(childEnv.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
           assert(fs.statSync(powershell).isFile());
           userEntryArgv=[powershell,'-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',commandEntry];
@@ -800,9 +822,43 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     if(windowsOwnerPreparation){
       try{
         const prepared=windowsOwnerPreparation;
-        const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
-          {encoding:'utf8',timeout:10000,windowsHide:true});
-        receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,output});
+        // Revalidate the same canonical action/principal immediately before
+        // removal. An absent Task needs no delete; an unknown action refuses.
+        assert(fs.realpathSync(prepared.taskFile).startsWith(fs.realpathSync(root)+path.sep));
+        const quote=value=>"'"+value.replace(/'/g,"''")+"'";
+        const script=`$ErrorActionPreference='Stop'
+$service=New-Object -ComObject 'Schedule.Service'; $service.Connect()
+$folder=$service.GetFolder('\\')
+$tasks=@($folder.GetTasks(1) | Where-Object { $_.Name -ceq ${quote(prepared.taskName)} })
+if($tasks.Count -eq 0){ '{"exists":false}' ; exit 0 }
+if($tasks.Count -ne 1){ throw 'Ambiguous private owner Task' }
+$actual=[xml]$tasks[0].Xml
+$expected=[xml][System.IO.File]::ReadAllText(${quote(prepared.taskFile)})
+foreach($name in @('Command','Arguments','WorkingDirectory','UserId','LogonType','RunLevel','Description','MultipleInstancesPolicy','DisallowStartIfOnBatteries','StopIfGoingOnBatteries','AllowStartOnDemand','Enabled','ExecutionTimeLimit')){
+  $left=@($actual.SelectNodes("//*[local-name()='$name']"))
+  $right=@($expected.SelectNodes("//*[local-name()='$name']"))
+  if($left.Count -ne 1 -or $right.Count -ne 1){ throw "Ambiguous owner Task field: $name" }
+  $a=$left[0].InnerText; $b=$right[0].InnerText
+  if($name -eq 'UserId' -and $a -cne $b){ $a=[System.Security.Principal.NTAccount]::new($a).Translate([System.Security.Principal.SecurityIdentifier]).Value }
+  if($a -cne $b){ throw "Mismatched owner Task field: $name" }
+}
+foreach($name in @('Actions','Principals')){
+  if(@($actual.SelectNodes("//*[local-name()='$name']/*")).Count -ne 1){ throw "Unexpected owner Task structure: $name" }
+}
+if(@($actual.SelectNodes("//*[local-name()='Exec']")).Count -ne 1 -or @($actual.SelectNodes("//*[local-name()='Triggers']/*")).Count -ne 0){ throw 'Unexpected private owner Task action or trigger' }
+'{"exists":true,"matches":true}'`;
+        const powershell=path.join(childEnv.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+        const deadline=Date.now()+10000;
+        const observed=JSON.parse(execFileSync(powershell,['-NoLogo','-NoProfile','-NonInteractive',
+          '-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+          {encoding:'utf8',timeout:Math.max(1,deadline-Date.now()),windowsHide:true}));
+        assert.equal(typeof observed.exists,'boolean');
+        if(observed.exists){
+          assert.equal(observed.matches,true);
+          const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
+            {encoding:'utf8',timeout:Math.max(1,deadline-Date.now()),windowsHide:true});
+          receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,ownershipVerified:true,output});
+        }else receipt.cleanup.push({privateWindowsOwnerTaskAbsent:prepared.taskName});
       }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     if(legacySocket){

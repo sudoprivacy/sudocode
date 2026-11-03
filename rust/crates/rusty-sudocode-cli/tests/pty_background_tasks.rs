@@ -1438,23 +1438,11 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
     screen(&session, "RUNNING_TASK_KEPT");
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
-    let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..51 {
-        session.send("\r").unwrap();
-        let view = screen(&session, "Esc task list");
-        let title = view
-            .lines()
-            .find(|line| line.contains("Shell details"))
-            .unwrap();
-        assert!(
-            !title.contains("HISTORY_RETIRED"),
-            "pruned history cannot stay in the UI"
-        );
-        seen.insert(title.trim().to_string());
-        session.send("\x1b").unwrap();
-        screen(&session, "Enter details");
-        session.send("\x1b[B").unwrap();
-    }
+    let seen = inspect_history(&mut session, 51);
+    assert!(
+        seen.iter().all(|title| !title.contains("HISTORY_RETIRED")),
+        "pruned history cannot stay in the UI"
+    );
     assert_eq!(
         seen.len(),
         51,
@@ -1474,4 +1462,105 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
     assert_tools_dispatched_once(&env, calls.len() + 2);
+}
+
+/// Visit the retained rows through the actual list/detail controls.
+fn inspect_history(session: &mut PtySession, count: usize) -> std::collections::BTreeSet<String> {
+    session.send(&"\x1b[A".repeat(count)).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..count {
+        session.send("\r").unwrap();
+        let view = screen(session, "Esc task list");
+        let title = view
+            .lines()
+            .find(|line| line.contains("Shell details"))
+            .unwrap();
+        seen.insert(title.trim().to_string());
+        session.send("\x1b").unwrap();
+        screen(session, "Enter details");
+        session.send("\x1b[B").unwrap();
+    }
+    seen
+}
+
+#[test]
+fn task_history_retains_inspected_results_and_late_completions() {
+    let (env, _release) = task_env("background-history-lru");
+    let mut session = start(
+        &env,
+        &[
+            shell(
+                "late",
+                "echo LONG_RUNNING; while [ ! -f release ]; do sleep 0.1; done; echo LATE_RESULT",
+                "RETENTION_LATE",
+            ),
+            shell("hot", "echo INSPECTED_RESULT", "RETENTION_HOT"),
+        ],
+    );
+    session.resize(45, 240).unwrap();
+    screen(&session, "1 new result");
+    let before = common::turn_status_marker(&session);
+    send_calls(
+        &env,
+        &mut session,
+        &[shell("cold", "echo UNINSPECTED_RESULT", "RETENTION_COLD")],
+    );
+    expect_parent_complete(&session, &before);
+    screen(&session, "2 new results");
+
+    let calls = (0..48)
+        .map(|index| {
+            shell(
+                &format!("fill-{index}"),
+                &format!("echo FILL_RESULT_{index:02}"),
+                &format!("RETENTION_FILL_{index:02}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let before = common::turn_status_marker(&session);
+    send_calls(&env, &mut session, &calls);
+    expect_parent_complete(&session, &before);
+    screen(&session, "1 terminal · 50 new results");
+
+    session.send("/ps\r").unwrap();
+    screen(&session, "51 in this session");
+    session.send(&"\x1b[B".repeat(51)).unwrap();
+    screen(&session, "❯ RETENTION_HOT");
+    session.send("\r").unwrap();
+    screen(&session, "  INSPECTED_RESULT");
+    session.send("\x1b").unwrap();
+    screen(&session, "Enter details");
+    // Selecting and repainting the next-oldest result is not an inspection.
+    session.send("\x1b[A").unwrap();
+    screen(&session, "❯ RETENTION_COLD");
+    session.send("\x1b").unwrap();
+    expect_input_ready(
+        &session,
+        common::DEFAULT_TIMEOUT,
+        "history inspection finished",
+    );
+
+    // The earliest-started task completes last, after the inactive limit is full.
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    common::expect_screen_rows_settled(
+        &session,
+        |view| {
+            view.lines().any(|line| {
+                line.contains("danger-full-access")
+                    && line.contains("49 new results")
+                    && !line.contains("terminal")
+            })
+        },
+        common::LIVE_TURN_BUDGET,
+        "late completion evicts the uninspected result",
+    );
+    session.send("/ps\r").unwrap();
+    screen(&session, "50 in this session");
+    let seen = inspect_history(&mut session, 50);
+    assert_eq!(seen.len(), 50, "all retained results remain accessible");
+    assert!(seen.iter().any(|title| title.contains("RETENTION_HOT")));
+    assert!(seen.iter().any(|title| title.contains("RETENTION_LATE")));
+    assert!(seen.iter().all(|title| !title.contains("RETENTION_COLD")));
+    close(session);
+    assert_tools_dispatched_once(&env, calls.len() + 3);
 }

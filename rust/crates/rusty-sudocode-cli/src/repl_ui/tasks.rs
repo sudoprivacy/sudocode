@@ -414,17 +414,14 @@ impl TaskBrowser {
         self.selected = self.rows.get(next).cloned();
     }
 
-    pub fn detail(&mut self) {
-        if let Some(entry) = self
-            .selected
-            .as_ref()
-            .and_then(|id| self.entries.get_mut(id))
-        {
-            entry.read = true;
-            self.focus = TaskFocus::Detail;
-            self.scroll = 0;
-            self.refresh_summary();
-        }
+    pub fn detail(&mut self) -> Option<String> {
+        let id = self.selected.clone()?;
+        let entry = self.entries.get_mut(&id)?;
+        entry.read = true;
+        self.focus = TaskFocus::Detail;
+        self.scroll = 0;
+        self.refresh_summary();
+        Some(id)
     }
     pub fn scroll(&mut self, up: bool, amount: usize) {
         if up {

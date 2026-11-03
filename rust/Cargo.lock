@@ -186,7 +186,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "api",
  "plugins",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "commands",
  "runtime",
@@ -1542,7 +1542,7 @@ checksum = "869b0adbda23651a9c5c0c3d270aac9fcb52e8622a8f2b17e57802d7791962f2"
 
 [[package]]
 name = "engine-acp"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "engine-core"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "api",
  "async-trait",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "engine-events"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "runtime",
  "serde",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "engine-host"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "backends",
  "commands",
@@ -2948,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "api",
  "serde_json",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3077,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "nexusd-cohost"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "a2a",
  "anyhow",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "process-text",
  "serde",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "process-text"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "stdin-peek",
 ]
@@ -4433,7 +4433,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -4616,7 +4616,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "arboard",
  "async-trait",
@@ -4756,7 +4756,7 @@ dependencies = [
 
 [[package]]
 name = "scode-benchmark-drivers"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "mock-anthropic-service",
  "pty-expect",
@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "service-host"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "a2a",
  "axum",
@@ -5220,7 +5220,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stdin-peek"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -5388,7 +5388,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "chrono",
  "dirs",
@@ -5793,7 +5793,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "api",
  "async-trait",

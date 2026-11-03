@@ -1,6 +1,6 @@
 # Agent Communication Protocol
 
-`scode acp` starts an **Agent Communication Protocol (ACP) server**. Editors,
+`scode acp` starts an **Agent Client Protocol (ACP) server**. Editors,
 Sudowork, and other frontends act as its clients. The stdio and WebSocket
 transports use the same request handler and agent engine.
 
@@ -56,6 +56,42 @@ that managed session.
 The native `scode` terminal UI consumes `engine-core` commands and events
 directly. It shares the engine with ACP without sending terminal input through
 an ACP client/server round trip.
+
+### Managed hosting
+
+Nexus `ManagedAgentService` supports two placements through the same managed
+session endpoint:
+
+| Placement | Start request | ACP connection |
+| --- | --- | --- |
+| Engine inside `nexusd-cohost` | `managed_agent.start_session_v1` without `spawn_spec` | The shared handler reads the managed session transport directly. |
+| Independent scode process | The same method with `spawn_spec.cmd` naming scode and `spawn_spec.args` including `acp` | The service bridges the child's private ACP stdio to the same managed session transport. |
+
+The controller uses the returned `session_endpoint` for ACP initialization,
+session creation/loading, prompts, notifications and turn cancellation. The
+child's stdio belongs to that protocol; it is not a terminal stream. An ACP
+frontend connects through its Nexus transport adapter and provides its own UI,
+so this placement needs no PTY, terminal forwarding or scrollback replay service.
+
+Keep process and conversation identities separate:
+
+- The managed response's `session_id` is the handle for
+  `managed_agent.get_session_v1` and `managed_agent.cancel_v1`.
+  `os_pid`, when supplied, identifies the actual child process.
+- ACP `sessionId` identifies the engine conversation. Cancel a turn with the
+  `session/cancel` notification; this leaves the process available for further
+  requests. Ending the managed session terminates its host and retires the
+  management handle. Retain the ACP conversation ID separately for recovery.
+- Independent scode recovery uses ACP `session/load` with the saved conversation
+  ID and its available session store. It restores model context without replaying
+  earlier chat updates to the client. The current Nexus subprocess contract
+  does not accept the cohost-only `start_session_v1.resume_session_id` field.
+
+`spawn_spec.env` replaces the child's environment. The caller supplies its
+required executable search path, home, scode configuration root and provider
+configuration; it must not assume the daemon's environment is inherited.
+This placement retains standalone scode's host filesystem and provider setup;
+it does not implicitly adopt the cohost's kernel filesystem or model mount.
 
 ## Use cases
 

@@ -825,6 +825,8 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         // Revalidate the same canonical action/principal immediately before
         // removal. An absent Task needs no delete; an unknown action refuses.
         assert(fs.realpathSync(prepared.taskFile).startsWith(fs.realpathSync(root)+path.sep));
+        assert.equal(crypto.createHash('sha256').update(fs.readFileSync(prepared.taskFile)).digest('hex'),
+          prepared.taskSha256,'The canonical private Task plan changed before cleanup');
         const quote=value=>"'"+value.replace(/'/g,"''")+"'";
         const script=`$ErrorActionPreference='Stop'
 $service=New-Object -ComObject 'Schedule.Service'; $service.Connect()
@@ -834,7 +836,13 @@ if($tasks.Count -eq 0){ '{"exists":false}' ; exit 0 }
 if($tasks.Count -ne 1){ throw 'Ambiguous private owner Task' }
 $actual=[xml]$tasks[0].Xml
 $expected=[xml][System.IO.File]::ReadAllText(${quote(prepared.taskFile)})
-foreach($name in @('Command','Arguments','WorkingDirectory','UserId','LogonType','RunLevel','Description','MultipleInstancesPolicy','DisallowStartIfOnBatteries','StopIfGoingOnBatteries','AllowStartOnDemand','Enabled','ExecutionTimeLimit')){
+$definition=$tasks[0].Definition
+# Task Scheduler omits these defaults from exported XML. Read their effective
+# COM properties instead of interpreting absent XML as an unknown value.
+if($definition.Principal.RunLevel -ne 0){ throw 'Mismatched owner Task effective RunLevel' }
+if($definition.Settings.AllowDemandStart -ne $true){ throw 'Mismatched owner Task effective AllowDemandStart' }
+if($definition.Settings.Enabled -ne $true){ throw 'Mismatched owner Task effective Enabled' }
+foreach($name in @('Command','Arguments','WorkingDirectory','UserId','LogonType','Description','MultipleInstancesPolicy','DisallowStartIfOnBatteries','StopIfGoingOnBatteries','ExecutionTimeLimit')){
   $left=@($actual.SelectNodes("//*[local-name()='$name']"))
   $right=@($expected.SelectNodes("//*[local-name()='$name']"))
   if($left.Count -ne 1 -or $right.Count -ne 1){ throw "Ambiguous owner Task field: $name" }

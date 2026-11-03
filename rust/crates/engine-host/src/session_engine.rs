@@ -146,6 +146,7 @@ pub struct CompactionOutcome {
 }
 
 pub struct SessionEngine {
+    host_context_required: std::sync::atomic::AtomicBool,
     background_tasks: runtime::background_tasks::BackgroundTasks,
     /// A cancellation endpoint that stays accessible while compaction holds
     /// the session mutex for its model request and receipt finalization.
@@ -178,6 +179,11 @@ pub struct SessionEngine {
 }
 
 impl SessionEngine {
+    /// Configure a caller-owned context provider while opening/loading a session.
+    pub fn require_host_context(&self, is_required: bool) {
+        self.host_context_required
+            .store(is_required, std::sync::atomic::Ordering::SeqCst);
+    }
     pub(crate) fn with_lifetime_guard(self, guard: impl Send + 'static) -> Self {
         *self
             .lifetime_guard
@@ -214,6 +220,7 @@ impl SessionEngine {
         allows_session_replacement: bool,
     ) -> Result<Self, String> {
         Ok(Self {
+            host_context_required: std::sync::atomic::AtomicBool::new(false),
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             turn_inputs: runtime::turn_input::TurnInputInbox::default(),
             compaction_abort_signal: session.abort_signal.clone(),
@@ -1075,6 +1082,29 @@ fn require_fit_without_compaction(
 }
 
 impl engine_core::EngineDelegate for SessionEngine {
+    fn requires_host_context(&self) -> bool {
+        self.host_context_required
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn apply_host_context(&self, text: String) -> Result<(), runtime::RuntimeError> {
+        if text.trim().is_empty() {
+            return Err(runtime::RuntimeError::new("host context must be non-empty"));
+        }
+        let mut session = self.lock_session();
+        if session.prompt_overrides.append_system_prompt.as_ref() == Some(&text) {
+            return Ok(());
+        }
+        let previous = session.prompt_overrides.append_system_prompt.replace(text);
+        let snapshot = session.runtime.session().clone();
+        let handle = session.handle.clone();
+        if let Err(error) = self.rebuild_locked(&mut session, snapshot, handle) {
+            session.prompt_overrides.append_system_prompt = previous;
+            return Err(runtime::RuntimeError::new(error));
+        }
+        Ok(())
+    }
+
     fn prepare_prompt(
         &self,
         blocks: Vec<runtime::ContentBlock>,

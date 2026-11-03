@@ -433,6 +433,8 @@ can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
 other MCP transports and resource/prompt wrappers remain serial. A visible
 tool card may still be queued: the amber border marks actual execution.
 Completed results appear immediately, even while another call is still running.
+Captured stdout/stderr belongs to that Bash invocation; a concurrently spawned
+sibling cannot keep its output pipes open after the command exits.
 Cancellation or a broken provider stream stops unfinished calls and preserves
 finished outputs. An interrupted provider response is not automatically replayed
 once tools have started. Streamed calls are saved before dispatch; append-log

@@ -69,16 +69,24 @@ fn release(mut writer: File, text: &str) {
 }
 
 fn start(env: &TestEnv, calls: &[Value], cap: &str) -> PtySession {
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "danger-full-access"],
-        &[
-            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            ("SUDOCODE_MAX_TOOL_USE_CONCURRENCY", cap),
-            ("TERM", "xterm-256color"),
-            ("COLORTERM", "truecolor"),
-            ("NO_COLOR", ""),
-        ],
-    );
+    start_with_env(env, calls, cap, &[])
+}
+
+fn start_with_env(
+    env: &TestEnv,
+    calls: &[Value],
+    cap: &str,
+    additional_env: &[(&str, &str)],
+) -> PtySession {
+    let mut env_vars = vec![
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+        ("SUDOCODE_MAX_TOOL_USE_CONCURRENCY", cap),
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("NO_COLOR", ""),
+    ];
+    env_vars.extend_from_slice(additional_env);
+    let mut sess = env.spawn_with_env(&["--permission-mode", "danger-full-access"], &env_vars);
     sess.resize(80, 100).unwrap();
     common::expect_screen(
         &sess,
@@ -185,6 +193,84 @@ fn fast_result_and_error_are_visible_before_slow_sibling_finishes() {
 
 #[test]
 fn short_shells_finish_while_a_parallel_sibling_is_held() {
+    exercise_short_shells(&[]);
+}
+
+#[test]
+fn empty_shell_completes_before_a_held_sibling() {
+    let env = TestEnv::new_mock("parallel-empty-shell");
+    fifo(&env, "held.fifo");
+    fifo(&env, "empty.fifo");
+    let sess = start(
+        &env,
+        &[
+            bash("held", &fifo_read("held.fifo")),
+            bash("empty", &fifo_read("empty.fifo")),
+        ],
+        "10",
+    );
+    let held = writer(&env, "held.fifo", &sess);
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("Running 2 tools"),
+        common::at_least(Duration::from_secs(15)),
+        "both real shells running before releasing the empty one",
+    );
+    // Both shells already exist, and this is the sole writer in the driver.
+    // Closing it without bytes supplies EOF with no stdout or stderr output.
+    drop(writer(&env, "empty.fifo", &sess));
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("Running Bash") && !screen.contains("Running 2 tools"),
+        common::at_least(Duration::from_secs(15)),
+        "empty-output shell completes before the held sibling",
+    );
+    assert!(!sess
+        .render(common::screen_contents)
+        .contains("Concurrency batch done."));
+    release(held, "HELD_EMPTY_CASE_RELEASED");
+    done(&sess);
+    let results = assert_result_order(&env, &["held", "empty"]);
+    assert_ne!(results[1]["is_error"], true);
+    finish(sess);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn concurrent_shell_capture_is_private_during_the_pipe_cloexec_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("pipe-window.dylib");
+    let log = directory.path().join("pipe-window.log");
+    let compiler_log = directory.path().join("compiler.log");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pipe_window.c");
+    let compiler = std::process::Command::new("/usr/bin/clang")
+        .args(["-dynamiclib", "-Wall", "-Wextra", "-Werror", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .stdout(std::process::Stdio::null())
+        .stderr(File::create(&compiler_log).unwrap())
+        .status()
+        .unwrap();
+    assert!(
+        compiler.success(),
+        "compile native scheduling control: {}",
+        std::fs::read_to_string(compiler_log).unwrap()
+    );
+    // Explicit per-CLI env values are installed after the PTY's protected
+    // system shell, which strips inherited DYLD variables on macOS.
+    exercise_short_shells(&[
+        ("DYLD_INSERT_LIBRARIES", library.to_str().unwrap()),
+        ("SCODE_DIAGNOSTIC_PIPE_WINDOW_LOG", log.to_str().unwrap()),
+    ]);
+    assert!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .contains("before_real_caller_fcntl"),
+        "native scheduling control did not reach scode"
+    );
+}
+
+fn exercise_short_shells(additional_env: &[(&str, &str)]) {
     for round in 0..4 {
         let env = TestEnv::new_mock(&format!("parallel-short-shells-{round}"));
         fifo(&env, "slow.fifo");
@@ -197,7 +283,7 @@ fn short_shells_finish_while_a_parallel_sibling_is_held() {
             calls.push(bash(&format!("fast-{index}"), &format!("cat {path}")));
             markers.push(marker);
         }
-        let sess = start(&env, &calls, "10");
+        let sess = start_with_env(&env, &calls, "10", additional_env);
         let slow = writer(&env, "slow.fifo", &sess);
         let screen = common::expect_screen(
             &sess,

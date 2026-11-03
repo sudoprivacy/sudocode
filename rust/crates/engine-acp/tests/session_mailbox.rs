@@ -234,16 +234,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     a2a::install_a2a_stamp_hook(&kernel, true).unwrap();
     let path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "operator"));
     common::provision_stream_transcript(&kernel, &path);
-    let seeded = common::managed_session::seed_managed_session(
-        &kernel,
-        &common::make_desc("seed", "worker", "scripted"),
-    );
-    let started = call(
-        &kernel,
-        "start_session_v1",
-        &json!({"agent_id":"worker","model":"scripted",
-            "resume_session_id":seeded.resume_session_id}),
-    );
+    let started = start_scripted_worker(&kernel, "worker");
     let (mailbox, created) = open_scripted_controller(&kernel, &started);
     let sid = created["result"]["sessionId"].as_str().unwrap();
     assert_runtime_state(&kernel, &started["session_id"], "ready", None);
@@ -301,6 +292,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     assert_parallel_question_progress(&mailbox, &kernel, &started, &fs, sid);
     assert_child_controller_permissions(&mailbox, &kernel, &started, &fs, sid, &rt, &service);
     let failed = exercise_failed_peer_delivery(&kernel, fs, &rt, &service);
+    exercise_cohost_context_questions(&kernel, &rt, &service);
 
     failed
         .mailbox
@@ -327,6 +319,122 @@ fn write_scripted_cohost_config(config_home: &std::path::Path) {
             "claude-sonnet":{"alias":"claude-sonnet","name":"Scripted child", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}}
         }
     }).to_string()).unwrap();
+}
+
+fn start_scripted_worker(kernel: &Arc<Kernel>, name: &str) -> Value {
+    let seeded = common::managed_session::seed_managed_session(
+        kernel,
+        &common::make_desc("seed", name, "scripted"),
+    );
+    call(
+        kernel,
+        "start_session_v1",
+        &json!({"agent_id":name,"model":"scripted",
+            "resume_session_id":seeded.resume_session_id}),
+    )
+}
+
+fn exercise_cohost_context_questions(
+    kernel: &Arc<Kernel>,
+    rt: &tokio::runtime::Runtime,
+    service: &mock_anthropic_service::MockAnthropicService,
+) {
+    let started = start_scripted_worker(kernel, "context-worker");
+    let (mailbox, created) =
+        open_scripted_controller_with_meta(kernel, &started, &json!({"hostContext":{"version":1}}));
+    let sid = created["result"]["sessionId"].as_str().unwrap();
+    assert_runtime_state(kernel, &started["session_id"], "ready", None);
+    assert_status(&mailbox, sid, "idle", None);
+    assert_cohost_context_questions(&mailbox, kernel, &started, sid, rt, service);
+    mailbox
+        .send(SessionPayload::Closed {
+            reason: "context controller disconnected".into(),
+        })
+        .unwrap();
+    await_terminated_cohost_processes(kernel, &[&started["session_id"]]);
+}
+
+fn assert_cohost_context_questions(
+    mailbox: &SessionMailbox<Kernel>,
+    kernel: &Arc<Kernel>,
+    started: &Value,
+    sid: &str,
+    rt: &tokio::runtime::Runtime,
+    service: &mock_anthropic_service::MockAnthropicService,
+) {
+    send(
+        mailbox,
+        json!({"jsonrpc":"2.0","id":"context-mode","method":"session/setPermissionMode",
+        "params":{"sessionId":sid,"permissionMode":"danger-full-access"}}),
+    );
+    let (mode, _) = until(mailbox, |message| message["id"] == "context-mode");
+    assert!(mode.get("error").is_none(), "{mode}");
+    for (index, context) in ["COHOST_CONTEXT_REVISION_A", "COHOST_CONTEXT_REVISION_B"]
+        .into_iter()
+        .enumerate()
+    {
+        let turn = format!("context-question-{index}");
+        let answer = format!("COHOST_CONTEXT_ANSWER_{index}");
+        let calls = json!([{"id":turn,"name":"AskUserQuestion",
+            "input":{"question":format!("Question after cohost context refresh {index}")}}]);
+        let before = rt.block_on(service.captured_requests()).len();
+        send(
+            mailbox,
+            json!({"jsonrpc":"2.0","id":turn,"method":"session/prompt",
+            "params":{"sessionId":sid,"prompt":[{"type":"text",
+                "text":format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")}]}}),
+        );
+        let (request, _) = until(mailbox, |message| {
+            message["method"] == "_sudocode/session/host_context"
+        });
+        assert_eq!(request["params"]["sessionId"], sid);
+        assert_runtime_state(kernel, &started["session_id"], "busy", None);
+        assert_status(mailbox, sid, "running", None);
+        assert_eq!(rt.block_on(service.captured_requests()).len(), before);
+        send(
+            mailbox,
+            json!({"jsonrpc":"2.0","id":request["id"],
+            "result":{"appendSystemPrompt":context}}),
+        );
+        let (question, _) = until(mailbox, |message| {
+            message["method"] == "_scode/ask_user_question"
+        });
+        assert_eq!(question["params"]["sessionId"], sid);
+        assert_runtime_state(
+            kernel,
+            &started["session_id"],
+            "awaiting_input",
+            Some("question"),
+        );
+        assert_status(mailbox, sid, "awaiting_input", Some("question"));
+        send(
+            mailbox,
+            json!({"jsonrpc":"2.0","id":question["id"],
+            "result":{"answers":[{"id":"q1","value":answer,"label":answer}]}}),
+        );
+        let (completed, _) = until(mailbox, |message| message["id"] == turn);
+        assert_eq!(completed["result"]["stopReason"], "end_turn", "{completed}");
+        let requests = rt.block_on(service.captured_requests());
+        let last = requests
+            .iter()
+            .rev()
+            .find(|request| !request.path.contains("count_tokens"))
+            .unwrap();
+        let body: Value = serde_json::from_str(&last.raw_body).unwrap();
+        assert!(body["system"].to_string().contains(context));
+        assert!(body["messages"].to_string().contains(&answer));
+        assert!(!body["messages"].to_string().contains(context));
+        if index == 1 {
+            assert!(!body["system"]
+                .to_string()
+                .contains("COHOST_CONTEXT_REVISION_A"));
+            assert!(body["messages"]
+                .to_string()
+                .contains("COHOST_CONTEXT_ANSWER_0"));
+        }
+        assert_runtime_state(kernel, &started["session_id"], "ready", None);
+        assert_status(mailbox, sid, "idle", None);
+    }
 }
 
 fn assert_cohost_permission_turns(
@@ -769,16 +877,7 @@ struct FailedPeer {
 }
 
 fn start_failed_peer_delivery(kernel: &Arc<Kernel>) -> FailedPeer {
-    let failed_seed = common::managed_session::seed_managed_session(
-        kernel,
-        &common::make_desc("seed", "failed-worker", "scripted"),
-    );
-    let failed_start = call(
-        kernel,
-        "start_session_v1",
-        &json!({"agent_id":"failed-worker","model":"scripted",
-            "resume_session_id":failed_seed.resume_session_id}),
-    );
+    let failed_start = start_scripted_worker(kernel, "failed-worker");
     let failed_endpoint: SessionEndpoint =
         serde_json::from_value(failed_start["session_endpoint"].clone()).unwrap();
     let failed_mailbox = SessionMailbox::open(
@@ -970,6 +1069,14 @@ fn open_scripted_controller(
     kernel: &Arc<Kernel>,
     started: &Value,
 ) -> (SessionMailbox<Kernel>, Value) {
+    open_scripted_controller_with_meta(kernel, started, &json!({}))
+}
+
+fn open_scripted_controller_with_meta(
+    kernel: &Arc<Kernel>,
+    started: &Value,
+    meta: &Value,
+) -> (SessionMailbox<Kernel>, Value) {
     let endpoint: SessionEndpoint =
         serde_json::from_value(started["session_endpoint"].clone()).unwrap();
     let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
@@ -984,9 +1091,14 @@ fn open_scripted_controller(
         initialized["result"]["_meta"]["sudocode"]["runtimeStatus"]["version"], 1,
         "{initialized}"
     );
+    assert_eq!(
+        initialized["result"]["_meta"]["sudocode"]["hostContext"]["version"], 1,
+        "{initialized}"
+    );
     send(
         &mailbox,
-        json!({"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/","mcpServers":[]}}),
+        json!({"jsonrpc":"2.0","id":"new","method":"session/new",
+            "params":{"cwd":"/","mcpServers":[],"_meta":{"sudocode":meta}}}),
     );
     let (created, _) = until(&mailbox, |message| message["id"] == "new");
     assert!(created.get("error").is_none(), "{created}");

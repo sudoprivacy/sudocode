@@ -162,5 +162,5 @@ fn native_ca_trust_does_not_accept_an_unknown_issuer() {
 
 #[test]
 fn native_ca_trust_still_checks_the_gateway_hostname() {
-    assert_tls_refusal("127.0.0.1", true, "NotValidForName");
+    assert_tls_refusal("127.0.0.1", true, r"certificate\s+not\s+valid\s+for\s+name");
 }

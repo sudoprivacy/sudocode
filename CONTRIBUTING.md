@@ -1092,6 +1092,9 @@ read/write field names as a generated compatibility projection; aliases belong
 to the accounting paths. After changing those paths, run
 `python scripts/generate_cache_semantics.py`. The existing public-fixture check
 also verifies that this projection has not drifted, without rewriting the file.
+Public product specs select native workspace acceptance because Rust embeds
+them as runtime inputs. Acceptance configuration and signer registration keep
+their separate infrastructure guards.
 
 ### Startup latency
 

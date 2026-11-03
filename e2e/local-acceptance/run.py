@@ -101,6 +101,8 @@ def scope_acceptance(directory):
              ("spec/local_acceptance.json", False, False, False),
              ("spec/local_acceptance_signers.json", False, False, False),
              ("spec/cache_ttl_prices.json", True, False, False),
+             ("spec/prompt_cache_observations.json", True, False, False),
+             ("spec/cache_usage_fixtures.json", True, False, False),
              ("rust/crates/engine-acp/src/ui.html", True, True, True), ("rust/crates/runtime/README.md", False, False, False),
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
@@ -134,6 +136,10 @@ def scope_acceptance(directory):
         command("git", "commit", "-m", f"input {index}", cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
         expect_native_targets(base, ["pty_file_operations"] if path.endswith("/tests/pty_file_operations.rs") else None)
+        if path.startswith("spec/"):
+            product_spec = not Path(path).name.startswith("local_acceptance")
+            assert ("native-workspace" in selected_checks(base)) == product_spec, (
+                "Public embedded contracts require native execution; acceptance metadata keeps its own guards", path)
         if path == "rust/crates/pty-harness/src/lib.rs":
             # The helper implementation may move out of tests/common. Its new
             # path must still select real native terminal acceptance.

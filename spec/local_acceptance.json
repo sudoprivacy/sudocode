@@ -143,7 +143,14 @@
         "rust/crates/runtime/src/config/**",
         "rust/vendor/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
-        "e2e/startup/**"
+        "e2e/startup/**",
+        "e2e/compiler-context/**",
+        "rust/crates/engine-core/src/session.rs",
+        "rust/crates/engine-core/src/attachment.rs",
+        "rust/crates/engine-events/src/lib.rs",
+        "rust/crates/engine-host/src/session_engine.rs",
+        "rust/crates/engine-acp/src/acp_sdk_server.rs",
+        "rust/crates/engine-acp/src/session_driver.rs"
       ],
       "exclude": [
         "**/README.md"

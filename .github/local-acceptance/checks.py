@@ -520,6 +520,12 @@ def run(name, root, output, base, execute):
         with stable_performance_power(output):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                     "--report", str(output / "startup.json"))
+        if (root / "e2e/compiler-context/run.py").is_file():
+            command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
+                    "--directory", str(output / "compiler-context"))
+        else:
+            print("This historical source predates the host-context compiler driver; "
+                  "its existing native release checks remain required.", flush=True)
     elif name == "native-services":
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
@@ -630,7 +636,7 @@ def native_guard_files():
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/publication_acceptance.py": "5667fdfa6197ff362299d6f7ee59fc6930ec28e88aabec4d15eeba641aa03f5e",
-        "e2e/local-acceptance/release_acceptance.py": "16798841782cf0044d5d37a3d4238709451e54d5ff5dc4e047dc709f5b7b266c",
+        "e2e/local-acceptance/release_acceptance.py": "d47c830e17d30c0df5b8756e6c7e71764ac825a7010cc4c075fb36eb80c5f246",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/run.py": "1e79dbcb72bd62bc4b7e60863e7f2fb225de7649cb419d701d4146cdb0ca740a",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
@@ -676,7 +682,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "d4a0420c4198f72fc02478644cf850f1c19b5a2786cda7e9e54c42f704077b86":
+    if actual_scope != "3a19be573a3b3b7d7ee0d92a4dda8473220005ae793a5d1bd311975780257e95":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

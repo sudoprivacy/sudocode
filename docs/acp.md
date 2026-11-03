@@ -394,11 +394,15 @@ does not rebuild the runtime. A failed, disconnected, malformed, empty or timed
 out response fails the turn before model work; it never falls back to a stale
 append. The provider has a 30-second response budget and cancellation releases
 its pending request. Slash and shell management commands do not call the provider.
+Host context uses the same request ID allocator, cancellation lock and request
+lease as permissions and questions. It stays queryable as foreground `running`
+while waiting for the machine response; only human prompts claim `awaiting_input`.
+An answer for a cancelled request cannot satisfy a later turn's request.
 Context stays fixed during a turn, including in-turn steering. The following
 turn resolves anew. The provider mode is transport state, so controllers must
 negotiate it again when restoring a session.
 
-The release-build CI jobs also drive the actual CLI with a pinned Sudograph
+The shared native release profile also drives the actual CLI with a pinned Sudograph
 compiler installed in a dedicated Python environment. Two turns around a model
 edit must receive the exact compiled context for their respective revisions;
 the graph must expose the same new revision. Captured provider requests must
@@ -407,8 +411,10 @@ host denial must prevent another model request. The loopback provider returns
 fixed responses: this checks the compiler/engine contract, not model reasoning,
 production host authorization or Sudowork's UI. Evidence retains the executable
 checksum, compiler identity, revisions, request bodies and ACP diagnostics.
-`e2e/compiler-context/run.py` runs the same check locally with explicit source,
-engine and evidence-directory arguments; it does not rebuild Rust.
+`e2e/compiler-context/source.json` owns the compiler revision for both local and
+complementary native CI acceptance. `e2e/compiler-context/run.py` runs the same
+check locally with engine and evidence-directory arguments; an optional existing
+source checkout must match that clean pinned revision. It does not rebuild Rust.
 
 ### Per-session system prompt (`_meta.sudocode.*`)
 

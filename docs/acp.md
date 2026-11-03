@@ -910,8 +910,9 @@ plugins, restart children, scan unrelated cwd results, or run a model. It binds
 pending deliveries and returns `{watermark,waiting,pending,unresolved,settled,
 blocked,contextRef,unsettledByTrace}`. `unsettledByTrace` maps each registered
 origin trace to whether it still owns unsettled, unsuppressed background delivery,
-including blocked sources. Synchronous or fully settled traces map to `false`;
-an absent key means not observed, never proof of settlement. It is an additive
+including blocked sources. Verified synchronous or fully settled traces map to `false`. A blocked source
+without background-handoff evidence (including an older failed journal) remains
+unknown. An absent key never proves settlement. It is an additive
 field, absent on older agents. Controllers combine it with their own pending
 receipts and continuation state; ACK means stored, not continuation finished.
 Auto-background handoff remains recorded if the parent fails: a later human

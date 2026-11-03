@@ -369,9 +369,11 @@ impl CompletionJournal {
                 // envelope-only metadata cannot inform the continuation.
                 let metadata =
                     serde_json::to_string(&payload.terminal).map_err(|e| e.to_string())?;
-                payload.message = format!(
-                    "<task-notification><task-id>{}</task-id><status>{}</status><terminal>{}</terminal><result>{}</result></task-notification>",
-                    escape(&payload.task_id), payload.status, escape(&metadata), escape(&output)
+                payload.message = crate::coordinator_mode::render_terminal_task_notification(
+                    &payload.task_id,
+                    payload.status.as_str(),
+                    &metadata,
+                    &output,
                 );
                 if serde_json::to_vec(&payload)
                     .map_err(|e| e.to_string())?
@@ -472,13 +474,4 @@ fn output_tail(value: &str, max: usize) -> String {
         start += 1;
     }
     value[start..].to_owned()
-}
-
-fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }

@@ -11,8 +11,9 @@ default). The transport lives in `runtime::mailbox` +
 
 | Layer | Command | LLM? |
 |---|---|---|
-| Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
+| Managed scode subprocess | `e2e/nexus-a2a/run-managed-subprocess.sh` | scripted by default |
+| In-process cohost | `e2e/nexus-a2a/run-cohost.sh` | scripted by default |
 | Cross-node replication and PTY duet | `e2e/nexus-a2a/run-cross-node.sh` | scripted by default |
 | Offline message before first receiver start | `bash e2e/nexus-a2a/run-live-offline.sh` | funded, real model |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
@@ -94,6 +95,26 @@ SUDOROUTER_API_KEY=sk-…funded… SCODE_BIN=$(pwd)/rust/target/debug/scode \
 
 ## Notes / gotchas
 
+### Managed subprocess acceptance
+
+`run-managed-subprocess.sh` asks the real `ManagedAgentService` to launch this
+checkout's scode executable with `acp`. It uses a session credential and the
+same managed ACP endpoint as an in-process host. The workflow verifies an
+actual OS PID, a fresh file read, cancellation of a running shell without
+terminating scode, managed shutdown and OS process exit. It then starts a new
+process, loads the saved ACP conversation, checks that the next model request
+includes the original assistant answer and reads the changed file. An empty
+test selection fails the harness.
+
+The workflow uses the shared Rust test controller and runs from the existing
+CLI A2A CI harness (`run.sh`), including CLI-only changes. It uses the pinned
+cluster daemon and does not build the independent cohost package.
+`NEXUS_A2A_MODEL_LIVE=1` runs the same assertions against
+the explicitly configured real provider. The subprocess gets an isolated home,
+configuration and workspace. Its provider and file tools use standalone scode
+configuration; this case does not claim that it adopted the cohost's VFS model
+mount or its control-plane `resume_session_id` capability.
+
 ### Model routing acceptance
 
 `run-cohost.sh` builds this checkout's daemon, boots it with mTLS, provisions
@@ -133,7 +154,7 @@ command exercises a live checkpoint through a real kernel model mount and
 then refuses the next checkpoint by revoking that route. It covers the co-host
 compaction client; the managed-agent mailbox has no `/compact` command.
 
-**Driving a live `scode` needs a PTY, not a pipe.** `printf 'prompt\n' | scode`
+**Driving the native scode REPL needs a PTY.** `printf 'prompt\n' | scode`
 answers and exits — fine for one shot, and `--print` is the supported form of
 it. A *persistent* receiver is the other half of a duet, and feeding it through
 a pipe or a FIFO does not work: the REPL reads keys from the terminal, so the
@@ -141,6 +162,8 @@ line is never consumed, while the process stays alive looking idle. The A2A
 receiver in that process still runs — its cursor advances — so the session looks
 healthy and simply ignores you. Drive it through a PTY (`pty-expect`, as
 `tests/pty_agent_duet.rs` does).
+`scode acp` is a separate server entry: ACP clients drive it over protocol
+pipes, without a terminal or a PTY.
 
 **A receive cursor can outlive the stream it recorded.** `a2a-cursor-<agent>`
 lives in the config home and survives a rebuilt cluster or a fresh data dir. A

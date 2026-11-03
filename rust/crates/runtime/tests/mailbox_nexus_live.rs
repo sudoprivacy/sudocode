@@ -42,6 +42,8 @@
     reason = "Register-write fault controls are exercised by receiver_retry_diagnostics, which shares this fixture."
 )]
 mod lease_fault;
+#[path = "common/managed_subprocess.rs"]
+mod managed_subprocess;
 #[path = "common/paused_transport.rs"]
 mod paused_transport;
 #[path = "common/session_controller.rs"]

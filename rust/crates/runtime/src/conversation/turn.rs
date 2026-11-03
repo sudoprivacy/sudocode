@@ -287,6 +287,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // of the overflow is a rejection, and the single salvage below
         // is all a long turn ever gets.
         while self.next_request_exceeds_budget() {
+            if !self.is_auto_compaction_enabled {
+                return Err(RuntimeError::auto_compaction_off());
+            }
             if state.compaction.count < MAX_TURN_COMPACTIONS {
                 let attempt = self
                     .compact_in_place(
@@ -391,6 +394,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                     // resend. Shares the turn's compaction allowance with the
                     // proactive check above; when compaction can no longer
                     // remove anything the error is real and must surface.
+                    if error.is_context_window_blocked() && !self.is_auto_compaction_enabled {
+                        let error = RuntimeError::auto_compaction_off();
+                        self.record_turn_failed(state.iterations, &error);
+                        return Err(error);
+                    }
                     if error.is_context_window_blocked()
                         && state.compaction.count < MAX_TURN_COMPACTIONS
                     {

@@ -8900,6 +8900,14 @@ fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
         return Err(String::from("setting must not be empty"));
     }
     let Some(spec) = supported_config_setting(setting) else {
+        let error = if runtime::config_schema::is_compat_only_setting(setting) {
+            format!(
+                "\"{setting}\" is a Claude Code setting scode does not implement; \
+                 a settings file may keep it, but it has no effect"
+            )
+        } else {
+            format!("Unknown setting: \"{setting}\"")
+        };
         return Ok(ConfigOutput {
             success: false,
             operation: None,
@@ -8907,7 +8915,7 @@ fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
             value: None,
             previous_value: None,
             new_value: None,
-            error: Some(format!("Unknown setting: \"{setting}\"")),
+            error: Some(error),
         });
     };
 
@@ -8992,7 +9000,10 @@ enum ConfigKind {
 
 fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
     Some(match setting {
-        "theme" => ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["theme"]),
+        "theme" => ConfigSettingSpec {
+            options: Some(runtime::config_schema::THEME_OPTIONS),
+            ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["theme"])
+        },
         // Per-project selector for which named account (under `auth_modes`) to
         // use. Scope = Settings (project `settings.local.json`, gitignored): a
         // reference only — the account itself (base_url + key) stays defined
@@ -9000,52 +9011,16 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
         "auth_profile" => {
             ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["auth_profile"])
         }
-        "editorMode" => ConfigSettingSpec {
-            options: Some(&["default", "vim", "emacs"]),
-            ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["editorMode"])
-        },
-        "verbose" => ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::Boolean, &["verbose"]),
-        "preferredNotifChannel" => ConfigSettingSpec::new(
-            ConfigScope::Global,
-            ConfigKind::String,
-            &["preferredNotifChannel"],
-        ),
         "autoCompactEnabled" => ConfigSettingSpec::new(
             ConfigScope::Global,
             ConfigKind::Boolean,
             &["autoCompactEnabled"],
         ),
-        "autoDreamEnabled" => ConfigSettingSpec::new(
-            ConfigScope::Settings,
-            ConfigKind::Boolean,
-            &["autoDreamEnabled"],
-        ),
-        "fileCheckpointingEnabled" => ConfigSettingSpec::new(
-            ConfigScope::Global,
-            ConfigKind::Boolean,
-            &["fileCheckpointingEnabled"],
-        ),
-        "showTurnDuration" => ConfigSettingSpec::new(
-            ConfigScope::Global,
-            ConfigKind::Boolean,
-            &["showTurnDuration"],
-        ),
-        "terminalProgressBarEnabled" => ConfigSettingSpec::new(
-            ConfigScope::Global,
-            ConfigKind::Boolean,
-            &["terminalProgressBarEnabled"],
-        ),
-        "todoFeatureEnabled" => ConfigSettingSpec::new(
-            ConfigScope::Global,
-            ConfigKind::Boolean,
-            &["todoFeatureEnabled"],
-        ),
         "model" => ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["model"]),
-        "alwaysThinkingEnabled" => ConfigSettingSpec::new(
-            ConfigScope::Settings,
-            ConfigKind::Boolean,
-            &["alwaysThinkingEnabled"],
-        ),
+        // Claude Code's name for the setting scode reads as `thinking`.
+        "thinking" | "alwaysThinkingEnabled" => {
+            ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::Boolean, &["thinking"])
+        }
         "effortLevel" => ConfigSettingSpec {
             options: Some(&["auto", "low", "medium", "high", "xhigh"]),
             ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["effortLevel"])
@@ -9065,10 +9040,6 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
         "language" => {
             ConfigSettingSpec::new(ConfigScope::Settings, ConfigKind::String, &["language"])
         }
-        "teammateMode" => ConfigSettingSpec {
-            options: Some(&["tmux", "in-process", "auto"]),
-            ..ConfigSettingSpec::new(ConfigScope::Global, ConfigKind::String, &["teammateMode"])
-        },
         // This process's mailbox identity — the name peers address and the
         // inbox the receiver polls. Settings scope (per-project settings file):
         // a sub-agent belongs to its parent scode, so the name is project-scoped
@@ -13833,7 +13804,7 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("cwd dir");
         std::fs::write(
             home.join(".nexus").join("sudocode").join("settings.json"),
-            r#"{"verbose":false}"#,
+            r#"{"autoCompactEnabled":false}"#,
         )
         .expect("write global settings");
 
@@ -13844,9 +13815,35 @@ mod tests {
         std::env::remove_var("SUDO_CODE_CONFIG_HOME");
         std::env::set_current_dir(&cwd).expect("set cwd");
 
-        let get = execute_tool("Config", &json!({"setting": "verbose"})).expect("get config");
+        let get =
+            execute_tool("Config", &json!({"setting": "autoCompactEnabled"})).expect("get config");
         let get_output: serde_json::Value = serde_json::from_str(&get).expect("json");
         assert_eq!(get_output["value"], false);
+
+        // Claude Code's spelling writes the key scode actually reads.
+        let thinking = execute_tool(
+            "Config",
+            &json!({"setting": "alwaysThinkingEnabled", "value": false}),
+        )
+        .expect("set thinking");
+        let thinking: serde_json::Value = serde_json::from_str(&thinking).expect("json");
+        assert_eq!(thinking["newValue"], false);
+        let read = execute_tool("Config", &json!({"setting": "thinking"})).expect("get thinking");
+        let read: serde_json::Value = serde_json::from_str(&read).expect("json");
+        assert_eq!(read["value"], false);
+
+        // A Claude Code setting scode ignores is refused with that reason.
+        let ignored = execute_tool("Config", &json!({"setting": "verbose", "value": true}))
+            .expect("ignored setting result");
+        let ignored: serde_json::Value = serde_json::from_str(&ignored).expect("json");
+        assert_eq!(ignored["success"], false);
+        assert!(ignored["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("does not implement")));
+
+        let theme = execute_tool("Config", &json!({"setting": "theme", "value": "solarized"}))
+            .expect_err("unknown theme should error");
+        assert!(theme.contains("auto, dark, light"));
 
         let set = execute_tool(
             "Config",

@@ -1043,6 +1043,19 @@ impl Drop for SessionEngine {
     }
 }
 
+/// With `autoCompactEnabled = false`, a prompt that still fits is sent as
+/// it is and one that does not is refused, leaving compaction to `/compact`.
+fn require_fit_without_compaction(
+    budget: &runtime::ContextBudget,
+    tokens: usize,
+) -> Result<(), runtime::RuntimeError> {
+    if budget.fits_buffered(tokens) {
+        Ok(())
+    } else {
+        Err(runtime::RuntimeError::auto_compaction_off())
+    }
+}
+
 impl engine_core::EngineDelegate for SessionEngine {
     fn prepare_prompt(
         &self,
@@ -1121,7 +1134,10 @@ impl engine_core::EngineDelegate for SessionEngine {
             .set_compaction_pending_input_tokens(prompt_tokens);
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let mut pre_send_compaction = None;
-        if estimated_tokens + prompt_tokens > history_budget {
+        let is_over_budget = estimated_tokens + prompt_tokens > history_budget;
+        if is_over_budget && !session.runtime.is_auto_compaction_enabled() {
+            require_fit_without_compaction(&budget, estimated_tokens + prompt_tokens)?;
+        } else if is_over_budget {
             Self::record_pre_send_compaction_check(
                 &session.runtime,
                 estimated_tokens,
@@ -1497,6 +1513,8 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn effort_options(&self, model: &str) -> Result<(String, Vec<String>), String>;
     /// Apply effort without rebuilding the prompt or changing signed history.
     fn set_effort(&self, level: &str) -> Result<(), String>;
+    /// Persist `autoCompactEnabled` and apply it from the next request.
+    fn set_auto_compaction(&self, is_enabled: bool) -> Result<(), String>;
     /// Pin the auth mode (engine SSOT) and rebuild so it takes effect.
     fn set_auth(&self, mode: AuthMode) -> Result<(), String>;
     /// Switch the active permission mode (engine SSOT) in place.
@@ -1732,6 +1750,14 @@ impl SessionLifecycle for SessionEngine {
             .reasoning_effort
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = preference;
+        Ok(())
+    }
+
+    fn set_auto_compaction(&self, is_enabled: bool) -> Result<(), String> {
+        let mut session = self.lock_session();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        tools::set_config_setting("autoCompactEnabled", &is_enabled.to_string())?;
+        session.runtime.set_auto_compaction(is_enabled);
         Ok(())
     }
 

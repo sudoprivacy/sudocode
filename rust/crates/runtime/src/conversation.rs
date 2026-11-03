@@ -978,6 +978,15 @@ impl RuntimeError {
         }
     }
 
+    /// A request that needs compaction while `autoCompactEnabled` is off.
+    #[must_use]
+    pub fn auto_compaction_off() -> Self {
+        Self::context_window_blocked(
+            "Context is full and automatic compaction is off (autoCompactEnabled = false). \
+             Run /compact, then resend. History preserved; no model request sent.",
+        )
+    }
+
     /// A provider stream that failed after delivering events.
     #[must_use]
     pub fn stream_interrupted(message: impl Into<String>) -> Self {
@@ -1246,6 +1255,9 @@ pub struct ConversationRuntime<C, T> {
     /// compaction. When this reaches `MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS`,
     /// `maybe_auto_compact` short-circuits for the rest of the session.
     consecutive_auto_compact_noops: u8,
+    /// `autoCompactEnabled`. Off, no trigger compacts on its own; a request
+    /// that does not fit is refused with [`RuntimeError::auto_compaction_off`].
+    is_auto_compaction_enabled: bool,
     hook_abort_signal: HookAbortSignal,
     turn_inputs: crate::turn_input::TurnInputInbox,
     hook_progress_reporter: Option<HookProgressSink>,
@@ -1326,6 +1338,7 @@ where
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
             consecutive_auto_compact_noops: 0,
+            is_auto_compaction_enabled: true,
             hook_abort_signal: HookAbortSignal::default(),
             turn_inputs: crate::turn_input::TurnInputInbox::default(),
             hook_progress_reporter: None,
@@ -1340,6 +1353,16 @@ where
             session_source_stale: false,
             agent_description_store: None,
         }
+    }
+
+    /// Apply `autoCompactEnabled`; takes effect from the next request.
+    pub fn set_auto_compaction(&mut self, is_enabled: bool) {
+        self.is_auto_compaction_enabled = is_enabled;
+    }
+
+    #[must_use]
+    pub fn is_auto_compaction_enabled(&self) -> bool {
+        self.is_auto_compaction_enabled
     }
 
     pub fn set_turn_input_inbox(&mut self, inbox: crate::turn_input::TurnInputInbox) {
@@ -2768,6 +2791,9 @@ where
         &mut self,
         observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<Option<AutoCompactionEvent>, RuntimeError> {
+        if !self.is_auto_compaction_enabled {
+            return Ok(None);
+        }
         let model = self.compaction_model();
         let threshold = auto_compact_threshold_for_model(&model);
         // Compare the context the provider actually processed on the latest
@@ -6302,6 +6328,117 @@ mod tests {
             rejections.load(Ordering::Relaxed),
             0,
             "the runtime should compact before dispatching, never letting the provider reject"
+        );
+    }
+
+    /// `autoCompactEnabled = false`: a turn that outgrows the window is refused
+    /// before the request that would not fit, with nothing summarized, and a
+    /// turn above the post-turn threshold is left as it is.
+    #[tokio::test]
+    async fn automatic_compaction_off_refuses_instead_of_compacting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const LIMIT: usize = 20_000;
+
+        struct BudgetedApi {
+            requests: Arc<AtomicUsize>,
+            summaries: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ApiClient for BudgetedApi {
+            fn context_budget(
+                &self,
+                _model: &str,
+                _system_prompt: &SystemPrompt,
+            ) -> crate::compact::ContextBudget {
+                crate::compact::ContextBudget {
+                    context_limit: LIMIT,
+                    max_output_tokens: 200,
+                    overhead_tokens: 100,
+                    buffer_tokens: 300,
+                }
+            }
+
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                let step = self.requests.fetch_add(1, Ordering::Relaxed);
+                Ok(events_to_stream(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("tool-{step}"),
+                        name: "bulk".to_string(),
+                        input: "go".to_string(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::Usage(TokenUsage {
+                        input_tokens: 50,
+                        output_tokens: 4,
+                        ..TokenUsage::default()
+                    }),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<crate::session::ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                self.summaries.fetch_add(1, Ordering::Relaxed);
+                Ok("<summary>bulk steps</summary>".to_string())
+            }
+        }
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let summaries = Arc::new(AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            BudgetedApi {
+                requests: Arc::clone(&requests),
+                summaries: Arc::clone(&summaries),
+            },
+            StaticToolExecutor::new().register("bulk", |_| Ok("x".repeat(4_000))),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_max_iterations(64);
+        runtime.set_auto_compaction(false);
+
+        let error = runtime
+            .run_turn("do many steps", None, None)
+            .await
+            .expect_err("a turn that outgrows the window must be refused");
+        assert!(error.is_context_window_blocked(), "{error}");
+        assert!(error.to_string().contains("autoCompactEnabled"), "{error}");
+        assert_eq!(
+            summaries.load(Ordering::Relaxed),
+            0,
+            "nothing may be summarized"
+        );
+        let sent = requests.load(Ordering::Relaxed);
+        assert!(
+            sent > 1 && sent < 64,
+            "requests sent before the refusal: {sent}"
+        );
+
+        // Above the post-turn threshold, the check does not even attempt a
+        // compaction while off. An attempt compacts, counts a no-op or fails.
+        let _g = env_guard().await;
+        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "10");
+        runtime.set_auto_compaction(false);
+        let off = runtime.maybe_auto_compact(None).await;
+        let is_untouched = matches!(off, Ok(None)) && runtime.consecutive_auto_compact_noops == 0;
+        runtime.set_auto_compaction(true);
+        let on = runtime.maybe_auto_compact(None).await;
+        std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+        assert!(is_untouched, "post-turn compaction must not run while off");
+        assert!(
+            !matches!(on, Ok(None)) || runtime.consecutive_auto_compact_noops > 0,
+            "the same check attempts compaction once enabled again"
         );
     }
 

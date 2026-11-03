@@ -554,6 +554,7 @@ pub fn build_engine_runtime(
         );
         let thinking = settings.thinking();
         rt.api_client_mut().set_thinking_enabled(thinking);
+        rt.set_auto_compaction(settings.auto_compact_enabled());
     }
     Ok(runtime)
 }

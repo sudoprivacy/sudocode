@@ -6,7 +6,7 @@ use pty_expect::PtySession;
 use runtime::{ContentBlock, SessionStore};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn start(env: &TestEnv, resume: bool, queue: bool, width: u16) -> PtySession {
+fn start(env: &TestEnv, resume: bool, width: u16) -> PtySession {
     let mut args = vec!["--permission-mode", "danger-full-access"];
     if resume {
         args.push("--resume");
@@ -14,10 +14,6 @@ fn start(env: &TestEnv, resume: bool, queue: bool, width: u16) -> PtySession {
     let mut sess = env.spawn_with_env(
         &args,
         &[
-            (
-                "SUDOCODE_INTERRUPT_QUEUE_MODE",
-                if queue { "queue" } else { "off" },
-            ),
             ("NO_COLOR", ""),
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
@@ -257,12 +253,8 @@ fn transcript_visible(screen: &str) -> bool {
     .all(|marker| screen.contains(marker))
 }
 
-fn roundtrip(queue: bool, width: u16) {
-    let env = if queue {
-        TestEnv::new("block-spacing")
-    } else {
-        TestEnv::new("block-spacing-sync")
-    };
+fn roundtrip(width: u16) {
+    let env = TestEnv::new("block-spacing");
     for (file, body) in [
         ("spacing-one.txt", "ONE_START\n\n\nONE_END\n"),
         ("spacing-two.txt", "TWO_START\n\n\nTWO_END\n"),
@@ -272,45 +264,19 @@ fn roundtrip(queue: bool, width: u16) {
     let config = env.workspace_root().join(".nexus/sudocode");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
-    let mut sess = start(&env, false, queue, width);
+    let mut sess = start(&env, false, width);
     let prompt = env.prompt(&format!("Read spacing-one.txt and spacing-two.txt now using two separate Bash tool calls: `cat spacing-one.txt` and `cat spacing-two.txt`. Give them the descriptions `Read first spacing file` and `Read second spacing file`, respectively. Immediately before calling the tools, emit the exact plain standalone paragraph `Spacing intro.` including its final period, then continue with the tool calls in the same turn. Do not end the turn after that paragraph. Do not combine commands and do not repeat the file contents in your answer. After both tools finish reply with exactly this Markdown, without an outer code fence:\n{}", mock_anthropic_service::SPACING_FINAL), "transcript_spacing");
-    // The sync editor also intercepts bracketed paste for OS clipboard images.
-    // Type a short line there; live runs read the full instructions from a file.
-    if queue {
-        sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
-        let placeholder = format!(
-            "[Pasted text #1 +{} lines]",
-            prompt.chars().filter(|&ch| ch == '\n').count()
-        );
-        common::expect_screen_settled(
-            &sess,
-            |s| common::input_line_of(s) == placeholder,
-            common::DEFAULT_TIMEOUT,
-            "complete multiline prompt pasted",
-        );
-    } else {
-        let instructions_file = "spacing-instructions.md";
-        let instructions = env.workspace_root().join(instructions_file);
-        std::fs::write(&instructions, &prompt).unwrap();
-        let input = if env.is_mock() {
-            "PARITY_SCENARIO:transcript_spacing".to_string()
-        } else {
-            format!("Use read_file with the exact relative path `{instructions_file}` in the current working directory, then follow the file's instructions.")
-        };
-        // A workspace-relative name avoids copying a randomized temporary path.
-        // Keep the input assertion on one row, then restore the tested width
-        // before checking the live transcript and its replay.
-        let input_width = u16::try_from(input.chars().count() + 8).unwrap().max(width);
-        sess.resize(120, input_width).unwrap();
-        common::expect_screen_settled(
-            &sess,
-            |s| s.contains("❯") && s.contains("/help"),
-            common::DEFAULT_TIMEOUT,
-            "resized sync chrome",
-        );
-        sess.send(&input).unwrap();
-        common::expect_input_line(&sess, &input, common::DEFAULT_TIMEOUT, "sync input");
-    }
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    let placeholder = format!(
+        "[Pasted text #1 +{} lines]",
+        prompt.chars().filter(|&ch| ch == '\n').count()
+    );
+    common::expect_screen_settled(
+        &sess,
+        |s| common::input_line_of(s) == placeholder,
+        common::DEFAULT_TIMEOUT,
+        "complete multiline prompt pasted",
+    );
     let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(
@@ -319,9 +285,6 @@ fn roundtrip(queue: bool, width: u16) {
         common::LIVE_TURN_BUDGET,
         "spacing turn completed and input rearmed",
     );
-    if !queue {
-        sess.resize(120, width).unwrap();
-    }
     common::expect_turn_complete_after(
         &sess,
         &marker,
@@ -337,7 +300,7 @@ fn roundtrip(queue: bool, width: u16) {
     let expected = expected_file_frames(&env);
     assert_transcript(&sess, &expected);
     finish(&mut sess);
-    let mut resumed = start(&env, true, queue, width);
+    let mut resumed = start(&env, true, width);
     common::expect_screen_settled(
         &resumed,
         transcript_visible,
@@ -371,17 +334,12 @@ fn roundtrip(queue: bool, width: u16) {
 
 #[test]
 fn live_and_replay_share_block_spacing() {
-    roundtrip(true, 100);
+    roundtrip(100);
 }
 
 #[test]
 fn narrow_live_and_replay_keep_spacing_and_content() {
-    roundtrip(true, 52);
-}
-
-#[test]
-fn sync_renderer_uses_the_same_spacing() {
-    roundtrip(false, 100);
+    roundtrip(52);
 }
 
 #[test]
@@ -406,7 +364,7 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
         &format!("Run these file reads. TOOL_BATCH:{batch}"),
         "tool_concurrency",
     );
-    let mut sess = start(&env, false, true, 100);
+    let mut sess = start(&env, false, 100);
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
@@ -442,7 +400,7 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     assert_eq!(expected, BTreeMap::from([("ONE", 2), ("TWO", 1)]));
     assert_file_frames(&sess, &expected, final_text);
     finish(&mut sess);
-    let mut resumed = start(&env, true, true, 100);
+    let mut resumed = start(&env, true, 100);
     common::expect_screen_settled(
         &resumed,
         |s| s.contains(final_text),
@@ -469,7 +427,7 @@ fn assert_reasoning(sess: &PtySession) {
 #[test]
 fn split_reasoning_stays_contiguous_before_separated_answer() {
     let env = TestEnv::new_mock("reasoning-spacing");
-    let mut sess = start(&env, false, true, 100);
+    let mut sess = start(&env, false, 100);
     sess.send("PARITY_SCENARIO:thinking_then_text").unwrap();
     common::expect_input_line(
         &sess,
@@ -493,7 +451,7 @@ fn split_reasoning_stays_contiguous_before_separated_answer() {
     );
     assert_reasoning(&sess);
     finish(&mut sess);
-    let mut resumed = start(&env, true, true, 100);
+    let mut resumed = start(&env, true, 100);
     common::expect_screen_settled(
         &resumed,
         |s| s.contains("The answer follows the reasoning."),

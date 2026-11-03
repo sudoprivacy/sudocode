@@ -506,8 +506,7 @@ fn restart(exe: &Path, args: &[std::ffi::OsString]) -> R<()> {
 /// treated as "no" — use `--yes` to update unattended.
 fn confirm(prompt: &str) -> R<bool> {
     let line = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        crate::prompt_choice_via_shared_editor(&format!("{prompt} [y/N] "))
-            .map_err(std::io::Error::other)?
+        crate::prompt_choice_line(&format!("{prompt} [y/N] ")).map_err(std::io::Error::other)?
     } else {
         print!("{prompt} [y/N] ");
         std::io::stdout().flush()?;

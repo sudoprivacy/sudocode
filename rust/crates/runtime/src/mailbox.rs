@@ -1539,9 +1539,8 @@ pub struct PeerStatus {
     /// `"receiving"`, `"standby"`, `"unavailable"`, or `"none"` when this
     /// process runs no receiver for the agent.
     pub receiver: &'static str,
-    /// When a received message runs: `"automatic"` as soon as the session is
-    /// idle, or `"next_prompt"` in the synchronous REPL, which runs it once the
-    /// user hands the prompt back.
+    /// When a received message runs: `"automatic"`, as soon as the session is
+    /// idle, on every host.
     pub delivery: &'static str,
     /// What keeps a resumed holder from moving a read position back:
     /// `"fenced"`, `"fenced_cas"` or `"at_least_once"` (see

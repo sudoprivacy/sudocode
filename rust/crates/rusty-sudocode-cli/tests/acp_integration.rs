@@ -8000,6 +8000,79 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     workspace.cleanup();
 }
 
+/// While the user holds tool control, the engine refuses a peer's input exactly
+/// as it refuses a human prompt: the message stays unread and starts its turn
+/// only after tools resume. The receiver has no pause check of its own.
+#[tokio::test]
+async fn acp_peer_message_waits_for_tool_resume() {
+    const AGENT: &str = "acp-pause-receiver";
+    const PEER: &str = "acp-pause-peer";
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-peer-pause");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    pin_agent_name(&workspace.root, AGENT);
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = open_direct_session(&mut client, &workspace.root).await;
+
+    let (_, paused) = client
+        .send_request(
+            "_sudocode/session/pause_tools",
+            json!({ "sessionId": session }),
+        )
+        .await;
+    assert_eq!(paused["result"]["isQuiescent"], true, "{paused}");
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
+        .send(runtime::agent_mailbox::MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
+            from: PEER.to_string(),
+            to: AGENT.to_string(),
+            body: "after resume PARITY_SCENARIO:single_turn_text".to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
+            request_id: None,
+        })
+        .expect("the peer writes on the pair root");
+    let is_peer_input = |msg: &Value| {
+        msg["method"] == "session/update"
+            && msg["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+            && msg["params"]["_meta"]["sudocode"]["a2a"]["from"] == PEER
+    };
+    // Several receiver hand-overs fit in this window; each must be refused.
+    assert!(
+        client
+            .recv_until(Duration::from_secs(5), is_peer_input)
+            .await
+            .is_err(),
+        "a paused session must not start a peer's turn"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        0,
+        "no model request while tools are paused"
+    );
+
+    let (_, resumed) = client
+        .send_request(
+            "_sudocode/session/resume_tools",
+            json!({ "sessionId": session, "pauseEpoch": paused["result"]["pauseEpoch"] }),
+        )
+        .await;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    client
+        .recv_until(Duration::from_secs(30), is_peer_input)
+        .await
+        .unwrap_or_else(|seen| panic!("the peer message never ran after resume; saw {seen:#?}"));
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 // ---------------------------------------------------------------------------
 // Direct A2A requests (`_sudocode/a2a/*`)
 // ---------------------------------------------------------------------------

@@ -37,16 +37,25 @@ fn tab_completion_shows_slash_commands() {
     let env = TestEnv::new("tab-complete");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "REPL input ready");
 
-    // Type partial command then Tab.
+    // Type a partial command, wait for the editor to show it, then Tab.
     sess.send("/mod").expect("type partial command");
-    std::thread::sleep(Duration::from_millis(100));
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/mod",
+        common::DEFAULT_TIMEOUT,
+        "partial command reached the editor",
+    );
     sess.send("\t").expect("send Tab");
 
-    // Completion list should show /model.
-    sess.expect("(?i)model")
-        .expect("tab completion should suggest /model");
+    // Tab completes the input to the first matching command.
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/model",
+        common::DEFAULT_TIMEOUT,
+        "tab completion should complete /mod to /model",
+    );
 
     // Clean exit.
     sess.send_ctrl('c').expect("cancel");
@@ -59,23 +68,34 @@ fn tab_completion_shows_slash_commands() {
 // 2. /model switches model in REPL
 // ──────────────────────────────────────────────────────────────────────
 
-/// Human types `/model sonnet` in REPL, sees confirmation that the
-/// model switched.
+/// Human types `/model claude-haiku` in a Sonnet REPL, sees confirmation
+/// that the model switched. Naming the current model would only print the
+/// model report, so the target differs from the startup model.
 #[test]
 fn model_switch_in_repl() {
     let env = TestEnv::new("model-switch");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "REPL input ready");
 
-    sess.send("/model sonnet\r").expect("send /model sonnet");
+    sess.send("/model claude-haiku\r")
+        .expect("send /model claude-haiku");
 
-    // Should confirm the model switch — mentions "sonnet" or "model".
-    sess.expect("(?i)(sonnet|model|switched|active)")
-        .expect("should see model switch confirmation");
+    // The switch report, not the echoed command line, proves the switch.
+    let screen = expect_report(
+        &sess,
+        &env,
+        "Model updated",
+        "should see model switch confirmation",
+    );
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.trim_start().starts_with("Current") && line.contains("haiku")),
+        "the switch report should name Haiku as the current model:\n{screen}"
+    );
 
     // Clean exit.
-    sess.expect("❯").expect("prompt after switch");
     sess.send("/exit\r").expect("exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().expect("should exit");
@@ -92,18 +112,28 @@ fn model_without_args_opens_picker() {
     let env = TestEnv::new("model-picker");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "REPL input ready");
 
     sess.send("/model\r").expect("send /model (no args)");
 
-    sess.expect("Select model")
-        .expect("should see interactive model picker");
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("Select model"),
+        env.timeout(),
+        "should see interactive model picker",
+    );
 
     // Cancel the picker and return to the prompt.
     sess.send("\x1b").expect("cancel picker");
+    common::expect_screen(
+        &sess,
+        |screen| !screen.contains("Select model"),
+        env.timeout(),
+        "Esc should close the model picker",
+    );
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after picker");
 
     // Clean exit.
-    sess.expect("❯").expect("prompt after picker");
     sess.send("/exit\r").expect("exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().expect("should exit");
@@ -122,17 +152,27 @@ fn permissions_switch_in_repl() {
     // Start in danger-full-access so we can switch down.
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access"]);
 
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "REPL input ready");
 
     sess.send("/permissions read-only\r")
         .expect("send /permissions");
 
     // Switch report shows "Active mode    read-only".
-    sess.expect("read-only")
-        .expect("should see read-only in switch confirmation");
+    let screen = expect_report(
+        &sess,
+        &env,
+        "Permissions updated",
+        "should see the switch report",
+    );
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.trim_start().starts_with("Active mode")
+                && line.trim_end().ends_with("read-only")),
+        "the switch report should show read-only as the active mode:\n{screen}"
+    );
 
     // Clean exit.
-    sess.expect("❯").expect("prompt after switch");
     sess.send("/exit\r").expect("exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
@@ -229,18 +269,44 @@ fn slash_command_fuzzy_suggest_on_typo() {
     let env = TestEnv::new("fuzzy-suggest");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "REPL input ready");
 
     // Submit a typo'd slash command.
     sess.send("/comit\r").expect("send typo command");
 
-    // Should see a suggestion or "not implemented" or "did you mean".
-    sess.expect("(?i)(commit|did you mean|not implemented|unknown|similar)")
-        .expect("should suggest the correct command or report error");
+    // The error names the typo and suggests the command it resembles.
+    let screen = expect_report(
+        &sess,
+        &env,
+        "Unknown slash command: /comit",
+        "should report the unknown command",
+    );
+    assert!(
+        screen.contains("Did you mean") && screen.contains("/commit"),
+        "the error should suggest /commit:\n{screen}"
+    );
 
     // Clean exit.
-    sess.expect("❯").expect("prompt after error");
     sess.send("/exit\r").expect("exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
+}
+
+/// Wait for a command's report and for the editor to be ready again. Waiting
+/// on the report text rather than the prompt glyph matters: the glyph is
+/// permanent chrome, and the echoed command line contains the same words.
+fn expect_report(
+    sess: &pty_expect::PtySession,
+    env: &TestEnv,
+    report: &str,
+    context: &str,
+) -> String {
+    let screen = common::expect_screen(
+        sess,
+        |screen| screen.contains(report),
+        env.timeout(),
+        context,
+    );
+    common::expect_input_line_cleared(sess, env.timeout(), context);
+    screen
 }

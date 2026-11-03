@@ -67,9 +67,6 @@ fn task_notification_pushed_into_next_user_turn_under_coord_mode() {
     let long = LIVE_TIMEOUT.saturating_mul(4);
     sess.set_default_timeout(long);
 
-    // Wait for the REPL prompt.
-    sess.expect("❯").expect("REPL prompt should appear");
-
     // Turn 1: spawn a sub-agent that emits the sentinel.
     let turn1 = format!(
         "Use Agent(subagent_type=\"general-purpose\", \
@@ -78,12 +75,8 @@ fn task_notification_pushed_into_next_user_turn_under_coord_mode() {
          run_in_background=true) to spawn a worker. \
          Briefly confirm you launched it and end this turn."
     );
-    sess.send(&format!("{turn1}\r")).expect("send turn 1");
-
     // The parent should emit a launch confirmation and end its turn.
-    // Wait for the REPL prompt to reappear (turn 1 done).
-    sess.expect("❯")
-        .expect("REPL prompt should reappear after turn 1");
+    common::run_turn(&mut sess, &turn1, long, "turn 1");
 
     // Give the sub-agent time to actually complete + emit envelope.
     // Sub-agents run on background threads; the mailbox write
@@ -102,34 +95,30 @@ fn task_notification_pushed_into_next_user_turn_under_coord_mode() {
          blocks (if any) do you now see in your context? Report the \
          verbatim `<result>...</result>` payload from any block you \
          see. If none, say NO_NOTIFICATIONS_SEEN.";
+    common::expect_input_line_cleared(&sess, long, "turn 2 input");
     sess.send(&format!("{turn2}\r")).expect("send turn 2");
 
-    // The parent's turn-2 response MUST show:
-    //   1. Evidence of the task-notification XML — either the
-    //      literal `<task-notification>` opener OR at minimum the
-    //      `<result>` tag it wraps.
-    //   2. The SENTINEL string carried inside the notification's
-    //      <result> section.
-    // If drain didn't fire, the parent would report NO_NOTIFICATIONS_SEEN.
-    sess.expect(SENTINEL).unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!(
+    // The parent's turn-2 response MUST carry the SENTINEL string from
+    // the notification's <result> section. Turn 1's prompt also names
+    // it, so only text rendered after turn 2's prompt counts. If drain
+    // didn't fire, the parent would report NO_NOTIFICATIONS_SEEN.
+    let reported = |screen: &str| {
+        screen
+            .rsplit_once("Since my last message")
+            .is_some_and(|(_, reply)| reply.contains(SENTINEL))
+    };
+    common::expect_screen(
+        &sess,
+        reported,
+        long,
+        &format!(
             "expected sentinel {SENTINEL} in parent's turn-2 report \
-             (proves the push path fired end-to-end): {e}\n\
-             tail:\n{tail}",
-            tail = screen
-                .chars()
-                .rev()
-                .take(1200)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>(),
-        );
-    });
+             (proves the push path fired end-to-end)"
+        ),
+    );
 
     // Exit cleanly.
-    sess.expect("❯").expect("REPL prompt after turn 2");
+    common::expect_input_line_cleared(&sess, long, "REPL prompt after turn 2");
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();

@@ -225,8 +225,8 @@ impl EngineEventRenderer {
     /// Show that the transport is retrying a failed request.
     ///
     /// The line is unconditional. A status-line phase alone would be invisible
-    /// on the paths that have no phase to set — the rustyline REPL and
-    /// `--print` both hold a spinner whose `phase` is `None` — and "the
+    /// on the paths that have no phase to set — `--print` holds a spinner
+    /// whose `phase` is `None` — and "the
     /// indicator exists but not where you are looking" is how this stopped
     /// being visible in the first place. Where a phase IS available (iocraft)
     /// it is set too, so a long backoff also reads on the live status line

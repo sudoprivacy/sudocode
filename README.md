@@ -141,9 +141,8 @@ permissions, and session controls.
 | Deliver pending messages now | Press **Esc** when messages are pending. |
 | Cancel the current turn | **Ctrl+C**, or **Esc** when no messages are pending. |
 
-These are the default asynchronous REPL controls. The
-[input guide](docs/usage.md#steering-queueing-and-cancellation) explains draft
-preservation, queue recall, cancellation, and the legacy synchronous mode.
+The [input guide](docs/usage.md#steering-queueing-and-cancellation) explains
+draft preservation, queue recall and cancellation.
 Use `/tasks` to inspect background work and `/context` to inspect context usage.
 
 ### Bring project context and tools

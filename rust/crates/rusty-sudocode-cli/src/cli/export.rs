@@ -6,7 +6,7 @@ use std::process::Command;
 use runtime::{ContentBlock, MessageRole, Session};
 use serde_json::json;
 
-use super::format::truncate_for_summary;
+use super::format::{text_from_blocks, truncate_for_summary};
 use crate::CliOutputFormat;
 use engine_host::session::load_session_reference;
 
@@ -397,7 +397,6 @@ pub(crate) fn render_prompt_history_report(entries: &[PromptHistoryEntry], limit
         "Prompt history".to_string(),
         format!("  Total            {total}"),
         format!("  Showing          {} most recent", shown.len()),
-        "  Reverse search   Ctrl-R in the REPL".to_string(),
         String::new(),
     ];
     for (offset, entry) in shown.iter().enumerate() {
@@ -426,20 +425,17 @@ pub(crate) fn collect_session_prompt_history(session: &Session) -> Vec<PromptHis
             })
             .collect();
     }
+    // Sessions saved before prompts were recorded: derive the entries from the
+    // user messages, without the runtime's `<system-reminder>` blocks, which
+    // ride inside user messages but were never typed.
     let timestamp_ms = session.updated_at_ms;
     session
         .messages()
         .iter()
         .filter(|message| message.role == MessageRole::User)
-        .filter_map(|message| {
-            message.blocks.iter().find_map(|block| match block {
-                ContentBlock::Text { text } => Some(PromptHistoryEntry {
-                    timestamp_ms,
-                    text: text.clone(),
-                }),
-                _ => None,
-            })
-        })
+        .map(|message| text_from_blocks(&message.blocks))
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| PromptHistoryEntry { timestamp_ms, text })
         .collect()
 }
 

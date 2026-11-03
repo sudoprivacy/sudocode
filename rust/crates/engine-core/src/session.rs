@@ -743,14 +743,6 @@ async fn run_one_turn(
         |(line, _)| line.chars().take(80).collect(),
     );
 
-    // The question prompter is installed on the tool executor (via the delegate)
-    // before the turn; the permission prompter + observer are passed into the
-    // blocking turn below.
-    delegate.set_question_prompter(Box::new(QuestionAdapter {
-        tx: evt_tx.clone(),
-        table: table.clone(),
-    }));
-
     let abort = delegate.abort_signal();
     abort.reset();
     let inbox = delegate.turn_input_inbox();
@@ -971,7 +963,7 @@ fn execute_input(
     delegate: &dyn EngineDelegate,
     input: TurnInput,
     observer: &mut dyn RuntimeObserver,
-    prompter: &mut dyn PermissionPrompter,
+    prompter: &mut PrompterAdapter,
 ) -> Result<TurnComplete, RuntimeError> {
     if let Some((line, build)) = input.management {
         let cancelled = delegate.run_management(&line, &build, observer)?;
@@ -985,6 +977,12 @@ fn execute_input(
         });
     }
     let blocks = delegate.prepare_prompt(input.blocks, input.image_policy)?;
+    // Host context and image preparation can rebuild the runtime. Install the
+    // question bridge only once preparation has selected the runtime to execute.
+    delegate.set_question_prompter(Box::new(QuestionAdapter {
+        tx: prompter.tx.clone(),
+        table: prompter.table.clone(),
+    }));
     delegate.run_turn(blocks, observer, prompter)
 }
 

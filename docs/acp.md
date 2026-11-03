@@ -398,6 +398,8 @@ Host context uses the same request ID allocator, cancellation lock and request
 lease as permissions and questions. It stays queryable as foreground `running`
 while waiting for the machine response; only human prompts claim `awaiting_input`.
 An answer for a cancelled request cannot satisfy a later turn's request.
+The question bridge is installed after context and image preparation, so runtime
+rebuilding preserves interactive questions and their human-input status.
 Context stays fixed during a turn, including in-turn steering. The following
 turn resolves anew. The provider mode is transport state, so controllers must
 negotiate it again when restoring a session.

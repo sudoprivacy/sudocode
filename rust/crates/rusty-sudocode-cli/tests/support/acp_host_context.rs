@@ -264,6 +264,79 @@ async fn verify_host_context_cancellation(
         .contains("cancelled-host-context"));
 }
 
+async fn verify_context_refresh_preserves_questions(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
+    let session = session_id_of(
+        &session_new_with_meta(
+            client,
+            &workspace.root,
+            json!({"hostContext": {"version": 1}}),
+        )
+        .await,
+    );
+    set_permission_mode(client, &session, "allow").await;
+    for (index, context) in [A, B].into_iter().enumerate() {
+        let answer = format!("HOST_CONTEXT_QUESTION_ANSWER_{index}");
+        let calls = json!([{
+            "id": format!("context-question-{index}"), "name": "AskUserQuestion",
+            "input": {"question": format!("Question after context refresh {index}")},
+        }]);
+        let prompt = client
+            .send_request_no_wait(
+                "session/prompt",
+                json!({
+                    "sessionId": session, "prompt": [{"type": "text",
+                        "text": format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}],
+                }),
+            )
+            .await;
+        let request = context_request(client, &session).await;
+        answer_context(client, request, context).await;
+        let (_, question) = client
+            .recv_until(RECV_TIMEOUT, |value| {
+                is_server_request(value, "_scode/ask_user_question")
+            })
+            .await
+            .expect("runtime rebuilding must retain the current turn's question bridge");
+        let (_, status) = client
+            .send_request("_sudocode/session/status", json!({"sessionId": session}))
+            .await;
+        assert_eq!(
+            status["result"]["foreground"],
+            json!({"state": "awaiting_input", "waiting_for": "question"})
+        );
+        client
+            .send_raw(&json!({"jsonrpc": "2.0", "id": question["id"],
+                "result": {"answers": [{"id": "q1", "value": answer, "label": answer}]},
+            }))
+            .await;
+        let (_, completed) = client
+            .recv_until(RECV_TIMEOUT, |value| is_response_to(value, prompt))
+            .await
+            .expect("the live answer must complete the original turn");
+        assert_eq!(completed["result"]["stopReason"], "end_turn", "{completed}");
+        let requests = server.captured_requests().await;
+        let request = requests
+            .iter()
+            .rev()
+            .find(|request| !request.path.contains("count_tokens"))
+            .unwrap();
+        let body: Value = serde_json::from_str(&request.raw_body).unwrap();
+        assert!(body["system"].to_string().contains(context));
+        assert!(body["messages"].to_string().contains(&answer));
+        if index == 1 {
+            assert!(!body["system"].to_string().contains(A));
+        }
+        let (_, status) = client
+            .send_request("_sudocode/session/status", json!({"sessionId": session}))
+            .await;
+        assert_eq!(status["result"]["foreground"], json!({"state": "idle"}));
+    }
+}
+
 #[tokio::test]
 async fn acp_host_context_refreshes_queued_turns_and_fails_closed() {
     for is_websocket in [false, true] {
@@ -302,6 +375,7 @@ async fn acp_host_context_refreshes_queued_turns_and_fails_closed() {
         verify_context_failure_and_retry(&mut client, &server, &session).await;
         verify_context_resume_and_isolation(&mut client, &server, &workspace, &session).await;
         verify_host_context_cancellation(&mut client, &server, &workspace).await;
+        verify_context_refresh_preserves_questions(&mut client, &server, &workspace).await;
 
         client.shutdown().await;
         workspace.cleanup();

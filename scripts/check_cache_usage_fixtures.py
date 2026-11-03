@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from generate_cache_semantics import check_spec
 
 
 def main():
     root = Path(__file__).resolve().parents[1]
+    check_spec(root / "spec/prompt_cache_observations.json")
     schema = json.loads((root / "spec/cache_usage_fixtures.schema.json").read_text("utf-8"))
     fixtures = json.loads((root / "spec/cache_usage_fixtures.json").read_text("utf-8"))
     Draft202012Validator.check_schema(schema)

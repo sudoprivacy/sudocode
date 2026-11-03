@@ -18,12 +18,21 @@
     "provider_request_id": "Provider or gateway request identifier used to join request records"
   },
   "provider_semantics": {
-    "anthropic": {"read_field": "cache_read_input_tokens", "write_field": "cache_creation_input_tokens"},
-    "openai": {"read_field": "prompt_tokens_details.cached_tokens", "write_field": null},
-    "gemini": {"read_field": "cachedContentTokenCount", "write_field": null}
+    "anthropic": {
+      "read_field": "cache_read_input_tokens",
+      "write_field": "cache_creation_input_tokens"
+    },
+    "openai": {
+      "read_field": "prompt_tokens_details.cached_tokens",
+      "write_field": "prompt_tokens_details.cache_write_tokens"
+    },
+    "gemini": {
+      "read_field": "cachedContentTokenCount",
+      "write_field": null
+    }
   },
   "input_accounting": {
-    "counter_rule": "Reported counters are nonnegative integers; absent or null counters remain unknown",
+    "counter_rule": "Reported counters and computed input totals are integers in 0..9223372036854775807 (nonnegative int64); absent or null counters remain unknown",
     "anthropic": {
       "usage_object": "usage",
       "input_paths": ["input_tokens"],

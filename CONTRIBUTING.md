@@ -1086,6 +1086,13 @@ includes cache tokens. Missing counters remain unknown. Pair-total comparisons
 are scoped heuristics; their results describe reported usage and require
 separate evidence for billing or credential identity.
 
+`input_accounting` owns provider usage paths and the nonnegative int64 domain
+for both counters and computed totals. `provider_semantics` retains the primary
+read/write field names as a generated compatibility projection; aliases belong
+to the accounting paths. After changing those paths, run
+`python scripts/generate_cache_semantics.py`. The existing public-fixture check
+also verifies that this projection has not drifted, without rewriting the file.
+
 ### Startup latency
 
 `SCODE_TRACE_STARTUP=1 scode version` prints local phase durations to stderr.

@@ -659,6 +659,31 @@ fn expect_turn_complete_before(
     }
 }
 
+/// Host terminal hints scode reads to choose colours and features. A PTY test
+/// declares its own terminal; inheriting these made results depend on the
+/// developer's terminal (`COLORTERM=truecolor` turned indexed colours into RGB).
+const HOST_TERMINAL_HINTS: &[&str] = &[
+    "COLORTERM",
+    "COLORFGBG",
+    "TERM_PROGRAM",
+    "TMUX",
+    "VTE_VERSION",
+    "WT_SESSION",
+];
+
+/// `cd` into `dir` and exec through `/usr/bin/env` without host config or
+/// terminal hints; the caller appends the child's own variables and argv.
+fn exec_env_prefix(dir: &str) -> String {
+    let mut cmd = format!(
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
+        shell_quote(dir)
+    );
+    for hint in HOST_TERMINAL_HINTS {
+        write!(cmd, " -u {hint}").unwrap();
+    }
+    cmd
+}
+
 /// Locate the compiled CLI, or a release artifact selected for live acceptance.
 #[must_use]
 #[inline]
@@ -1150,10 +1175,7 @@ fn spawn_binary_with_workspace(
     // C:\ paths) and can't find `env` — the resulting `exec: env: not
     // found` masquerades as a 127 exit. `/usr/bin/env` resolves the
     // same way on Linux, macOS, and Git Bash on Windows.
-    let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
-        shell_quote(&workspace_root)
-    );
+    let mut cmd = exec_env_prefix(&workspace_root);
     write!(
         cmd,
         " SUDO_CODE_CONFIG_HOME={}",
@@ -1410,10 +1432,7 @@ pub fn spawn_scode_in_dir_with_env(
     // terminal escape). Routing through `sh -c` + `/usr/bin/env` quotes
     // reliably and resolves the scode path identically on Linux, macOS, and
     // Git Bash (see the note in `spawn_with_workspace`).
-    let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
-        shell_quote(&dir_str)
-    );
+    let mut cmd = exec_env_prefix(&dir_str);
     for (key, value) in env {
         write!(
             cmd,

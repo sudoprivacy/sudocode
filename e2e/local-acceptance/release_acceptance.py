@@ -418,11 +418,12 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         return execute(["cargo", *args], rust, output / (name + ".log"))
 
     execute(["git", "init", "--initial-branch=main"], root, output / "source-history-init.log")
+    # Git-derived controls need the same complete, locked Cargo inputs.
+    cargo("generate-lockfile", "--offline", name="lockfile")
     execute(["git", "add", "rust", "e2e/startup"], root, output / "source-history-add.log")
     execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
              "-c", "commit.gpgsign=false", "commit", "-m", "Historical source without compiler journey"],
             root, output / "source-history-commit.log")
-    cargo("generate-lockfile", name="lockfile")
     cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
           "--no-run", "--message-format=json-render-diagnostics", name="workspace-driver")
     artifacts = [json.loads(line) for line in (output / "workspace-driver.log").read_text(encoding="utf-8").splitlines()

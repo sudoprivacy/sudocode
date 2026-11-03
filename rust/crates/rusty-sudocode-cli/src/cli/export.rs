@@ -1,7 +1,6 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use runtime::{ContentBlock, MessageRole, Session};
 use serde_json::json;
@@ -318,22 +317,6 @@ pub(crate) fn render_export_text(session: &Session) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn write_temp_text_file(
-    filename: &str,
-    contents: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = env::temp_dir().join(filename);
-    fs::write(&path, contents)?;
-    Ok(path)
-}
-
-pub(crate) fn command_exists(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
 pub(crate) fn parse_history_count(raw: Option<&str>) -> Result<usize, String> {
     let Some(raw) = raw else {
         return Ok(DEFAULT_HISTORY_LIMIT);
@@ -439,34 +422,6 @@ pub(crate) fn collect_session_prompt_history(session: &Session) -> Vec<PromptHis
         .collect()
 }
 
-pub(crate) fn recent_user_context(session: &Session, limit: usize) -> String {
-    let requests = session
-        .messages()
-        .iter()
-        .filter(|message| message.role == MessageRole::User)
-        .filter_map(|message| {
-            message.blocks.iter().find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.trim().to_string()),
-                _ => None,
-            })
-        })
-        .rev()
-        .take(limit)
-        .collect::<Vec<_>>();
-
-    if requests.is_empty() {
-        "<no prior user messages>".to_string()
-    } else {
-        requests
-            .into_iter()
-            .rev()
-            .enumerate()
-            .map(|(index, text)| format!("{}. {}", index + 1, text))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
-
 pub(crate) fn truncate_for_prompt(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         value.trim().to_string()
@@ -474,18 +429,4 @@ pub(crate) fn truncate_for_prompt(value: &str, limit: usize) -> String {
         let truncated = value.chars().take(limit).collect::<String>();
         format!("{}\n…[truncated]", truncated.trim_end())
     }
-}
-
-pub(crate) fn sanitize_generated_message(value: &str) -> String {
-    value.trim().trim_matches('`').trim().replace("\r\n", "\n")
-}
-
-pub(crate) fn parse_titled_body(value: &str) -> Option<(String, String)> {
-    let normalized = sanitize_generated_message(value);
-    let title = normalized
-        .lines()
-        .find_map(|line| line.strip_prefix("TITLE:").map(str::trim))?;
-    let body_start = normalized.find("BODY:")?;
-    let body = normalized[body_start + "BODY:".len()..].trim();
-    Some((title.to_string(), body.to_string()))
 }

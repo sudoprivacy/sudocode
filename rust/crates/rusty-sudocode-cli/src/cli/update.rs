@@ -523,7 +523,6 @@ fn confirm(prompt: &str) -> R<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     #[test]
     fn version_comparison() {

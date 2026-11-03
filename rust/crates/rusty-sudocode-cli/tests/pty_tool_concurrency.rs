@@ -196,6 +196,45 @@ fn short_shells_finish_while_a_parallel_sibling_is_held() {
     exercise_short_shells(&[]);
 }
 
+#[test]
+fn empty_shell_completes_before_a_held_sibling() {
+    let env = TestEnv::new_mock("parallel-empty-shell");
+    fifo(&env, "held.fifo");
+    fifo(&env, "empty.fifo");
+    let sess = start(
+        &env,
+        &[
+            bash("held", &fifo_read("held.fifo")),
+            bash("empty", "head -n 0 empty.fifo"),
+        ],
+        "10",
+    );
+    let held = writer(&env, "held.fifo", &sess);
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("Running 2 tools"),
+        common::at_least(Duration::from_secs(15)),
+        "both real shells running before releasing the empty one",
+    );
+    // Opening its writer releases head's FIFO open; zero lines produce no
+    // stdout or stderr, and the other shell remains genuinely held.
+    drop(writer(&env, "empty.fifo", &sess));
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("Running Bash") && !screen.contains("Running 2 tools"),
+        common::at_least(Duration::from_secs(15)),
+        "empty-output shell completes before the held sibling",
+    );
+    assert!(!sess
+        .render(common::screen_contents)
+        .contains("Concurrency batch done."));
+    release(held, "HELD_EMPTY_CASE_RELEASED");
+    done(&sess);
+    let results = assert_result_order(&env, &["held", "empty"]);
+    assert_ne!(results[1]["is_error"], true);
+    finish(sess);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn concurrent_shell_capture_is_private_during_the_pipe_cloexec_window() {

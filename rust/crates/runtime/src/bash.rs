@@ -3,7 +3,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use command_group::{AsyncCommandGroup, CommandGroup};
+use command_group::CommandGroup;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
@@ -17,6 +17,9 @@ use crate::sandbox::{
 use crate::workspace_root::current_workspace_root;
 use crate::ConfigLoader;
 
+mod capture;
+use capture::spawn_captured_shell;
+
 /// Keep shell lifetime under the engine's cancellation and process-tree control.
 #[must_use]
 pub fn shell_process_group<T>(
@@ -28,69 +31,6 @@ pub fn shell_process_group<T>(
     group.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
     group.kill_on_drop(true);
     group
-}
-
-/// Spawn one captured shell with the same pipe ownership for both readers.
-fn spawn_captured_shell(
-    mut command: TokioCommand,
-) -> io::Result<(
-    command_group::AsyncGroupChild,
-    tokio::process::ChildStdout,
-    tokio::process::ChildStderr,
-)> {
-    // Darwin's anonymous pipe() is followed by separate CLOEXEC fcntl calls.
-    // Another concurrent spawn can inherit a writer in that window, preventing
-    // this command's EOF until an unrelated sibling exits. Open an unlinked
-    // FIFO with O_CLOEXEC instead: each descriptor is private from creation.
-    #[cfg(target_os = "macos")]
-    let (stdout_read, stderr_read) = {
-        let (stdout_read, stdout_write) = close_on_exec_pipe()?;
-        let (stderr_read, stderr_write) = close_on_exec_pipe()?;
-        command.stdout(stdout_write).stderr(stderr_write);
-        (stdout_read, stderr_read)
-    };
-    #[cfg(not(target_os = "macos"))]
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    command.kill_on_drop(true);
-    let mut child = shell_process_group(command.group()).spawn()?;
-    // Custom Stdio files remain owned by Command after spawn. Release the
-    // parent's writers before awaiting EOF, including on every error path.
-    drop(command);
-    #[cfg(target_os = "macos")]
-    {
-        // Match Tokio's normal spawn lifecycle: register readers only after
-        // the child's stdio has been installed and parent writers are closed.
-        child.inner().stdout = Some(tokio::process::ChildStdout::from_std(stdout_read.into())?);
-        child.inner().stderr = Some(tokio::process::ChildStderr::from_std(stderr_read.into())?);
-    }
-    let stdout = child.inner().stdout.take().expect("stdout piped");
-    let stderr = child.inner().stderr.take().expect("stderr piped");
-    Ok((child, stdout, stderr))
-}
-
-/// Create a pipe whose endpoints are atomically close-on-exec on Darwin.
-#[cfg(target_os = "macos")]
-fn close_on_exec_pipe() -> io::Result<(std::os::fd::OwnedFd, std::fs::File)> {
-    use nix::{fcntl::OFlag, sys::stat::Mode, unistd::mkfifo};
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let directory = tempfile::Builder::new()
-        .prefix("scode-shell-pipe-")
-        .tempdir()?;
-    let path = directory.path().join("pipe");
-    mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR)?;
-    let read = OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
-        .open(&path)?;
-    let write = OpenOptions::new()
-        .write(true)
-        .custom_flags(OFlag::O_CLOEXEC.bits())
-        .open(&path)?;
-    std::fs::remove_file(path)?;
-    Ok((read.into(), write))
 }
 
 /// Default foreground subprocess timeout for tool-backed command execution.

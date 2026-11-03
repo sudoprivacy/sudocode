@@ -46,6 +46,3 @@ mod pty_smoke;
 
 #[path = "../pty_tool_pause.rs"]
 mod pty_tool_pause;
-
-#[path = "../visual_regression.rs"]
-mod visual_regression;

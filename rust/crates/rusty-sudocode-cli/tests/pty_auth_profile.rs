@@ -45,7 +45,11 @@ fn config_set_auth_profile_persists_to_settings_local() {
             panic!("should confirm auth_profile persisted: {e}\nPTY screen:\n{screen}");
         });
 
-    sess.expect("❯").expect("prompt after set");
+    common::expect_input_line_cleared(
+        &sess,
+        common::at_least(Duration::from_secs(20)),
+        "prompt after set",
+    );
     sess.send("/exit\r").expect("send exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(common::screen_contents);
@@ -208,17 +212,19 @@ fn write_auth_profile(env: &TestEnv, profile: &str) {
 /// Wait for the REPL to be ready for input again, then exit and assert a clean
 /// shutdown.
 ///
-/// The `expect("❯")` is the load-bearing half. A slash command's output can
+/// The readiness wait is the load-bearing half. A slash command's output can
 /// match while the REPL is still finishing the command, and keys sent into that
 /// window are not read as a submitted line — the session then never exits, and
 /// the failure surfaces as a timeout on the exit rather than on the command
-/// that caused it. The exit then gets its own budget, because teardown is a
+/// that caused it. The prompt glyph cannot stand in for readiness: it is
+/// permanent chrome. The exit then gets its own budget, because teardown is a
 /// different cost from the command under test.
 fn exit_cleanly(sess: &mut pty_expect::PtySession) {
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("REPL should return to the prompt: {e}\nPTY screen:\n{screen}");
-    });
+    common::expect_input_line_cleared(
+        sess,
+        common::at_least(Duration::from_secs(20)),
+        "REPL should return to the prompt",
+    );
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {

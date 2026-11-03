@@ -353,7 +353,7 @@ fn repl_cron_slash_add_and_list() {
     s.send("/cron add --every 3600 --prompt \"repl scheduled task\" --name viaslash\r")
         .expect("send /cron add");
     s.expect("created").expect("cron created via /cron");
-    s.expect("❯").expect("prompt after add");
+    common::expect_input_line_cleared(&s, common::DEFAULT_TIMEOUT, "prompt after add");
     s.send("/exit\r").expect("send /exit");
     drop(s);
     // The store proves the full slash path end-to-end: parse+dispatch reached

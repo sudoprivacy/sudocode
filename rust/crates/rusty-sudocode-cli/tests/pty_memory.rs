@@ -409,7 +409,12 @@ fn memory_tab_completion() {
 
     // After Tab, the line should complete to `/memory`.
     // Then press Enter to execute.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/memory",
+        common::at_least(Duration::from_secs(10)),
+        "Tab should complete /mem to /memory",
+    );
     sess.send("\r").expect("send Enter");
 
     // `/memory` opens the resolved instruction file in $EDITOR (set to `true`,
@@ -428,7 +433,11 @@ fn memory_tab_completion() {
     }
 
     // Wait for prompt, then exit.
-    sess.expect("❯").expect("prompt after /memory");
+    common::expect_input_line_cleared(
+        &sess,
+        common::at_least(Duration::from_secs(10)),
+        "prompt after /memory",
+    );
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(common::screen_contents);
@@ -543,7 +552,11 @@ fn memory_write_read_forget_workflow() {
     if matched.to_lowercase().contains("select memory file") {
         sess.send("\r").expect("accept memory-file selection");
     }
-    sess.expect("❯").expect("prompt after /memory");
+    common::expect_input_line_cleared(
+        &sess,
+        common::at_least(Duration::from_mins(1)),
+        "prompt after /memory",
+    );
 
     // ── Step 3: Forget memory ────────────────────────────────────────
     let marker = common::turn_status_marker(&sess);

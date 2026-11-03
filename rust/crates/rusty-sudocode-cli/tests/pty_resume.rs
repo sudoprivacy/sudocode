@@ -190,12 +190,13 @@ fn resume_no_args_resumes_latest() {
         &[("EDITOR", "true")],
     );
     sess2.set_default_timeout(common::at_least(Duration::from_secs(10)));
-    sess2.expect("❯").unwrap_or_else(|e| {
-        let screen = sess2.render(common::screen_contents);
-        panic!(
-            "bare --resume should resume latest (enter REPL), not list: {e}\nPTY screen:\n{screen}"
-        );
-    });
+    // A session list would also carry `❯` as its row selector; an empty,
+    // settled input line is what proves the REPL itself is ready.
+    common::expect_input_line_cleared(
+        &sess2,
+        common::at_least(Duration::from_secs(10)),
+        "bare --resume should resume latest (enter REPL), not list",
+    );
     sess2.send("/exit\r").expect("send exit");
     let exit2 = sess2.expect_eof().expect("clean exit");
     assert_eq!(exit2, 0);

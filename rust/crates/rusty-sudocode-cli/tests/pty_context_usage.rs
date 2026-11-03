@@ -43,7 +43,7 @@ fn show_full_context(sess: &mut pty_expect::PtySession) {
 }
 
 fn exit_repl(sess: &mut pty_expect::PtySession) {
-    sess.expect("❯").expect("prompt before exit");
+    common::expect_input_line_cleared(sess, common::DEFAULT_TIMEOUT, "prompt before exit");
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
     assert_eq!(sess.expect_eof().expect("REPL exits after /context"), 0);
@@ -85,7 +85,7 @@ fn context_renders_grid_and_legend_on_fresh_session() {
         .expect("expand hint on the compact form");
 
     // No turn yet, so nothing is in the transcript.
-    sess.expect("❯").expect("prompt after report");
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after report");
     let screen = screen_tail(&sess, 4000);
     eprintln!("--- /context screen ---\n{screen}\n---");
     assert!(
@@ -123,7 +123,7 @@ fn context_all_lists_tools_and_agent_types() {
         .expect("built-in agent type listed with its source");
 
     // Let the report finish drawing before reading the screen.
-    sess.expect("❯").expect("prompt after report");
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after report");
     let screen = screen_tail(&sess, 6000);
     assert!(
         !screen.contains("/context all to expand"),
@@ -201,7 +201,7 @@ fn context_lists_workspace_instruction_files_as_memory() {
             screen_tail(&sess, 10000)
         );
     });
-    sess.expect("❯").expect("prompt after compact report");
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after compact report");
 
     sess.send("/context all\r").expect("send /context all");
     // ConPTY may insert cursor/line-wrap sequences inside the long absolute

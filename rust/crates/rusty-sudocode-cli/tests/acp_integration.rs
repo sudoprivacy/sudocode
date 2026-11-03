@@ -3759,14 +3759,14 @@ fn dump_subagent_events(label: &str, notifs: &[Value]) {
     }
 }
 
-/// Without the opt-in, the wire is what it was before sub-agent events
-/// existed. The fixtures were captured from the pre-contract binary
-/// (`origin/main` e3000e02) over these same scenarios and normalized the same
-/// way: workspace path, version, the returned session ID, generated ids and
+/// Without the opt-in, no sub-agent event metadata is emitted. The fixtures
+/// began with the pre-contract binary (`origin/main` e3000e02) and retain
+/// reviewed off-path API additions, including successfully saved transcript
+/// paths in synchronous Agent manifests. Normalization covers the workspace
+/// path, version, the returned session ID, generated ids and
 /// timestamps (runs of ten or more digits), the palette colour hashed from an
-/// agent id, and the size
-/// estimate that depends on path lengths. Background children are given time
-/// to finish so a late update would be caught too.
+/// agent id, and the size estimate that depends on path lengths. Background
+/// children are given time to finish so a late update would be caught too.
 /// Independent terminal tool updates may arrive in completion order; only
 /// contiguous runs of those updates are reordered for the comparison.
 ///

@@ -53,7 +53,11 @@ if [ -z "$BIN" ]; then
   # `--features daemon,driver-ai`: the bin is behind it so the workspace's own test and
   # clippy jobs do not compile a raft + tonic tree on three platforms (and do not
   # need `protoc`, which the macOS runners have not got).
-  cargo_in_workspace build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
+  COHOST_BUILD=(cargo_in_workspace)
+  if [ -n "${NEXUS_A2A_COHOST_CARGO_CONFIG:-}" ]; then
+    COHOST_BUILD+=(--config "$NEXUS_A2A_COHOST_CARGO_CONFIG")
+  fi
+  "${COHOST_BUILD[@]}" build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
   BIN="$(cargo_in_workspace metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/nexusd-cohost"
   [ -x "$BIN" ] || BIN="$BIN.exe"
@@ -165,33 +169,72 @@ echo "== 3b. stop, mint the client bundle, restart =="
 authon_stop
 CLIENT_ID="live-probe"
 [ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ] || CLIENT_ID="$OPERATOR"
-CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
-# Recovery also exercises automatic replies, which address the authenticated
-# sender. Give that workflow the operator's own credential.
+CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+# Recovery reads the co-host's `send` reply, which is addressed to the operator.
+# Give that workflow the operator's own credential.
 RESUME_CLIENT_BUNDLE="$(authon_mint "$OPERATOR")"
+# The front door: a plain agent cert whose whole job is minting the session
+# credential below. It never drives the agent control plane itself.
+FRONTDOOR_ID="cohost-front-door"
+FRONTDOOR_BUNDLE="$(authon_mint "$FRONTDOOR_ID")"
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
-ready=
-for i in $(seq 1 30); do
-  if NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-       "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>/dev/null | grep -q "1 passed"; then
-    echo "   writable after ~$((i * 4))s"
-    ready=1
-    break
+wait_writable() {
+  local i
+  for i in $(seq 1 30); do
+    if NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+         "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>/dev/null | grep -q "1 passed"; then
+      echo "   writable after ~$((i * 4))s"
+      return 0
+    fi
+    sleep 4
+  done
+  echo "!! the co-host daemon never became writable" >&2
+  tail -40 "$WORK_DIR/daemon.log" >&2
+  return 1
+}
+
+provision_model() {
+  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+    NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+    NEXUS_A2A_MODEL_URL="$NEXUS_A2A_MODEL_URL" \
+    NEXUS_A2A_MODEL_ZONE="model" \
+    NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
+    "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
+}
+
+# v0.8.5's control plane takes `start_session_v1` from a session credential
+# only, and the front-door shape is how one is legitimately obtained: the node
+# cert that administers the allow-list is the daemon's own, sitting in the
+# data dir this harness owns; the front door then mints a per-session identity
+# bound to the operator. See lib.sh's session-credential block for why the
+# Rust tests cannot link this surface themselves.
+echo "== 3d. allow the front door, mint the session credential =="
+session_mint_tools_init
+# The gRPC plane binds after the zone topology the wait above keyed on, so the
+# first dial can race the listener. Retry until it answers rather than fail a
+# run on a startup ordering that says nothing about the code under test.
+allow_ok=
+for _ in $(seq 1 30); do
+  if allow_session_minter "$ENDPOINT" "$AUTHON_DATA_DIR/data" "$FRONTDOOR_ID"; then
+    allow_ok=1; break
   fi
-  sleep 4
+  sleep 2
 done
-[ -n "$ready" ] || { echo "!! the co-host daemon never became writable" >&2; \
-  tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+[ -n "$allow_ok" ] || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+SESSION_BUNDLE="$(mint_session_bundle "$ENDPOINT" "$(shell_path "$FRONTDOOR_BUNDLE")" \
+  "$OPERATOR" "$WORK_DIR/session-bundle")" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+SESSION_RESUME_BUNDLE="$(mint_session_bundle "$ENDPOINT" "$(shell_path "$FRONTDOOR_BUNDLE")" \
+  "$OPERATOR" "$WORK_DIR/session-resume-bundle")" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+
+wait_writable
 
 echo "== 3c. provision the model mount =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
-  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
-  NEXUS_A2A_MODEL_URL="$NEXUS_A2A_MODEL_URL" \
-  NEXUS_A2A_MODEL_ZONE="model" \
-  NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
-  "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
+provision_model
 
 echo "== durable reader receipts through native Raft =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
@@ -209,7 +252,7 @@ echo "   both sides filed"
 
 if [ "${NEXUS_A2A_MODEL_LIVE:-0}" = 1 ]; then
   echo "== 5. real-model child and two-turn VFS workflow =="
-  if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
     NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
     NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
     NEXUS_A2A_TEST_MODEL="$MODEL" \
@@ -241,14 +284,14 @@ if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE
 fi
 
 echo "== 7. delegate with VFS context and conflicting host instructions =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
   NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
   NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_subagent_context -- --ignored --nocapture
 
 echo "== 8. stop and restore a durable co-host session on a new pid =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RESUME_CLIENT_BUNDLE" \
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_RESUME_BUNDLE" \
   NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_session_resume -- --ignored --nocapture
@@ -258,6 +301,28 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_filesystem_stream_read_and_append_preserve_all_frames -- --ignored --nocapture
 
 echo "== 10. a silent client connection times out and recovers =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
+
+echo "== 11. independent concurrent contexts in one durable SID =="
+authon_stop
+# Enable the experiment only for its stage; earlier recovery stays on defaults.
+SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY=1 authon_boot
+authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
+wait_writable
+provision_model
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_RESUME_BUNDLE" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+  NEXUS_A2A_TEST_MODEL="$MODEL" \
+  "${CARGO_TEST[@]}" live_cohost_shared_sid_concurrent_contexts -- --ignored --exact --nocapture \
+  | tee "$WORK_DIR/shared-sid-test.log"
+grep -F "test result: ok. 1 passed; 0 failed;" "$WORK_DIR/shared-sid-test.log" >/dev/null
+
+echo "== 10. filesystem stream reads preserve every committed frame =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_filesystem_stream_read_and_append_preserve_all_frames -- --ignored --nocapture
+
+echo "== 11. a silent client connection times out and recovers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
 

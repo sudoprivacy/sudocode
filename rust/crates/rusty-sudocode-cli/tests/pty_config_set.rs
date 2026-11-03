@@ -24,7 +24,7 @@ fn config_set_queue_toggles() {
     sess.send("/config set queue off\r")
         .expect("send config set queue off");
     sess.expect("queue: off").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should confirm queue off: {e}\nPTY screen:\n{screen}");
     });
 
@@ -35,13 +35,13 @@ fn config_set_queue_toggles() {
     sess.send("/config set queue on\r")
         .expect("send config set queue on");
     sess.expect("queue: on").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should confirm queue on: {e}\nPTY screen:\n{screen}");
     });
 
     sess.send("/exit\r").expect("send exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);

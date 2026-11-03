@@ -193,14 +193,16 @@ pub fn prepare_image(data: &str, mime: &str, model: &str) -> Result<ContentBlock
 
 /// Resolve explicit CLI image references, including quoted paths containing
 /// spaces. Ordinary @mentions remain text. Called only for user input.
-pub fn prompt_blocks(text: &str, fs: &dyn FsBackend) -> io::Result<Vec<ContentBlock>> {
-    let mut blocks = vec![ContentBlock::Text {
-        text: text.to_owned(),
-    }];
-    let pattern = regex::Regex::new(r#"(?:^|\s)@(?:"([^"]+)"|'([^']+)'|([^\s]+))"#)
-        .expect("constant image reference regex");
+pub fn prompt_blocks(text: impl Into<String>, fs: &dyn FsBackend) -> io::Result<Vec<ContentBlock>> {
+    static REFERENCES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = REFERENCES.get_or_init(|| {
+        regex::Regex::new(r#"(?:^|\s)@(?:"([^"]+)"|'([^']+)'|([^\s]+))"#)
+            .expect("constant image reference regex")
+    });
+    let text = text.into();
+    let mut images = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for capture in pattern.captures_iter(text) {
+    for capture in pattern.captures_iter(&text) {
         let path = capture
             .get(1)
             .or_else(|| capture.get(2))
@@ -211,10 +213,13 @@ pub fn prompt_blocks(text: &str, fs: &dyn FsBackend) -> io::Result<Vec<ContentBl
             continue;
         }
         let image = read_image(fs, path)?;
-        blocks.push(ContentBlock::Image {
+        images.push(ContentBlock::Image {
             data: image.data,
             mime_type: image.mime_type,
         });
     }
+    let mut blocks = Vec::with_capacity(1 + images.len());
+    blocks.push(ContentBlock::Text { text });
+    blocks.extend(images);
     Ok(blocks)
 }

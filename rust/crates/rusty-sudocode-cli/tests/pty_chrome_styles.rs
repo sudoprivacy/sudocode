@@ -12,6 +12,32 @@ use unicode_width::UnicodeWidthChar;
 
 // Lowest matching row: a todo/queued label can also occur in scrollback above
 // the live chrome. Coordinates use terminal columns, not UTF-8 byte offsets.
+// Fixed terminal-cell expectations, independent of the product resolver.
+const DARK_AMBER: &str = "Rgb(245, 158, 11)";
+const LIGHT_AMBER: &str = "Rgb(148, 93, 5)";
+const DARK_SECONDARY: &str = "Rgb(158, 158, 158)";
+const LIGHT_SECONDARY: &str = "Rgb(118, 118, 118)";
+
+const CHOICE_PALETTES: [(&str, bool, &str, &str, &str, &str); 3] = [
+    (
+        "15;0",
+        false,
+        "Idx(255)",
+        "Idx(236)",
+        DARK_AMBER,
+        DARK_SECONDARY,
+    ),
+    (
+        "0;15",
+        false,
+        "Idx(234)",
+        "Idx(255)",
+        LIGHT_AMBER,
+        LIGHT_SECONDARY,
+    ),
+    ("15;0", true, "Default", "Default", "Default", "Default"),
+];
+
 fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String, bool, bool)> {
     sess.render(|screen| {
         // Search logical text across wrapping, but retain physical coordinates
@@ -95,6 +121,42 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     }
 }
 
+fn expect_frame_caps(sess: &PtySession, color: &str) {
+    // Bold corners shift inside their cells in Menlo even though plain text
+    // and column positions match. This contract also covers live overlays.
+    if let Some(root) = std::env::var_os("SCODE_FRAME_SNAPSHOT_DIR") {
+        common::expect_screen(
+            sess,
+            |screen| screen.contains("╭─") && screen.contains("╰─"),
+            common::DEFAULT_TIMEOUT,
+            "complete frame before raster capture",
+        );
+        let snapshot = sess.render(|screen| {
+            let (rows, cols) = screen.raw().size();
+            serde_json::json!({
+                "rows": rows, "cols": cols,
+                "ansi": String::from_utf8(screen.raw().contents_formatted()).unwrap(),
+            })
+        });
+        let thread = std::thread::current();
+        let name = format!("{}-{color}", thread.name().unwrap_or("frame"));
+        let name: String = name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect();
+        let root = std::path::PathBuf::from(root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(format!("{name}.json")),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+    }
+    for cap in ["╭─", "╰─"] {
+        expect_style(sess, cap, (color, false, false));
+    }
+}
+
 fn settle_chrome(sess: &PtySession) {
     // A styled label (or the prompt byte itself) can arrive before the frame
     // finishes. Resizing in that window reflows the startup banner while the
@@ -143,8 +205,8 @@ fn exit(sess: &mut PtySession) {
 #[test]
 fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
     for (background, no_color, muted, border) in [
-        ("15;0", false, "Idx(247)", "Idx(248)"),
-        ("0;15", false, "Idx(241)", "Idx(241)"),
+        ("15;0", false, DARK_SECONDARY, DARK_SECONDARY),
+        ("0;15", false, LIGHT_SECONDARY, LIGHT_SECONDARY),
         ("15;0", true, "Default", "Default"),
     ] {
         let env = TestEnv::new("chrome-semantic-roles");
@@ -240,9 +302,9 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             (
                 "InheritedTitle",
                 if background == "0;15" {
-                    "Idx(94)"
+                    LIGHT_AMBER
                 } else {
-                    "Idx(214)"
+                    DARK_AMBER
                 },
                 false,
             ),
@@ -269,13 +331,7 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
 
 #[test]
 fn question_focus_surface_moves_without_recoloring_ordinary_text() {
-    for (background, no_color, selected_fg, selected_bg, primary, muted) in [
-        (
-            "15;0", false, "Idx(255)", "Idx(236)", "Idx(214)", "Idx(247)",
-        ),
-        ("0;15", false, "Idx(234)", "Idx(255)", "Idx(94)", "Idx(241)"),
-        ("15;0", true, "Default", "Default", "Default", "Default"),
-    ] {
+    for (background, no_color, selected_fg, selected_bg, primary, muted) in CHOICE_PALETTES {
         for option_count in [2, 10] {
             let env = TestEnv::new("question-focus-surface");
             let mut sess = env.spawn_with_env(
@@ -290,16 +346,7 @@ fn question_focus_surface_moves_without_recoloring_ordinary_text() {
             );
             sess.resize(40, 600).unwrap();
             settle_chrome(&sess);
-            let mut options = vec![
-                "FirstSurfaceChoice".to_string(),
-                "SecondSurfaceChoice".to_string(),
-            ];
-            options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
-            let input = serde_json::json!({
-                "title": "SurfaceQuestionTitle",
-                "question": "Choose a readable surface",
-                "options": options,
-            });
+            let input = surface_question_input(option_count);
             let calls = serde_json::json!([{
                 "id": "surface_question", "name": "AskUserQuestion", "input": input,
             }]);
@@ -404,7 +451,7 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect(r"\x1b\[9mFinished parser")
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
-    expect_style(&sess, "✓", ("Idx(10)", false, false));
+    expect_style(&sess, "✓", ("Idx(2)", false, false));
     expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
     expect_style(&sess, "Checking styles", ("Default", true, false));
     expect_style(&sess, "Finished parser", ("Default", false, true));
@@ -449,7 +496,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     // Neutral quantities keep terminal foreground and weight in every color
     // mode, including NO_COLOR, independent of icon/status semantic colors.
     expect_style(&sess, "1 todos", ("Default", true, false));
-    // Both a persistent info label and the active status slot use the role.
+    // Information icons keep their semantic green; activity uses neutral text.
     expect_style(&sess, "■", (green, false, false));
     let marker = common::turn_status_marker(&sess);
     let prompt = env.prompt(
@@ -462,13 +509,13 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_screen(
         &sess,
         |_| {
-            ["Thinking...", "Reasoning..."].iter().any(|label| {
+            ["Working...", "Thinking..."].iter().any(|label| {
                 attributes(&sess, label)
-                    .is_some_and(|(color, bold, dim)| color == green && !bold && !dim)
+                    .is_some_and(|(color, bold, dim)| color == "Default" && !bold && !dim)
             })
         },
         common::LIVE_TURN_BUDGET,
-        "active status uses theme info green",
+        "active status uses terminal foreground independently of info green",
     );
     sess.send("info-draft").unwrap();
     common::expect_input_line(
@@ -495,7 +542,8 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
-    expect_style(&sess, "╰─", (green, !no_color, false));
+    expect_frame_caps(&sess, green);
+    expect_style(&sess, "│", (green, false, false));
     exit(&mut sess);
 }
 
@@ -542,25 +590,25 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     let border = if no_color {
         "Default"
     } else if light {
-        "Idx(94)"
+        LIGHT_AMBER
     } else {
-        "Idx(214)"
+        DARK_AMBER
     };
     let label = if no_color {
         "Default"
     } else if light {
-        "Idx(241)"
+        LIGHT_SECONDARY
     } else {
-        "Idx(247)"
+        DARK_SECONDARY
     };
-    expect_style(&sess, "╭─", (border, !no_color, false));
+    expect_frame_caps(&sess, border);
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
-    sess.send("\r").expect("queue draft");
+    sess.send("\t").expect("queue draft");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
-    expect_style(&sess, "╭─", (border, !no_color, false));
+    expect_frame_caps(&sess, border);
     sess.send("\x1b[A").expect("recall queued message");
     common::expect_input_line(
         &sess,
@@ -578,7 +626,7 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "recall removes the queue preview",
     );
-    sess.send("\r").expect("requeue the recalled message");
+    sess.send("\t").expect("requeue the recalled message");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     sess.resize(30, 78).expect("resize during tool");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
@@ -721,7 +769,7 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
 
 #[test]
 fn todo_summary_scopes_every_count_and_label_in_both_themes() {
-    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(241)")] {
+    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(243)")] {
         for statuses in [
             vec!["completed"],
             vec!["completed", "in_progress", "pending"],
@@ -800,15 +848,15 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
 }
 
 #[test]
-fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
+fn resumed_status_scopes_semantic_accents_and_cache_colors() {
     use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
     // No API needed: resume real persisted usage through the production REPL.
     // Exercise both palettes and the warning/error -> muted transition as well
     // as the healthy-cache -> muted transition.
     for (background, muted, hit_color, error_color) in [
-        ("15;0", "Idx(247)", "Idx(220)", "Idx(9)"),
-        ("0;15", "Idx(241)", "Idx(130)", "Idx(1)"),
+        ("15;0", "Idx(247)", "Idx(3)", "Idx(1)"),
+        ("0;15", "Idx(243)", "Default", "Idx(1)"),
     ] {
         for (read, creation, hit, write) in
             [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]
@@ -855,19 +903,24 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             sess.resize(40, 240).unwrap();
             for width in [240, 100] {
                 resize_idle_chrome(&mut sess, 40, width);
-                for label in [
-                    "turn 1",
-                    "ctx ",
-                    "tokens · +1m14s Σ1m14s · ctx 10.0k",
-                    "chrome-style-branch",
-                ] {
+                for label in ["turn 1", "+1m14s Σ1m14s"] {
                     expect_style(&sess, label, (muted, false, false));
                 }
-                let healthy_color = if background == "15;0" {
-                    "Idx(10)"
-                } else {
-                    "Idx(2)"
-                };
+                let model_color = attributes(&sess, "[claude").unwrap().0;
+                let usage_color = attributes(&sess, "ctx ").unwrap().0;
+                let branch_color = attributes(&sess, "chrome-style-branch").unwrap().0;
+                for color in [&model_color, &usage_color, &branch_color] {
+                    assert_ne!(
+                        color, muted,
+                        "metadata accents stay distinct from secondary labels"
+                    );
+                }
+                assert_ne!(
+                    model_color, branch_color,
+                    "model and branch have distinct roles"
+                );
+                expect_style(&sess, "tokens", (&usage_color, false, false));
+                let healthy_color = "Idx(2)";
                 expect_style(
                     &sess,
                     hit,
@@ -894,4 +947,17 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             exit(&mut sess);
         }
     }
+}
+
+fn surface_question_input(option_count: usize) -> serde_json::Value {
+    let mut options = vec![
+        "FirstSurfaceChoice".to_string(),
+        "SecondSurfaceChoice".to_string(),
+    ];
+    options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
+    serde_json::json!({
+        "title": "SurfaceQuestionTitle",
+        "question": "Choose a readable surface",
+        "options": options,
+    })
 }

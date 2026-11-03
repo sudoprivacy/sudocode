@@ -19,6 +19,19 @@ use serde_json::Value;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn record_tool_call(session: &mut Session, id: &str, name: &str) {
+    session
+        .push_message(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: "{}".into(),
+                thought_signature: None,
+            },
+        ]))
+        .unwrap();
+}
+
 #[test]
 fn resumed_undo_restores_file_modified_by_edit_file_tool() {
     // given — workspace with the post-edit content on disk and a session
@@ -47,6 +60,7 @@ fn resumed_undo_restores_file_modified_by_edit_file_tool() {
         .expect("user prompt persisted");
     session
         .push_message(ConversationMessage {
+            history: None,
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 id: "tool-1".into(),
@@ -61,6 +75,7 @@ fn resumed_undo_restores_file_modified_by_edit_file_tool() {
         .expect("tool_use persisted");
     session
         .push_message(ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-1".into(),
@@ -121,8 +136,10 @@ fn resumed_undo_deletes_file_when_write_file_originally_created_it() {
 
     let session_path = temp_dir.join("session.jsonl");
     let mut session = workspace_session(&temp_dir).with_persistence_path(&session_path);
+    record_tool_call(&mut session, "tool-create-1", "write_file");
     session
         .push_message(ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-create-1".into(),
@@ -222,8 +239,10 @@ fn resumed_undo_survives_hook_feedback_suffix_in_tool_result() {
 
     let session_path = temp_dir.join("session.jsonl");
     let mut session = workspace_session(&temp_dir).with_persistence_path(&session_path);
+    record_tool_call(&mut session, "tool-hook-1", "edit_file");
     session
         .push_message(ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-hook-1".into(),
@@ -278,8 +297,10 @@ fn resumed_undo_emits_structured_json_when_requested() {
 
     let session_path = temp_dir.join("session.jsonl");
     let mut session = workspace_session(&temp_dir).with_persistence_path(&session_path);
+    record_tool_call(&mut session, "tool-json-1", "edit_file");
     session
         .push_message(ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-json-1".into(),

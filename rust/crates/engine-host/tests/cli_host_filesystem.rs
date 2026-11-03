@@ -11,6 +11,8 @@
 
 use std::path::Path;
 
+mod common;
+
 use engine_host::HostContext;
 
 /// One temp root per test, under a config home that is not the developer's.
@@ -232,6 +234,7 @@ fn every_method_takes_the_host_spelling() {
         fs.read_to_string(&at("atomic.txt")).expect("read atomic"),
         "atomic\n"
     );
+    let _snapshot_reader = assert_reader_snapshot(fs.as_ref(), &at("atomic.txt"));
 
     // Directories, renames, removals.
     fs.create_dir_all(&at("sub/deeper"))
@@ -300,6 +303,23 @@ fn every_method_takes_the_host_spelling() {
     );
 }
 
+fn assert_reader_snapshot(fs: &dyn runtime::FsBackend, path: &str) -> std::fs::File {
+    let mut opened = std::fs::File::open(path).expect("open committed snapshot");
+    fs.write_atomic(path, b"replacement publication\n")
+        .expect("replace atomic");
+    let mut previous = String::new();
+    std::io::Read::read_to_string(&mut opened, &mut previous).expect("read previous snapshot");
+    assert_eq!(
+        previous, "atomic\n",
+        "publication must not truncate an existing reader"
+    );
+    assert_eq!(
+        fs.read_to_string(path).expect("read replacement"),
+        "replacement publication\n"
+    );
+    opened
+}
+
 /// Every stored concern follows the BACKEND, for both hosts.
 ///
 /// `agent_store_dir` derived a host path from the process directory, so every
@@ -314,11 +334,9 @@ fn a_backend_roots_every_concern_it_imposes_a_namespace_for() {
     use std::sync::Arc;
 
     let kernel = Arc::new(kernel::kernel::Kernel::new());
-    let cohost: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let cohost: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "owner",
-        "root",
-        "scode-agent",
+        &common::make_desc("7", "scode-agent", "unused"),
         "/proc/7/workspace".to_string(),
     ));
     // Every concern the backend roots, asserted where the one match answers

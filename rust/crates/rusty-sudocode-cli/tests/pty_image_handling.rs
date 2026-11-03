@@ -7,105 +7,13 @@
 //! `-- --include-ignored` to exercise the local browser as well.
 
 mod common;
+#[path = "support/image_fixture.rs"]
+mod image_fixture;
 
 use std::fs;
 
 use common::TestEnv;
-
-/// Minimal valid PNG: 128×128, yellow background, red rectangle,
-/// cyan circle. Same fixture used in the sudowork e2e yaml
-/// (`sudowork/tests/e2e/fixtures/img-small-3shapes.png`). Written
-/// inline so this test never depends on a sibling repo.
-fn write_fixture_png(path: &std::path::Path) {
-    use std::io::Write;
-
-    let (w, h) = (128u32, 128u32);
-    let mut raw = Vec::with_capacity((w * h * 3 + h) as usize);
-    for y in 0..h {
-        raw.push(0u8); // filter byte
-        for x in 0..w {
-            let (r, g, b) = if (20..=60).contains(&x) && (40..=90).contains(&y) {
-                (210u8, 20u8, 20u8) // red rect
-            } else if {
-                let dx = x as i32 - 90;
-                let dy = y as i32 - 64;
-                dx * dx + dy * dy <= 25 * 25
-            } {
-                (30u8, 200u8, 240u8) // cyan circle
-            } else {
-                (240u8, 224u8, 64u8) // yellow bg
-            };
-            raw.push(r);
-            raw.push(g);
-            raw.push(b);
-        }
-    }
-    let compressed = deflate_zlib(&raw);
-
-    let mut png = Vec::new();
-    png.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    write_png_chunk(&mut png, b"IHDR", &{
-        let mut d = Vec::new();
-        d.extend_from_slice(&w.to_be_bytes());
-        d.extend_from_slice(&h.to_be_bytes());
-        d.push(8); // 8-bit depth
-        d.push(2); // color type 2 = RGB
-        d.push(0);
-        d.push(0);
-        d.push(0);
-        d
-    });
-    write_png_chunk(&mut png, b"IDAT", &compressed);
-    write_png_chunk(&mut png, b"IEND", &[]);
-
-    let mut f = fs::File::create(path).expect("create fixture png");
-    f.write_all(&png).expect("write fixture png");
-}
-
-fn write_png_chunk(png: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
-    let len = data.len() as u32;
-    png.extend_from_slice(&len.to_be_bytes());
-    let crc_start = png.len();
-    png.extend_from_slice(tag);
-    png.extend_from_slice(data);
-    let crc = crc32(&png[crc_start..]);
-    png.extend_from_slice(&crc.to_be_bytes());
-}
-
-fn deflate_zlib(raw: &[u8]) -> Vec<u8> {
-    // Use flate2 which is already in scode's build tree.
-    use flate2::{write::ZlibEncoder, Compression};
-    use std::io::Write;
-    let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
-    e.write_all(raw).expect("deflate");
-    e.finish().expect("deflate finish")
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    // Inline table-driven CRC-32 (PNG polynomial 0xedb88320).
-    // Avoids adding a crc32 dep to the test-only tree.
-    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        let mut t = [0u32; 256];
-        for i in 0..256u32 {
-            let mut c = i;
-            for _ in 0..8 {
-                c = if c & 1 != 0 {
-                    0xedb88320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
-            }
-            t[i as usize] = c;
-        }
-        t
-    });
-    let mut c = 0xffffffffu32;
-    for &b in data {
-        c = table[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
-    }
-    c ^ 0xffffffff
-}
+use image_fixture::{mark_model_text_only, write_fixture_png};
 
 // ──────────────────────────────────────────────────────────────────────
 // 1. CLI @image reference — full round trip
@@ -154,7 +62,7 @@ fn cli_at_image_reference_completes_turn() {
     // content pattern is also satisfied by the echo of the prompt, which names
     // the image and its shapes, so it can return while the turn still runs;
     // the exit is what actually proves the turn finished.)
-    sess.set_default_timeout(std::time::Duration::from_secs(180));
+    sess.set_default_timeout(std::time::Duration::from_mins(3));
     sess.expect("(?i)(answer|image|shape|color|red|blue|yellow|circle|rectangle|square)")
         .expect("scode should produce some assistant content on stdout");
     let exit = sess.expect_eof().expect("scode should exit");
@@ -217,7 +125,7 @@ fn read_image_and_text_batch_sends_real_pixels_and_survives_resume() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -254,7 +162,7 @@ fn read_image_and_text_batch_sends_real_pixels_and_survives_resume() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let body = env.captured_message_bodies().last().unwrap().clone();
@@ -279,7 +187,7 @@ fn corrupt_image_is_a_tool_error_and_other_batch_results_survive() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -312,7 +220,7 @@ fn disabled_read_cannot_attach_pixels() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -339,7 +247,7 @@ fn quoted_cli_image_path_is_attached_once() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -359,16 +267,200 @@ fn missing_cli_image_fails_before_model_request() {
     }
 }
 
+struct ReleaseImageTool(std::path::PathBuf);
+
+impl Drop for ReleaseImageTool {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "release");
+    }
+}
+
+fn start_image_tool(env: &TestEnv) -> pty_expect::PtySession {
+    use serde_json::json;
+
+    fs::write(
+        env.workspace_root().join("image-wait.sh"),
+        "printf started > image-tool-started; while test ! -f image-tool-release; do sleep 0.1; done; printf 'IMAGE_TOOL_RESULT\\n'",
+    )
+    .unwrap();
+    let mut session = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "Bash",
+        ],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    session.resize(60, 160).unwrap();
+    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "image test input");
+    let prompt = if env.is_mock() {
+        format!(
+            "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
+            json!([{"id":"image-held-tool", "name":"Bash", "input":{"command":"sh image-wait.sh", "timeout":common::LIVE_TURN_BUDGET.as_millis()*3}}]),
+        )
+    } else {
+        "Run sh image-wait.sh exactly once in the foreground. Do not create image-tool-release. When it completes, follow the latest user message without using more tools.".into()
+    };
+    session
+        .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+        .unwrap();
+    common::expect_screen(
+        &session,
+        |view| !common::input_line_of(view).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "initial image test request",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |_| env.workspace_root().join("image-tool-started").exists(),
+        common::LIVE_TURN_BUDGET,
+        "image test tool is running",
+    );
+    session
+}
+
+fn steering_image_reference(queue_before_flush: bool) {
+    use base64::Engine as _;
+
+    let env = TestEnv::new(if queue_before_flush {
+        "image-queue-flush"
+    } else {
+        "image-enter-steer"
+    });
+    let image = env.workspace_root().join("image fixture.png");
+    write_fixture_png(&image);
+    let expected = base64::engine::general_purpose::STANDARD.encode(fs::read(&image).unwrap());
+    let release = env.workspace_root().join("image-tool-release");
+    let _release = ReleaseImageTool(release.clone());
+    let mut session = start_image_tool(&env);
+    let input =
+        "Describe this image in one short English sentence: @\"image fixture.png\" @\"image fixture.png\"";
+    session.send(&format!("\x1b[200~{input}\x1b[201~")).unwrap();
+    common::expect_input_line(
+        &session,
+        input,
+        common::DEFAULT_TIMEOUT,
+        "image steering draft",
+    );
+    session
+        .send(if queue_before_flush { "\t" } else { "\r" })
+        .unwrap();
+    if queue_before_flush {
+        common::expect_screen(
+            &session,
+            |view| view.contains("queued:"),
+            common::DEFAULT_TIMEOUT,
+            "image explicitly queued",
+        );
+        session.send("\x1b").unwrap();
+    }
+    common::expect_screen(
+        &session,
+        |view| view.contains("steering:"),
+        common::DEFAULT_TIMEOUT,
+        "image steered during the original tool",
+    );
+    fs::write(&release, "release").unwrap();
+    common::expect_screen(
+        &session,
+        |view| {
+            view.contains("IMAGE_TOOL_RESULT")
+                && view.contains("ctx ")
+                && !view.contains("steering:")
+        },
+        common::LIVE_TURN_BUDGET,
+        "image follow-up completes without cancelling the original tool",
+    );
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 2);
+        let content = captured_blocks(&env).pop().unwrap();
+        let images: Vec<_> = content
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] == "image")
+            .collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "steering must attach native pixels once: {content}"
+        );
+        assert_eq!(images[0]["source"]["data"], expected);
+    } else {
+        common::expect_screen(
+            &session,
+            |view| {
+                view.split(|c: char| !c.is_ascii_alphabetic()).any(|word| {
+                    ["red", "cyan", "rectangle", "circle", "yellow"]
+                        .iter()
+                        .any(|expected| word.eq_ignore_ascii_case(expected))
+                })
+            },
+            common::LIVE_TURN_BUDGET,
+            "the live model describes the actual pixels without Read",
+        );
+    }
+    session.render(|screen| assert!(!screen.contents().contains("Cancelled")));
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+#[test]
+fn steering_image_on_enter_preserves_native_pixels() {
+    steering_image_reference(false);
+}
+
+#[test]
+fn steering_image_on_queue_flush_preserves_native_pixels() {
+    steering_image_reference(true);
+}
+
+#[test]
+fn steering_image_rejects_text_only_models_before_another_provider_request() {
+    let env = TestEnv::new("steering-image-text-only");
+    if !env.is_mock() {
+        return; // The capability override belongs to the deterministic provider fixture.
+    }
+    mark_model_text_only(&env);
+    write_fixture_png(&env.workspace_root().join("image fixture.png"));
+    let release = env.workspace_root().join("image-tool-release");
+    let _release = ReleaseImageTool(release.clone());
+    let mut session = start_image_tool(&env);
+    let input = "Describe @\"image fixture.png\"";
+    session.send(&format!("\x1b[200~{input}\x1b[201~")).unwrap();
+    common::expect_input_line(
+        &session,
+        input,
+        common::DEFAULT_TIMEOUT,
+        "text-only image draft",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |view| view.contains("steering:"),
+        common::DEFAULT_TIMEOUT,
+        "text-only image is staged",
+    );
+    fs::write(&release, "release").unwrap();
+    common::expect_screen(
+        &session,
+        |view| view.contains("does not support image input"),
+        common::DEFAULT_TIMEOUT,
+        "steering shares initial-input capability rejection",
+    );
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+    assert_eq!(
+        env.captured_message_count(),
+        1,
+        "an unsupported image must not reach the provider"
+    );
+}
+
 #[path = "common/openai_compat_mock.rs"]
 mod image_vlm_mock;
-
-fn mark_model_text_only(env: &TestEnv) {
-    env.set_model_catalog(serde_json::json!({"data": [{
-        "id": "claude-sonnet-4-6", "context_window": 200000,
-        "max_output_tokens": 64000, "vision_supported": false
-    }]}));
-    env.prime_model_catalog();
-}
 
 #[test]
 fn text_only_model_rejects_images_without_calling_configured_vlm() {
@@ -403,7 +495,7 @@ fn text_only_model_rejects_images_without_calling_configured_vlm() {
             sess.expect_eof().unwrap(),
             0,
             "{}",
-            sess.render(|s| s.contents())
+            sess.render(common::screen_contents)
         );
         let requests = captured_blocks(&env);
         let blocks = requests.last().unwrap().as_array().unwrap();
@@ -452,7 +544,7 @@ fn serial_read_attaches_image() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -493,17 +585,17 @@ fn real_browser_screenshot_reaches_model_as_pixels() {
     )).unwrap();
     let prompt = env.prompt("Run bash capture.sh to take a real browser screenshot, then use Read on screen.png to inspect its pixels and describe what you see. Do not inspect capture.sh or page HTML.", "browser_image_roundtrip");
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    sess.set_default_timeout(std::time::Duration::from_secs(120));
+    sess.set_default_timeout(std::time::Duration::from_mins(2));
     assert_eq!(
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     let png = fs::read(env.workspace_root().join("screen.png")).unwrap_or_else(|error| {
         panic!(
             "actual screenshot missing: {error}; PTY: {}",
-            sess.render(|screen| screen.contents())
+            sess.render(common::screen_contents)
         )
     });
     assert!(png.starts_with(b"\x89PNG"));

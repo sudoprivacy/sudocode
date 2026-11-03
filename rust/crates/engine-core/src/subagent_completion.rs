@@ -16,8 +16,14 @@ impl Completions {
                 }
             }
             EngineEvent::ToolResult {
-                id, name, output, ..
-            } => self.0.tool_result(id, name, output),
+                assistant_message_id,
+                id,
+                name,
+                output,
+                ..
+            } => self
+                .0
+                .tool_result(assistant_message_id.as_deref(), id, name, output),
             _ => return Vec::new(),
         }
         self.0.drain()
@@ -27,7 +33,7 @@ impl Completions {
 mod control;
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use engine_events::PromptContext;
 use runtime::subagent_completion::CompletionJournal;
@@ -42,6 +48,12 @@ pub struct CompletionState {
     wake: Arc<tokio::sync::Notify>,
     delivery: Mutex<control::DeliveryState>,
     inner: Mutex<CompletionTurn>,
+    // Error-only state must not reserve the reporter's map/strings in every
+    // healthy session. Keep allocation lazy as well as initialization.
+    persistence_diagnostics: std::sync::OnceLock<Box<telemetry::RetryDiagnostics>>,
+    // Fields drop in declaration order. Keep this last so retirement follows
+    // the journal/storage fields, including a worker's final state owner.
+    pub(crate) lifetime: crate::attachment::CompletionLifetime,
 }
 
 #[derive(Default)]
@@ -117,7 +129,11 @@ impl CompletionState {
     fn retry_locked(&self, turn: &mut CompletionTurn) -> Result<(), String> {
         if let Some(journal) = self.journal() {
             while let Some((id, event)) = turn.terminal_retries.first_key_value() {
-                journal.lifecycle(event)?;
+                if let Err(error) = journal.lifecycle(event) {
+                    self.persistence_diagnostics().failed(id, &error);
+                    return Err(error);
+                }
+                self.persistence_diagnostics().succeeded(id);
                 let id = id.clone();
                 turn.terminal_retries.remove(&id);
             }
@@ -145,16 +161,20 @@ impl CompletionState {
                         if let Err(error) = journal.lifecycle(lifecycle) {
                             let mut terminal = lifecycle.as_ref().clone();
                             terminal.raw_output = None;
-                            turn.terminal_retries
-                                .insert(lifecycle.tool_call_id.clone(), terminal);
-                            eprintln!("[engine-completion] terminal persistence pending: {error}");
+                            let source = lifecycle.source_key();
+                            turn.terminal_retries.insert(source.clone(), terminal);
+                            self.persistence_diagnostics().failed(&source, &error);
                         }
                     }
                     Ok(())
                 }
                 EngineEvent::ToolResult {
-                    id, name, output, ..
-                } => journal.tool_result(id, name, output),
+                    assistant_message_id,
+                    id,
+                    name,
+                    output,
+                    ..
+                } => journal.tool_result(assistant_message_id.as_deref(), id, name, output),
                 _ => Ok(()),
             };
             if let Err(error) = observed {
@@ -208,22 +228,27 @@ impl CompletionState {
 
 /// Serializes completion-affecting events before crossing the renderer seam.
 /// Streaming deltas retain the direct channel path and take no state lock.
+/// The pump owns the route; retained host callbacks cannot keep it alive.
 #[derive(Clone)]
 pub(crate) struct EventSink {
-    tx: std::sync::mpsc::Sender<EngineEvent>,
+    tx: Weak<std::sync::mpsc::Sender<EngineEvent>>,
     order: Arc<Mutex<()>>,
+    state: Arc<Mutex<engine_events::EngineState>>,
     pub(crate) completions: Arc<CompletionState>,
+    pub(crate) inputs: Arc<crate::session_inputs::SessionInputs>,
 }
 
 impl EventSink {
     pub(crate) fn new(
-        tx: std::sync::mpsc::Sender<EngineEvent>,
+        tx: &Arc<std::sync::mpsc::Sender<EngineEvent>>,
         completions: Arc<CompletionState>,
     ) -> Self {
         Self {
-            tx,
+            tx: Arc::downgrade(tx),
             completions,
             order: Arc::default(),
+            state: Arc::new(Mutex::new(engine_events::EngineState::Idle)),
+            inputs: Arc::default(),
         }
     }
 
@@ -231,20 +256,47 @@ impl EventSink {
         &self,
         message: String,
     ) -> Result<(), std::sync::mpsc::SendError<()>> {
-        self.tx
-            .send(EngineEvent::PromptRejected { message })
-            .map_err(|_| std::sync::mpsc::SendError(()))?;
-        self.tx
-            .send(EngineEvent::State(engine_events::EngineState::Idle))
-            .map_err(|_| std::sync::mpsc::SendError(()))
+        self.send(EngineEvent::PromptRejected { message })?;
+        self.send(EngineEvent::State(engine_events::EngineState::Idle))
+    }
+
+    pub(crate) fn runtime_status(
+        &self,
+        tasks: &runtime::background_tasks::BackgroundTasks,
+    ) -> engine_events::RuntimeStatus {
+        let foreground = *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        engine_events::RuntimeStatus {
+            foreground,
+            background: tasks.summary(),
+        }
     }
 
     pub(crate) fn send(&self, event: EngineEvent) -> Result<(), std::sync::mpsc::SendError<()>> {
+        let tx = self.route()?;
+        if let EngineEvent::State(state) = event {
+            // Keep query observations in the same order as lifecycle events.
+            // Provider output and elapsed time never mutate this projection.
+            let mut current = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *current = state;
+            return tx
+                .send(EngineEvent::State(state))
+                .map_err(|_| std::sync::mpsc::SendError(()));
+        }
         if matches!(
             event,
             EngineEvent::TurnStarted { .. }
                 | EngineEvent::TurnComplete(_)
                 | EngineEvent::TurnFailed { .. }
+                | EngineEvent::PromptRejected { .. }
+                | EngineEvent::InputCommitted(_)
+                | EngineEvent::InputDeferred(_)
+                | EngineEvent::BackgroundTask(_)
                 | EngineEvent::ToolResult { .. }
         ) || matches!(&event, EngineEvent::Subagent(event) if matches!(event.update, SubagentUpdate::Lifecycle(_)))
         {
@@ -252,16 +304,34 @@ impl EventSink {
                 .order
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for event in self.completions.observe(event) {
-                self.tx
-                    .send(event)
-                    .map_err(|_| std::sync::mpsc::SendError(()))?;
+            let events = if matches!(event, EngineEvent::BackgroundTask(_)) {
+                vec![event]
+            } else {
+                self.completions.observe(event)
+            };
+            for event in events {
+                let input_state = if matches!(event, EngineEvent::BackgroundTask(_))
+                    && self.completions.journal().is_some()
+                {
+                    None
+                } else {
+                    self.inputs.observe(&event)
+                };
+                tx.send(event).map_err(|_| std::sync::mpsc::SendError(()))?;
+                if let Some(state) = input_state {
+                    tx.send(EngineEvent::InputState(state))
+                        .map_err(|_| std::sync::mpsc::SendError(()))?;
+                }
             }
             Ok(())
         } else {
-            self.tx
-                .send(event)
-                .map_err(|_| std::sync::mpsc::SendError(()))
+            tx.send(event).map_err(|_| std::sync::mpsc::SendError(()))
         }
+    }
+
+    fn route(
+        &self,
+    ) -> Result<Arc<std::sync::mpsc::Sender<EngineEvent>>, std::sync::mpsc::SendError<()>> {
+        self.tx.upgrade().ok_or(std::sync::mpsc::SendError(()))
     }
 }

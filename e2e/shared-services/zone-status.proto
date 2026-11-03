@@ -1,0 +1,21 @@
+syntax = "proto3";
+package nexus.grpc.vfs;
+
+// Read-only harness subset of the pinned nexus-vfs zone_runtime.proto, as
+// cluster-info.proto is of transport.proto. Field numbers and enum values
+// match upstream; fields the harness does not read are omitted.
+service ZoneRuntimeService {
+  rpc ZoneStatus(ZoneStatusRequest) returns (ZoneStatusResponse);
+}
+message ZoneStatusRequest { string auth_token = 1; string zone_id = 2; }
+message ZoneStatusResponse {
+  enum Presence {
+    PRESENCE_UNKNOWN = 0;
+    RESIDENT = 1;
+    HOSTED_NOT_RESIDENT = 2;
+    LOCAL_NOT_FOUND = 3;
+    DELETED = 4;
+  }
+  string zone_id = 1;
+  Presence presence = 2;
+}

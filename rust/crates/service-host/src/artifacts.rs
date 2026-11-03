@@ -31,6 +31,14 @@ pub fn root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".nexus-vfs"))
 }
 
+pub(crate) fn owner_root(explicit: Option<&Path>) -> Result<PathBuf> {
+    match explicit {
+        Some(path) if path.is_absolute() => Ok(path.to_path_buf()),
+        Some(_) => Err("Local Box owner root must be absolute".into()),
+        None => root(),
+    }
+}
+
 pub fn version() -> String {
     manifest()
         .expect("valid embedded artifact manifest")
@@ -214,7 +222,7 @@ pub fn install(root: &Path) -> Result<()> {
     let staged_assembly = tempfile::tempdir_in(&runtime_dir)?;
     let staged_root = staged_assembly.path();
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_mins(2))
         .user_agent("scode-service-installer")
         .build()?;
     for (prefix, archive, files) in selected(staged_root)? {
@@ -288,7 +296,10 @@ pub fn install(root: &Path) -> Result<()> {
 }
 
 fn extract_file(archive: &str, bytes: &[u8], name: &str) -> Result<Vec<u8>> {
-    if archive.ends_with(".zip") {
+    if Path::new(archive)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
         for index in 0..archive.len() {
             let mut file = archive.by_index(index)?;

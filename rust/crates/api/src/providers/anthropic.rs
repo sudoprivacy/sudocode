@@ -141,6 +141,57 @@ impl From<OAuthTokenSet> for AuthSource {
     }
 }
 
+/// The prompt-cache TTL a client asks for, shared by every clone of it, the
+/// auth mode's default it started from, and whether a setting pinned it.
+#[derive(Debug, Clone)]
+pub struct CacheTtl {
+    current: Arc<AtomicBool>,
+    default_one_hour: bool,
+    pinned: bool,
+}
+
+impl CacheTtl {
+    #[must_use]
+    pub fn new(one_hour: bool) -> Self {
+        Self {
+            current: Arc::new(AtomicBool::new(one_hour)),
+            default_one_hour: one_hour,
+            pinned: false,
+        }
+    }
+
+    #[must_use]
+    pub fn one_hour(&self) -> bool {
+        self.current.load(Ordering::Acquire)
+    }
+
+    pub fn set_one_hour(&self, one_hour: bool) {
+        self.current.store(one_hour, Ordering::Release);
+    }
+
+    /// What the auth mode picks when no setting overrides it.
+    #[must_use]
+    pub fn default_one_hour(&self) -> bool {
+        self.default_one_hour
+    }
+
+    /// Whether `cache_ttl_1h` set the starting value. Unpinned, the engine may
+    /// choose the TTL from this session's own cache history.
+    #[must_use]
+    pub fn pinned(&self) -> bool {
+        self.pinned
+    }
+
+    #[must_use]
+    pub fn seconds(&self) -> u32 {
+        if self.one_hour() {
+            3600
+        } else {
+            300
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
     http: HttpTransport,
@@ -155,20 +206,21 @@ pub struct AnthropicClient {
     /// block. Required for OAuth subscription tokens where the server gates
     /// access by checking the first system block for an exact match.
     oauth_system_prefix: bool,
-    /// Ask Anthropic to hold cached prefixes for an hour instead of the
-    /// five-minute default.
+    /// The prompt-cache TTL every `cache_control` block of a request asks for.
     ///
-    /// Matches Claude Code, which sets `ttl: "1h"` for subscribers and leaves
-    /// metered API keys on the 5m default (`should1hCacheTTL`): a subscription
-    /// pays for a cache write out of its rate-limit window, where re-creating
-    /// a prefix costs far more than holding it, while a metered key pays 2x
-    /// base for a 1h write against 1.25x for a 5m one.
+    /// The default follows Claude Code: 1h for subscribers, 5m for metered
+    /// keys. A subscription pays for a cache write out of its rate-limit
+    /// window, where re-creating a prefix costs far more than holding it, while
+    /// a metered key pays 2x base for a 1h write against 1.25x for a 5m one.
     ///
-    /// Resolved once at construction and never re-read. Claude Code latches it
-    /// the same way and says why: flipping the TTL mid-session changes the
-    /// `cache_control` block itself, which busts the very prefix it is meant
-    /// to keep — "~20K tokens per flip" in their note.
-    cache_ttl_1h: bool,
+    /// Read once per request, so a change reaches the next request and never
+    /// splits one. Changing it is not free in one direction, measured against
+    /// the API: a request that adds content and asks for 1h on a prefix cached
+    /// at 5m rewrites the whole prefix at the 1h write price, because a 1h entry
+    /// cannot extend a 5m one. Going from 1h to 5m keeps the cached prefix, and
+    /// so does a TTL change on unchanged content. When to switch is the
+    /// engine's decision (`engine_client`), not this client's.
+    cache_ttl: CacheTtl,
     /// Set once this base URL has answered `/v1/messages/count_tokens` with a
     /// status that means the endpoint is not there.
     ///
@@ -195,7 +247,7 @@ impl AnthropicClient {
             oauth_system_prefix: false,
             // A bare API key is metered per token: a 1h write bills 2x base
             // against 1.25x for 5m, so the longer hold has to be asked for.
-            cache_ttl_1h: false,
+            cache_ttl: CacheTtl::new(false),
             count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -211,12 +263,15 @@ impl AnthropicClient {
     /// client through here and nowhere else, so there is one place to look for
     /// why a request carries the TTL it does.
     ///
-    /// Set it before the first request or not at all: the value is part of
-    /// every `cache_control` block, so changing it between turns rewrites the
-    /// cached prefix and throws away what it was holding.
+    /// This sets the starting value. A live change goes through
+    /// [`AnthropicClient::cache_ttl`], which every clone of this client shares.
     #[must_use]
     pub fn with_cache_ttl_1h(mut self, enabled: bool) -> Self {
-        self.cache_ttl_1h = enabled;
+        self.cache_ttl = CacheTtl {
+            current: Arc::new(AtomicBool::new(enabled)),
+            default_one_hour: self.cache_ttl.default_one_hour,
+            pinned: true,
+        };
         self
     }
 
@@ -230,7 +285,13 @@ impl AnthropicClient {
     /// already paid to create.
     #[must_use]
     pub fn cache_ttl_1h(&self) -> bool {
-        self.cache_ttl_1h
+        self.cache_ttl.one_hour()
+    }
+
+    /// The live TTL this client and its clones read on each request.
+    #[must_use]
+    pub fn cache_ttl(&self) -> &CacheTtl {
+        &self.cache_ttl
     }
 
     #[must_use]
@@ -271,7 +332,7 @@ impl AnthropicClient {
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             cache_diagnostics: CacheDiagnostics::default(),
             oauth_system_prefix: is_subscription,
-            cache_ttl_1h: is_subscription,
+            cache_ttl: CacheTtl::new(is_subscription),
             count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         };
         if is_subscription {
@@ -384,7 +445,7 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
-        self.cache_diagnostics = CacheDiagnostics::for_session(prompt_cache.paths().session_dir);
+        self.cache_diagnostics = CacheDiagnostics::for_session(&prompt_cache.paths().session_dir);
         self.prompt_cache = Some(prompt_cache);
         self
     }
@@ -567,8 +628,7 @@ impl AnthropicClient {
                 ),
             pending: VecDeque::new(),
             done: false,
-            logically_complete: false,
-            terminal_emitted: false,
+            completion: MessageCompletion::Streaming,
             terminal_deadline: None,
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
@@ -639,7 +699,7 @@ impl AnthropicClient {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body, request);
-        apply_cache_hints(&mut body, request, self.cache_ttl_1h);
+        apply_cache_hints(&mut body, request, self.cache_ttl.one_hour());
         apply_request_metadata(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
         let diagnose_cache = cache_diagnostics_enabled();
@@ -818,7 +878,7 @@ impl AnthropicClient {
         );
         let mut request_body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut request_body, request);
-        apply_cache_hints(&mut request_body, request, self.cache_ttl_1h);
+        apply_cache_hints(&mut request_body, request, self.cache_ttl.one_hour());
         apply_request_metadata(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         dump_request_body("count_tokens", &request_body);
@@ -1140,15 +1200,8 @@ pub struct MessageStream {
     parser: SseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
-    /// Set once we observe a logical end-of-message (a `message_delta` with a
-    /// `stop_reason`, or a `message_stop`). After this the response is
-    /// semantically complete, so a truncated trailing frame (e.g. a proxy
-    /// cutting the connection right after `message_stop`) is harmless noise
-    /// and must not be surfaced as an `IncompleteStream` error.
-    logically_complete: bool,
-    /// Consumers require one terminal event even when we finish on stop_reason
-    /// before the upstream's separate message_stop packet can be read.
-    terminal_emitted: bool,
+    /// Logical completion and the emitted terminal frame share one lifecycle.
+    completion: MessageCompletion,
     /// A logical stop is not permission to drop the HTTP stream immediately.
     /// Drain its real terminal event, with a bound for proxies that never send it.
     terminal_deadline: Option<tokio::time::Instant>,
@@ -1161,6 +1214,14 @@ pub struct MessageStream {
     cache_diagnostics: Option<CacheDiagnostics>,
     progress: StreamProgress,
     observation: Option<crate::CacheRequestObservation>,
+}
+
+/// A provider stop reason completes content before its terminal frame arrives.
+#[derive(Debug, PartialEq, Eq)]
+enum MessageCompletion {
+    Streaming,
+    LogicalStop,
+    TerminalStop,
 }
 
 impl MessageStream {
@@ -1206,7 +1267,7 @@ impl MessageStream {
                         return Err(self.record_refusal(error))
                     }
                     Err(error @ ApiError::InvalidSseFrame(_)) => return Err(error),
-                    Err(_) if self.logically_complete => Vec::new(),
+                    Err(_) if self.completion != MessageCompletion::Streaming => Vec::new(),
                     Err(error) => return Err(error),
                 };
                 for event in &remaining {
@@ -1220,7 +1281,7 @@ impl MessageStream {
                     self.observe_event(&event);
                     return Ok(Some(event));
                 }
-                if self.logically_complete && !self.terminal_emitted {
+                if self.completion == MessageCompletion::LogicalStop {
                     let event = StreamEvent::MessageStop(MessageStopEvent {});
                     self.observe_event(&event);
                     return Ok(Some(event));
@@ -1229,12 +1290,11 @@ impl MessageStream {
             }
 
             let chunk = if let Some(deadline) = self.terminal_deadline {
-                match tokio::time::timeout_at(deadline, self.response.chunk()).await {
-                    Ok(chunk) => chunk,
-                    Err(_) => {
-                        self.done = true;
-                        continue;
-                    }
+                if let Ok(chunk) = tokio::time::timeout_at(deadline, self.response.chunk()).await {
+                    chunk
+                } else {
+                    self.done = true;
+                    continue;
                 }
             } else {
                 self.response.chunk().await
@@ -1260,7 +1320,7 @@ impl MessageStream {
                 // stream, just like a partial SSE frame at clean HTTP EOF.
                 // Preserve that transport classification for recovery callers.
                 // A confirmed logical end may survive a broken terminal tail.
-                Err(_) if self.logically_complete => {
+                Err(_) if self.completion != MessageCompletion::Streaming => {
                     self.done = true;
                 }
                 Err(error) => {
@@ -1336,7 +1396,9 @@ impl MessageStream {
                 // One absolute grace deadline prevents a keepalive-only proxy
                 // from holding up the next turn indefinitely.
                 if delta.stop_reason.is_some() {
-                    self.logically_complete = true;
+                    if self.completion == MessageCompletion::Streaming {
+                        self.completion = MessageCompletion::LogicalStop;
+                    }
                     self.terminal_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + std::time::Duration::from_secs(1)
                     });
@@ -1347,9 +1409,8 @@ impl MessageStream {
                 }
             }
             StreamEvent::MessageStop(_) => {
-                self.terminal_emitted = true;
                 self.done = true;
-                self.logically_complete = true;
+                self.completion = MessageCompletion::TerminalStop;
                 self.record_usage_once();
             }
             _ => {}
@@ -1378,7 +1439,7 @@ impl MessageStream {
         let mut observation = self.observation.clone();
         if let Some(observation) = &mut observation {
             observation.response_completed_ms = crate::cache_observation::now_ms();
-            observation.completed = self.logically_complete;
+            observation.completed = self.completion != MessageCompletion::Streaming;
         }
         if let Some(prompt_cache) = &self.prompt_cache {
             let record = prompt_cache.record_usage_observed(
@@ -1724,12 +1785,10 @@ fn record_thinking_transformations(
 /// the server's own answer, so it distinguishes "we sent something different"
 /// from "what arrived was different from what we sent".
 fn cache_diagnostics_enabled() -> bool {
-    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS")
-        .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
+    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS").is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
 }
 
 /// Write the request body that is about to be sent to `SUDOCODE_DUMP_REQUESTS`,
@@ -1777,15 +1836,13 @@ fn write_request_dump(
     std::fs::create_dir_all(dir).ok()?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     // Nanos disambiguate requests that land in the same millisecond; without
     // them a fast tool loop silently overwrites its own earlier dumps, which
     // would make consecutive-request diffing miss exactly the pairs we care about.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     let path = dir.join(format!("{stamp}-{nanos:09}-{kind}.json"));
     std::fs::write(&path, text).ok()?;
     Some(path)
@@ -1924,7 +1981,7 @@ mod tests {
     use crate::http_transport::{request_id_from_headers, RetryPolicy};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Mutex, OnceLock};
+
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -2884,14 +2941,17 @@ mod tests {
             Some(crate::providers::AuthMode::Subscription),
         );
         assert!(
-            subscription.cache_ttl_1h,
+            subscription.cache_ttl_1h(),
             "subscription should hold cached prefixes for an hour"
         );
 
         let api_key = AnthropicClient::new("sk-ant-api03-key");
-        assert!(!api_key.cache_ttl_1h, "metered key stays on the 5m default");
+        assert!(
+            !api_key.cache_ttl_1h(),
+            "metered key stays on the 5m default"
+        );
 
-        assert!(!subscription.clone().with_cache_ttl_1h(false).cache_ttl_1h);
+        assert!(!subscription.clone().with_cache_ttl_1h(false).cache_ttl_1h());
     }
 
     #[test]

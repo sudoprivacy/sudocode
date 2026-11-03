@@ -1,0 +1,113 @@
+{
+  "repository": "https://github.com/openai/codex",
+  "commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
+  "encoding": "SHA256 of canonical Git blob bytes (LF), not platform checkout newlines",
+  "files": [
+    {
+      "path": "examples/render.rs",
+      "sha256": "e7c6efe4efa9c91800845fe37bbb85a8fe540871c3685d2ac64dfbeb960dc841",
+      "bytes": 487
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+      "bytes": 10926
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+      "bytes": 242
+    },
+    {
+      "path": "README.md",
+      "sha256": "26fabfe10390049e33d846d52389884d023c38ca9552beb757455849ee39f5f6",
+      "bytes": 6412
+    },
+    {
+      "path": "src/draw.rs",
+      "sha256": "f2fcce613dffaff2ec92d90270c6810b8c4b48e30f7e21364d0a1cbb06bbd84c",
+      "bytes": 8316
+    },
+    {
+      "path": "src/families_tests.rs",
+      "sha256": "c8353ccdc370392bbd7acd6f07d7b86f2069df344c05a7e9cb13ea0d5d0e69fe",
+      "bytes": 16101
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "a4874182b28599ca3b2456594cf84999f69289c0d9829793d9322f4c01f36a44",
+      "bytes": 4990
+    },
+    {
+      "path": "src/output.rs",
+      "sha256": "f19769bb1db608a6ef683971f01d4c9f9296aae27e3a5ed01a72536bc51ad182",
+      "bytes": 1746
+    },
+    {
+      "path": "src/parse.rs",
+      "sha256": "d3f020a5e14054517468216d443ca895d60ee6bb303a494ada389356cea1f2cc",
+      "bytes": 8646
+    },
+    {
+      "path": "src/relations.rs",
+      "sha256": "68b030f350f9d0d1b3a5e8e8e2936d026aa4b3fd5220a4e25e47c147a993dbc3",
+      "bytes": 8268
+    },
+    {
+      "path": "src/sequence.rs",
+      "sha256": "53dfbf095beb847f425a2de32fc4cc1c812882b9f1c0d411c49b59aabded466d",
+      "bytes": 11290
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__branches_merges_and_retry_loop.snap",
+      "sha256": "ade97d241981a6c0f372e97ba0781f589611882752c4466270e75f1e5396cd91",
+      "bytes": 3545
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__families_tests__class.snap",
+      "sha256": "0bf90e8da0da63a9225a04bc6008ee3b221b5d4127a877c37e72879efbf82f1e",
+      "bytes": 2629
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__families_tests__er.snap",
+      "sha256": "c1ed5ac3910197a66e9e22e662c858c232925e67424d8cf0ae4241b3f0a6d51a",
+      "bytes": 3167
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__families_tests__LR.snap",
+      "sha256": "2880f444e8483755e2bd4246b035138d8aa0a4c13d22c2aa5427b99be9403238",
+      "bytes": 1055
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__families_tests__sequence.snap",
+      "sha256": "9a8a8425420543b4b44617160d8e238fccc7e20ffc37026df8df1382676ceade",
+      "bytes": 10286
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__families_tests__state.snap",
+      "sha256": "93e0f0b1390ab55b16f9ce9446c1592bd40242801ef959187eace383632f3d7f",
+      "bytes": 5455
+    },
+    {
+      "path": "src/snapshots/codex_mermaid__tests__stadiums_with_other_shapes_in_every_direction.snap",
+      "sha256": "4b6ac3f34210b1862808580e673fa337bc8180a3549dc2492c3e88f962a3ef41",
+      "bytes": 7772
+    },
+    {
+      "path": "src/state.rs",
+      "sha256": "998e33be3009ef390fa034ec7f7bbb913ff8220bd5fbd97ecc9a6da2c01d7d22",
+      "bytes": 4128
+    },
+    {
+      "path": "src/syntax.rs",
+      "sha256": "25b93ff985bfb537ee7a96e0d0c6484616b753d76e568c7f99bcf045ac8b3fd5",
+      "bytes": 4311
+    },
+    {
+      "path": "src/tests.rs",
+      "sha256": "1f9faba350f1862cab193d8db7f0cacc4bf790681f06c61aa8ae57a733c45e3b",
+      "bytes": 16078
+    }
+  ],
+  "verifiedUnmodified": true
+}

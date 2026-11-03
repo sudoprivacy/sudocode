@@ -34,6 +34,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,9 +48,21 @@ use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// A free function keeps both Screen lifetimes late-bound for PtySession::render.
-fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
+/// Keep both `Screen` lifetimes late-bound for `PtySession::render` callbacks.
+#[must_use]
+pub fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
     screen.contents()
+}
+
+/// Preserve physical row boundaries for assertions about inline UI layout.
+/// `contents()` joins soft-wrapped rows, including a full-width rule followed
+/// by a question header in `ConPTY`. Transcript assertions still use that view.
+fn screen_rows(screen: &pty_expect::Screen<'_>) -> String {
+    screen
+        .raw()
+        .rows(0, screen.raw().size().1)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Find a persisted session transcript below a fixture's session store.
@@ -86,12 +99,16 @@ pub fn find_session_transcript(dir: &std::path::Path) -> Option<PathBuf> {
 /// Inert on Linux and macOS, where the variables mean nothing.
 const MSYS_ARGV_PASSTHROUGH: &str = "export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*';";
 
-/// Default PTY-test timeout for `expect` operations.
-/// Windows CI runners are significantly slower to spawn PTY processes
-/// (cold cache, antivirus scanning, etc.), so use a generous timeout.
+/// Watchdog for functional PTY operations, not a performance threshold.
+/// Fresh macOS executables can spend over 16 seconds before entering `main`,
+/// including the replacement image in self-update. Performance gates measure
+/// startup and input latency separately; their thresholds remain unchanged.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Windows cold launches can also include executable scanning.
 #[cfg(windows)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Live-mode timeout — real API calls can take a few seconds.
@@ -99,7 +116,7 @@ pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A wait, never shorter than this platform's floor.
 ///
-/// [`DEFAULT_TIMEOUT`] exists because Windows runners are slow to spawn a PTY,
+/// [`DEFAULT_TIMEOUT`] accounts for platform-specific process startup delays,
 /// and a test that hardcodes fewer seconds silently opts out of it — the
 /// calibration is there precisely for the runner it then fails on. Of the four
 /// `pty_resume` tests, the two asking for 10s and 5s were the two that failed on
@@ -157,9 +174,44 @@ pub fn expect_screen<F>(sess: &PtySession, pred: F, budget: Duration, context: &
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_view(sess, pred, budget, context, screen_contents)
+}
+
+/// Wait for a layout predicate without joining soft-wrapped physical rows.
+pub fn expect_screen_rows<F>(sess: &PtySession, pred: F, budget: Duration, context: &str) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    expect_screen_view(sess, pred, budget, context, screen_rows)
+}
+
+fn expect_screen_view<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let deadline = Instant::now() + at_least(budget);
+    expect_screen_before_view(sess, pred, deadline, budget, context, contents)
+}
+
+fn expect_screen_before_view<F>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     loop {
-        let screen = sess.render(screen_contents);
+        let screen = sess.render(contents);
         if pred(&screen) {
             return screen;
         }
@@ -190,12 +242,52 @@ pub fn expect_screen_settled<F>(
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_settled_view(sess, pred, budget, context, screen_contents)
+}
+
+/// Wait for stable physical rows with the same deadline and settling contract.
+pub fn expect_screen_rows_settled<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    expect_screen_settled_view(sess, pred, budget, context, screen_rows)
+}
+
+fn expect_screen_settled_view<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let deadline = Instant::now() + at_least(budget);
+    expect_screen_settled_before_view(sess, pred, deadline, budget, context, contents)
+}
+
+fn expect_screen_settled_before_view<F>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let mut previous: Option<String> = None;
     let mut stable = 0u32;
     let mut satisfied = false;
     loop {
-        let screen = sess.render(screen_contents);
+        let screen = sess.render(contents);
         if pred(&screen) {
             satisfied = true;
             if previous.as_deref() == Some(screen.as_str()) {
@@ -269,17 +361,20 @@ pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, contex
 /// shares that row and it reads `────…────❯ abc!`.
 #[must_use]
 pub fn input_line_of(screen: &str) -> String {
-    screen
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let marker = line.rfind(PROMPT_MARKER)?;
-            Some(line[marker + PROMPT_MARKER.len()..].trim().to_string())
-        })
+    input_after_prompt(screen)
+        .and_then(|input| input.lines().next())
         .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
-/// Current InputSlot and FooterSlot, excluding obsolete UI that an extreme
+/// The live editor starts after the last prompt; chrome geometry differs
+/// between rustyline and iocraft and cannot define whether input arrived.
+fn input_after_prompt(screen: &str) -> Option<&str> {
+    screen.rsplit_once(PROMPT_MARKER).map(|(_, input)| input)
+}
+
+/// Current `InputSlot` and `FooterSlot`, excluding obsolete UI that an extreme
 /// resize may have pushed into retained scrollback. Unlike `input_line_of`,
 /// this also locates question, picker and size-warning bodies without a prompt.
 /// Do not use it for duplicate-free resize assertions: those must inspect the
@@ -365,7 +460,7 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
         sess,
         // A process that has not painted its prompt yet also has an empty
         // screen. It must not accept keystrokes as a ready REPL.
-        |screen| screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty(),
+        is_ready_for_input,
         budget,
         &format!("{context}: the input line never cleared"),
     );
@@ -375,8 +470,11 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
 /// and ordinary whitespace differences.
 #[must_use]
 pub fn screen_contains(screen: &str, text: &str) -> bool {
-    let compact = |value: &str| value.split_whitespace().collect::<String>();
-    compact(screen).contains(&compact(text))
+    compact_screen_text(screen).contains(&compact_screen_text(text))
+}
+
+fn compact_screen_text(value: &str) -> String {
+    value.split_whitespace().collect()
 }
 
 /// How long a live turn may take before a gate calls it a failure.
@@ -422,6 +520,57 @@ pub fn turn_status_marker(sess: &PtySession) -> String {
     turn_status_identity(&sess.render(screen_contents))
 }
 
+/// Submit and complete one turn within a single deadline for readiness, input
+/// acknowledgement, response completion and the final settled editor.
+///
+/// Capture the completed-turn marker after this acknowledgement, before Enter.
+/// A marker read while resumed history is still painting can precede an old
+/// result line and incorrectly identify that replay as a newly completed turn.
+/// Match every typed character from the live prompt, using physical rows to
+/// preserve wrapped drafts independently of either renderer's chrome layout.
+pub fn run_turn(sess: &mut PtySession, text: &str, budget: Duration, context: &str) {
+    assert!(!text.is_empty() && !text.contains(['\r', '\n']));
+    let deadline = Instant::now() + budget;
+    expect_input_line_cleared_before(sess, deadline, budget, context);
+    sess.send(text).unwrap();
+    expect_screen_before_view(
+        sess,
+        |screen| {
+            input_after_prompt(screen).is_some_and(|input| {
+                compact_screen_text(input).starts_with(&compact_screen_text(text))
+            })
+        },
+        deadline,
+        budget,
+        &format!("{context}: the live editor did not acknowledge the submitted line"),
+        screen_rows,
+    );
+    let marker = turn_status_marker(sess);
+    sess.send("\r").unwrap();
+    expect_turn_complete_before(sess, &marker, "", deadline, budget, context);
+    expect_input_line_cleared_before(sess, deadline, budget, "turn completed");
+}
+
+fn is_ready_for_input(screen: &str) -> bool {
+    screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty()
+}
+
+fn expect_input_line_cleared_before(
+    sess: &PtySession,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+) {
+    expect_screen_settled_before_view(
+        sess,
+        is_ready_for_input,
+        deadline,
+        budget,
+        &format!("{context}: the input line never cleared"),
+        screen_contents,
+    );
+}
+
 /// Block until the turn submitted after `marker` was taken has finished AND the
 /// REPL is ready for input again.
 ///
@@ -459,18 +608,40 @@ pub fn expect_turn_complete_after(
     budget: Duration,
     context: &str,
 ) {
+    expect_turn_complete_with_input(sess, marker, "", budget, context);
+}
+
+/// The same fresh-turn/readiness contract while preserving an exact in-flight draft.
+pub fn expect_turn_complete_with_input(
+    sess: &PtySession,
+    marker: &str,
+    expected_input: &str,
+    budget: Duration,
+    context: &str,
+) {
     let deadline = Instant::now() + budget;
+    expect_turn_complete_before(sess, marker, expected_input, deadline, budget, context);
+}
+
+fn expect_turn_complete_before(
+    sess: &PtySession,
+    marker: &str,
+    expected_input: &str,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+) {
     loop {
         let screen = sess.render(screen_contents);
         let status = turn_status_line(&screen);
         let identity = turn_status_identity(&screen);
         let fresh = !identity.is_empty() && identity != marker;
-        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen).is_empty() {
+        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen) == expected_input {
             return;
         }
         if Instant::now() >= deadline {
             let unmet = if fresh {
-                "this turn finished but the input line never came back empty"
+                "this turn finished but the input line did not restore the expected text"
             } else if status.is_empty() {
                 "no per-turn status line ever appeared, so no turn ran"
             } else {
@@ -490,9 +661,14 @@ pub fn expect_turn_complete_after(
 
 /// Locate the compiled CLI, or a release artifact selected for live acceptance.
 #[must_use]
+#[inline]
 pub fn scode_bin() -> PathBuf {
     std::env::var_os("SCODE_TEST_BIN")
-        .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_scode")), PathBuf::from)
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_scode").map(PathBuf::from))
+        .expect(
+            "standalone benchmark drivers require SCODE_TEST_BIN pointing to the measured release",
+        )
 }
 
 /// A throwaway config home under `parent`, seeded from the real one, for a
@@ -576,8 +752,8 @@ static LIVE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct TestEnv {
     backend: Backend,
-    /// Holds the live serial lock for the duration of the test.
-    _live_guard: Option<std::sync::MutexGuard<'static, ()>>,
+    /// Retain one live-test permit until all of its participant fixtures close.
+    live_guard: Option<Rc<std::sync::MutexGuard<'static, ()>>>,
 }
 
 impl TestEnv {
@@ -605,7 +781,7 @@ impl TestEnv {
                 server,
                 workspace,
             },
-            _live_guard: None,
+            live_guard: None,
         }
     }
 
@@ -614,7 +790,10 @@ impl TestEnv {
         let guard = LIVE_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::new_live_with_guard(label, Rc::new(guard))
+    }
 
+    fn new_live_with_guard(label: &str, guard: Rc<std::sync::MutexGuard<'static, ()>>) -> Self {
         let real_config_home = default_config_home();
         assert!(
             real_config_home.join("sudocode.json").exists(),
@@ -625,7 +804,16 @@ impl TestEnv {
         copy_live_credentials(&real_config_home, &workspace.config_home);
         Self {
             backend: Backend::Live { workspace },
-            _live_guard: Some(guard),
+            live_guard: Some(guard),
+        }
+    }
+
+    /// Create an independent participant in this test without reacquiring its permit.
+    /// Each participant retains its own workspace, credentials and process state.
+    pub fn peer(&self, label: &str) -> Self {
+        match &self.live_guard {
+            Some(guard) => Self::new_live_with_guard(label, Rc::clone(guard)),
+            None => Self::new_mock(label),
         }
     }
 
@@ -657,6 +845,25 @@ impl TestEnv {
             }
             Backend::Live { .. } => natural_prompt.to_string(),
         }
+    }
+
+    /// Keep a provider's large tool arguments out of the human input editor.
+    /// The mock still sends the complete arguments over the actual SSE transport.
+    /// Each prompt owns an immutable snapshot, including queued or replayed turns.
+    pub fn tool_batch_prompt(&self, calls: &serde_json::Value) -> String {
+        assert!(
+            self.is_mock(),
+            "tool batch fixture requires the protocol provider"
+        );
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = self
+            .workspace_root()
+            .join(format!("tool-batch-{counter}.json"));
+        std::fs::write(&path, serde_json::to_vec(calls).unwrap()).unwrap();
+        self.prompt(
+            &format!("TOOL_BATCH:{}", serde_json::json!({"calls_path":path})),
+            "tool_concurrency",
+        )
     }
 
     /// Spawn `scode` under a PTY with the right auth, model, and
@@ -706,6 +913,20 @@ impl TestEnv {
                 env_vars,
             ),
         }
+    }
+
+    /// Launch a selected executable with exact arguments and the same workspace isolation.
+    #[inline]
+    pub fn spawn_binary_with_env(
+        &self,
+        binary: &std::path::Path,
+        args: &[&str],
+        env_vars: &[(&str, &str)],
+    ) -> PtySession {
+        let workspace = match &self.backend {
+            Backend::Mock { workspace, .. } | Backend::Live { workspace } => workspace,
+        };
+        spawn_binary_with_workspace(workspace, None, binary, &[], args, self.timeout(), env_vars)
     }
 
     /// The workspace root (temp dir).  Useful for writing fixture
@@ -885,7 +1106,27 @@ fn spawn_with_workspace(
     timeout: Duration,
     env_vars: &[(&str, &str)],
 ) -> PtySession {
-    let bin = scode_bin();
+    spawn_binary_with_workspace(
+        workspace,
+        config_home_override,
+        &scode_bin(),
+        base_args,
+        extra_args,
+        timeout,
+        env_vars,
+    )
+}
+
+/// Apply one isolation and terminal contract to both built and installed executables.
+fn spawn_binary_with_workspace(
+    workspace: &HarnessWorkspace,
+    config_home_override: Option<&std::path::Path>,
+    bin: &std::path::Path,
+    base_args: &[&str],
+    extra_args: &[&str],
+    timeout: Duration,
+    env_vars: &[(&str, &str)],
+) -> PtySession {
     let bin_str = bin.to_string_lossy().to_string();
     #[cfg(not(windows))]
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
@@ -958,6 +1199,16 @@ fn spawn_with_workspace(
     // want async mode set SUDOCODE_INTERRUPT_QUEUE_MODE explicitly in
     // `env_vars`, which appears later and overrides this default.
     cmd.push_str(" SUDOCODE_INTERRUPT_QUEUE_MODE=off");
+    // Scripted text pastes must not attach an image from the host clipboard.
+    // The documented clipboard source treats a missing image as empty. Image
+    // paste journeys override this default in `env_vars` below.
+    let no_image = workspace.root.join("no-clipboard-image");
+    write!(
+        cmd,
+        " SUDOCODE_CLIPBOARD_IMAGE={}",
+        shell_quote(&no_image.display().to_string())
+    )
+    .unwrap();
     for (k, v) in env_vars {
         write!(cmd, " {}={}", k, shell_quote(v)).unwrap();
     }

@@ -213,33 +213,7 @@ impl ModelCatalog {
         let bundled = ModelCapabilitiesFile::default();
         let mut cursors = BTreeSet::new();
         for page in 0..20 {
-            let mut request = client.get(url.clone());
-            for (name, value) in &self.0.source.headers {
-                request = request.header(name, value);
-            }
-            let mut response = request
-                .send()
-                .await
-                .map_err(|_| "Model discovery request failed")?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Model discovery returned HTTP {}",
-                    response.status().as_u16()
-                ));
-            }
-            let mut body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| "Model discovery response was interrupted")?
-            {
-                if body.len() + chunk.len() > 4 * 1024 * 1024 {
-                    return Err("Model discovery response was too large".into());
-                }
-                body.extend_from_slice(&chunk);
-            }
-            let json: serde_json::Value = serde_json::from_slice(&body)
-                .map_err(|_| "Model discovery returned invalid JSON")?;
+            let json = self.fetch_page(&client, &url).await?;
             let data = json
                 .get("data")
                 .and_then(serde_json::Value::as_array)
@@ -281,24 +255,7 @@ impl ModelCatalog {
                     default: bundled.default,
                     models,
                 };
-                let encoded = serde_json::to_vec(&CachedCatalog {
-                    version: 1,
-                    catalog: file.clone(),
-                })
-                .map_err(|_| "Could not encode model catalog")?;
-                if let Some(parent) = self.0.path.parent() {
-                    StdFsBackend
-                        .create_dir_all(&parent.to_string_lossy())
-                        .map_err(|_| "Could not create model catalog cache")?;
-                }
-                StdFsBackend
-                    .write_atomic(&self.0.path.to_string_lossy(), &encoded)
-                    .map_err(|_| "Could not save model catalog cache")?;
-                *self
-                    .0
-                    .snapshot
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file);
+                self.install_snapshot(file)?;
                 return Ok(());
             }
             let cursor = json
@@ -320,6 +277,65 @@ impl ModelCatalog {
                 .append_pair("after_id", cursor);
         }
         Err("Model discovery pagination did not finish".into())
+    }
+
+    /// Fetch one bounded page without changing the last complete catalog.
+    async fn fetch_page(
+        &self,
+        client: &reqwest::Client,
+        url: &reqwest::Url,
+    ) -> Result<serde_json::Value, String> {
+        let mut request = client.get(url.clone());
+        for (name, value) in &self.0.source.headers {
+            request = request.header(name, value);
+        }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|_| "Model discovery request failed")?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Model discovery returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Model discovery response was interrupted")?
+        {
+            if body.len() + chunk.len() > 4 * 1024 * 1024 {
+                return Err("Model discovery response was too large".into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| "Model discovery returned invalid JSON")?;
+        Ok(json)
+    }
+
+    /// Publish in memory only after the complete snapshot was saved atomically.
+    fn install_snapshot(&self, file: ModelCapabilitiesFile) -> Result<(), String> {
+        let encoded = serde_json::to_vec(&CachedCatalog {
+            version: 1,
+            catalog: file.clone(),
+        })
+        .map_err(|_| "Could not encode model catalog")?;
+        if let Some(parent) = self.0.path.parent() {
+            StdFsBackend
+                .create_dir_all(&parent.to_string_lossy())
+                .map_err(|_| "Could not create model catalog cache")?;
+        }
+        StdFsBackend
+            .write_atomic(&self.0.path.to_string_lossy(), &encoded)
+            .map_err(|_| "Could not save model catalog cache")?;
+        *self
+            .0
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file);
+        Ok(())
     }
 }
 

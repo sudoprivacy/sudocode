@@ -1,6 +1,3 @@
-#[cfg(test)]
-pub mod test_isolation;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
@@ -538,6 +535,17 @@ impl PluginTool {
     }
 
     pub fn execute(&self, input: &Value) -> Result<String, PluginError> {
+        self.execute_with_call_id(input, None)
+    }
+
+    /// Correlate an external effect with the host's existing invocation. The ID
+    /// is not an identity or permission credential. Never inherit another
+    /// process's call ID when this dispatch has no context.
+    pub fn execute_with_call_id(
+        &self,
+        input: &Value,
+        call_id: Option<&str>,
+    ) -> Result<String, PluginError> {
         let input_json = input.to_string();
         let mut process = Command::new(&self.command);
         process
@@ -548,7 +556,11 @@ impl PluginTool {
             .env("SUDOCODE_PLUGIN_ID", &self.plugin_id)
             .env("SUDOCODE_PLUGIN_NAME", &self.plugin_name)
             .env("SUDOCODE_TOOL_NAME", &self.definition.name)
-            .env("SUDOCODE_TOOL_INPUT", &input_json);
+            .env("SUDOCODE_TOOL_INPUT", &input_json)
+            .env_remove("SUDOCODE_TOOL_CALL_ID");
+        if let Some(call_id) = call_id {
+            process.env("SUDOCODE_TOOL_CALL_ID", call_id);
+        }
         if let Some(root) = &self.root {
             process
                 .current_dir(root)
@@ -563,9 +575,15 @@ impl PluginTool {
 
         let output = child.wait_with_output()?;
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            Ok(process_text::decode_process_output(&output.stdout)
+                .text
+                .trim()
+                .to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = process_text::decode_process_output(&output.stderr)
+                .text
+                .trim()
+                .to_string();
             Err(PluginError::CommandFailed(format!(
                 "plugin tool `{}` from `{}` failed for `{}`: {}",
                 self.definition.name,
@@ -2711,7 +2729,10 @@ fn run_lifecycle_commands(
         let output = process.output()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = process_text::decode_process_output(&output.stderr)
+                .text
+                .trim()
+                .to_string();
             return Err(PluginError::CommandFailed(format!(
                 "plugin `{}` {} failed for `{}`: {}",
                 metadata.id,
@@ -2783,7 +2804,9 @@ fn materialize_source(
             if !output.status.success() {
                 return Err(PluginError::CommandFailed(format!(
                     "git clone failed for `{url}`: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    process_text::decode_process_output(&output.stderr)
+                        .text
+                        .trim()
                 )));
             }
             Ok(destination)
@@ -2914,9 +2937,61 @@ fn ensure_object<'a>(root: &'a mut Map<String, Value>, key: &str) -> &'a mut Map
         .expect("object should exist")
 }
 
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+
+    #[test]
+    fn plugin_call_context_child() {
+        if std::env::var("SUDOCODE_PLUGIN_ID").as_deref() == Ok("call-context@local") {
+            println!(
+                "PLUGIN_CALL_CONTEXT={}",
+                std::env::var("SUDOCODE_TOOL_CALL_ID").unwrap_or_else(|_| "absent".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_process_gets_the_actual_invocation_without_cross_call_leakage() {
+        let tool = PluginTool::new(
+            "call-context@local",
+            "call-context",
+            PluginToolDefinition {
+                name: "context_probe".to_string(),
+                description: Some("test subprocess".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            std::env::current_exe()
+                .expect("test binary")
+                .to_string_lossy()
+                .to_string(),
+            vec![
+                "--exact".to_string(),
+                "invocation_tests::plugin_call_context_child".to_string(),
+                "--nocapture".to_string(),
+            ],
+            PluginToolPermission::ReadOnly,
+            None,
+        );
+        let input = serde_json::json!({});
+        let first = tool
+            .execute_with_call_id(&input, Some("host-tool-雪-1"))
+            .expect("first invocation");
+        assert!(first.contains("PLUGIN_CALL_CONTEXT=host-tool-雪-1"));
+        let absent = tool.execute(&input).expect("context-free invocation");
+        assert!(absent.contains("PLUGIN_CALL_CONTEXT=absent"));
+        assert!(!absent.contains("host-tool-雪-1"));
+        let next = tool
+            .execute_with_call_id(&input, Some("host-tool-2"))
+            .expect("next invocation");
+        assert!(next.contains("PLUGIN_CALL_CONTEXT=host-tool-2"));
+        assert!(!next.contains("host-tool-雪-1"));
+    }
+}
+
 /// Environment variable lock for test isolation.
 /// Guards against concurrent modification of `SUDO_CODE_CONFIG_HOME`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn env_lock() -> &'static std::sync::Mutex<()> {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     &ENV_LOCK
@@ -3224,8 +3299,8 @@ mod tests {
 
         let manifest = load_plugin_from_directory(&root).expect("packaged manifest should load");
         assert_eq!(manifest.name, "packaged-demo");
-        assert!(manifest.tools.is_empty());
-        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.tools, [] as [PluginToolManifest; 0]);
+        assert_eq!(manifest.commands, [] as [PluginCommandManifest; 0]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3244,10 +3319,10 @@ mod tests {
         );
 
         let manifest = load_plugin_from_directory(&root).expect("minimal manifest should load");
-        assert!(manifest.permissions.is_empty());
+        assert_eq!(manifest.permissions, [] as [PluginPermission; 0]);
         assert!(manifest.hooks.is_empty());
-        assert!(manifest.tools.is_empty());
-        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.tools, [] as [PluginToolManifest; 0]);
+        assert_eq!(manifest.commands, [] as [PluginCommandManifest; 0]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4684,7 +4759,7 @@ mod tests {
         let report = PluginRegistryReport::new(PluginRegistry::new(Vec::new()), vec![failure]);
         let outcome = report.load_outcome();
 
-        assert!(outcome.loaded_plugins.is_empty());
+        assert_eq!(outcome.loaded_plugins, [] as [LoadedPlugin; 0]);
         assert_eq!(outcome.failures.len(), 1);
         assert_eq!(
             outcome.failures[0].plugin_root,
@@ -5105,113 +5180,5 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
-    }
-
-    #[allow(clippy::struct_excessive_bools)]
-    struct PluginFixture {
-        plugin_id: String,
-        display_name: String,
-        description: String,
-        tool_count: usize,
-        pre_hook: usize,
-        post_hook: usize,
-        post_fail_hook: usize,
-        has_skills: bool,
-        has_mcp_servers: bool,
-        has_apps: bool,
-        enabled: bool,
-    }
-
-    impl PluginFixture {
-        fn new(plugin_id: &str, display_name: &str, description: &str) -> Self {
-            Self {
-                plugin_id: plugin_id.to_string(),
-                display_name: display_name.to_string(),
-                description: description.to_string(),
-                tool_count: 0,
-                pre_hook: 0,
-                post_hook: 0,
-                post_fail_hook: 0,
-                has_skills: false,
-                has_mcp_servers: false,
-                has_apps: false,
-                enabled: true,
-            }
-        }
-
-        fn tools(mut self, n: usize) -> Self {
-            self.tool_count = n;
-            self
-        }
-        fn pre_hooks(mut self, n: usize) -> Self {
-            self.pre_hook = n;
-            self
-        }
-        fn post_hooks(mut self, n: usize) -> Self {
-            self.post_hook = n;
-            self
-        }
-        fn post_fail_hooks(mut self, n: usize) -> Self {
-            self.post_fail_hook = n;
-            self
-        }
-        fn with_skills(mut self) -> Self {
-            self.has_skills = true;
-            self
-        }
-        fn with_mcp(mut self) -> Self {
-            self.has_mcp_servers = true;
-            self
-        }
-        fn with_apps(mut self) -> Self {
-            self.has_apps = true;
-            self
-        }
-        fn disabled(mut self) -> Self {
-            self.enabled = false;
-            self
-        }
-
-        fn build(self) -> super::LoadedPlugin {
-            let (name, source) = self.plugin_id.split_once('@').map_or_else(
-                || (self.plugin_id.clone(), "unknown".to_string()),
-                |(n, s)| (n.to_string(), s.to_string()),
-            );
-            super::LoadedPlugin {
-                summary: super::PluginSummary {
-                    metadata: super::PluginMetadata {
-                        id: self.plugin_id.clone(),
-                        name: name.clone(),
-                        version: "1.0.0".to_string(),
-                        description: self.description.clone(),
-                        kind: super::PluginKind::External,
-                        source: source.clone(),
-                        default_enabled: true,
-                        root: None,
-                        display_name: None,
-                    },
-                    enabled: self.enabled,
-                },
-                root: None,
-                kind: super::PluginKind::External,
-                source,
-                capabilities: super::PluginCapabilityMetadata::default(),
-                skill_roots: vec![],
-                mcp_config_paths: vec![],
-                app_config_paths: vec![],
-                capability_summary: super::PluginCapabilitySummary {
-                    plugin_id: self.plugin_id,
-                    display_name: self.display_name,
-                    description: self.description,
-                    tool_count: self.tool_count,
-                    pre_tool_hook_count: self.pre_hook,
-                    post_tool_hook_count: self.post_hook,
-                    post_tool_use_failure_hook_count: self.post_fail_hook,
-                    has_skills: self.has_skills,
-                    has_mcp_servers: self.has_mcp_servers,
-                    has_apps: self.has_apps,
-                },
-            }
-        }
     }
 }

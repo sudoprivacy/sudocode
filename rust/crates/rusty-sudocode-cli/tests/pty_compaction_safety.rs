@@ -222,94 +222,8 @@ fn serve(
         ("200 OK", json!({"input_tokens": 1000}))
     } else if !is_post {
         ("200 OK", json!({"data": []}))
-    } else if mode == "budget-transport-exhausted"
-        || (mode == "budget-transport-fallback" && number <= 2)
-    {
-        (
-            "503 Service Unavailable",
-            json!({"type":"error", "error":{"type":"overloaded_error", "message":"fixture transient overload"}}),
-        )
-    } else if mode.starts_with("gemini-") {
-        let mut candidate = json!({"content":{"role":"model","parts":[{"text":"<summary>PROJECT_ALPHA complete checkpoint.</summary>"}]}});
-        if mode != "gemini-missing-terminal" {
-            candidate["finishReason"] = json!(if mode == "gemini-truncated" {
-                "MAX_TOKENS"
-            } else {
-                "STOP"
-            });
-        }
-        (
-            "200 OK",
-            json!({"candidates":[candidate],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":50}}),
-        )
-    } else if mode.starts_with("codex-") {
-        (
-            "200 OK",
-            json!({"usage":{"input_tokens":1000,"output_tokens":50}}),
-        )
-    } else if mode.starts_with("openai-") {
-        openai_completion_response(&first, mode, number)
-    } else if mode.starts_with("internal")
-        && (request["model"]
-            != if mode == "internal-prefixed" {
-                "intranet/apeiron-v1"
-            } else {
-                "apeiron-v1"
-            }
-            || request["max_tokens"].as_u64().unwrap_or(u64::MAX) > 1024)
-    {
-        (
-            "400 Bad Request",
-            json!({"type":"error","error":{"type":"invalid_request_error","message":format!("internal deployment rejected model={} max_tokens={}", request["model"], request["max_tokens"])}}),
-        )
-    } else if mode == "long-summary-fallback" && number == 1 {
-        (
-            "400 Bad Request",
-            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture cache-safe compaction not supported"}}),
-        )
-    } else if mode == "auth-unsupported" {
-        (
-            "401 Unauthorized",
-            json!({"type":"error", "error":{"type":"authentication_error", "message":"fixture auth scheme not supported; cache-safe compaction not supported"}}),
-        )
-    } else if matches!(mode, "error" | "post-error") {
-        (
-            "400 Bad Request",
-            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
-        )
     } else {
-        // A checkpoint that needs more than the former 8192-token ceiling.
-        // The provider truncates it when the actual request budget is too small.
-        let long_summary = mode.starts_with("long-summary");
-        let truncated = mode == "truncated"
-            || (mode == "budget-truncated-then-success" && number == 1)
-            || (long_summary && request["max_tokens"].as_u64().unwrap_or(0) < 10_000);
-        let text = match mode {
-            "empty" => String::new(),
-            "growing" => "unhelpful repetition ".repeat(20_000),
-            // The transport deliberately supplies complete but oversized
-            // checkpoints. The runtime must validate the installed history,
-            // even when a gateway ignores the requested visible-text budget.
-            "budget-weak-then-target" if number == 1 => framed_fixture_summary(8_999),
-            "budget-over-ceiling-then-success" if number == 1 => framed_fixture_summary(4_000),
-            "budget-transport-fallback" if number == 3 => framed_fixture_summary(8_999),
-            "budget-weak-then-target" | "budget-transport-fallback" => {
-                framed_fixture_summary(1_000)
-            }
-            "budget-over-target" => framed_fixture_summary(6_000),
-            "budget-small-output" => framed_fixture_summary(400),
-            "budget-delayed" => {
-                std::thread::sleep(Duration::from_secs(4));
-                framed_fixture_summary(1_000)
-            }
-            _ if long_summary && truncated => "<summary>Incomplete checkpoint".into(),
-            _ if long_summary => format!("<summary>PROJECT_ALPHA {}CHECKPOINT_COMPLETE</summary>", "fact ".repeat(7_200)),
-            _ => format!("<summary>Consolidated checkpoint {number}: preserve project ALPHA and pending deployment. Next: verify tests.</summary>"),
-        };
-        (
-            "200 OK",
-            json!({"id":"compact-fixture", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6", "content":[{"type":"text", "text":text}], "stop_reason":if truncated {"max_tokens"} else {"end_turn"}, "usage":{"input_tokens":1000,"output_tokens":if long_summary {10_000} else {50}}}),
-        )
+        model_compaction_response(&first, mode, number, &request, compaction)
     };
     #[cfg(unix)]
     if is_post {
@@ -576,6 +490,26 @@ fn budget_fixture(env: &TestEnv) -> PathBuf {
     path
 }
 
+#[inline]
+fn replace_first_assistant_text(source: &Session, transcript: &str, replacement: &str) -> String {
+    let original_text = source
+        .messages()
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .flat_map(|message| &message.blocks)
+        .find_map(|block| match block {
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
+        })
+        .expect("fixture has an assistant text message");
+    let changed = transcript.replace(
+        &serde_json::to_string(original_text).unwrap(),
+        &serde_json::to_string(replacement).unwrap(),
+    );
+    assert_ne!(changed, transcript, "fixture must edit an existing message");
+    changed
+}
+
 fn budget_env(label: &str, provider: &Provider) -> TestEnv {
     // Exact counts and malformed/oversized provider bodies require the
     // deterministic backend; TestEnv still isolates instructions and config.
@@ -594,9 +528,9 @@ fn framed_fixture_summary(tokens: usize) -> String {
     let summary = "<summary>PROJECT_ALPHA CHECKPOINT_COMPLETE</summary>";
     let estimate = |summary: &str| {
         let mut session = Session::new();
-        session.messages = vec![ConversationMessage::user_text(
+        session = session.with_messages(vec![ConversationMessage::user_text(
             get_compact_continuation_message(summary, true, true, None),
-        )];
+        )]);
         estimate_session_tokens(&session)
     };
     let base = estimate(summary);
@@ -766,7 +700,15 @@ fn manual_compact_retries_a_one_token_reduction_before_committing_the_target() {
         })
         .collect();
     assert_eq!(archives.len(), 1, "only the accepted replacement commits");
-    assert_eq!(std::fs::read(archives[0].path()).unwrap(), original);
+    assert!(std::fs::read(archives[0].path())
+        .unwrap()
+        .starts_with(&original));
+    assert_eq!(
+        Session::load_from_path(archives[0].path())
+            .unwrap()
+            .session_id,
+        Session::load_from_path(&path).unwrap().session_id,
+    );
 }
 
 #[test]
@@ -781,7 +723,7 @@ fn safe_but_over_target_checkpoints_fail_and_preserve_history() {
         "12K is under the hard window but over the 7.5K target: {screen}"
     );
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     let report = restored.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
@@ -816,7 +758,7 @@ fn immediately_repeating_a_met_compaction_skips_until_its_budget_changes() {
     assert_eq!(code, 0, "{screen}");
     assert_eq!(compaction_request_count(&provider), requests);
     let second = Session::load_from_path(&path).unwrap();
-    assert_eq!(second.messages, first.messages);
+    assert_eq!(second.messages(), first.messages());
     assert_eq!(second.compaction, first.compaction);
     assert_eq!(second.maintenance_usage, first.maintenance_usage);
 
@@ -836,7 +778,7 @@ fn immediately_repeating_a_met_compaction_skips_until_its_budget_changes() {
     assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
     assert_eq!(report.before_history, estimate_session_tokens(&first));
     assert_eq!(report.target_history, Some(report.before_history / 2));
-    assert_eq!(changed.messages, first.messages);
+    assert_eq!(changed.messages(), first.messages());
     // The already compacted four-message tail cannot meet a second halving,
     // so invalidating the fingerprint fails locally before billing a request.
     assert_eq!(compaction_request_count(&provider), requests);
@@ -848,14 +790,12 @@ fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_targe
     let env = budget_env("large-image-tail", &provider);
     let mut session = Session::new().with_workspace_root(env.workspace_root());
     session.model = Some("claude-sonnet-4-6".into());
-    session
-        .messages
-        .push(ConversationMessage::user_text(format!(
-            "Previous summary: PROJECT_ALPHA {}",
-            "s".repeat(8_000)
-        )));
+    let mut messages = vec![ConversationMessage::user_text(format!(
+        "Previous summary: PROJECT_ALPHA {}",
+        "s".repeat(8_000)
+    ))];
     for (id, path) in [("older-image", "older.png"), ("latest-image", "latest.png")] {
-        session.messages.push(ConversationMessage::assistant(vec![
+        messages.push(ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: id.into(),
                 name: "read_file".into(),
@@ -873,8 +813,9 @@ fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_targe
             data: "AAAA".repeat(375_000),
             mime_type: "image/png".into(),
         });
-        session.messages.push(result);
+        messages.push(result);
     }
+    let session = session.with_messages(messages);
     let before = estimate_session_tokens(&session);
     let path = env.workspace_root().join("history.jsonl");
     session.save_to_path(&path).unwrap();
@@ -885,11 +826,11 @@ fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_targe
     let report = restored.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
     assert!(estimate_session_tokens(&restored) <= before / 2);
-    assert_eq!(restored.messages.len(), 3);
-    assert!(restored.messages[1].blocks.iter().any(|block| {
+    assert_eq!(restored.messages().len(), 3);
+    assert!(restored.messages()[1].blocks.iter().any(|block| {
         matches!(block, ContentBlock::ToolUse { id, .. } if id == "latest-image")
     }));
-    assert!(restored.messages[2]
+    assert!(restored.messages()[2]
         .blocks
         .iter()
         .any(|block| matches!(block, ContentBlock::Image { .. })));
@@ -919,10 +860,10 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
         let env = budget_env(mode, &provider);
         let mut session = Session::new().with_workspace_root(env.workspace_root());
         session.model = Some("claude-sonnet-4-6".into());
-        session.messages.push(ConversationMessage::user_text(
+        let mut messages = vec![ConversationMessage::user_text(
             "Certificate task: ".to_owned() + &"u".repeat(8_800),
-        ));
-        session.messages.push(ConversationMessage::assistant(vec![
+        )];
+        messages.push(ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: "earlier-command".into(),
                 name: "bash".into(),
@@ -930,13 +871,13 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
                 thought_signature: None,
             },
         ]));
-        session.messages.push(ConversationMessage::tool_result(
+        messages.push(ConversationMessage::tool_result(
             "earlier-command",
             "bash",
             "p".repeat(15_800),
             false,
         ));
-        session.messages.push(ConversationMessage::assistant(vec![
+        messages.push(ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: "unread-image".into(),
                 name: "read_file".into(),
@@ -954,7 +895,8 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
             data: "AAAA".repeat(1_382_360),
             mime_type: "image/png".into(),
         });
-        session.messages.push(image);
+        messages.push(image);
+        let session = session.with_messages(messages);
         let before = estimate_session_tokens(&session);
         let path = env.workspace_root().join("history.jsonl");
         session.save_to_path(&path).unwrap();
@@ -968,7 +910,7 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
         );
         assert!(estimate_session_tokens(&restored) <= before / 2);
         assert!(restored
-            .messages
+            .messages()
             .iter()
             .any(|message| message.blocks.iter().any(|block| {
                 matches!(block, ContentBlock::Image { data, .. } if data.len() == 5_529_440)
@@ -990,49 +932,7 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
         cli.send("/exit\r").unwrap();
         assert_eq!(cli.expect_eof().unwrap(), 0);
 
-        let requests = provider.requests.lock().unwrap();
-        let checkpoints: Vec<_> = requests
-            .iter()
-            .filter(|request| is_compaction_request(request))
-            .collect();
-        assert_eq!(checkpoints.len(), 2);
-        let tasks: Vec<_> = requests
-            .iter()
-            .filter(|request| !is_compaction_request(request))
-            .collect();
-        assert_eq!(tasks.len(), 1);
-        assert!(tasks[0]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| {
-                message["content"].as_array().is_some_and(|content| {
-                    content.iter().any(|block| {
-                        block["type"] == "image"
-                            && block["source"]["data"]
-                                .as_str()
-                                .is_some_and(|data| data.len() == 5_529_440)
-                    })
-                })
-            }));
-        assert!(checkpoints[0]["tools"].is_array());
-        assert!(checkpoints[1]["tools"].is_null());
-        let first_request = checkpoints[0].to_string();
-        let initial_cap: u64 = first_request
-            .split("This run requires the entire summary to fit within ")
-            .nth(1)
-            .unwrap()
-            .split(" tokens")
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!(initial_cap >= 512);
-        if mode == "budget-truncated-then-success" {
-            assert_eq!(checkpoints[1]["max_tokens"], json!(initial_cap));
-        } else {
-            assert!(checkpoints[1]["max_tokens"].as_u64().unwrap() < initial_cap);
-        }
+        assert_retained_image_requests(&provider.requests.lock().unwrap(), mode);
     }
 }
 
@@ -1090,7 +990,9 @@ fn exhausted_network_retries_do_not_restart_the_budget_in_the_fallback() {
         ..runtime::TokenUsage::default()
     };
     let mut original = Session::load_from_path(&path).unwrap();
-    original.messages.last_mut().unwrap().usage = Some(old_usage);
+    let mut messages = original.messages().to_vec();
+    messages.last_mut().unwrap().usage = Some(old_usage);
+    original = original.with_messages(messages);
     original.save_to_path(&path).unwrap();
     // Retain a read-only snapshot after handing the writer to the CLI.
     drop(original);
@@ -1104,7 +1006,7 @@ fn exhausted_network_retries_do_not_restart_the_budget_in_the_fallback() {
     let (code, screen) = compact_env(&env, &path);
     assert_ne!(code, 0, "{screen}");
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     assert_eq!(
         compaction_request_count(&provider),
@@ -1144,9 +1046,12 @@ fn usage_preceding_a_malformed_stream_frame_is_billable_without_installing_text(
     let (code, screen) = compact_env(&env, &path);
     assert_ne!(code, 0, "{screen}");
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
-    assert!(!restored.maintenance_usage.is_empty());
+    assert_ne!(
+        restored.maintenance_usage,
+        [] as [runtime::MaintenanceUsageReceipt; 0]
+    );
     assert!(
         restored.maintenance_usage.iter().all(|receipt| {
             receipt
@@ -1194,12 +1099,14 @@ fn an_unreachable_protected_tail_or_todo_budget_does_not_call_the_provider() {
             ).unwrap();
         } else {
             let mut session = Session::load_from_path(&path).unwrap();
-            for (index, message) in session.messages.iter_mut().enumerate() {
+            let mut messages = session.messages().to_vec();
+            for (index, message) in messages.iter_mut().enumerate() {
                 let tokens = if index < 6 { 100 } else { 3_600 };
                 message.blocks = vec![ContentBlock::Text {
                     text: "x".repeat((tokens - 1) * 4 + 1),
                 }];
             }
+            session = session.with_messages(messages);
             assert_eq!(estimate_session_tokens(&session), 15_000);
             session.save_to_path(&path).unwrap();
         }
@@ -1210,7 +1117,7 @@ fn an_unreachable_protected_tail_or_todo_budget_does_not_call_the_provider() {
             "protected context exceeds the 7.5K target: {screen}"
         );
         let restored = Session::load_from_path(&path).unwrap();
-        assert_eq!(restored.messages, original.messages);
+        assert_eq!(restored.messages(), original.messages());
         assert_eq!(restored.compaction, original.compaction);
         assert_eq!(compaction_request_count(&provider), 0);
     }
@@ -1234,7 +1141,7 @@ fn empty_history_cannot_skip_when_fixed_request_overhead_exceeds_the_window() {
         "fixed overhead cannot fit an empty history: {screen}"
     );
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, source.messages);
+    assert_eq!(restored.messages(), source.messages());
     assert_eq!(restored.compaction, source.compaction);
     let report = restored.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
@@ -1242,7 +1149,10 @@ fn empty_history_cannot_skip_when_fixed_request_overhead_exceeds_the_window() {
     assert_eq!(report.safe_history_budget, 0);
     assert!(report.actual_fixed_overhead > 0);
     assert_eq!(report.attempts, 0);
-    assert!(restored.maintenance_usage.is_empty());
+    assert_eq!(
+        restored.maintenance_usage,
+        [] as [runtime::MaintenanceUsageReceipt; 0]
+    );
     assert!(provider.requests.lock().unwrap().is_empty());
 }
 
@@ -1292,7 +1202,10 @@ fn automatic_compaction_keeps_the_pending_prompt_once_in_the_task_request() {
         "the resumed task must include the pending prompt exactly once"
     );
     assert!(requests.iter().any(is_compaction_request));
-    assert!(!tasks[0]["tools"].as_array().unwrap().is_empty());
+    assert_ne!(
+        tasks[0]["tools"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -1388,6 +1301,7 @@ fn pruning_below_the_request_budget_still_summarizes_until_the_ratio_is_met() {
 fn cancelling_a_delayed_checkpoint_preserves_the_resumable_source() {
     let provider = Provider::new("budget-delayed");
     let env = budget_env("cancel-before-checkpoint-commit", &provider);
+    let (description_path, description_before) = seed_peer_description(&env);
     let path = budget_fixture(&env);
     let original = Session::load_from_path(&path).unwrap();
     let mut cli = env.spawn(&["--resume", path.to_str().unwrap(), "/compact"]);
@@ -1401,7 +1315,7 @@ fn cancelling_a_delayed_checkpoint_preserves_the_resumable_source() {
     cli.set_default_timeout(Duration::from_secs(15));
     let _ = cli.expect_eof().unwrap();
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     assert_eq!(compaction_request_count(&provider), 1);
     let report = restored.last_compaction_report.as_ref().unwrap();
@@ -1410,13 +1324,37 @@ fn cancelling_a_delayed_checkpoint_preserves_the_resumable_source() {
     assert_eq!(report.completed_responses, 0);
     assert_eq!(restored.maintenance_usage.len(), 1);
     assert!(restored.maintenance_usage[0].usage.is_none());
+    assert_eq!(std::fs::read(description_path).unwrap(), description_before);
+}
+
+fn seed_peer_description(env: &TestEnv) -> (PathBuf, Vec<u8>) {
+    let settings_path = env.config_home().join("settings.json");
+    let mut settings: Value = std::fs::read(&settings_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({}));
+    settings["agentName"] = json!("checkpoint-owner");
+    settings["experimental"]["peerDescriptions"] = json!(true);
+    std::fs::write(settings_path, settings.to_string()).unwrap();
+    let directory =
+        runtime::mailbox::local_pair_root_in(env.config_home()).join("agents/checkpoint-owner");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("description.json");
+    let bytes = serde_json::to_vec(&json!({
+        "description":"Previously committed peer work", "updated_at":"2026-10-01T00:00:00Z",
+        "source_session_id":"previous-session",
+    }))
+    .unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    (path, bytes)
 }
 
 #[test]
-fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
+fn a_concurrent_edit_to_existing_history_prevents_checkpoint_installation() {
     for before_run in [false, true] {
         let provider = Provider::new("budget-revision-conflict");
         let env = budget_env("durable-source-revision-conflict", &provider);
+        let (description_path, description_before) = seed_peer_description(&env);
         let path = budget_fixture(&env);
         let args = if before_run {
             vec!["--resume", path.to_str().unwrap()]
@@ -1434,13 +1372,16 @@ fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
                 "summary request must start before the external append",
             );
         }
-        let mut external = Session::load_from_path(&path).unwrap();
-        external
-            .push_user_text("EXTERNAL_WRITER_SENTINEL preserve this concurrent decision.")
-            .unwrap();
-        external.save_to_path(&path).unwrap();
-        // The external write is complete; the CLI must now be able to persist
-        // its source_changed report without a second active fixture writer.
+        let external = Session::load_from_path(&path).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let changed = replace_first_assistant_text(
+            &external,
+            &original,
+            "EXTERNAL_WRITER_SENTINEL preserve this concurrent decision.",
+        );
+        std::fs::write(&path, changed).unwrap();
+        // Reload the changed bytes for the final preservation assertions.
+        // These read-only snapshots do not acquire another session writer.
         drop(external);
         let external = Session::load_from_path(&path).unwrap();
         let screen = if before_run {
@@ -1457,7 +1398,14 @@ fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
                 "source conflict finished",
             );
             cli.send("/exit\r").unwrap();
-            assert_eq!(cli.expect_eof().unwrap(), 0);
+            let pid = cli.process_id();
+            let code = cli.expect_eof().unwrap();
+            assert_eq!(
+                code,
+                0,
+                "source conflict exit; before_run={before_run}, child={pid:?}\nPTY:\n{}",
+                cli.render(rendered_contents)
+            );
             screen
         } else {
             provider.response_released.store(true, Ordering::Relaxed);
@@ -1471,8 +1419,9 @@ fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
             screen
         };
         let restored = Session::load_from_path(&path).unwrap();
-        assert_eq!(restored.messages, external.messages);
+        assert_eq!(restored.messages(), external.messages());
         assert_eq!(restored.compaction, external.compaction);
+        assert_eq!(std::fs::read(description_path).unwrap(), description_before);
         assert_eq!(
             compaction_request_count(&provider),
             usize::from(!before_run)
@@ -1489,6 +1438,62 @@ fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
                 .to_string_lossy()
                 .contains("before-compact")));
     }
+}
+
+#[test]
+fn a_rejected_source_refresh_exits_cleanly_and_preserves_the_changed_transcript() {
+    let provider = Provider::new("budget-revision-conflict");
+    let env = budget_env("source-refresh-identity-conflict", &provider);
+    let path = budget_fixture(&env);
+    let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "original source loaded");
+    let source = Session::load_from_path(&path).unwrap();
+    let original = std::fs::read_to_string(&path).unwrap();
+    // A metadata-only SID edit does not invalidate the loaded message view;
+    // change history too, so compaction must actually attempt a source refresh.
+    let changed_history = replace_first_assistant_text(
+        &source,
+        &original,
+        "EXTERNAL_IDENTITY_SENTINEL preserve the changed history.",
+    );
+    let changed = changed_history.replace(&source.session_id, "session-external-identity");
+    assert_ne!(
+        changed_history, changed,
+        "the fixture must change the durable identity"
+    );
+    std::fs::write(&path, &changed).unwrap();
+    assert!(
+        matches!(
+            source.durable_revision_for_history(),
+            Err(runtime::SessionError::SourceChanged)
+        ),
+        "the injected history change must reach the source-refresh branch"
+    );
+    cli.send("/compact\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("source_changed") || screen.contains("source changed"),
+        Duration::from_secs(30),
+        "identity change must reject the source refresh",
+    );
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "source rejection finished");
+    cli.send("/exit\r").unwrap();
+    let code = cli.expect_eof().unwrap();
+    let screen = cli.render(rendered_contents);
+    assert_eq!(
+        code, 1,
+        "persistence error must exit normally, not abort: {screen}"
+    );
+    assert!(
+        !screen.contains("threads should not terminate unexpectedly"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("thread local panicked on drop"),
+        "{screen}"
+    );
+    assert_eq!(compaction_request_count(&provider), 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), changed);
 }
 
 #[test]
@@ -1512,6 +1517,21 @@ fn compaction_preserves_external_billing_for_unchanged_history() {
     let mut external = Session::load_from_path(&path).unwrap();
     external.merge_maintenance_usage(std::slice::from_ref(&receipt));
     external.persist_maintenance_metadata().unwrap();
+    let persisted = std::fs::read(&path).unwrap();
+    assert!(external
+        .push_user_text("METADATA_WRITER_MUST_NOT_APPEND_MESSAGES")
+        .unwrap_err()
+        .to_string()
+        .contains("session_writer_busy"));
+    let changed = external
+        .clone()
+        .with_messages(vec![ConversationMessage::user_text("REPLACED_CONTEXT")]);
+    assert!(changed
+        .persist_maintenance_metadata()
+        .unwrap_err()
+        .to_string()
+        .contains("source changed"));
+    assert_eq!(std::fs::read(&path).unwrap(), persisted);
     drop(external);
     cli.send("/compact\r").unwrap();
     common::expect_screen(
@@ -1663,7 +1683,7 @@ fn live_compaction_resumes_a_file_task_using_constraints_from_removed_history() 
         "the real model must recover facts available only in the compacted prefix"
     );
     let resumed = Session::load_from_path(&path).unwrap();
-    assert!(resumed.messages.iter().flat_map(|message| &message.blocks).any(|block| {
+    assert!(resumed.messages().iter().flat_map(|message| &message.blocks).any(|block| {
         matches!(block, ContentBlock::ToolUse { name, .. } if name == "write_file" || name == "Write")
     }));
     let report = compacted.last_compaction_report.as_ref().unwrap();
@@ -1717,7 +1737,7 @@ fn codex_and_gemini_require_a_complete_terminal_before_installing_a_checkpoint()
             assert!(estimate_session_tokens(&restored) <= 7_500);
             assert_eq!(compaction_request_count(&provider), 1);
         } else {
-            assert_eq!(restored.messages, original.messages, "{mode}");
+            assert_eq!(restored.messages(), original.messages(), "{mode}");
             assert_eq!(restored.compaction, original.compaction, "{mode}");
             let report = restored.last_compaction_report.as_ref().unwrap();
             assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
@@ -1787,7 +1807,7 @@ fn compact_with_model(
     let budget = Duration::from_secs(30);
     let deadline = std::time::Instant::now() + budget;
     loop {
-        let screen = cli.render(|screen| screen.contents());
+        let screen = cli.render(common::screen_contents);
         if common::screen_contains(&screen, expected) {
             break;
         }
@@ -1807,8 +1827,8 @@ fn compact_with_model(
                     "scode exited with code {code} without ever showing \
                      {expected:?}\n{screen}"
                 ),
-                Err(_) => panic!(
-                    "timed out after {budget:?} waiting for {expected:?}; scode \
+                Err(error) => panic!(
+                    "timed out after {budget:?} waiting for {expected:?}: {error}; scode \
                      is still running\n{screen}"
                 ),
             }
@@ -1829,7 +1849,8 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
         assert_ne!(compact(&workspace, &path, "history preserved"), 0, "{mode}");
         let restored = Session::load_from_path(&path).unwrap();
         assert_eq!(
-            restored.messages, original.messages,
+            restored.messages(),
+            original.messages(),
             "{mode} must preserve every source message"
         );
         assert_eq!(
@@ -1895,13 +1916,15 @@ fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
         // Leave ample room below the strict history target so the request uses
         // the full 12K visible ceiling. The former production path added a
         // fictitious 16K manual thinking reservation to this adaptive model.
-        for message in &mut source.messages {
+        let mut messages = source.messages().to_vec();
+        for message in &mut messages {
             for block in &mut message.blocks {
                 if let ContentBlock::Text { text } = block {
                     *text = text.repeat(10);
                 }
             }
         }
+        source = source.with_messages(messages);
         source.save_to_path(&path).unwrap();
         let before = estimate_session_tokens(&source);
         drop(source);
@@ -1988,7 +2011,7 @@ fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
         assert!(continued.contains("Consolidated checkpoint"));
         assert_eq!(continued.matches("PROJECT_ADAPTIVE_CONTINUE").count(), 1);
         let restored = Session::load_from_path(&path).unwrap();
-        assert!(restored.messages.iter().any(|message| {
+        assert!(restored.messages().iter().any(|message| {
             message.blocks.iter().any(
                 |block| matches!(block, ContentBlock::Text { text } if text == "ALPHA_CONTEXT_OK"),
             )
@@ -2029,13 +2052,15 @@ fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
         // target. The smaller fixture belongs to the dynamic-cap regression;
         // it can no longer count a 10K checkpoint as ordinary success.
         let mut source = Session::load_from_path(&path).unwrap();
-        for message in &mut source.messages {
+        let mut messages = source.messages().to_vec();
+        for message in &mut messages {
             for block in &mut message.blocks {
                 if let ContentBlock::Text { text } = block {
                     *text = text.repeat(4);
                 }
             }
         }
+        source = source.with_messages(messages);
         source.save_to_path(&path).unwrap();
         let before = estimate_session_tokens(&source);
         drop(source);
@@ -2077,9 +2102,9 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
     let original = std::fs::read(&path).unwrap();
     assert_eq!(compact(&workspace, &path, "Messages removed"), 0);
     let first = Session::load_from_path(&path).unwrap();
-    assert!(first.messages.len() < 32);
+    assert!(first.messages().len() < 32);
     assert!(
-        first.messages.len() > 5,
+        first.messages().len() > 5,
         "retain a token-priced recent tail, not only four messages"
     );
     assert!(
@@ -2114,7 +2139,15 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
         })
         .collect();
     assert_eq!(archives.len(), 1);
-    assert_eq!(std::fs::read(archives[0].path()).unwrap(), original);
+    assert!(std::fs::read(archives[0].path())
+        .unwrap()
+        .starts_with(&original));
+    assert_eq!(
+        Session::load_from_path(archives[0].path())
+            .unwrap()
+            .session_id,
+        Session::load_from_path(&path).unwrap().session_id,
+    );
 
     let mut next = first;
     for _ in 0..12 {
@@ -2147,8 +2180,8 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
     );
 }
 
-/// TodoWrite is whole-list-replace with no read tool, so the model needs the
-/// exact list back in context after compaction discards the old TodoWrite
+/// `TodoWrite` is whole-list-replace with no read tool, so the model needs the
+/// exact list back in context after compaction discards the old `TodoWrite`
 /// messages. Seed a todo store, compact, and assert the compacted history
 /// carries the structured list forward (CC todo-continuity parity).
 #[test]
@@ -2174,7 +2207,7 @@ fn compaction_carries_the_todo_list_forward() {
 
     let restored = Session::load_from_path(&path).unwrap();
     let transcript = restored
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| m.blocks.iter())
         .filter_map(|b| match b {
@@ -2236,13 +2269,15 @@ fn automatic_compaction_continues_after_a_long_summary() {
     std::fs::write(config_path, config.to_string()).unwrap();
     let path = fixture(&workspace);
     let mut session = Session::load_from_path(&path).unwrap();
-    for message in &mut session.messages {
+    let mut messages = session.messages().to_vec();
+    for message in &mut messages {
         for block in &mut message.blocks {
             if let ContentBlock::Text { text } = block {
                 *text = text.repeat(4);
             }
         }
     }
+    session = session.with_messages(messages);
     session.save_to_path(&path).unwrap();
 
     drop(session);
@@ -2332,13 +2367,15 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
     std::fs::write(config_path, config.to_string()).unwrap();
     let path = fixture(&workspace);
     let mut original = Session::load_from_path(&path).unwrap();
-    for message in &mut original.messages {
+    let mut messages = original.messages().to_vec();
+    for message in &mut messages {
         for block in &mut message.blocks {
             if let ContentBlock::Text { text } = block {
                 *text = text.repeat(3);
             }
         }
     }
+    original = original.with_messages(messages);
     // Pruning happens on a staged clone before preflight or a model failure.
     // A failure must restore this output as well as the textual history.
     original
@@ -2378,8 +2415,8 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
     cli.expect_eof().unwrap();
     let restored = Session::load_from_path(&path).unwrap();
     assert_eq!(
-        &restored.messages[..original.messages.len()],
-        &original.messages
+        &restored.messages()[..original.messages().len()],
+        original.messages()
     );
     assert_eq!(
         restored.last_compaction_report.as_ref().unwrap().outcome,
@@ -2471,9 +2508,20 @@ fn persistence_failure_preserves_original_transcript() {
     workspace.write_mock_config(&provider.url);
     let path = fixture(&workspace);
     let original = std::fs::read(&path).unwrap();
+    let source = Session::load_from_path(&path).unwrap();
     let _restore = RestorePermissions(workspace.root.clone());
     assert_ne!(compact(&workspace, &path, "history preserved"), 0);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // Failure/billing metadata may append to the existing log even when the
+    // directory refuses the archive needed for a context replacement.
+    assert!(std::fs::read(&path).unwrap().starts_with(&original));
+    let restored = Session::load_from_path(&path).unwrap();
+    assert_eq!(restored.messages(), source.messages());
+    assert_eq!(restored.compaction, source.compaction);
+    assert_eq!(
+        restored.last_compaction_report.as_ref().unwrap().outcome,
+        runtime::CompactionOutcome::Failed
+    );
+    assert_eq!(restored.maintenance_usage.len(), 1);
     assert_eq!(
         provider.requests.lock().unwrap().len(),
         1,
@@ -2488,7 +2536,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
     workspace.write_mock_config(&provider.url);
     let path = fixture(&workspace);
     let mut damaged = Session::load_from_path(&path).unwrap();
-    damaged.messages.clear();
+    damaged = damaged.with_messages(Vec::new());
     damaged.record_compaction("legacy checkpoint", 32);
     damaged.save_to_path(&path).unwrap();
     drop(damaged);
@@ -2504,7 +2552,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
     cli.send("\r").unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let screen = cli.render(|s| s.contents());
+        let screen = cli.render(common::screen_contents);
         if common::screen_contains(&screen, "no active history") {
             break;
         }
@@ -2522,7 +2570,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
         provider.requests.lock().unwrap().is_empty(),
         "damaged history must never reach the model"
     );
-    assert!(Session::load_from_path(&path).unwrap().messages.is_empty());
+    assert_eq!(Session::load_from_path(&path).unwrap().messages(), []);
 }
 
 // Drive both runtime clients through the real Agent tool. Two closed read
@@ -2663,17 +2711,7 @@ fn subagent_compaction_uses_shared_text_transport() {
     // No model was specified in the spawn. Both the child and its compaction
     // must use the parent's configured route, not the response's model label.
     assert!(requests.iter().all(|r| r["model"] == "intranet/child-v1"));
-    let manifests = std::fs::read_dir(workspace.root.join(".sudocode-agents"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .map(|entry| {
-            serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(manifests.len(), 1);
-    assert_eq!(manifests[0]["model"], "claude-sonnet");
-    assert_eq!(manifests[0]["status"], "completed");
+    assert_delegated_manifest(&workspace);
     let checkpoint = checkpoints[0];
     let child_turns = requests.iter().filter(|request| {
         !is_compaction_request(request) && request["system"] == checkpoint["system"]
@@ -2760,6 +2798,86 @@ fn internal_model_alias_and_resumed_model_use_active_wire_identity() {
 }
 
 #[test]
+fn provider_prompt_length_rejection_compacts_before_resending_the_pending_turn() {
+    let provider = Provider::new("openai-prompt-limit");
+    let workspace = HarnessWorkspace::new("grok-prompt-limit");
+    workspace.write_mock_config(&provider.url);
+    let config_path = workspace.config_home.join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let model = &mut config["models"]["claude-sonnet"];
+    model["contextWindow"] = json!(1_000_000);
+    model["maxOutputTokens"] = json!(1024);
+    model["providers"]["api-key"]["model"] = json!("grok-4.6");
+    model["providers"]["api-key"]["api"] = json!("openai-completions");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let path = fixture(&workspace);
+    let original = Session::load_from_path(&path).unwrap();
+    let mut cli = spawn_scode_in_dir_with_env(
+        &workspace.root,
+        &[
+            "--auth",
+            "api-key",
+            "--model",
+            "claude-sonnet",
+            "--resume",
+            path.to_str().unwrap(),
+        ],
+        Duration::from_secs(30),
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
+    )
+    .unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
+    cli.send("Continue PROJECT_ALPHA. Pending instruction: GROK_PENDING_ONCE.")
+        .unwrap();
+    common::expect_input_line(
+        &cli,
+        "GROK_PENDING_ONCE",
+        Duration::from_secs(30),
+        "pending prompt entered",
+    );
+    let marker = common::turn_status_marker(&cli);
+    cli.send("\r").unwrap();
+    cli.expect("GROK_PROMPT_RECOVERED").unwrap_or_else(|error| {
+        panic!(
+            "pending turn did not complete after compaction: {error}\n{}\nrequest count: {}",
+            cli.render(common::screen_contents),
+            provider.requests.lock().unwrap().len()
+        );
+    });
+    common::expect_turn_complete_after(
+        &cli,
+        &marker,
+        Duration::from_secs(30),
+        "provider-rejected turn completed after compaction",
+    );
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "one refusal, one checkpoint, one task");
+    assert!(!is_compaction_request(&requests[0]));
+    assert!(is_compaction_request(&requests[1]));
+    assert!(!is_compaction_request(&requests[2]));
+    for index in [0, 2] {
+        let messages = requests[index]["messages"].to_string();
+        assert_eq!(messages.matches("GROK_PENDING_ONCE").count(), 1);
+        assert!(messages.contains("PROJECT_ALPHA"));
+        assert_eq!(requests[index]["model"], "grok-4.6");
+    }
+    assert!(
+        requests[2]["messages"].to_string().len() < requests[0]["messages"].to_string().len(),
+        "the retry must contain the compacted history"
+    );
+    let restored = Session::load_from_path(&path).unwrap();
+    assert!(restored.compaction.is_some());
+    assert!(restored.messages().len() < original.messages().len());
+    assert!(!workspace.root.join("SHOULD_NOT_EXIST").exists());
+}
+
+#[test]
 fn openai_compaction_validates_responses_and_preserves_history_on_failure() {
     for mode in [
         "openai-success",
@@ -2798,13 +2916,14 @@ fn openai_compaction_validates_responses_and_preserves_history_on_failure() {
             let restored = Session::load_from_path(&path).unwrap();
             assert!(restored
                 .compaction
+                .as_ref()
                 .unwrap()
                 .summary
                 .contains("PROJECT_ALPHA"));
-            assert!(restored.messages.len() < 32);
+            assert!(restored.messages().len() < 32);
         } else {
             let restored = Session::load_from_path(&path).unwrap();
-            assert_eq!(restored.messages, original.messages, "{mode}");
+            assert_eq!(restored.messages(), original.messages(), "{mode}");
             assert_eq!(restored.compaction, original.compaction, "{mode}");
         }
         assert!(!workspace.root.join("SHOULD_NOT_EXIST").exists());
@@ -2868,24 +2987,19 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
         "typed turn landed",
     );
     cli.send("\r").unwrap();
-    cli.expect("Context compaction failed")
-        .unwrap_or_else(|error| {
-            panic!(
-                "{error}\n{}\nrequests: {:?}",
-                cli.render(|screen| screen.contents()),
-                provider
-                    .requests
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|request| is_compaction_request(request))
-                    .collect::<Vec<_>>()
-            );
-        });
+    common::expect_screen(
+        &cli,
+        |screen| common::screen_contains(screen, "Context compaction failed"),
+        Duration::from_secs(30),
+        "the completed turn must display the automatic compaction failure",
+    );
     cli.send("/exit\r").unwrap();
     cli.expect_eof().unwrap();
     let after = Session::load_from_path(&path).unwrap();
-    assert_eq!(&after.messages[..before.messages.len()], &before.messages);
+    assert_eq!(
+        &after.messages()[..before.messages().len()],
+        before.messages()
+    );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(
         requests
@@ -2896,4 +3010,190 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
         "no further task request after compaction fails"
     );
     assert!(requests.iter().any(is_compaction_request));
+}
+
+fn anthropic_checkpoint_response(
+    mode: &str,
+    number: usize,
+    request: &Value,
+    compaction: bool,
+) -> (&'static str, Value) {
+    // A checkpoint that needs more than the former 8192-token ceiling.
+    // The provider truncates it when the actual request budget is too small.
+    let long_summary = mode.starts_with("long-summary");
+    let truncated = mode == "truncated"
+        || (mode == "budget-truncated-then-success" && number == 1)
+        || (long_summary && request["max_tokens"].as_u64().unwrap_or(0) < 10_000);
+    let mut text = match mode {
+            "empty" => String::new(),
+            "growing" => "unhelpful repetition ".repeat(20_000),
+            // The transport deliberately supplies complete but oversized
+            // checkpoints. The runtime must validate the installed history,
+            // even when a gateway ignores the requested visible-text budget.
+            "budget-weak-then-target" if number == 1 => framed_fixture_summary(8_999),
+            "budget-over-ceiling-then-success" if number == 1 => framed_fixture_summary(4_000),
+            "budget-transport-fallback" if number == 3 => framed_fixture_summary(8_999),
+            "budget-weak-then-target" | "budget-transport-fallback" => {
+                framed_fixture_summary(1_000)
+            }
+            "budget-over-target" => framed_fixture_summary(6_000),
+            "budget-small-output" => framed_fixture_summary(400),
+            "budget-delayed" => {
+                std::thread::sleep(Duration::from_secs(4));
+                framed_fixture_summary(1_000)
+            }
+            _ if long_summary && truncated => "<summary>Incomplete checkpoint".into(),
+            _ if long_summary => format!("<summary>PROJECT_ALPHA {}CHECKPOINT_COMPLETE</summary>", "fact ".repeat(7_200)),
+            _ => format!("<summary>Consolidated checkpoint {number}: preserve project ALPHA and pending deployment. Next: verify tests.</summary>"),
+        };
+    if compaction
+        && request
+            .to_string()
+            .contains("Optional checkpoint metadata:")
+    {
+        text.push_str("\n<agent-description>\"Updated peer task\"</agent-description>");
+    }
+    (
+        "200 OK",
+        json!({"id":"compact-fixture", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6", "content":[{"type":"text", "text":text}], "stop_reason":if truncated {"max_tokens"} else {"end_turn"}, "usage":{"input_tokens":1000,"output_tokens":if long_summary {10_000} else {50}}}),
+    )
+}
+
+fn model_compaction_response(
+    first: &str,
+    mode: &str,
+    number: usize,
+    request: &Value,
+    compaction: bool,
+) -> (&'static str, Value) {
+    if mode == "openai-prompt-limit" && !compaction {
+        if number == 1 {
+            (
+                "400 Bad Request",
+                json!({"code":"invalid-argument","error":"This model's maximum prompt length is 200000 but the request contains 205005 tokens."}),
+            )
+        } else {
+            (
+                "200 OK",
+                json!({"id":"recovered-turn","object":"chat.completion","created":0,"model":"grok-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"GROK_PROMPT_RECOVERED"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010}}),
+            )
+        }
+    } else if mode == "budget-transport-exhausted"
+        || (mode == "budget-transport-fallback" && number <= 2)
+    {
+        (
+            "503 Service Unavailable",
+            json!({"type":"error", "error":{"type":"overloaded_error", "message":"fixture transient overload"}}),
+        )
+    } else if mode.starts_with("gemini-") {
+        let mut candidate = json!({"content":{"role":"model","parts":[{"text":"<summary>PROJECT_ALPHA complete checkpoint.</summary>"}]}});
+        if mode != "gemini-missing-terminal" {
+            candidate["finishReason"] = json!(if mode == "gemini-truncated" {
+                "MAX_TOKENS"
+            } else {
+                "STOP"
+            });
+        }
+        (
+            "200 OK",
+            json!({"candidates":[candidate],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":50}}),
+        )
+    } else if mode.starts_with("codex-") {
+        (
+            "200 OK",
+            json!({"usage":{"input_tokens":1000,"output_tokens":50}}),
+        )
+    } else if mode.starts_with("openai-") {
+        openai_completion_response(first, mode, number)
+    } else if mode.starts_with("internal")
+        && (request["model"]
+            != if mode == "internal-prefixed" {
+                "intranet/apeiron-v1"
+            } else {
+                "apeiron-v1"
+            }
+            || request["max_tokens"].as_u64().unwrap_or(u64::MAX) > 1024)
+    {
+        (
+            "400 Bad Request",
+            json!({"type":"error","error":{"type":"invalid_request_error","message":format!("internal deployment rejected model={} max_tokens={}", request["model"], request["max_tokens"])}}),
+        )
+    } else if mode == "long-summary-fallback" && number == 1 {
+        (
+            "400 Bad Request",
+            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture cache-safe compaction not supported"}}),
+        )
+    } else if mode == "auth-unsupported" {
+        (
+            "401 Unauthorized",
+            json!({"type":"error", "error":{"type":"authentication_error", "message":"fixture auth scheme not supported; cache-safe compaction not supported"}}),
+        )
+    } else if matches!(mode, "error" | "post-error") {
+        (
+            "400 Bad Request",
+            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
+        )
+    } else {
+        anthropic_checkpoint_response(mode, number, request, compaction)
+    }
+}
+
+fn assert_retained_image_requests(requests: &[Value], mode: &str) {
+    let checkpoints: Vec<_> = requests
+        .iter()
+        .filter(|request| is_compaction_request(request))
+        .collect();
+    assert_eq!(checkpoints.len(), 2);
+    let tasks: Vec<_> = requests
+        .iter()
+        .filter(|request| !is_compaction_request(request))
+        .collect();
+    assert_eq!(tasks.len(), 1);
+    assert!(tasks[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["content"].as_array().is_some_and(|content| {
+                content.iter().any(|block| {
+                    block["type"] == "image"
+                        && block["source"]["data"]
+                            .as_str()
+                            .is_some_and(|data| data.len() == 5_529_440)
+                })
+            })
+        }));
+    assert!(checkpoints[0]["tools"].is_array());
+    assert!(checkpoints[1]["tools"].is_null());
+    let first_request = checkpoints[0].to_string();
+    let initial_cap: u64 = first_request
+        .split("This run requires the entire summary to fit within ")
+        .nth(1)
+        .unwrap()
+        .split(" tokens")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(initial_cap >= 512);
+    if mode == "budget-truncated-then-success" {
+        assert_eq!(checkpoints[1]["max_tokens"], json!(initial_cap));
+    } else {
+        assert!(checkpoints[1]["max_tokens"].as_u64().unwrap() < initial_cap);
+    }
+}
+
+fn assert_delegated_manifest(workspace: &HarnessWorkspace) {
+    let manifests = std::fs::read_dir(workspace.root.join(".sudocode-agents"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
+        })
+        .filter(|manifest| manifest.get("agentId").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["model"], "claude-sonnet");
+    assert_eq!(manifests[0]["status"], "completed");
 }

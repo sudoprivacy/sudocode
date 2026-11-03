@@ -282,7 +282,10 @@ fn compaction_clears_the_context_anchor_and_resumes_critical_facts() {
     let report = compacted.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
     assert!(runtime::estimate_session_tokens(&compacted) <= 7_500);
-    assert!(!compacted.maintenance_usage.is_empty());
+    assert_ne!(
+        compacted.maintenance_usage,
+        [] as [runtime::MaintenanceUsageReceipt; 0]
+    );
 
     let mut sess = env.spawn(&[
         "--resume",
@@ -318,7 +321,7 @@ fn compaction_clears_the_context_anchor_and_resumes_critical_facts() {
     assert_eq!(sess.expect_eof().unwrap(), 0);
     let continued = runtime::Session::load_from_path(&path).unwrap();
     let assistant = continued
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| message.role == runtime::MessageRole::Assistant)

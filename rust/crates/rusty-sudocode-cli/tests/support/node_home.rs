@@ -78,7 +78,7 @@ impl Drop for NodeHome {
 /// but are trusted by no node: a fresh self-signed certificate serves as CA and
 /// client certificate alike. It gets a session as far as dialling, which is
 /// all a test of an unreachable node needs.
-pub fn write_unusable_credential(agents_dir: &Path, agent: &str) {
+pub fn write_untrusted_credential(agents_dir: &Path, agent: &str) {
     let bundle = agents_dir.join(agent);
     std::fs::create_dir_all(&bundle).expect("create the credential directory");
     let issued = rcgen::generate_simple_self_signed(vec![agent.to_string()])
@@ -101,6 +101,26 @@ pub fn write_unusable_credential(agents_dir: &Path, agent: &str) {
     });
     std::fs::write(bundle.join("credential.json"), manifest.to_string())
         .expect("write credential.json");
+}
+
+/// Inspect the complete private test tree, including its HOME and config home.
+/// Do not follow symlinks out of the fixture into unrelated workspaces.
+pub fn assert_no_disk_mailboxes_below(root: &Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("inspect the private fixture tree") {
+            let entry = entry.expect("inspect a fixture entry");
+            let name = entry.file_name();
+            assert!(
+                name != ".sudocode-inbox" && name != "local-mailbox",
+                "unexpected disk mailbox at {}",
+                entry.path().display()
+            );
+            if entry.file_type().expect("fixture entry type").is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
 }
 
 /// Pin the agent name a session started in `workspace` answers to.

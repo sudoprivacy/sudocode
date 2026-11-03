@@ -15,9 +15,11 @@
 //! `#[ignore]` — opt-in, needs a live LLM. The CI gate for the same path is
 //! `cohost_mock_llm`, which runs this harness against a scripted model; the two
 //! share `common` so a pass there is a statement about this one. Run with:
+//! ```bash
 //!   ANTHROPIC_API_KEY=<sudorouter sk-…> \
 //!   ANTHROPIC_BASE_URL=https://napi.sudorouter.ai \
 //!   cargo test -p engine-acp --features mailbox --test cohost_live_llm -- --ignored --nocapture
+//! ```
 
 #[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
@@ -30,12 +32,13 @@ use common::{
     make_desc, mount_agent_world, provision_stream_transcript, send_prompt, user_ctx,
     wait_for_agent_reply,
 };
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::{FsBackend, KernelFsBackend};
 
-/// Model the agent runs, read from its descriptor `model` label. SudoRouter
+/// Model the agent runs, read from its descriptor `model` label. `SudoRouter`
 /// serves `claude-sonnet-4-6`; override via `SUDOCODE_TEST_MODEL`.
 fn test_model() -> String {
     std::env::var("SUDOCODE_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string())
@@ -72,11 +75,15 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     // Mailbox over this same kernel — rather than planting entries by hand.
     // Hand-planting is how a test ends up exercising a shape production never
     // creates, and this one is here precisely to exercise the production path.
-    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        user,
+        &AgentDescriptor {
+            pid: format!("pid-{user}"),
+            name: user.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         "/".to_string(),
     ));
     let transcript = InboxConvention::new(String::new()).transcript_path(user, agent_id);

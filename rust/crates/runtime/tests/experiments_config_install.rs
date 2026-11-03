@@ -1,6 +1,6 @@
 //! The config-sourced branch of `runtime::experiments`, isolated in
 //! its own test binary: `init_config_flags` fills a process-global
-//! OnceLock, so installing a truthy flag would leak into the
+//! `OnceLock`, so installing a truthy flag would leak into the
 //! default-off assertions in `experiments_flags.rs` if they shared a
 //! process. Here the install is the only test, so first-call-wins is
 //! guaranteed to be THIS call.

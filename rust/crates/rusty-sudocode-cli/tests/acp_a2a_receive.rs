@@ -1,14 +1,14 @@
 //! Live E2E: a nexus-A2A peer message reaches an ACP client.
 //!
 //! The send half of standalone A2A has worked since #508 — `scode` advertises
-//! a `send_message` tool and writes to the peer's replicated DT_STREAM inbox.
+//! a `send_message` tool and writes to the peer's replicated `DT_STREAM` inbox.
 //! The receive half was only ever wired into the interactive REPL, which
 //! printed `📨 A2A from <peer>` to the terminal. Anything driving `scode acp`
 //! programmatically — which is what an agent does, and the reason the ACP cut
 //! exists — saw nothing at all. A duet between two such agents could send and
 //! never receive.
 //!
-//! This proves the other half over a real daemon and a real DT_STREAM: a peer
+//! This proves the other half over a real daemon and a real `DT_STREAM`: a peer
 //! writes into the agent's inbox and the ACP client is told, out of band, with
 //! no turn in flight.
 //!
@@ -44,7 +44,9 @@ use runtime::agent_mailbox::MailboxEnvelope;
 /// `Mailbox` and duplicated it. Production had already moved, so exercising the
 /// copy proved nothing about what ships.
 fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
-    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+    // The mTLS dial is the server-verified credential, so this is the
+    // transport-verified construction a running agent uses.
+    Mailbox::over_nexus_mtls(Arc::clone(client), agent, auth, "root")
 }
 
 fn send_to(
@@ -55,6 +57,7 @@ fn send_to(
     auth: &str,
 ) -> Result<(), String> {
     mailbox(client, from_agent, auth).send(MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: from_agent.to_string(),
         to: to_agent.to_string(),
         body: body.to_string(),
@@ -115,7 +118,7 @@ struct AcpStdio {
 }
 
 impl AcpStdio {
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    fn request(&mut self, method: &str, params: &Value) -> Value {
         self.next_id += 1;
         let id = self.next_id;
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
@@ -187,6 +190,104 @@ impl Drop for AcpStdio {
     }
 }
 
+/// A successful close must retire the real receiver worker before the client
+/// can terminate its CLI. Merely observing an empty agent's startup response
+/// misses this branch: the receiver may not have claimed its seat yet.
+#[test]
+#[ignore = "requires a running nexusd-cluster and a dedicated receiver credential"]
+fn live_session_close_releases_an_acquired_receiver_seat_before_reply() {
+    use runtime::fs_backend::{FsBackend, NexusVfsFsBackend};
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("test daemon endpoint");
+    let bundle = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+        .expect("dedicated lifecycle receiver credential");
+    let credential = runtime::nexus_mailbox::AgentCredential::load(&bundle)
+        .expect("load lifecycle receiver credential");
+    let agent = credential.agent.clone();
+    let client = runtime::nexus_mailbox::Config {
+        endpoint: endpoint.clone(),
+        agent: agent.clone(),
+        tls: credential.tls,
+    }
+    .connect()
+    .expect("connect using the receiver's own mTLS identity");
+    let backend = NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root");
+    let path = format!("/agents/{agent}/receiver.lock");
+    let workspace = tempfile::tempdir().expect("lifecycle workspace");
+    let config_home = tempfile::tempdir().expect("lifecycle config home");
+    let binary = std::env::var_os("SCODE_RECEIVER_TEST_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_scode").into());
+    let mut acp = spawn_acp_from_binary(
+        &binary,
+        &endpoint,
+        &agent,
+        "unused-peer",
+        &workspace,
+        &config_home,
+    );
+    let initialized = acp.request(
+        "initialize",
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    assert!(initialized.get("result").is_some(), "{initialized}");
+    let opened_at = Instant::now();
+    let opened = acp.request(
+        "session/new",
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    let sid = opened["result"]["sessionId"]
+        .as_str()
+        .expect("new SID")
+        .to_string();
+    let second = acp.request(
+        "session/new",
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    let second_sid = second["result"]["sessionId"]
+        .as_str()
+        .expect("second SID")
+        .to_string();
+    await_real_receiver_seat(&backend, &path);
+    let first_close = acp.request("session/close", &json!({"sessionId": sid}));
+    assert!(first_close.get("result").is_some(), "{first_close}");
+    assert!(
+        backend
+            .try_lock(&path, 30_000)
+            .expect("seat after first close")
+            .is_none(),
+        "closing one session must preserve its agent's other live session"
+    );
+    let last_close = acp.request("session/close", &json!({"sessionId": second_sid}));
+    assert!(last_close.get("result").is_some(), "{last_close}");
+    assert!(
+        opened_at.elapsed() < Duration::from_secs(15),
+        "the close proof must precede the receiver's original 30-second TTL"
+    );
+    let probe = backend
+        .try_lock(&path, 30_000)
+        .expect("seat after last close");
+    assert!(
+        probe.is_some(),
+        "close replied before its acquired receiver seat was released"
+    );
+    drop(probe);
+
+    // Re-entry on this connection exercises the retained retirement handle.
+    let loaded = acp.request(
+        "session/load",
+        &json!({"sessionId": second_sid, "cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    await_real_receiver_seat(&backend, &path);
+    let closed = acp.request("session/close", &json!({"sessionId": second_sid}));
+    assert!(closed.get("result").is_some(), "{closed}");
+    let probe = backend
+        .try_lock(&path, 30_000)
+        .expect("seat after re-entry close");
+    assert!(probe.is_some(), "re-entered receiver was not joined");
+    drop(probe);
+}
+
 /// Start `scode acp` wired to `endpoint` as `agent`, with an isolated config
 /// home so the durable read cursor a test writes cannot leak into another test
 /// or into the developer's own.
@@ -194,6 +295,24 @@ fn spawn_acp(
     endpoint: &str,
     agent: &str,
     peer: &str,
+    workspace: &tempfile::TempDir,
+    config_home: &tempfile::TempDir,
+) -> AcpStdio {
+    spawn_acp_from_binary(
+        std::ffi::OsStr::new(env!("CARGO_BIN_EXE_scode")),
+        endpoint,
+        agent,
+        peer,
+        workspace,
+        config_home,
+    )
+}
+
+fn spawn_acp_from_binary(
+    binary: &std::ffi::OsStr,
+    endpoint: &str,
+    agent: &str,
+    _peer: &str,
     workspace: &tempfile::TempDir,
     config_home: &tempfile::TempDir,
 ) -> AcpStdio {
@@ -216,7 +335,7 @@ fn spawn_acp(
         std::path::Path::new(&receiver_credential),
     );
     node_home::pin_agent_name(workspace.path(), agent);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    let mut cmd = Command::new(binary);
     cmd.arg("acp")
         .current_dir(workspace.path())
         .env("SUDO_CODE_CONFIG_HOME", config_home.path())
@@ -271,7 +390,7 @@ fn a2a_peer_message_reaches_an_acp_client() {
 
     let init = acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     assert!(init.get("result").is_some(), "initialize failed: {init}");
 
@@ -279,7 +398,7 @@ fn a2a_peer_message_reaches_an_acp_client() {
     // nobody to notify.
     let new_session = acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     let session_id = new_session["result"]["sessionId"]
         .as_str()
@@ -354,11 +473,11 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
         let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
         acp.request(
             "initialize",
-            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            &json!({"protocolVersion": 1, "clientCapabilities": {}}),
         );
         acp.request(
             "session/new",
-            json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+            &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
         );
         // Wait for the cursor to actually exist before killing the process.
         // The premise of this test is "a client that HAS read this inbox
@@ -384,11 +503,11 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
     let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
     acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     let notification = acp.await_notification(|msg| {
         msg["method"] == "session/update"
@@ -435,11 +554,11 @@ fn a_first_time_receiver_does_not_replay_history() {
     let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
     acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
 
     // A live message proves the receiver is working, and its arrival is the
@@ -459,4 +578,19 @@ fn a_first_time_receiver_does_not_replay_history() {
         text.contains(live) && !text.contains("ancient history"),
         "the first delivery should be the live message, not replayed history: {text}"
     );
+}
+
+fn await_real_receiver_seat(backend: &dyn runtime::FsBackend, path: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match backend.try_lock(path, 30_000).expect("probe the real seat") {
+            None => break,
+            Some(probe) => drop(probe),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "receiver never acquired its real seat"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

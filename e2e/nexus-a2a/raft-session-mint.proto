@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package nexus.raft;
+
+// Minimal subset of nexus-vfs's proto/nexus/raft/transport.proto: only the
+// session-mint surface this harness drives over grpcurl. The service and
+// message SHAPE here must match the pinned nexus-vfs rev — a drift fails
+// loudly at the next harness run, which is the contract a subset can keep.
+//
+// Why a subset at all: the Rust tests must not link the tonic/protoc tree
+// (the workspace's plain `cargo test` has no protoc — that constraint is why
+// the co-host bin is feature-gated), and the daemon ships no gRPC reflection.
+// grpcurl with an explicit proto is the one way bash can speak this surface.
+
+service ZoneApiService {
+  // Signs a SESSION credential: an agent identity bound to `owner_id`, with a
+  // fresh per-call subject and a short validity. Reachable by an AGENT caller
+  // on the replicated session-mint allow-list (see AllowSessionMinter).
+  rpc MintSessionAgent(MintSessionAgentRequest) returns (MintSessionAgentResponse);
+
+  // Adds an agent to that allow-list. NODE-gated: an agent that could edit the
+  // list could grant itself the right to mint identities for anyone.
+  rpc AllowSessionMinter(AllowSessionMinterRequest) returns (AllowSessionMinterResponse);
+}
+
+message MintSessionAgentRequest {
+  string owner_id = 1;
+  uint64 validity_secs = 2;
+}
+
+message MintSessionAgentResponse {
+  bool success = 1;
+  optional string error = 2;
+  bytes agent_cert_pem = 3;
+  bytes agent_key_pem = 4;
+  bytes ca_pem = 5;
+  string subject_id = 6;
+}
+
+message AllowSessionMinterRequest {
+  string agent_id = 1;
+}
+
+message AllowSessionMinterResponse {
+  bool success = 1;
+  optional string error = 2;
+}

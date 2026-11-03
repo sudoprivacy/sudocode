@@ -594,8 +594,7 @@ fn lifecycle_phase_for_method(method: &str) -> McpLifecyclePhase {
     match method {
         "initialize" => McpLifecyclePhase::InitializeHandshake,
         "tools/list" => McpLifecyclePhase::ToolDiscovery,
-        "resources/list" => McpLifecyclePhase::ResourceDiscovery,
-        "prompts/list" => McpLifecyclePhase::ResourceDiscovery,
+        "resources/list" | "prompts/list" => McpLifecyclePhase::ResourceDiscovery,
         "prompts/get" | "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
         _ => McpLifecyclePhase::ErrorSurfacing,
     }
@@ -622,7 +621,7 @@ struct ToolRoute {
 }
 
 /// Maximum number of spawn+initialize attempts to make against a single MCP
-/// server within one McpServerManager lifetime. Exceeding this trips a sticky
+/// server within one `McpServerManager` lifetime. Exceeding this trips a sticky
 /// `permanent_failure` so a broken plugin MCP server cannot loop-fork.
 pub(crate) const MCP_SPAWN_ATTEMPT_LIMIT: u32 = 2;
 
@@ -633,10 +632,10 @@ struct ManagedMcpServer {
     initialized: bool,
     generation: u64,
     /// Total spawn attempts (including retries) made against this server.
-    /// Capped at MCP_SPAWN_ATTEMPT_LIMIT to short-circuit the spawn loop.
+    /// Capped at `MCP_SPAWN_ATTEMPT_LIMIT` to short-circuit the spawn loop.
     spawn_attempts: u32,
     /// Sticky terminal failure that disables further spawn attempts and is
-    /// returned verbatim on every future request. Set once spawn_attempts
+    /// returned verbatim on every future request. Set once `spawn_attempts`
     /// reaches the cap.
     permanent_failure: Option<String>,
 }
@@ -842,6 +841,7 @@ impl McpServerManager {
     /// Whether this discovered tool's transport shares an initialized session
     /// across independent requests. Metadata controls *permission to overlap*;
     /// this checks actual transport capability, not that metadata.
+    #[must_use]
     pub fn supports_concurrent_tool(&self, name: &str) -> bool {
         self.tool_index
             .get(name)
@@ -1482,7 +1482,7 @@ impl McpServerManager {
         };
 
         if let Some(process) = process.as_mut() {
-            let _ = process.shutdown().await;
+            let () = process.shutdown().await;
         }
 
         Ok(())
@@ -1495,6 +1495,7 @@ impl McpServerManager {
         )
     }
 
+    #[must_use]
     pub fn should_reset_server(error: &McpServerManagerError) -> bool {
         matches!(
             error,
@@ -1535,6 +1536,53 @@ impl McpServerManager {
         }
     }
 
+    async fn spawn_server_process(
+        &mut self,
+        server_name: &str,
+    ) -> Result<(), McpServerManagerError> {
+        let attempt_count = self
+            .servers
+            .get(server_name)
+            .map_or(0, |server| server.spawn_attempts);
+        if attempt_count >= MCP_SPAWN_ATTEMPT_LIMIT {
+            let reason = format!(
+                        "MCP server `{server_name}` exceeded {MCP_SPAWN_ATTEMPT_LIMIT} initialize attempts; refusing to retry spawn"
+                    );
+            if let Some(server) = self.servers.get_mut(server_name) {
+                server.permanent_failure = Some(reason.clone());
+            }
+            return Err(McpServerManagerError::PermanentlyFailed {
+                server_name: server_name.to_string(),
+                reason,
+            });
+        }
+        let bootstrap = {
+            let server = self.server_mut(server_name)?;
+            server.spawn_attempts = server.spawn_attempts.saturating_add(1);
+            server.bootstrap.clone()
+        };
+        let process = match timeout(
+            Duration::from_millis(MCP_INITIALIZE_TIMEOUT_MS),
+            spawn_mcp_connection(&bootstrap),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(McpServerManagerError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "MCP spawn timed out",
+                )));
+            }
+        };
+        let server = self.server_mut(server_name)?;
+        server.generation = server.generation.wrapping_add(1);
+        server.process = Some(process);
+        server.initialized = false;
+
+        Ok(())
+    }
+
     async fn ensure_server_ready(
         &mut self,
         server_name: &str,
@@ -1567,46 +1615,7 @@ impl McpServerManager {
                 })?;
 
             if needs_spawn {
-                let attempt_count = self
-                    .servers
-                    .get(server_name)
-                    .map(|server| server.spawn_attempts)
-                    .unwrap_or(0);
-                if attempt_count >= MCP_SPAWN_ATTEMPT_LIMIT {
-                    let reason = format!(
-                        "MCP server `{server_name}` exceeded {MCP_SPAWN_ATTEMPT_LIMIT} initialize attempts; refusing to retry spawn"
-                    );
-                    if let Some(server) = self.servers.get_mut(server_name) {
-                        server.permanent_failure = Some(reason.clone());
-                    }
-                    return Err(McpServerManagerError::PermanentlyFailed {
-                        server_name: server_name.to_string(),
-                        reason,
-                    });
-                }
-                let bootstrap = {
-                    let server = self.server_mut(server_name)?;
-                    server.spawn_attempts = server.spawn_attempts.saturating_add(1);
-                    server.bootstrap.clone()
-                };
-                let process = match timeout(
-                    Duration::from_millis(MCP_INITIALIZE_TIMEOUT_MS),
-                    spawn_mcp_connection(&bootstrap),
-                )
-                .await
-                {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        return Err(McpServerManagerError::Io(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "MCP spawn timed out",
-                        )));
-                    }
-                };
-                let server = self.server_mut(server_name)?;
-                server.generation = server.generation.wrapping_add(1);
-                server.process = Some(process);
-                server.initialized = false;
+                self.spawn_server_process(server_name).await?;
             }
 
             let needs_initialize = self
@@ -1751,6 +1760,182 @@ mod tests {
             },
         );
         servers
+    }
+
+    fn stdio_lifecycle_manager(failure: &str) -> McpServerManager {
+        let script = r"
+import json, sys
+failure = sys.argv[1]
+methods = []
+initialized = False
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request['method']
+    methods.append(method)
+    if method == 'notifications/initialized':
+        assert 'id' not in request
+        assert methods == ['initialize', 'notifications/initialized']
+        initialized = True
+        continue
+    response = {'jsonrpc': '2.0', 'id': request['id']}
+    if method == 'initialize':
+        if failure == 'initialize-disconnect':
+            sys.exit(0)
+        if failure == 'initialize':
+            response['result'] = {'capabilities': {}}
+        elif failure == 'initialize-error':
+            response['error'] = {'code': -32001, 'message': 'initialize rejected'}
+        else:
+            response['result'] = {
+                'protocolVersion': request['params']['protocolVersion'],
+                'capabilities': {'tools': {}},
+                'serverInfo': {'name': 'strict-peer', 'version': '1'}
+            }
+    elif not initialized:
+        response['error'] = {'code': -32002, 'message': 'initialized notification missing'}
+    elif method == 'tools/list':
+        if failure == 'tools/list':
+            response['result'] = {'tools': 'invalid'}
+        elif failure == 'discovery-error':
+            response['error'] = {'code': -32001, 'message': 'discovery rejected'}
+        else:
+            response['result'] = {'tools': [{
+                'name': 'echo',
+                'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}}
+            }]}
+    elif method == 'tools/call':
+        assert request['params']['name'] == 'echo'
+        text = request['params']['arguments']['text']
+        response['result'] = {
+            'content': [{'type': 'text', 'text': 'echo:' + text}],
+            'structuredContent': {'methods': methods},
+            'isError': False
+        }
+    print(json.dumps(response), flush=True)
+";
+        let mut servers = stub_servers();
+        let McpServerConfig::Stdio(config) = &mut servers.get_mut("test-server").unwrap().config
+        else {
+            unreachable!()
+        };
+        config.command = if cfg!(windows) { "python" } else { "python3" }.to_string();
+        config.args = vec![
+            "-u".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            failure.to_string(),
+        ];
+        McpServerManager::from_servers(&servers)
+    }
+
+    #[tokio::test]
+    async fn stdio_lifecycle_initializes_discovers_and_calls_without_model() {
+        let mut manager = stdio_lifecycle_manager("");
+        let report = manager.discover_tools_best_effort().await;
+        let response = if let Some(tool) = report.tools.first() {
+            Some(
+                manager
+                    .call_tool(
+                        &tool.qualified_name,
+                        Some(serde_json::json!({"text": "regression"})),
+                    )
+                    .await,
+            )
+        } else {
+            None
+        };
+        manager.shutdown().await.unwrap();
+        assert!(
+            report.failed_servers.is_empty(),
+            "{:?}",
+            report.failed_servers
+        );
+        assert_eq!(report.tools.len(), 1);
+        assert_eq!(report.tools[0].qualified_name, "mcp__test-server__echo");
+        let response = response.unwrap().unwrap();
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.content[0].data["text"], "echo:regression");
+        assert_eq!(
+            result.structured_content.unwrap()["methods"],
+            serde_json::json!([
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call"
+            ])
+        );
+        let server = &manager.servers["test-server"];
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn stdio_lifecycle_reports_initialize_and_discovery_failures() {
+        for (failure, method, phase) in [
+            (
+                "initialize",
+                "initialize",
+                McpLifecyclePhase::InitializeHandshake,
+            ),
+            (
+                "initialize-error",
+                "initialize",
+                McpLifecyclePhase::InitializeHandshake,
+            ),
+            ("tools/list", "tools/list", McpLifecyclePhase::ToolDiscovery),
+            (
+                "discovery-error",
+                "tools/list",
+                McpLifecyclePhase::ToolDiscovery,
+            ),
+        ] {
+            let mut manager = stdio_lifecycle_manager(failure);
+            let report = manager.discover_tools_best_effort().await;
+            manager.shutdown().await.unwrap();
+            assert!(report.tools.is_empty(), "{failure}");
+            assert_eq!(report.failed_servers.len(), 1, "{failure}");
+            let error = &report.failed_servers[0];
+            assert_eq!(error.server_name, "test-server");
+            assert_eq!(error.phase, phase, "{}", error.error);
+            assert_eq!(error.context["method"], method);
+            assert!(!error.recoverable);
+            assert!(error.error.contains(method), "{}", error.error);
+            assert_eq!(
+                manager.tools_with_server(),
+                [] as [(std::string::String, std::string::String); 0]
+            );
+            if failure.ends_with("-error") {
+                assert_eq!(error.context["jsonrpc_code"], "-32001");
+                assert!(error.error.contains("rejected"));
+            } else {
+                assert!(error.error.contains("invalid response"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_lifecycle_initialize_disconnect_keeps_spawn_limit_sticky() {
+        let mut manager = stdio_lifecycle_manager("initialize-disconnect");
+        for _ in 0..3 {
+            let report = manager.discover_tools_best_effort().await;
+            assert_eq!(
+                report.tools,
+                [] as [crate::mcp_server_manager::ManagedMcpTool; 0]
+            );
+            assert_eq!(report.failed_servers.len(), 1);
+            let failure = &report.failed_servers[0];
+            assert_eq!(failure.phase, McpLifecyclePhase::InitializeHandshake);
+            assert_eq!(failure.context["method"], "initialize");
+            assert!(!failure.recoverable);
+            assert!(failure.error.contains("permanently disabled"));
+            let server = &manager.servers["test-server"];
+            assert_eq!(server.spawn_attempts, MCP_SPAWN_ATTEMPT_LIMIT);
+            assert!(server.permanent_failure.is_some());
+            assert!(server.process.is_none());
+        }
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]

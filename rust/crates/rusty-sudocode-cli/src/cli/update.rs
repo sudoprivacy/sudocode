@@ -268,7 +268,7 @@ fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
 fn client() -> R<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_mins(2))
         .build()?)
 }
 

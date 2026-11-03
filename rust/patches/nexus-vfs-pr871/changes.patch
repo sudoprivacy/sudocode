@@ -1,0 +1,1799 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index bf4ebe6ea..013d4b3fd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4680,6 +4680,15 @@ version = "2.6.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+ 
++[[package]]
++name = "sudo-contracts"
++version = "0.2.0-rc.1"
++source = "git+https://github.com/sudoprivacy/sudostack?rev=8323b0f6ac50270594dd76120919c20cc57318dd#8323b0f6ac50270594dd76120919c20cc57318dd"
++dependencies = [
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "symlink"
+ version = "0.1.0"
+@@ -5328,6 +5337,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "sha2 0.11.0",
++ "sudo-contracts",
+  "tempfile",
+  "thiserror 2.0.18",
+  "tokio",
+diff --git a/proto/nexus/grpc/vfs/vfs.proto b/proto/nexus/grpc/vfs/vfs.proto
+index 1e529a067..8fabf2e35 100644
+--- a/proto/nexus/grpc/vfs/vfs.proto
++++ b/proto/nexus/grpc/vfs/vfs.proto
+@@ -15,6 +15,8 @@ syntax = "proto3";
+ package nexus.grpc.vfs;
+ 
+ service NexusVFSService {
++  // A distinct method prevents old servers from executing scoped mutations.
++  rpc ScopedFs(ScopedFsRequest) returns (ScopedFsResponse);
+   // Generic dispatch RPC — method name + JSON-encoded params.
+   // Server routes to the same dispatch_method() as the HTTP endpoint.
+   rpc Call(CallRequest) returns (CallResponse);
+@@ -647,3 +649,43 @@ message StreamCollectAllResponse {
+   bool is_error = 2;
+   bytes error_payload = 3;
+ }
++
++message ScopedFsRequest {
++  uint32 version = 1;
++  string auth_token = 2;
++  bytes resource_scope_json = 3;
++  oneof operation {
++    ReadRequest read = 10;
++    WriteRequest write = 11;
++    StatRequest stat = 12;
++    ReaddirRequest readdir = 13;
++    SetattrRequest setattr = 14;
++    MkdirRequest mkdir = 15;
++    DeleteRequest delete = 16;
++    LockRequest lock = 17;
++    UnlockRequest unlock = 18;
++    StreamWriteRequest stream_write = 19;
++    StreamReadAtRequest stream_read_at = 20;
++    ScopedRenameRequest rename = 21;
++    ScopedAppendRequest append = 22;
++  }
++}
++message ScopedFsResponse {
++  oneof result {
++    ReadResponse read = 10;
++    WriteResponse write = 11;
++    StatResponse stat = 12;
++    ReaddirResponse readdir = 13;
++    SetattrResponse setattr = 14;
++    MkdirResponse mkdir = 15;
++    DeleteResponse delete = 16;
++    LockResponse lock = 17;
++    UnlockResponse unlock = 18;
++    StreamWriteResponse stream_write = 19;
++    StreamReadAtResponse stream_read_at = 20;
++    WriteResponse rename = 21;
++    WriteResponse append = 22;
++  }
++}
++message ScopedRenameRequest { string from = 1; string to = 2; }
++message ScopedAppendRequest { string path = 1; bytes content = 2; bool stream = 3; }
+diff --git a/rust/backends/src/storage/local_connector.rs b/rust/backends/src/storage/local_connector.rs
+index 5417aecab..18aa08f33 100644
+--- a/rust/backends/src/storage/local_connector.rs
++++ b/rust/backends/src/storage/local_connector.rs
+@@ -80,6 +80,19 @@ impl LocalConnectorBackend {
+ }
+ 
+ impl ObjectStore for LocalConnectorBackend {
++    fn scoped_delete_file(&self, path: &str) -> Result<(), StorageError> {
++        fs::remove_file(self.root_path.join(path.trim_start_matches('/')))
++            .map_err(StorageError::IOError)
++    }
++    fn scoped_path(&self, path: &str, follow: bool) -> Result<Option<String>, StorageError> {
++        super::scoped_local::scoped_path(&self.root_path, path, follow).map(Some)
++    }
++
++    fn scoped_entry_is_dir(&self, path: &str) -> Result<bool, StorageError> {
++        fs::symlink_metadata(self.root_path.join(path.trim_start_matches('/')))
++            .map(|metadata| metadata.is_dir())
++            .map_err(StorageError::IOError)
++    }
+     fn name(&self) -> &str {
+         "local_connector"
+     }
+@@ -88,7 +101,7 @@ impl ObjectStore for LocalConnectorBackend {
+         &self,
+         content: &[u8],
+         content_id: &str,
+-        _ctx: &kernel::kernel::OperationContext,
++        ctx: &kernel::kernel::OperationContext,
+         offset: u64,
+     ) -> Result<WriteResult, StorageError> {
+         if content_id.is_empty() {
+@@ -99,7 +112,7 @@ impl ObjectStore for LocalConnectorBackend {
+         }
+         let file_path = self.resolve_path(content_id)?;
+ 
+-        if let Some(parent) = file_path.parent() {
++        if let Some(parent) = file_path.parent().filter(|_| ctx.resource_guard.is_none()) {
+             fs::create_dir_all(parent).map_err(StorageError::IOError)?;
+         }
+ 
+diff --git a/rust/backends/src/storage/mod.rs b/rust/backends/src/storage/mod.rs
+index 525d12762..4cdf950fe 100644
+--- a/rust/backends/src/storage/mod.rs
++++ b/rust/backends/src/storage/mod.rs
+@@ -26,3 +26,5 @@ mod mount_path;
+ pub mod path_local;
+ #[cfg(feature = "driver-remote")]
+ pub mod remote;
++#[cfg(any(feature = "driver-local-connector", feature = "driver-path-local"))]
++mod scoped_local;
+diff --git a/rust/backends/src/storage/path_local.rs b/rust/backends/src/storage/path_local.rs
+index 443743acc..c4b445031 100644
+--- a/rust/backends/src/storage/path_local.rs
++++ b/rust/backends/src/storage/path_local.rs
+@@ -45,6 +45,19 @@ impl PathLocalBackend {
+ }
+ 
+ impl ObjectStore for PathLocalBackend {
++    fn scoped_delete_file(&self, path: &str) -> Result<(), StorageError> {
++        fs::remove_file(self.root_path.join(path.trim_start_matches('/')))
++            .map_err(StorageError::IOError)
++    }
++    fn scoped_path(&self, path: &str, follow: bool) -> Result<Option<String>, StorageError> {
++        super::scoped_local::scoped_path(&self.root_path, path, follow).map(Some)
++    }
++
++    fn scoped_entry_is_dir(&self, path: &str) -> Result<bool, StorageError> {
++        fs::symlink_metadata(self.root_path.join(path.trim_start_matches('/')))
++            .map(|metadata| metadata.is_dir())
++            .map_err(StorageError::IOError)
++    }
+     fn name(&self) -> &str {
+         "path_local"
+     }
+@@ -53,7 +66,7 @@ impl ObjectStore for PathLocalBackend {
+         &self,
+         content: &[u8],
+         content_id: &str,
+-        _ctx: &kernel::kernel::OperationContext,
++        ctx: &kernel::kernel::OperationContext,
+         offset: u64,
+     ) -> Result<WriteResult, StorageError> {
+         if content_id.is_empty() {
+@@ -66,7 +79,7 @@ impl ObjectStore for PathLocalBackend {
+ 
+         // Ensure parent directory exists (only needed on create; open-for-write
+         // below errors cleanly if the parent vanishes mid-op).
+-        if let Some(parent) = file_path.parent() {
++        if let Some(parent) = file_path.parent().filter(|_| ctx.resource_guard.is_none()) {
+             fs::create_dir_all(parent).map_err(StorageError::IOError)?;
+         }
+ 
+diff --git a/rust/backends/src/storage/remote.rs b/rust/backends/src/storage/remote.rs
+index bfd62b406..05935b0f6 100644
+--- a/rust/backends/src/storage/remote.rs
++++ b/rust/backends/src/storage/remote.rs
+@@ -96,6 +96,9 @@ fn parse_stat_size_from_response(
+ }
+ 
+ impl ObjectStore for RemoteBackend {
++    fn scoped_path(&self, _path: &str, _follow: bool) -> Result<Option<String>, StorageError> {
++        Err(StorageError::NotSupported("scoped remote backend protocol"))
++    }
+     fn name(&self) -> &str {
+         "remote"
+     }
+diff --git a/rust/backends/src/storage/scoped_local.rs b/rust/backends/src/storage/scoped_local.rs
+new file mode 100644
+index 000000000..9c7f9a9e6
+--- /dev/null
++++ b/rust/backends/src/storage/scoped_local.rs
+@@ -0,0 +1,68 @@
++//! Stable native path resolution for request-scoped resource admission.
++use kernel::abc::object_store::StorageError;
++use std::path::{Path, PathBuf};
++
++pub(super) fn scoped_path(root: &Path, path: &str, follow: bool) -> Result<String, StorageError> {
++    let root = root.canonicalize().map_err(StorageError::IOError)?;
++    let path = Path::new(path.trim_start_matches('/'));
++    if path
++        .components()
++        .any(|part| !matches!(part, std::path::Component::Normal(_)))
++    {
++        return Err(StorageError::IOError(std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "invalid scoped backend path",
++        )));
++    }
++    let physical = root.join(path);
++    let (start, mut suffix) = if follow {
++        (physical.clone(), Vec::new())
++    } else {
++        (
++            physical.parent().unwrap_or(&root).to_path_buf(),
++            physical
++                .file_name()
++                .map(|name| vec![name.to_os_string()])
++                .unwrap_or_default(),
++        )
++    };
++    let mut current = start;
++    let resolved = loop {
++        match current.canonicalize() {
++            Ok(mut resolved) => {
++                for part in suffix.iter().rev() {
++                    resolved.push(part);
++                }
++                break resolved;
++            }
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
++                // A dangling link is an existing entry whose target is missing;
++                // treating it as a missing leaf would permit write-through escape.
++                if std::fs::symlink_metadata(&current)
++                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
++                {
++                    return Err(StorageError::IOError(std::io::Error::new(
++                        std::io::ErrorKind::PermissionDenied,
++                        "unresolved scoped native link",
++                    )));
++                }
++                let Some(name) = current.file_name() else {
++                    return Err(StorageError::IOError(error));
++                };
++                suffix.push(name.to_os_string());
++                current = current
++                    .parent()
++                    .map(PathBuf::from)
++                    .ok_or(StorageError::IOError(error))?;
++            }
++            Err(error) => return Err(StorageError::IOError(error)),
++        }
++    };
++    let relative = resolved.strip_prefix(&root).map_err(|_| {
++        StorageError::IOError(std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "scoped path escapes mount",
++        ))
++    })?;
++    Ok(relative.to_string_lossy().replace('\\', "/"))
++}
+diff --git a/rust/contracts/src/lib.rs b/rust/contracts/src/lib.rs
+index 4a42a1cde..8c994b834 100644
+--- a/rust/contracts/src/lib.rs
++++ b/rust/contracts/src/lib.rs
+@@ -11,6 +11,7 @@ pub mod constants;
+ pub mod lock_state;
+ pub mod operation_context;
+ pub mod operation_id;
++pub mod resource_guard;
+ pub mod rust_service;
+ pub mod zone_id;
+ pub mod zone_path;
+diff --git a/rust/contracts/src/operation_context.rs b/rust/contracts/src/operation_context.rs
+index fa53a98ad..961d688a4 100644
+--- a/rust/contracts/src/operation_context.rs
++++ b/rust/contracts/src/operation_context.rs
+@@ -34,6 +34,8 @@
+ /// are two fields that can disagree.
+ #[derive(Clone, Debug)]
+ pub struct OperationContext {
++    /// Additional host-owned resource restriction. Never grants principal rights.
++    pub resource_guard: Option<std::sync::Arc<dyn crate::resource_guard::ResourceGuard>>,
+     /// The principal this operation runs on behalf of — a human user, a
+     /// service account, or an agent acting for itself. See the type docs: this
+     /// is the attribution identity, distinct from `agent_id`, the actor.
+@@ -112,6 +114,7 @@ impl OperationContext {
+         is_system: bool,
+     ) -> Self {
+         Self {
++            resource_guard: None,
+             user_id: user_id.to_string(),
+             zone_id: zone_id.to_string(),
+             is_admin,
+diff --git a/rust/contracts/src/resource_guard.rs b/rust/contracts/src/resource_guard.rs
+new file mode 100644
+index 000000000..3cad3ea96
+--- /dev/null
++++ b/rust/contracts/src/resource_guard.rs
+@@ -0,0 +1,7 @@
++//! Optional request-local resource admission, independent of principal permissions.
++
++/// The host fixes the top-level resource intent when constructing this guard.
++/// Nested syscalls cannot relabel a read to acquire a different grant.
++pub trait ResourceGuard: std::fmt::Debug + Send + Sync {
++    fn check(&self, path: &str) -> Result<(), String>;
++}
+diff --git a/rust/kernel/src/abc/object_store.rs b/rust/kernel/src/abc/object_store.rs
+index e0c805aaa..232831a12 100644
+--- a/rust/kernel/src/abc/object_store.rs
++++ b/rust/kernel/src/abc/object_store.rs
+@@ -120,6 +120,28 @@ impl From<std::fs::Metadata> for ReferenceMetadata {
+ /// hot path and can be added later as the call sites materialize.
+ #[allow(dead_code)]
+ pub trait ObjectStore: Send + Sync {
++    /// Resolve a stable native target to a backend-relative resource path.
++    /// Opaque blob stores have no additional user-resource path. A path backend
++    /// must implement this before it can serve a resource-restricted request.
++    fn scoped_path(&self, path: &str, follow: bool) -> Result<Option<String>, StorageError> {
++        let _ = follow;
++        if self.resolve_physical_path(path).is_some() {
++            Err(StorageError::NotSupported("scoped native path admission"))
++        } else {
++            Ok(None)
++        }
++    }
++
++    /// Observe the entry itself for scoped unlink, without following a link.
++    fn scoped_entry_is_dir(&self, path: &str) -> Result<bool, StorageError> {
++        let _ = path;
++        Err(StorageError::NotSupported("scoped no-follow metadata"))
++    }
++
++    fn scoped_delete_file(&self, path: &str) -> Result<(), StorageError> {
++        let _ = path;
++        Err(StorageError::NotSupported("scoped no-follow deletion"))
++    }
+     /// Backend identifier (e.g. "local", "gcs", "s3").
+     fn name(&self) -> &str;
+ 
+diff --git a/rust/kernel/src/kernel/dispatch.rs b/rust/kernel/src/kernel/dispatch.rs
+index f977dc873..3b96f5cc6 100644
+--- a/rust/kernel/src/kernel/dispatch.rs
++++ b/rust/kernel/src/kernel/dispatch.rs
+@@ -194,6 +194,14 @@ impl Kernel {
+         permission: Permission,
+         ctx: &OperationContext,
+     ) -> Result<(), KernelError> {
++        let scoped_route;
++        let admission_route = if ctx.resource_guard.is_some() && route.is_none() {
++            scoped_route = self.vfs_router.route(path, &ctx.zone_id);
++            scoped_route.as_ref()
++        } else {
++            route
++        };
++        self.check_resource_path(path, admission_route, ctx, false)?;
+         // System-level short-circuits stay in the kernel — they are
+         // language-of-the-kernel concepts (synthetic views, system contexts),
+         // not authorization decisions.
+diff --git a/rust/kernel/src/kernel/mod.rs b/rust/kernel/src/kernel/mod.rs
+index 0ec6352e9..4ccd2027e 100644
+--- a/rust/kernel/src/kernel/mod.rs
++++ b/rust/kernel/src/kernel/mod.rs
+@@ -100,6 +100,7 @@ mod locks;
+ mod mount;
+ mod observability;
+ mod plugins;
++mod resource_access;
+ pub mod syscall;
+ pub mod syscall_async;
+ mod syscall_impl;
+@@ -1591,6 +1592,21 @@ impl Kernel {
+         // registration so remote reads resolve through the correct metastore.
+         remote_metastore: Option<Arc<dyn crate::meta_store::MetaStore>>,
+     ) -> Result<SysSetAttrResult, KernelError> {
++        if ctx.resource_guard.is_some() {
++            self.check_permission(path, crate::Permission::Write, ctx)?;
++            if let Some(target) = link_target {
++                ctx.resource_guard
++                    .as_ref()
++                    .unwrap()
++                    .check(target)
++                    .map_err(KernelError::PermissionDenied)?;
++            }
++            if entry_type == 2 {
++                return Err(KernelError::PermissionDenied(
++                    "scoped mount mutation is unsupported".into(),
++                ));
++            }
++        }
+         match entry_type {
+             2 => {
+                 self.check_permission(path, crate::Permission::Write, ctx)?;
+@@ -3528,6 +3544,7 @@ mod tests {
+         kernel.register_observer(obs, "cap".to_string(), FileEventType::FileWrite.bit());
+ 
+         let ctx = OperationContext {
++            resource_guard: None,
+             user_id: "alice".to_string(),
+             zone_id: "root".to_string(),
+             is_admin: false,
+@@ -3580,6 +3597,7 @@ mod tests {
+         );
+ 
+         let ctx = OperationContext {
++            resource_guard: None,
+             user_id: String::new(),
+             zone_id: "root".to_string(),
+             is_admin: true,
+diff --git a/rust/kernel/src/kernel/resource_access.rs b/rust/kernel/src/kernel/resource_access.rs
+new file mode 100644
+index 000000000..966309ede
+--- /dev/null
++++ b/rust/kernel/src/kernel/resource_access.rs
+@@ -0,0 +1,205 @@
++//! Result-preserving admission for APIs whose legacy shape carries no context.
++use super::{Kernel, KernelError, OperationContext, StatResult};
++use crate::abc::object_store::StorageError;
++use crate::core::vfs_router::RouteResult;
++use crate::dispatch::Permission;
++use crate::kernel::syscall::ReaddirOpts;
++
++pub(super) fn storage_error(error: StorageError) -> KernelError {
++    match error {
++        StorageError::NotFound(path) => KernelError::FileNotFound(path),
++        StorageError::IOError(error) if error.kind() == std::io::ErrorKind::NotFound => {
++            KernelError::FileNotFound(error.to_string())
++        }
++        StorageError::IOError(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
++            KernelError::PermissionDenied(error.to_string())
++        }
++        StorageError::IOError(error) => KernelError::IOError(error.to_string()),
++        error => KernelError::BackendError(format!("{error:?}")),
++    }
++}
++
++impl Kernel {
++    pub(crate) fn check_resource_path(
++        &self,
++        path: &str,
++        route: Option<&RouteResult>,
++        ctx: &OperationContext,
++        follow: bool,
++    ) -> Result<(), KernelError> {
++        let Some(guard) = &ctx.resource_guard else {
++            return Ok(());
++        };
++        guard.check(path).map_err(KernelError::PermissionDenied)?;
++        let Some(route) = route else {
++            return Ok(());
++        };
++        let Some(backend) = &route.backend else {
++            if route.target_zone_id.is_some() {
++                return Err(KernelError::PermissionDenied(
++                    "scoped peer route is unsupported".into(),
++                ));
++            }
++            return Ok(());
++        };
++        let actual =
++            backend
++                .scoped_path(&route.backend_path, follow)
++                .map_err(|error| match error {
++                    StorageError::NotSupported(_) => KernelError::PermissionDenied(
++                        "scoped backend admission is unsupported".into(),
++                    ),
++                    error => storage_error(error),
++                })?;
++        if let Some(actual) = actual {
++            let actual = crate::core::vfs_router::zone_to_global(
++                &route.mount_point,
++                &format!("/{}", actual.trim_start_matches('/')),
++            );
++            guard
++                .check(&actual)
++                .map_err(KernelError::PermissionDenied)?;
++        }
++        Ok(())
++    }
++
++    pub fn scoped_stat(
++        &self,
++        path: &str,
++        ctx: &OperationContext,
++    ) -> Result<Option<StatResult>, KernelError> {
++        self.scoped_stat_for(path, ctx, Permission::Read)
++    }
++
++    pub fn scoped_stat_for(
++        &self,
++        path: &str,
++        ctx: &OperationContext,
++        permission: Permission,
++    ) -> Result<Option<StatResult>, KernelError> {
++        let route = self.vfs_router.route(path, &ctx.zone_id);
++        self.check_permission_with_route(path, route.as_ref(), permission, ctx)?;
++        self.check_resource_path(path, route.as_ref(), ctx, true)?;
++        self.sys_stat_result(path, &ctx.zone_id, ctx.resource_guard.is_some())
++    }
++
++    pub fn scoped_readdir(
++        &self,
++        path: &str,
++        ctx: &OperationContext,
++        opts: ReaddirOpts,
++    ) -> Result<Vec<(String, u8)>, KernelError> {
++        if ctx.resource_guard.is_none() {
++            self.check_permission(path, Permission::Read, ctx)?;
++            let entries = self.sys_readdir_checked(path, &ctx.zone_id, false, opts)?;
++            let mut visible = Vec::new();
++            for entry in entries {
++                match self.check_permission(&entry.0, Permission::Read, ctx) {
++                    Ok(()) => visible.push(entry),
++                    Err(KernelError::PermissionDenied(_)) => {}
++                    Err(error) => return Err(error),
++                }
++            }
++            return Ok(visible);
++        }
++        let path = if path != "/" {
++            path.trim_end_matches('/')
++        } else {
++            path
++        };
++        let stat = self
++            .scoped_stat(path, ctx)?
++            .ok_or_else(|| KernelError::FileNotFound(path.into()))?;
++        if !stat.is_directory {
++            return Err(KernelError::InvalidPath(format!("not a directory: {path}")));
++        }
++        let route = self
++            .vfs_router
++            .route(path, &ctx.zone_id)
++            .ok_or_else(|| KernelError::FileNotFound(path.into()))?;
++        let mut seen = std::collections::BTreeMap::new();
++        self.scan_mount_into_admitted(&route, path, opts.recursive, &mut seen, Some(ctx))?;
++        if opts.recursive {
++            for child in self.vfs_router.child_mounts_under(path, &ctx.zone_id) {
++                let child_route = self.vfs_router.route(&child, &ctx.zone_id);
++                match self
++                    .check_permission_with_route(
++                        &child,
++                        child_route.as_ref(),
++                        Permission::Read,
++                        ctx,
++                    )
++                    .and_then(|_| self.check_resource_path(&child, child_route.as_ref(), ctx, true))
++                {
++                    Ok(()) => {}
++                    Err(KernelError::PermissionDenied(_)) => continue,
++                    Err(error) => return Err(error),
++                }
++                if let Some(route) = child_route {
++                    self.scan_mount_into_admitted(&route, &child, true, &mut seen, Some(ctx))?;
++                }
++            }
++        }
++        let mut visible = Vec::new();
++        for (path, (kind, zone)) in seen {
++            if ctx.zone_id != contracts::ROOT_ZONE_ID
++                && zone
++                    .as_deref()
++                    .is_some_and(|zone| zone != ctx.zone_id && zone != contracts::ROOT_ZONE_ID)
++            {
++                continue;
++            }
++            match self.check_permission(&path, Permission::Read, ctx) {
++                Ok(()) => visible.push((path, kind)),
++                Err(KernelError::PermissionDenied(_)) => {}
++                Err(error) => return Err(error),
++            }
++        }
++        if let Some(limit) = opts.limit {
++            visible.truncate(limit);
++        }
++        Ok(visible)
++    }
++
++    /// No ancestor is read or created implicitly by this scoped convenience.
++    pub fn scoped_mkdir_all(&self, path: &str, ctx: &OperationContext) -> Result<(), KernelError> {
++        self.check_permission(path, Permission::Write, ctx)?;
++        if ctx.resource_guard.is_none() {
++            self.mkdir(path, ctx, true, true)?;
++            return Ok(());
++        }
++        let guard = ctx.resource_guard.as_ref().unwrap();
++        let mut prefix = String::new();
++        let mut started = guard.check("/").is_ok();
++        for part in path.split('/').filter(|part| !part.is_empty()) {
++            prefix.push('/');
++            prefix.push_str(part);
++            if guard.check(&prefix).is_err() {
++                if started {
++                    return Err(KernelError::PermissionDenied(prefix));
++                }
++                continue;
++            }
++            let route = self.vfs_router.route(&prefix, &ctx.zone_id);
++            self.check_resource_path(&prefix, route.as_ref(), ctx, true)?;
++            self.check_permission(&prefix, Permission::Write, ctx)?;
++            if !started {
++                if !self
++                    .scoped_stat_for(&prefix, ctx, Permission::Write)?
++                    .is_some_and(|stat| stat.is_directory)
++                {
++                    return Err(KernelError::FileNotFound(format!(
++                        "scoped directory root {prefix}"
++                    )));
++                }
++                started = true;
++            } else {
++                self.mkdir(&prefix, ctx, false, true)?;
++            }
++        }
++        if !started {
++            return Err(KernelError::PermissionDenied(path.into()));
++        }
++        Ok(())
++    }
++}
+diff --git a/rust/kernel/src/kernel/syscall_impl.rs b/rust/kernel/src/kernel/syscall_impl.rs
+index 80c591f98..2a445ebe6 100644
+--- a/rust/kernel/src/kernel/syscall_impl.rs
++++ b/rust/kernel/src/kernel/syscall_impl.rs
+@@ -235,6 +235,8 @@ impl Kernel {
+ 
+         // 1c. Permission gate (§13) — BEFORE native hooks.
+         self.check_permission(path, Permission::Read, ctx)?;
++        let scoped_route = self.vfs_router.route(path, &ctx.zone_id);
++        self.check_resource_path(path, scoped_route.as_ref(), ctx, true)?;
+ 
+         // 1d. Native INTERCEPT PRE hooks (§11 native hooks) — audit etc.
+         let hook_id = HookIdentity {
+@@ -372,7 +374,18 @@ impl Kernel {
+                 if let Some(data) = route
+                     .backend
+                     .as_ref()
+-                    .and_then(|b| b.read_content(&route.backend_path, ctx).ok())
++                    .map(|b| b.read_content(&route.backend_path, ctx))
++                    .map(|result| {
++                        if ctx.resource_guard.is_some() {
++                            result
++                                .map(Some)
++                                .map_err(super::resource_access::storage_error)
++                        } else {
++                            Ok(result.ok())
++                        }
++                    })
++                    .transpose()?
++                    .flatten()
+                 {
+                     let size = data.len() as u64;
+                     // Lazy metadata materialization — single duality gate
+@@ -396,13 +409,15 @@ impl Kernel {
+                     // backend read via content_id) SSOT-symmetric with the
+                     // cold path (metastore miss → backend read via
+                     // backend_path).
+-                    self.observe_backend_content(
+-                        path,
+-                        size,
+-                        Some(route.backend_path.clone()),
+-                        &route.zone_id,
+-                        ctx,
+-                    );
++                    if ctx.resource_guard.is_none() {
++                        self.observe_backend_content(
++                            path,
++                            size,
++                            Some(route.backend_path.clone()),
++                            &route.zone_id,
++                            ctx,
++                        );
++                    }
+                     return Ok(SysReadResult {
+                         data: Some(data),
+                         post_hook_needed: self.read_hook_count.load(Ordering::Relaxed) > 0,
+@@ -511,7 +526,7 @@ impl Kernel {
+ 
+         // FDT fast path: pread from pre-opened fd (PAS backends).
+         // Skips VFS lock + backend I/O entirely (same as DT_PIPE pattern).
+-        if entry.entry_type == DT_REG {
++        if entry.entry_type == DT_REG && ctx.resource_guard.is_none() {
+             if let Some(data) = self.fdt.pread(path) {
+                 return Ok(SysReadResult {
+                     data: Some(data),
+@@ -543,6 +558,38 @@ impl Kernel {
+         // bail-out at this point pre-empted that fast path and broke
+         // every cross-node read of an observe-materialised entry.
+         let content_id_opt = entry.content_id.as_deref().filter(|s| !s.is_empty());
++        if let (Some(_), Some(backend), Some(cid)) =
++            (&ctx.resource_guard, &route.backend, content_id_opt)
++        {
++            if !route.is_cas && cid != route.backend_path {
++                let actual = backend
++                    .scoped_path(cid, true)
++                    .map_err(|error| match error {
++                        crate::abc::object_store::StorageError::NotSupported(_) => {
++                            KernelError::PermissionDenied(
++                                "scoped content admission is unsupported".into(),
++                            )
++                        }
++                        error => super::resource_access::storage_error(error),
++                    })?;
++                let actual = actual.ok_or_else(|| {
++                    KernelError::PermissionDenied(
++                        "scoped indirect path content is unsupported".into(),
++                    )
++                })?;
++                let path = crate::core::vfs_router::zone_to_global(
++                    &route.mount_point,
++                    &format!("/{}", actual.trim_start_matches('/')),
++                );
++                self.check_permission(&path, Permission::Read, ctx)?;
++                self.check_resource_path(
++                    &path,
++                    self.vfs_router.route(&path, &ctx.zone_id).as_ref(),
++                    ctx,
++                    true,
++                )?;
++            }
++        }
+ 
+         // 4. VFS lock (blocking acquire — wrapper releases GIL before calling this)
+         let lock_handle =
+@@ -576,21 +623,20 @@ impl Kernel {
+                 .as_deref()
+                 .zip(self.self_address.read().as_deref())
+                 .is_some_and(|(writer, me)| writer == me);
+-        let content = if federation_cache_substitution_read {
++        let content_result = if federation_cache_substitution_read {
+             self.federation_cache_arc()
+-                .and_then(|b| b.read_content(path, ctx).ok())
++                .map(|b| b.read_content(path, ctx))
+         } else {
+-            match content_id_opt {
+-                Some(cid) => route
+-                    .backend
+-                    .as_ref()
+-                    .and_then(|b| b.read_content(cid, ctx).ok()),
+-                None => None,
+-            }
++            content_id_opt.and_then(|cid| route.backend.as_ref().map(|b| b.read_content(cid, ctx)))
+         };
+-
+-        // 6. Release VFS lock (always, even on miss)
+         self.lock_manager.do_release(lock_handle);
++        let content = if ctx.resource_guard.is_some() {
++            content_result
++                .transpose()
++                .map_err(super::resource_access::storage_error)?
++        } else {
++            content_result.and_then(Result::ok)
++        };
+ 
+         // 7. Return result
+         match content {
+@@ -605,6 +651,9 @@ impl Kernel {
+             // Local backend miss + metadata exists → federation path:
+             // try the origin encoded in backend_name. Otherwise it's a
+             // genuine miss.
++            None if ctx.resource_guard.is_some() => Err(KernelError::PermissionDenied(
++                "scoped peer content fetch is unsupported".into(),
++            )),
+             None => self.try_remote_fetch(path, &entry),
+         }
+     }
+@@ -812,6 +861,8 @@ impl Kernel {
+         offset: u64,
+         max_link_hops: u8,
+     ) -> Result<SysWriteResult, KernelError> {
++        let scoped_route = self.vfs_router.route(path, &ctx.zone_id);
++        self.check_resource_path(path, scoped_route.as_ref(), ctx, true)?;
+         let miss = || {
+             Ok(SysWriteResult {
+                 hit: false,
+@@ -1187,7 +1238,9 @@ impl Kernel {
+                     .as_ref()
+                     .and_then(|b| b.resolve_physical_path(&wr.content_id))
+                 {
+-                    let _ = self.fdt.register(input.path, &phys);
++                    if input.ctx.resource_guard.is_none() {
++                        let _ = self.fdt.register(input.path, &phys);
++                    }
+                 }
+ 
+                 // Snapshot old state for OBSERVE event payload + Python
+@@ -1300,14 +1353,23 @@ impl Kernel {
+     /// validate -> route -> dcache lookup -> return StatResult.
+     /// Returns None on dcache miss or trie-resolved paths (wrapper handles).
+     pub fn sys_stat(&self, path: &str, zone_id: &str) -> Option<StatResult> {
++        self.sys_stat_result(path, zone_id, false).ok().flatten()
++    }
++
++    pub(super) fn sys_stat_result(
++        &self,
++        path: &str,
++        zone_id: &str,
++        strict: bool,
++    ) -> Result<Option<StatResult>, KernelError> {
+         // 1. Validate
+         if validate_path_fast(path).is_err() {
+-            return None;
++            return Ok(None);
+         }
+ 
+         // 2. Trie-resolved paths -> wrapper handles
+         if self.trie.lookup(path).is_some() {
+-            return None;
++            return Ok(None);
+         }
+ 
+         // 2.5 Federation synthetic_views: /__sys__/zones/<id> exposes raft cluster
+@@ -1317,7 +1379,7 @@ impl Kernel {
+         // state through `sys_stat` instead of a direct kernel
+         // accessor on the coordinator.
+         if let Some(stat) = self.zones_view_stat(path) {
+-            return Some(stat);
++            return Ok(Some(stat));
+         }
+ 
+         // 3. Route — try VFS routing; fall back to global metastore
+@@ -1330,9 +1392,8 @@ impl Kernel {
+                 // metastore fallback (same path create_nexus_fs settings boot uses).
+                 return self
+                     .metastore_get(path)
+-                    .ok()
+-                    .flatten()
+-                    .map(StatResult::from);
++                    .map(|entry| entry.map(StatResult::from))
++                    .map_err(|error| KernelError::IOError(error.to_string()));
+             }
+         };
+         // 3.5. Mount-point synthesis (federation cross-zone mount).
+@@ -1351,7 +1412,7 @@ impl Kernel {
+             // Mount-point root: the routed path IS the mount point itself.
+             // No metastore entry exists at the mount root — the VFS route
+             // is the SSOT. Synthesize a DT_MOUNT directory result.
+-            return Some(StatResult {
++            return Ok(Some(StatResult {
+                 path: path.to_string(),
+                 size: 4096,
+                 content_id: None,
+@@ -1368,7 +1429,7 @@ impl Kernel {
+                 lock: None,
+                 link_target: None,
+                 owner_id: None,
+-            });
++            }));
+         }
+ 
+         // 4. MetaStore lookup. The metastore impl serves cache hits from
+@@ -1381,7 +1442,9 @@ impl Kernel {
+         //    metastore but no explicit entry — e.g. /docs/ when
+         //    /docs/readme.md exists). Returns synthetic DT_DIR.
+         let entry: FileMetadata = match self
+-            .with_metastore_route(&route, |ms| ms.get(path).ok().flatten())
++            .with_metastore_route(&route, |ms| ms.get(path))
++            .transpose()
++            .map_err(|error| KernelError::IOError(error.to_string()))?
+             .flatten()
+         {
+             Some(meta) => meta,
+@@ -1389,29 +1452,42 @@ impl Kernel {
+                 // A reference-backed file may arrive through an editor or
+                 // shell without a metastore row. Its attributes come from
+                 // the same physical file the backend reads, including mode.
+-                if let Some(Ok(metadata)) = route
++                if let Some(observation) = route
+                     .backend
+                     .as_ref()
+                     .and_then(|backend| backend.reference_metadata(&route.backend_path))
+                 {
+-                    let mut stat = StatResult::from(FileMetadata {
+-                        path: path.to_string(),
+-                        zone_id: Some(route.zone_id.clone()),
+-                        ..Default::default()
+-                    });
+-                    apply_reference_metadata(&mut stat, metadata);
+-                    return Some(stat);
++                    let metadata = match observation {
++                        Ok(metadata) => Some(metadata),
++                        Err(error) if !strict || error.kind() == std::io::ErrorKind::NotFound => {
++                            None
++                        }
++                        Err(error) => {
++                            return Err(super::resource_access::storage_error(
++                                crate::abc::object_store::StorageError::IOError(error),
++                            ))
++                        }
++                    };
++                    if let Some(metadata) = metadata {
++                        let mut stat = StatResult::from(FileMetadata {
++                            path: path.to_string(),
++                            zone_id: Some(route.zone_id.clone()),
++                            ..Default::default()
++                        });
++                        apply_reference_metadata(&mut stat, metadata);
++                        return Ok(Some(stat));
++                    }
+                 }
+                 // Implicit directory: children exist under this prefix
+                 // but no explicit entry. Eliminates Python fallback to
+                 // _check_is_directory() (Crossing 3a).
+                 let is_implicit = self
+-                    .with_metastore_route(&route, |ms| {
+-                        ms.is_implicit_directory(path).unwrap_or(false)
+-                    })
++                    .with_metastore_route(&route, |ms| ms.is_implicit_directory(path))
++                    .transpose()
++                    .map_err(|error| KernelError::IOError(error.to_string()))?
+                     .unwrap_or(false);
+                 if is_implicit {
+-                    return Some(StatResult {
++                    return Ok(Some(StatResult {
+                         path: path.to_string(),
+                         size: 4096,
+                         content_id: None,
+@@ -1428,7 +1504,7 @@ impl Kernel {
+                         lock: None,
+                         link_target: None,
+                         owner_id: None,
+-                    });
++                    }));
+                 }
+                 // Backend-only existence check.  `sys_readdir`
+                 // already merges `backend.list_dir(...)` output into
+@@ -1450,8 +1526,22 @@ impl Kernel {
+                 // or `fs::metadata` on in-process filesystem
+                 // backends.
+                 if let Some(backend) = route.backend.as_ref() {
+-                    if let Ok(bs) = backend.stat(&route.backend_path) {
+-                        return Some(StatResult {
++                    let observation = backend.stat(&route.backend_path);
++                    if strict {
++                        if let Err(error) = &observation {
++                            if !matches!(
++                                error,
++                                crate::abc::object_store::StorageError::NotFound(_)
++                                    | crate::abc::object_store::StorageError::NotSupported(_)
++                            ) {
++                                return Err(super::resource_access::storage_error(
++                                    observation.err().unwrap(),
++                                ));
++                            }
++                        }
++                    }
++                    if let Ok(bs) = observation {
++                        return Ok(Some(StatResult {
+                             path: path.to_string(),
+                             size: if bs.is_dir { 4096 } else { bs.size },
+                             content_id: None,
+@@ -1472,7 +1562,7 @@ impl Kernel {
+                             lock: None,
+                             link_target: None,
+                             owner_id: None,
+-                        });
++                        }));
+                     }
+                 }
+                 // Federation peer dispatch — sister of sys_readdir's
+@@ -1489,8 +1579,11 @@ impl Kernel {
+                 // `via_federation_stat` returns `None` for non-federation
+                 // routes (caller falls through to local stat) — the
+                 // is-peer-mount predicate is encapsulated.
+-                if let Some(bs) = route.via_federation_stat(self, path) {
+-                    return Some(StatResult {
++                if let Some(bs) = (!strict)
++                    .then(|| route.via_federation_stat(self, path))
++                    .flatten()
++                {
++                    return Ok(Some(StatResult {
+                         path: path.to_string(),
+                         size: if bs.is_dir { 4096 } else { bs.size },
+                         content_id: None,
+@@ -1511,13 +1604,13 @@ impl Kernel {
+                         lock: None,
+                         link_target: None,
+                         owner_id: None,
+-                    });
++                    }));
+                 }
+-                return None;
++                return Ok(None);
+             }
+         };
+ 
+-        self.stat_from_metadata(path, zone_id, route, entry)
++        self.stat_from_metadata_result(path, zone_id, route, entry, strict)
+     }
+ 
+     /// Resolve live stat fields from an already-read inode for point and batch reads.
+@@ -1528,32 +1621,68 @@ impl Kernel {
+         route: crate::vfs_router::RouteResult,
+         entry: FileMetadata,
+     ) -> Option<StatResult> {
++        self.stat_from_metadata_result(path, zone_id, route, entry, false)
++            .ok()
++            .flatten()
++    }
++
++    pub(super) fn stat_from_metadata_result(
++        &self,
++        path: &str,
++        zone_id: &str,
++        route: crate::vfs_router::RouteResult,
++        entry: FileMetadata,
++        strict: bool,
++    ) -> Result<Option<StatResult>, KernelError> {
+         // A replicated inode can name another node's bytes. That node's
+         // durable metadata remains authoritative over this node's filesystem.
+         let reference =
+             reference_file_metadata(&route, &entry, self.self_address.read().as_deref());
+         if let Some(observation) = reference {
+-            let metadata = observation.ok()?;
++            let metadata = match observation {
++                Ok(metadata) => metadata,
++                Err(error) if !strict || error.kind() == std::io::ErrorKind::NotFound => {
++                    return Ok(None)
++                }
++                Err(error) => {
++                    return Err(super::resource_access::storage_error(
++                        crate::abc::object_store::StorageError::IOError(error),
++                    ))
++                }
++            };
+             let mut stat = StatResult::from(entry);
+             stat.lock = self.lock_manager.get_lock_info(path);
+             apply_reference_metadata(&mut stat, metadata);
+-            return Some(stat);
++            return Ok(Some(stat));
+         }
+         // Virtual directory inodes may exist without a native directory. When
+         // there is one, report its real permissions without persisting a copy.
+         if entry.entry_type == DT_DIR
+             && has_local_content_origin(&entry, self.self_address.read().as_deref())
+         {
+-            if let Some(Ok(metadata)) = route
++            let observation = route
+                 .backend
+                 .as_ref()
+-                .and_then(|backend| backend.reference_metadata(&route.backend_path))
++                .and_then(|backend| backend.reference_metadata(&route.backend_path));
++            if strict {
++                if let Some(Err(error)) = &observation {
++                    if error.kind() != std::io::ErrorKind::NotFound {
++                        return Err(super::resource_access::storage_error(
++                            crate::abc::object_store::StorageError::IOError(std::io::Error::new(
++                                error.kind(),
++                                error.to_string(),
++                            )),
++                        ));
++                    }
++                }
++            }
++            if let Some(Ok(metadata)) = observation
+                 .filter(|observation| observation.as_ref().is_ok_and(|metadata| metadata.is_dir))
+             {
+                 let mut stat = StatResult::from(entry);
+                 stat.lock = self.lock_manager.get_lock_info(path);
+                 apply_reference_metadata(&mut stat, metadata);
+-                return Some(stat);
++                return Ok(Some(stat));
+             }
+         }
+ 
+@@ -1609,7 +1738,7 @@ impl Kernel {
+             entry.modified_at_ms
+         };
+ 
+-        Some(StatResult {
++        Ok(Some(StatResult {
+             path: path.to_string(),
+             size,
+             content_id: entry.content_id,
+@@ -1626,7 +1755,7 @@ impl Kernel {
+             lock,
+             link_target: entry.link_target,
+             owner_id: entry.owner_id,
+-        })
++        }))
+     }
+ 
+     /// Set native file permissions through the route's reference backend.
+@@ -1869,7 +1998,19 @@ impl Kernel {
+                         // `rmdir` is the tool: it tolerates a missing row, and it is
+                         // where the non-empty refusal lives, so `recursive` keeps meaning
+                         // what it means everywhere else.
+-                        if matches!(backend.stat(&route.backend_path), Ok(s) if s.is_dir) {
++                        let is_dir = if ctx.resource_guard.is_some() {
++                            self.check_resource_path(path, Some(&route), ctx, false)?;
++                            backend
++                                .scoped_entry_is_dir(&route.backend_path)
++                                .map_err(|error| {
++                                    KernelError::BackendError(format!(
++                                        "scoped unlink metadata: {error:?}"
++                                    ))
++                                })?
++                        } else {
++                            matches!(backend.stat(&route.backend_path), Ok(s) if s.is_dir)
++                        };
++                        if is_dir {
+                             let removed = self.rmdir(path, ctx, recursive)?;
+                             return Ok(SysUnlinkResult {
+                                 hit: removed.hit,
+@@ -1880,7 +2021,12 @@ impl Kernel {
+                                 size: 0,
+                             });
+                         }
+-                        match backend.delete_file(&route.backend_path) {
++                        let deleted = if ctx.resource_guard.is_some() {
++                            backend.scoped_delete_file(&route.backend_path)
++                        } else {
++                            backend.delete_file(&route.backend_path)
++                        };
++                        match deleted {
+                             Ok(()) => {
+                                 return Ok(SysUnlinkResult {
+                                     hit: true,
+@@ -2070,7 +2216,11 @@ impl Kernel {
+         // backend or no peer dispatch is appropriate (e.g. a connector
+         // mount with no Rust backend and no target_zone_id).
+         if let Some(backend) = route.backend.as_ref() {
+-            let _ = backend.delete_file(&route.backend_path);
++            if ctx.resource_guard.is_some() {
++                let _ = backend.scoped_delete_file(&route.backend_path);
++            } else {
++                let _ = backend.delete_file(&route.backend_path);
++            }
+         }
+ 
+         // 7b. FDT cleanup — close pre-opened fd (if any).
+@@ -2116,6 +2266,11 @@ impl Kernel {
+         new_path: &str,
+         ctx: &OperationContext,
+     ) -> Result<SysRenameResult, KernelError> {
++        if ctx.resource_guard.is_some() {
++            return Err(KernelError::PermissionDenied(
++                "scoped rename uses read-write-unlink composition".into(),
++            ));
++        }
+         let miss = || {
+             Ok(SysRenameResult {
+                 hit: false,
+@@ -2503,6 +2658,11 @@ impl Kernel {
+         ctx: &OperationContext,
+         max_link_hops: u8,
+     ) -> Result<SysCopyResult, KernelError> {
++        if ctx.resource_guard.is_some() {
++            return Err(KernelError::PermissionDenied(
++                "scoped native copy is unsupported".into(),
++            ));
++        }
+         let miss = || {
+             Ok(SysCopyResult {
+                 hit: false,
+@@ -2897,6 +3057,15 @@ impl Kernel {
+         parents: bool,
+         exist_ok: bool,
+     ) -> Result<SysMkdirResult, KernelError> {
++        if parents && ctx.resource_guard.is_some() {
++            self.scoped_mkdir_all(path, ctx)?;
++            return Ok(SysMkdirResult {
++                hit: true,
++                post_hook_needed: false,
++            });
++        }
++        let scoped_route = self.vfs_router.route(path, &ctx.zone_id);
++        self.check_resource_path(path, scoped_route.as_ref(), ctx, true)?;
+         // 1. Validate
+         validate_path_fast(path)?;
+ 
+@@ -3140,6 +3309,13 @@ impl Kernel {
+             .route(path, &ctx.zone_id)
+             .ok_or_else(|| KernelError::FileNotFound(path.to_string()))?;
+ 
++        self.check_resource_path(path, Some(&route), ctx, true)?;
++        if ctx.resource_guard.is_some() && recursive {
++            return Err(KernelError::PermissionDenied(
++                "recursive scoped rmdir is unsupported".into(),
++            ));
++        }
++
+         // 3. Get metadata (per-mount or global) — full path
+         let entry_type = self
+             .with_metastore_route(&route, |ms| {
+@@ -3303,6 +3479,14 @@ impl Kernel {
+         reqs: &[crate::kernel::WriteRequest],
+         ctx: &OperationContext,
+     ) -> Vec<Result<SysWriteResult, KernelError>> {
++        if ctx.resource_guard.is_some() {
++            return reqs
++                .iter()
++                .map(|req| {
++                    self.sys_write_with_link_depth(&req.path, ctx, &req.content, req.offset, 1)
++                })
++                .collect();
++        }
+         let n = reqs.len();
+         let mut results: Vec<Result<SysWriteResult, KernelError>> = Vec::with_capacity(n);
+ 
+@@ -3570,6 +3754,12 @@ impl Kernel {
+         reqs: &[crate::kernel::ReadRequest],
+         ctx: &OperationContext,
+     ) -> Vec<Result<SysReadResult, KernelError>> {
++        if ctx.resource_guard.is_some() {
++            return reqs
++                .iter()
++                .map(|req| self.sys_read_single(&req.path, ctx, 1, req.timeout_ms, req.offset))
++                .collect();
++        }
+         let n = reqs.len();
+         let mut results: Vec<Option<Result<SysReadResult, KernelError>>> =
+             (0..n).map(|_| None).collect();
+@@ -3970,6 +4160,17 @@ impl Kernel {
+         recursive: bool,
+         seen: &mut std::collections::BTreeMap<String, (u8, Option<String>)>,
+     ) {
++        let _ = self.scan_mount_into_admitted(route, scan_root, recursive, seen, None);
++    }
++
++    pub(super) fn scan_mount_into_admitted(
++        &self,
++        route: &crate::vfs_router::RouteResult,
++        scan_root: &str,
++        recursive: bool,
++        seen: &mut std::collections::BTreeMap<String, (u8, Option<String>)>,
++        ctx: Option<&OperationContext>,
++    ) -> Result<(), KernelError> {
+         let global_prefix = if scan_root == contracts::VFS_ROOT {
+             contracts::VFS_ROOT.to_string()
+         } else {
+@@ -4001,18 +4202,18 @@ impl Kernel {
+         // Also note the merge semantics this respects: one mount failing does not
+         // invalidate the others, so the listing continues with what the remaining
+         // mounts hold rather than collapsing to nothing.
+-        let listing = self.with_metastore_route(route, |ms| match ms.list(&global_prefix) {
+-            Ok(rows) => Some(rows),
+-            Err(e) => {
+-                tracing::warn!(
+-                    prefix = %global_prefix,
+-                    error = %e,
+-                    "metastore listing failed — this directory's entries from that store \
+-                     are MISSING from the result, not absent from the namespace"
+-                );
++        let listing = self.with_metastore_route(route, |ms| ms.list(&global_prefix));
++        let listing = match listing {
++            Some(Ok(rows)) => Some(rows),
++            Some(Err(error)) if ctx.is_some() => {
++                return Err(KernelError::IOError(error.to_string()));
++            }
++            Some(Err(error)) => {
++                tracing::warn!(prefix = %global_prefix, %error, "metastore listing failed");
+                 None
+             }
+-        });
++            None => None,
++        };
+         if let Some(ms_children) = listing {
+             let parent_depth = global_prefix.matches('/').count();
+             let local_address = self.self_address.read().clone();
+@@ -4026,15 +4227,42 @@ impl Kernel {
+             // reading rows that a write never planted.
+             let mut implied: Vec<(String, Option<String>)> = Vec::new();
+             let mut last_implied = String::new();
+-            for meta in ms_children.into_iter().flatten() {
++            for meta in ms_children {
+                 if !meta.path.starts_with(&global_prefix) {
+                     continue;
+                 }
++                let depth = meta.path.matches('/').count();
++                if let Some(ctx) = ctx {
++                    if recursive || depth == parent_depth {
++                        let child_route = self.vfs_router.route(&meta.path, &ctx.zone_id);
++                        match self
++                            .check_permission_with_route(
++                                &meta.path,
++                                child_route.as_ref(),
++                                Permission::Read,
++                                ctx,
++                            )
++                            .and_then(|_| {
++                                self.check_resource_path(
++                                    &meta.path,
++                                    child_route.as_ref(),
++                                    ctx,
++                                    true,
++                                )
++                            }) {
++                            Ok(()) => {}
++                            Err(KernelError::PermissionDenied(_)) => continue,
++                            Err(error) => return Err(error),
++                        }
++                    }
++                }
+                 // A stored generation describes the last Nexus write; it
+                 // does not prove that its reference still exists on disk.
+                 // Do not delete the row (or propose a Raft mutation) merely
+                 // because a shell removed the file. Revalidate the read view.
+-                let child_route = (has_local_references && meta.entry_type == DT_REG)
++                let child_route = (has_local_references
++                    && meta.entry_type == DT_REG
++                    && (ctx.is_none() || recursive || depth == parent_depth))
+                     .then(|| self.vfs_router.route(&meta.path, &route.zone_id))
+                     .flatten();
+                 let entry_type = if let Some(child_route) = child_route {
+@@ -4049,12 +4277,16 @@ impl Kernel {
+                         Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                             continue;
+                         }
++                        Some(Err(error)) if ctx.is_some() => {
++                            return Err(super::resource_access::storage_error(
++                                crate::abc::object_store::StorageError::IOError(error),
++                            ))
++                        }
+                         _ => meta.entry_type,
+                     }
+                 } else {
+                     meta.entry_type
+                 };
+-                let depth = meta.path.matches('/').count();
+                 if depth > parent_depth {
+                     for rel in Self::implied_relative_dirs(&global_prefix, &meta.path, recursive) {
+                         // `list` hands back sorted paths, so every row under one
+@@ -4108,12 +4340,25 @@ impl Kernel {
+         // tick. Gated + cheap: entries the metastore pass already carried
+         // cost only the `contains_key` check; a non-armed mount runs none of
+         // this (no `is_sync_armed` follow-through, no stat, no propose).
+-        if let Some(Ok(backend_entries)) = route
++        let backend_entries = route
+             .backend
+             .as_ref()
+-            .map(|b| b.list_dir(&route.backend_path))
+-        {
+-            let armed = self.dlc.is_sync_armed(&route.mount_point);
++            .map(|b| b.list_dir(&route.backend_path));
++        if ctx.is_some() {
++            if let Some(Err(error)) = &backend_entries {
++                if !matches!(
++                    error,
++                    crate::abc::object_store::StorageError::NotFound(_)
++                        | crate::abc::object_store::StorageError::NotSupported(_)
++                ) {
++                    return Err(super::resource_access::storage_error(
++                        backend_entries.unwrap().err().unwrap(),
++                    ));
++                }
++            }
++        }
++        if let Some(Ok(backend_entries)) = backend_entries {
++            let armed = ctx.is_none() && self.dlc.is_sync_armed(&route.mount_point);
+             for name in backend_entries {
+                 let is_dir = name.ends_with('/');
+                 let clean = name.trim_end_matches('/');
+@@ -4160,7 +4405,11 @@ impl Kernel {
+                     );
+                 }
+             }
+-        } else if let Some(entries) = route.via_federation_readdir(self, scan_root) {
++        } else if let Some(entries) = ctx
++            .is_none()
++            .then(|| route.via_federation_readdir(self, scan_root))
++            .flatten()
++        {
+             // Federation peer dispatch: no local backend for this
+             // mount, but the routing entry's `target_zone_id` says the
+             // SSOT lives on a peer.  `via_federation_readdir` returns
+@@ -4193,6 +4442,7 @@ impl Kernel {
+                     .or_insert((etype, Some(route.zone_id.clone())));
+             }
+         }
++        Ok(())
+     }
+ 
+     pub fn sys_readdir(
+diff --git a/rust/transport/Cargo.toml b/rust/transport/Cargo.toml
+index 9175bf434..49e6398e1 100644
+--- a/rust/transport/Cargo.toml
++++ b/rust/transport/Cargo.toml
+@@ -12,6 +12,7 @@ crate-type = ["rlib"]
+ default = []
+ 
+ [dependencies]
++sudo-contracts = { git = "https://github.com/sudoprivacy/sudostack", rev = "8323b0f6ac50270594dd76120919c20cc57318dd" }
+ contracts = { workspace = true }
+ nexus-plugin-abi = { workspace = true }
+ nexus-search-common = { path = "../search-common", features = ["transport"] }
+diff --git a/rust/transport/src/grpc.rs b/rust/transport/src/grpc.rs
+index e9df56314..7cf6cc83b 100644
+--- a/rust/transport/src/grpc.rs
++++ b/rust/transport/src/grpc.rs
+@@ -43,6 +43,8 @@ use kernel::kernel::vfs_proto::{
+ };
+ use kernel::kernel::{Kernel, KernelError, OperationContext};
+ use kernel::Permission;
++mod scoped_fs;
++use kernel::kernel::vfs_proto::{ScopedFsRequest, ScopedFsResponse};
+ 
+ /// Configuration for the VFS gRPC server.
+ #[derive(Clone)]
+@@ -231,6 +233,7 @@ macro_rules! impl_authed_request {
+ }
+ 
+ impl_authed_request!(
++    ScopedFsRequest,
+     BatchReadRequest,
+     BatchStatRequest,
+     BatchWriteRequest,
+@@ -728,6 +731,12 @@ where
+ 
+ #[tonic::async_trait]
+ impl NexusVfsService for VfsServiceImpl {
++    async fn scoped_fs(
++        &self,
++        req: Request<ScopedFsRequest>,
++    ) -> Result<Response<ScopedFsResponse>, Status> {
++        self.scoped_fs_request(req).await
++    }
+     async fn chmod(&self, req: Request<ChmodRequest>) -> Result<Response<ChmodResponse>, Status> {
+         let (ctx, req) = match self.authenticate(req).await {
+             Ok(value) => value,
+@@ -928,7 +937,19 @@ impl NexusVfsService for VfsServiceImpl {
+         }
+         // `sys_stat` returns `Option` — `None` is "no such path", a
+         // normal result surfaced as `found = false` (not an error).
+-        match self.kernel.sys_stat(&req.path, &ctx.zone_id) {
++        let stat = if ctx.resource_guard.is_some() {
++            match self.kernel.scoped_stat(&req.path, &ctx) {
++                Ok(stat) => stat,
++                Err(error) => {
++                    return Ok(Response::new(error_stat(Status::permission_denied(
++                        error.to_string(),
++                    ))))
++                }
++            }
++        } else {
++            self.kernel.sys_stat(&req.path, &ctx.zone_id)
++        };
++        match stat {
+             Some(s) => Ok(Response::new(StatResponse {
+                 found: true,
+                 path: s.path,
+@@ -980,7 +1001,15 @@ impl NexusVfsService for VfsServiceImpl {
+         // only our local scan and do NOT re-dispatch — prevents
+         // ping-pong loops in 3+ node topologies where every hop's
+         // local search misses.
+-        let entries = if req.from_peer {
++        let entries = if ctx.resource_guard.is_some() {
++            self.kernel
++                .scoped_readdir(
++                    &req.path,
++                    &ctx,
++                    kernel::kernel::syscall::ReaddirOpts::default(),
++                )
++                .map_err(|error| Status::permission_denied(error.to_string()))?
++        } else if req.from_peer {
+             // Peer fan-out probe: a pure local scan. An empty result means "I
+             // don't have it" — a valid answer that lets the fanning-out peer
+             // move on — NOT NotFound, so this arm never errors. Single-level
+@@ -2381,6 +2410,12 @@ pub(crate) mod tests {
+ 
+     #[tonic::async_trait]
+     impl NexusVfsService for HubStub {
++        async fn scoped_fs(
++            &self,
++            _: Request<ScopedFsRequest>,
++        ) -> Result<Response<ScopedFsResponse>, Status> {
++            Err(Status::unimplemented("old service"))
++        }
+         async fn chmod(&self, _: Request<ChmodRequest>) -> Result<Response<ChmodResponse>, Status> {
+             Err(Status::unimplemented("test hub has no local files"))
+         }
+@@ -2678,6 +2713,15 @@ pub(crate) mod tests {
+             std::thread::sleep(Duration::from_millis(100));
+         }
+         assert!(ready, "server did not become reachable");
++        server_rt.block_on(async {
++            let mut client = kernel::kernel::vfs_proto::nexus_vfs_service_client::NexusVfsServiceClient::connect(format!("http://{bind}")).await.unwrap();
++            let error = client.scoped_fs(ScopedFsRequest { version: 1, operation: Some(kernel::kernel::vfs_proto::scoped_fs_request::Operation::Write(WriteRequest { path: "/outside".into(), content: b"denied".to_vec(), ..Default::default() })), ..Default::default() }).await.unwrap_err();
++            assert_eq!(error.code(), tonic::Code::Unimplemented);
++        });
++        assert!(
++            hub.write_paths().is_empty(),
++            "old service must reject before writes"
++        );
+ 
+         let backend =
+             RemoteBackend::with_zone_path(std::sync::Arc::clone(&transport), "/zone/acme");
+diff --git a/rust/transport/src/grpc/scoped_fs.rs b/rust/transport/src/grpc/scoped_fs.rs
+new file mode 100644
+index 000000000..268e92861
+--- /dev/null
++++ b/rust/transport/src/grpc/scoped_fs.rs
+@@ -0,0 +1,288 @@
++//! One fail-closed protocol entry with server-owned compound-operation intent.
++use super::*;
++use contracts::resource_guard::ResourceGuard;
++use kernel::kernel::vfs_proto::{
++    scoped_fs_request::Operation, scoped_fs_response::Result as FsResult,
++};
++use sudo_contracts::{RuntimeResourceScope, Validate};
++
++#[derive(Debug)]
++struct ScopedGuard {
++    scope: RuntimeResourceScope,
++    capability: &'static str,
++}
++
++impl contracts::resource_guard::ResourceGuard for ScopedGuard {
++    fn check(&self, path: &str) -> Result<(), String> {
++        contracts::validate_zone_path(path).map_err(|error| error.to_string())?;
++        if self.scope.rules.iter().any(|rule| {
++            rule.capability == self.capability
++                && rule.resource_prefixes.iter().any(|prefix| {
++                    prefix == "/" || path == prefix || path.starts_with(&format!("{prefix}/"))
++                })
++        }) {
++            Ok(())
++        } else {
++            Err(format!("{path} is outside runtime scope"))
++        }
++    }
++}
++
++fn request<T>(value: T, ctx: &OperationContext) -> Request<T> {
++    let mut request = Request::new(value);
++    request
++        .extensions_mut()
++        .insert(AuthenticatedRequestContext(ctx.clone()));
++    request
++}
++
++fn compound_error(payload: Vec<u8>) -> WriteResponse {
++    WriteResponse {
++        is_error: true,
++        error_payload: payload,
++        ..Default::default()
++    }
++}
++
++impl VfsServiceImpl {
++    pub(super) async fn scoped_fs_request(
++        &self,
++        req: Request<ScopedFsRequest>,
++    ) -> Result<Response<ScopedFsResponse>, Status> {
++        let (mut ctx, req) = self.authenticate(req).await?;
++        if req.version != 1 {
++            return Err(Status::unimplemented(
++                "unsupported scoped filesystem protocol",
++            ));
++        }
++        let scope: RuntimeResourceScope = serde_json::from_slice(&req.resource_scope_json)
++            .map_err(|_| Status::permission_denied("invalid resource scope"))?;
++        scope
++            .validate()
++            .map_err(|_| Status::permission_denied("invalid resource scope"))?;
++        if scope.zone_id != ctx.zone_id {
++            return Err(Status::permission_denied(
++                "resource scope zone differs from authenticated zone",
++            ));
++        }
++        let op = req
++            .operation
++            .ok_or_else(|| Status::invalid_argument("missing scoped operation"))?;
++        let read = matches!(
++            &op,
++            Operation::Read(_)
++                | Operation::Stat(_)
++                | Operation::Readdir(_)
++                | Operation::StreamReadAt(_)
++        );
++        let capability = if read {
++            "zone.data.read"
++        } else {
++            "zone.data.write"
++        };
++        ctx.resource_guard = Some(Arc::new(ScopedGuard {
++            scope: scope.clone(),
++            capability,
++        }));
++        // Every nested handler receives only this authenticated, immutable context.
++        let result = match op {
++            Operation::Read(r) => FsResult::Read(self.read(request(r, &ctx)).await?.into_inner()),
++            Operation::Write(r) => {
++                FsResult::Write(self.write(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Stat(r) => {
++                if !r.zone_id.is_empty() && r.zone_id != ctx.zone_id {
++                    return Err(Status::permission_denied("cross-zone stat"));
++                }
++                FsResult::Stat(self.stat(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Readdir(r) => {
++                if r.recursive || r.from_peer || (!r.zone_id.is_empty() && r.zone_id != ctx.zone_id)
++                {
++                    return Err(Status::invalid_argument(
++                        "unsupported scoped enumeration mode",
++                    ));
++                }
++                FsResult::Readdir(self.readdir(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Setattr(r) => {
++                if !matches!(r.entry_type, 1 | 4 | 6)
++                    || (!r.zone_id.is_empty() && r.zone_id != ctx.zone_id)
++                    || r.content_id.is_some()
++                    || !r.backend_name.is_empty()
++                    || r.is_external
++                {
++                    return Err(Status::permission_denied("unsupported scoped setattr"));
++                }
++                if r.entry_type == 6 {
++                    let target = r
++                        .link_target
++                        .as_deref()
++                        .ok_or_else(|| Status::invalid_argument("missing link target"))?;
++                    ctx.resource_guard
++                        .as_ref()
++                        .unwrap()
++                        .check(target)
++                        .map_err(Status::permission_denied)?;
++                }
++                FsResult::Setattr(self.setattr(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Mkdir(r) => {
++                ScopedGuard {
++                    scope,
++                    capability: "zone.data.read",
++                }
++                .check(&r.path)
++                .map_err(Status::permission_denied)?;
++                FsResult::Mkdir(self.mkdir(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Delete(r) => {
++                if r.recursive {
++                    return Err(Status::invalid_argument(
++                        "recursive scoped deletion is unsupported",
++                    ));
++                }
++                FsResult::Delete(self.delete(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Lock(r) => FsResult::Lock(self.lock(request(r, &ctx)).await?.into_inner()),
++            Operation::Unlock(r) => {
++                if r.force {
++                    return Err(Status::permission_denied(
++                        "scoped force unlock is unsupported",
++                    ));
++                }
++                FsResult::Unlock(self.unlock(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::StreamWrite(r) => FsResult::StreamWrite(
++                self.stream_write_nowait(request(r, &ctx))
++                    .await?
++                    .into_inner(),
++            ),
++            Operation::StreamReadAt(r) => {
++                FsResult::StreamReadAt(self.stream_read_at(request(r, &ctx)).await?.into_inner())
++            }
++            Operation::Rename(r) => {
++                ctx.resource_guard
++                    .as_ref()
++                    .unwrap()
++                    .check(&r.from)
++                    .map_err(Status::permission_denied)?;
++                ctx.resource_guard
++                    .as_ref()
++                    .unwrap()
++                    .check(&r.to)
++                    .map_err(Status::permission_denied)?;
++                let read = self
++                    .read(request(
++                        ReadRequest {
++                            path: r.from.clone(),
++                            ..Default::default()
++                        },
++                        &ctx,
++                    ))
++                    .await?
++                    .into_inner();
++                if read.is_error {
++                    return Ok(Response::new(ScopedFsResponse {
++                        result: Some(FsResult::Rename(compound_error(read.error_payload))),
++                    }));
++                }
++                let write = self
++                    .write(request(
++                        WriteRequest {
++                            path: r.to,
++                            content: read.content,
++                            ..Default::default()
++                        },
++                        &ctx,
++                    ))
++                    .await?
++                    .into_inner();
++                if write.is_error {
++                    return Ok(Response::new(ScopedFsResponse {
++                        result: Some(FsResult::Rename(write)),
++                    }));
++                }
++                let deleted = self
++                    .delete(request(
++                        DeleteRequest {
++                            path: r.from,
++                            ..Default::default()
++                        },
++                        &ctx,
++                    ))
++                    .await?
++                    .into_inner();
++                if deleted.is_error {
++                    return Ok(Response::new(ScopedFsResponse {
++                        result: Some(FsResult::Rename(compound_error(deleted.error_payload))),
++                    }));
++                }
++                FsResult::Rename(write)
++            }
++            Operation::Append(r) => {
++                ScopedGuard {
++                    scope,
++                    capability: "zone.data.read",
++                }
++                .check(&r.path)
++                .map_err(Status::permission_denied)?;
++                // The client supplies the existing predicate's branch, never a resource intent.
++                if r.stream {
++                    let written = self
++                        .stream_write_nowait(request(
++                            StreamWriteRequest {
++                                path: r.path,
++                                data: r.content,
++                                ..Default::default()
++                            },
++                            &ctx,
++                        ))
++                        .await?
++                        .into_inner();
++                    FsResult::Append(if written.is_error {
++                        compound_error(written.error_payload)
++                    } else {
++                        WriteResponse::default()
++                    })
++                } else {
++                    let kernel = self.kernel.clone();
++                    let read_ctx = ctx.clone();
++                    let path = r.path.clone();
++                    let read = run_blocking(move || {
++                        KernelSyscall::sys_read(&*kernel, &path, &read_ctx, 0, 0)
++                    })
++                    .await?;
++                    let mut content = match read {
++                        Ok(read) => read.data.unwrap_or_default(),
++                        Err(KernelError::FileNotFound(_)) => Vec::new(),
++                        Err(error) => {
++                            let (code, message) = self.map_kernel_err(error);
++                            return Ok(Response::new(ScopedFsResponse {
++                                result: Some(FsResult::Append(compound_error(encode_rpc_error(
++                                    code, &message,
++                                )))),
++                            }));
++                        }
++                    };
++                    content.extend_from_slice(&r.content);
++                    FsResult::Append(
++                        self.write(request(
++                            WriteRequest {
++                                path: r.path,
++                                content,
++                                ..Default::default()
++                            },
++                            &ctx,
++                        ))
++                        .await?
++                        .into_inner(),
++                    )
++                }
++            }
++        };
++        Ok(Response::new(ScopedFsResponse {
++            result: Some(result),
++        }))
++    }
++}
+diff --git a/rust/transport/src/runtime_gateway.rs b/rust/transport/src/runtime_gateway.rs
+index 6673bea25..210e5e072 100644
+--- a/rust/transport/src/runtime_gateway.rs
++++ b/rust/transport/src/runtime_gateway.rs
+@@ -134,6 +134,7 @@ mod tests {
+ }
+ 
+ gateway_methods! {
++    scoped_fs: ScopedFsRequest => ScopedFsResponse,
+     read: ReadRequest => ReadResponse,
+     write: WriteRequest => WriteResponse,
+     chmod: ChmodRequest => ChmodResponse,

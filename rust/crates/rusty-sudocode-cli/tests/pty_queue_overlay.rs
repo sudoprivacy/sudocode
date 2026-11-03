@@ -39,7 +39,7 @@ fn input_submitted_during_a_turn_shows_in_the_queue_overlay() {
         .expect("bash tool should print interrupt-start before sleeping");
 
     // Submit a marker DURING the running turn. The coordinator queues it.
-    sess.send(&format!("{MARKER}\r"))
+    sess.send(&format!("{MARKER}\t"))
         .expect("submit marker during running turn");
 
     // The marker must appear in the queue overlay as a `↳ queued:` line — it is

@@ -1,4 +1,5 @@
 //! Choice surfaces and focus markers, without changing input or layout owners.
+use crate::render::TextRole;
 use crate::render::{ColorSupport, ColorTheme};
 use crossterm::style::{Attribute, ContentStyle};
 
@@ -34,7 +35,7 @@ impl<'a> ChoiceText<'a> {
     pub fn prefix(&self, text: &str) -> String {
         let mut style = self.surface;
         if self.focused {
-            style.foreground_color = Some(self.theme.primary);
+            style = self.theme.selected_style(TextRole::Brand, self.support);
             style.attributes.set(Attribute::Bold);
         }
         self.paint(text, style)
@@ -45,8 +46,11 @@ impl<'a> ChoiceText<'a> {
     }
 
     pub fn muted(&self, text: &str) -> String {
-        let mut style = self.surface;
-        style.foreground_color = Some(self.theme.muted);
+        let style = if self.focused {
+            self.theme.selected_style(TextRole::Secondary, self.support)
+        } else {
+            self.theme.style_for(TextRole::Secondary, self.support)
+        };
         self.paint(text, style)
     }
 }
@@ -74,20 +78,24 @@ mod tests {
                 for (needle, foreground, background, bold) in [
                     (
                         "> [1]",
-                        Some(theme.primary),
-                        Some(crossterm::style::Color::AnsiValue(theme.code_bg)),
+                        theme
+                            .selected_style(TextRole::Brand, support)
+                            .foreground_color,
+                        Some(crossterm::style::Color::AnsiValue(theme.code_background())),
                         true,
                     ),
                     (
                         "SelectedChoice",
                         theme.selection_style(support).foreground_color,
-                        Some(crossterm::style::Color::AnsiValue(theme.code_bg)),
+                        Some(crossterm::style::Color::AnsiValue(theme.code_background())),
                         false,
                     ),
                     (
                         "RecommendedChoice",
-                        Some(theme.muted),
-                        Some(crossterm::style::Color::AnsiValue(theme.code_bg)),
+                        theme
+                            .selected_style(TextRole::Secondary, support)
+                            .foreground_color,
+                        Some(crossterm::style::Color::AnsiValue(theme.code_background())),
                         false,
                     ),
                     ("OrdinaryChoice", None, None, false),
@@ -134,8 +142,14 @@ mod tests {
             let background = luminance(surface.background_color.unwrap());
             for foreground in [
                 surface.foreground_color.unwrap(),
-                theme.primary,
-                theme.muted,
+                theme
+                    .selected_style(TextRole::Brand, ColorSupport::Ansi256)
+                    .foreground_color
+                    .unwrap(),
+                theme
+                    .selected_style(TextRole::Secondary, ColorSupport::Ansi256)
+                    .foreground_color
+                    .unwrap(),
             ] {
                 let foreground = luminance(foreground);
                 let contrast =

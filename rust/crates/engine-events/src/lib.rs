@@ -37,6 +37,7 @@
 pub use runtime::background_tasks::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
+pub use runtime::turn_input::{InputDelivery, InputSource, InputView, TurnInput};
 pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
@@ -118,6 +119,53 @@ pub struct PromptContext {
     pub trace_id: String,
     pub expected_context: Option<ContextRef>,
     pub image_policy: ImageInputPolicy,
+    /// Inputs acknowledged only after the initial prompt has been persisted.
+    pub input_views: Vec<InputView>,
+}
+
+/// Delivery control is independent of transport and never inferred from a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputAction {
+    Submit {
+        client_id: String,
+        draft: Option<serde_json::Value>,
+        input: TurnInput,
+        delivery: InputDelivery,
+        context: Option<Box<PromptContext>>,
+    },
+    Flush,
+    FlushOrCancel,
+    Recall,
+    Snapshot,
+    /// Fence automatic turns while a host performs an idle lifecycle operation.
+    AcquireLifecycle {
+        token: u64,
+        allow_inputs: bool,
+    },
+    ReleaseLifecycle {
+        token: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInput {
+    pub id: u64,
+    pub client_id: String,
+    pub display: String,
+    pub source: InputSource,
+    pub delivery: InputDelivery,
+}
+
+/// Authoritative projection. Clients render this instead of scheduling inputs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputState {
+    pub revision: u64,
+    pub active_turn_id: Option<u64>,
+    pub running: bool,
+    pub paused: bool,
+    pub pending: Vec<PendingInput>,
 }
 
 /// Build metadata used by session management reports.
@@ -172,23 +220,37 @@ pub enum CompletionReceipt {
     Retry,
 }
 
-/// The engine's lifecycle state, surfaced to renderers via
-/// [`EngineEvent::State`].
+/// The request which owns the foreground input surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputReason {
+    Permission,
+    Question,
+}
+
+/// Foreground operation state, independent of renderer and storage backend.
+/// Background tasks retain their own session-owned registry and lifecycle.
 ///
-/// [`EngineState::AwaitingInput`] is the trigger the kernel
-/// `AgentState::AwaitingInput` primitive was built to receive: the engine
-/// enters it the instant it emits a [`EngineEvent::PermissionRequest`] or
-/// [`EngineEvent::QuestionRequest`], and returns to [`EngineState::Running`]
-/// once the matching answer command arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The engine enters [`Self::AwaitingInput`] when it emits a permission or
+/// question request, and returns to [`Self::Running`] when that prompt releases
+/// input. Independent tools can continue while the prompt owns input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "waiting_for", rename_all = "snake_case")]
 pub enum EngineState {
-    /// No turn in flight; waiting for the next [`EngineCommand::Prompt`].
+    /// No foreground operation in flight; background tasks may still run.
     Idle,
-    /// A turn is executing (model streaming, tools running).
+    /// A turn, management operation or direct tool call is executing.
     Running,
-    /// A turn is blocked on the renderer answering a permission or question
-    /// request.
-    AwaitingInput,
+    /// A prompt owns input. Other tools and provider streaming may continue.
+    AwaitingInput(InputReason),
+}
+
+/// A selected engine instance's current facts, independent of its host or PID.
+/// This observation neither proves global presence nor grants tool control.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeStatus {
+    pub foreground: EngineState,
+    pub background: runtime::background_tasks::BackgroundTaskSummary,
 }
 
 /// End-of-turn aggregate — absorbs `runtime::TurnSummary` minus the message
@@ -226,6 +288,11 @@ pub struct TurnComplete {
 /// — `PartialEq` is all any consumer (tests included) needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    InputState(InputState),
+    /// Persisted into this turn, rather than merely accepted by its input channel.
+    InputCommitted(InputView),
+    /// Not consumed: return ownership to the submitting surface.
+    InputDeferred(Vec<runtime::turn_input::TurnInput>),
     CommandResult {
         id: u64,
         result: Result<serde_json::Value, String>,
@@ -267,7 +334,7 @@ pub enum EngineEvent {
         input: String,
     },
     /// An authorized invocation acquired an execution slot. Input includes
-    /// any hook rewrite; merely receiving ToolCall does not mean it is running.
+    /// any hook rewrite; merely receiving `ToolCall` does not mean it is running.
     ToolStarted {
         id: String,
         name: String,
@@ -283,6 +350,7 @@ pub enum EngineEvent {
     /// A tool finished (was `RuntimeObserver::on_tool_result`). `output` is the
     /// tool's textual result; `is_error` distinguishes failures.
     ToolResult {
+        assistant_message_id: Option<String>,
         id: String,
         name: String,
         output: String,
@@ -293,8 +361,8 @@ pub enum EngineEvent {
     /// the CLI `ToolExecutor`'s progress callbacks. Structured; the renderer
     /// formats it.
     ToolProgress(ToolProgressEvent),
-    /// Live progress from a running plugin hook (the PreToolUse / PostToolUse /
-    /// PostToolUseFailure lifecycle) — was the build-time
+    /// Live progress from a running plugin hook (the `PreToolUse` / `PostToolUse` /
+    /// `PostToolUseFailure` lifecycle) — was the build-time
     /// `CliHookProgressReporter` stderr sink in the REPL, now surfaced through
     /// the seam. Structured; the renderer formats it.
     HookProgress(HookProgressEvent),
@@ -383,6 +451,19 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    /// Read current runtime metadata without starting or interrupting a turn.
+    /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
+    RuntimeStatus {
+        request_id: u64,
+    },
+    Input {
+        id: u64,
+        action: InputAction,
+    },
+    /// Soft steering; never cancels a tool or adds interruption guidance.
+    Steer {
+        inputs: Vec<runtime::turn_input::TurnInput>,
+    },
     CancelSubagent {
         request_id: u64,
         agent_id: String,
@@ -429,6 +510,17 @@ pub enum EngineCommand {
     QuestionAnswer {
         id: RequestId,
         answers: Result<Vec<QuestionPromptAnswer>, String>,
+    },
+    /// Run one tool by name for the host, outside any turn, through the same
+    /// hooks and permission policy a model's call passes. Nothing is written
+    /// to the conversation. The engine replies with
+    /// [`EngineEvent::CommandResult`]: `{"content", "isError"}` when the tool
+    /// produced a result, `{"refused": reason}` when nothing ran, and an error
+    /// when the call was admitted but its outcome is unknown.
+    DirectTool {
+        request_id: u64,
+        name: String,
+        input: String,
     },
     /// Run a slash command (`/model`, `/compact`, …); the engine replies with
     /// [`EngineEvent::Notice`] (or a more specific event).

@@ -5,6 +5,7 @@
 //! only decides how the exchange looks in a terminal: the echoed input line
 //! and the `⎿`-connected output block under it.
 
+use crate::render::TextRole;
 pub use commands::bash_mode::{failure_blocks, history_blocks, parse_bang_command, run};
 use runtime::{ContentBlock, ConversationMessage, MessageRole};
 
@@ -20,6 +21,7 @@ pub fn messages_from_blocks(blocks: Vec<ContentBlock>) -> Vec<ConversationMessag
     blocks
         .into_iter()
         .map(|block| ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![block],
             usage: None,
@@ -34,12 +36,12 @@ pub fn messages_from_blocks(blocks: Vec<ContentBlock>) -> Vec<ConversationMessag
 /// scrollback.
 #[must_use]
 pub fn render_input_line(command: &str) -> String {
-    use crate::render::{ansi_fg, theme, RESET};
+    use crate::render::{theme, RESET};
     let t = theme();
     format!(
         "{bg}{bang}!{RESET}{bg} {command}{RESET}",
         bg = t.code_bg_seq(),
-        bang = ansi_fg(t.error),
+        bang = t.fg_seq(TextRole::Error),
     )
 }
 
@@ -47,10 +49,14 @@ pub fn render_input_line(command: &str) -> String {
 /// connector, the rest are indented to align; stderr lines are tinted with the
 /// error colour; an empty result says so instead of printing nothing.
 #[must_use]
-pub fn render_output_block(stdout: &str, stderr: &str, exit_status: Option<&str>) -> String {
-    use crate::render::{ansi_fg, theme, DIM, RESET};
+pub fn render_output_block(
+    stdout: &str,
+    stderr: &str,
+    exit_status: Option<&runtime::ShellStatus>,
+) -> String {
+    use crate::render::{theme, DIM, RESET};
     let t = theme();
-    let err = ansi_fg(t.error);
+    let err = t.fg_seq(TextRole::Error);
     let mut lines: Vec<String> = stdout
         .lines()
         .map(str::to_string)
@@ -65,7 +71,7 @@ pub fn render_output_block(stdout: &str, stderr: &str, exit_status: Option<&str>
         ));
     }
     if let Some(status) = exit_status {
-        lines.push(format!("{err}{status}{RESET}"));
+        lines.push(format!("{err}{}{RESET}", status.label()));
     }
     if lines.is_empty() {
         lines.push(format!("{DIM}(no output){RESET}"));

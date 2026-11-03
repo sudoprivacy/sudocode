@@ -16,7 +16,7 @@ use common::TestEnv;
 use runtime::{ContentBlock, Session};
 use serde_json::{json, Value};
 
-const BUDGET: Duration = Duration::from_secs(240);
+const BUDGET: Duration = Duration::from_mins(4);
 
 fn transcripts(dir: &Path, paths: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap().flatten() {
@@ -37,10 +37,10 @@ fn run(env: &TestEnv, args: &[&str]) {
     let exit = cli.expect_eof().unwrap_or_else(|e| {
         panic!(
             "live CLI did not finish: {e}\n{}",
-            cli.render(|s| s.contents())
+            cli.render(common::screen_contents)
         )
     });
-    assert_eq!(exit, 0, "{}", cli.render(|s| s.contents()));
+    assert_eq!(exit, 0, "{}", cli.render(common::screen_contents));
 }
 
 #[allow(clippy::redundant_closure_for_method_calls)]
@@ -58,7 +58,7 @@ fn resume_turn(env: &TestEnv, path: &Path, prompt: &str) -> String {
     common::expect_input_line(&cli, &prompt[..20], BUDGET, "resumed prompt entered");
     cli.send("\r").unwrap();
     common::expect_turn_complete_after(&cli, &marker, BUDGET, "resumed turn completed");
-    let completed_screen = cli.render(|s| s.contents());
+    let completed_screen = cli.render(common::screen_contents);
     cli.send("/exit").unwrap();
     common::expect_input_line(&cli, "/exit", BUDGET, "exit entered");
     cli.send("\r").unwrap();
@@ -66,7 +66,7 @@ fn resume_turn(env: &TestEnv, path: &Path, prompt: &str) -> String {
         cli.expect_eof().unwrap(),
         0,
         "{}",
-        cli.render(|s| s.contents())
+        cli.render(common::screen_contents)
     );
     completed_screen
 }
@@ -167,7 +167,7 @@ fn delegate_compact_and_resume_a_fresh_quote() {
          do not search directories or read files because the source was removed.", output.display()));
     let bytes = fs::read(&output).unwrap_or_else(|error| {
         let session = Session::load_from_path(path).unwrap();
-        let last_messages: Vec<_> = session.messages.iter().rev().take(6).collect();
+        let last_messages: Vec<_> = session.messages().iter().rev().take(6).collect();
         panic!(
             "read {}: {error}\nPTY:\n{screen}\nFinal messages:\n{last_messages:#?}",
             output.display()
@@ -195,7 +195,7 @@ fn parent_transcript(env: &TestEnv) -> PathBuf {
     assert_eq!(parents.len(), 1, "must find the actual parent transcript");
     let before = Session::load_from_path(&parents[0]).unwrap();
     let spawns: Vec<_> = before
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|b| {

@@ -78,13 +78,13 @@ impl RuntimeMcpState {
                 .iter()
                 .map(|failure| runtime::McpFailedServer {
                     server_name: failure.server_name.clone(),
-                    phase: runtime::McpLifecyclePhase::ToolDiscovery,
+                    phase: failure.phase,
                     error: runtime::McpErrorSurface::new(
-                        runtime::McpLifecyclePhase::ToolDiscovery,
+                        failure.phase,
                         Some(failure.server_name.clone()),
                         failure.error.clone(),
-                        std::collections::BTreeMap::new(),
-                        true,
+                        failure.context.clone(),
+                        failure.recoverable,
                     ),
                 })
                 .chain(discovery.unsupported_servers.iter().map(|server| {
@@ -677,6 +677,10 @@ pub(crate) fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
 /// down. A poisoned lock or a failed shutdown is swallowed: teardown must not
 /// abort the surrounding cleanup path.
 pub fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
+    shutdown_mcp_ref_best_effort(mcp_state.as_deref());
+}
+
+pub(crate) fn shutdown_mcp_ref_best_effort(mcp_state: Option<&Mutex<RuntimeMcpState>>) {
     if let Some(state) = mcp_state {
         let _ = state
             .lock()
@@ -748,6 +752,47 @@ mod tests {
                 has_apps: false,
             },
         }
+    }
+
+    #[test]
+    fn startup_degraded_report_preserves_spawn_failure_metadata() {
+        let root = temp_dir("spawn-failure");
+        let runtime_config = runtime::ConfigLoader::new(&root, root.join("home"))
+            .load()
+            .unwrap();
+        let outcome = PluginLoadOutcome {
+            loaded_plugins: Vec::new(),
+            failures: Vec::new(),
+        };
+        let servers = BTreeMap::from([(
+            "missing-server".to_string(),
+            runtime::ScopedMcpServerConfig {
+                scope: runtime::ConfigSource::Project,
+                config: runtime::McpServerConfig::Stdio(runtime::McpStdioServerConfig {
+                    command: root.join("nonexistent-mcp-server").display().to_string(),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    current_dir: None,
+                    tool_call_timeout_ms: None,
+                }),
+            },
+        )]);
+        let (mut state, discovery) =
+            super::RuntimeMcpState::new(&runtime_config, &outcome, &servers)
+                .unwrap()
+                .unwrap();
+        let degraded = state.degraded_report().unwrap();
+        state.shutdown().unwrap();
+        assert_eq!(discovery.failed_servers.len(), 1);
+        assert_eq!(degraded.failed_servers.len(), 1);
+        let original = &discovery.failed_servers[0];
+        let reported = &degraded.failed_servers[0];
+        assert_eq!(original.phase, runtime::McpLifecyclePhase::SpawnConnect);
+        assert_eq!(reported.phase, original.phase);
+        assert_eq!(reported.error.phase, original.phase);
+        assert_eq!(reported.error.context, original.context);
+        assert_eq!(reported.error.recoverable, original.recoverable);
+        assert!(!reported.error.recoverable);
     }
 
     #[test]

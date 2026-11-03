@@ -25,7 +25,7 @@ fn up_arrow_moves_cursor_to_beginning_before_history() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -64,7 +64,7 @@ fn up_arrow_navigates_history_on_empty_buffer() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -92,7 +92,7 @@ fn down_arrow_moves_cursor_to_end() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -212,7 +212,7 @@ fn wait_for_input_line(sess: &mut PtySession, needle: &str, label: &str) {
         assert!(
             Instant::now() < deadline,
             "{label}: input line never contained {needle:?} (last saw {line:?})\nPTY screen:\n{}",
-            sess.render(|s| s.contents()),
+            sess.render(common::screen_contents),
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -293,7 +293,7 @@ fn up_arrow_moves_to_start_before_recalling_history() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
     seed_history(&env, &mut sess, "remember me");
@@ -330,7 +330,7 @@ fn up_arrow_moves_to_start_before_recalling_history() {
 /// Up inside a multi-line buffer moves between logical lines first; only once
 /// the cursor is on the first line does it jump to the start.
 /// Multi-line keyboard input needs real terminal event semantics that the
-/// Windows ConPTY harness cannot synthesize reliably. Bracketed-paste behavior
+/// Windows `ConPTY` harness cannot synthesize reliably. Bracketed-paste behavior
 /// remains covered by the dedicated paste suite.
 #[cfg(not(windows))]
 #[test]
@@ -351,7 +351,7 @@ fn up_arrow_moves_between_logical_lines_before_jumping_to_start() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -400,7 +400,7 @@ fn down_arrow_at_end_does_not_navigate_forward_history() {
     sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
     seed_history(&env, &mut sess, "do not resurface me");
@@ -441,7 +441,7 @@ fn exit_cleanly(sess: &mut PtySession) {
     wait_for_input_line(sess, "/exit", "typed /exit should render before Enter");
     sess.send("\r").expect("send Enter");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "clean exit code");

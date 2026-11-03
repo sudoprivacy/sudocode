@@ -17,7 +17,28 @@ def quantile(values, fraction):
 
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"Measurement input must be a regular file, not a link: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_digest(actual, expected, label):
+    """Refuse substituted build outputs before starting a native workload."""
+    if expected is not None and actual != expected:
+        raise ValueError(f"{label} differs from the validated build")
+
+
+def comparison_rounds(policy, case):
+    """Keep paired sampling explicit, including the full short RSS sentinel."""
+    overrides = policy.get("case_rounds", {})
+    assert isinstance(overrides, dict), "round overrides must be an object"
+    assert set(overrides) <= policy["cases"].keys(), "round overrides name an unknown case"
+    rounds = overrides.get(case, policy["rounds"])
+    assert set(rounds) == {"calibration", "comparison"}, "missing/extra paired stages"
+    minimum = {"calibration": 5, "comparison": 7} if case in {"short", "repeated"} else {"calibration": 3, "comparison": 3}
+    assert all(type(rounds[key]) is int and rounds[key] >= minimum[key] for key in minimum), "insufficient paired rounds"
+    return rounds
 
 
 def expected_metrics(spec):
@@ -31,6 +52,38 @@ def expected_metrics(spec):
     metrics.update(f"input_{phase}_{percentile}_ms" for phase in phases
                    for percentile in ["p50", "p95"])
     return metrics
+
+
+def judged_metrics(spec):
+    """The visible metrics this scenario is judged on; the driver still measures all."""
+    judged = set(spec["judge"])
+    assert judged and judged <= expected_metrics(spec), "judge only metrics the workload measures"
+    return judged
+
+
+def paired_samples(rounds):
+    """Describe every judged observation, retaining alternating binary order."""
+    return [{"stage": stage, "round": number, "side": side}
+            for stage, key in [("aa", "calibration"), ("ab", "comparison")]
+            for number in range(rounds[key])
+            for side in (["base", "candidate"] if number % 2 == 0 else ["candidate", "base"])]
+
+
+def policy_plan(policy, profile):
+    """Validate and describe the same workload before building or executing it."""
+    assert policy["version"] == 1
+    assert policy["sampling"]["input"] == 60 and policy["sampling"]["resize"] >= 40
+    assert policy["sampling"]["resize"] % 2 == 0 and policy["sampling"]["cancel"] >= 20
+    cases = policy["profiles"][profile]
+    assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
+    rounds = {case: comparison_rounds(policy, case) for case in cases}
+    metrics = {case: sorted(judged_metrics(policy["cases"][case])) for case in cases}
+    assert all(set(names) <= policy["metrics"].keys() for names in metrics.values())
+    pairs = {case: paired_samples(value) for case, value in rounds.items()}
+    samples = {case: len(value) for case, value in pairs.items()}
+    return {"version": 1, "profile": profile, "cases": cases, "rounds": rounds,
+            "metrics": metrics, "pairs": pairs, "unjudged_warmups": 0,
+            "samples": samples, "total_samples": sum(samples.values())}
 
 
 def validate(sample, case, policy):
@@ -109,30 +162,33 @@ def assess(controls, comparisons, policy, cases, metrics_for_case=expected_metri
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--driver", type=Path, required=True, help="compiled pty_render_performance test")
-    parser.add_argument("--base", type=Path, required=True)
-    parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--driver", type=Path, help="compiled pty_render_performance test")
+    parser.add_argument("--base", type=Path)
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--describe-policy", action="store_true",
+                        help="validate and print the matrix without starting a workload")
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("performance-policy.json"))
     parser.add_argument("--profile", choices=["core", "stress"], default="core")
     parser.add_argument("--preview", choices=["0", "1"], default="0")
     args = parser.parse_args()
     policy = json.loads(args.policy.read_text())
-    assert policy["version"] == 1
-    assert policy["rounds"]["calibration"] >= 5 and policy["rounds"]["comparison"] >= 7
-    assert policy["sampling"]["input"] == 60 and policy["sampling"]["resize"] >= 40
-    assert policy["sampling"]["resize"] % 2 == 0 and policy["sampling"]["cancel"] >= 20
-    cases = policy["profiles"][args.profile]
-    assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
-    for case in cases:
-        assert expected_metrics(policy["cases"][case]) <= policy["metrics"].keys()
+    plan = {**policy_plan(policy, args.profile), "policy_sha256": digest(args.policy)}
+    if args.describe_policy:
+        print(json.dumps(plan))
+        return 0
+    if not all([args.driver, args.base, args.candidate, args.output]):
+        parser.error("measurement requires --driver, --base, --candidate and --output")
+    cases, rounds_by_case = plan["cases"], plan["rounds"]
+    print("Rendering paired rounds, with no extra unjudged workloads: " + json.dumps(rounds_by_case), flush=True)
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output directory is not empty; choose a fresh path to preserve earlier evidence")
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"version": 1, "profile": args.profile, "preview": args.preview,
               "policy_sha256": digest(args.policy), "policy": policy,
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
-              "driver_sha256": digest(args.driver), "samples": [], "status": "running"}
+              "driver_sha256": digest(args.driver), "expected_driver_sha256": os.environ.get("SCODE_EXPECTED_DRIVER_SHA256"),
+              "samples": [], "status": "running", "unjudged_warmups": 0}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name))
                                 for name in ["benchmark.py", "host.cjs", "run.cjs", "performance.cjs", "resources.cjs"]}
     controls, comparisons = {case: [] for case in cases}, {case: [] for case in cases}
@@ -170,29 +226,34 @@ def main():
         return value
 
     try:
-        # Finish compilation before invocation. Warm both binaries before collecting pairs.
-        for case in cases:
-            sample(args.base, case, "warm", 0, "base")
-            sample(args.candidate, case, "warm", 0, "candidate")
-        for stage, rounds, collection in [
-            ("aa", policy["rounds"]["calibration"], controls),
-            ("ab", policy["rounds"]["comparison"], comparisons),
+        verify_digest(report["driver_sha256"], report["expected_driver_sha256"], "driver")
+        # Every observation starts a fresh driver/Node/SUT. Begin with the
+        # existing calibration pairs instead of repeating full unjudged runs.
+        for stage, key, collection in [
+            ("aa", "calibration", controls),
+            ("ab", "comparison", comparisons),
         ]:
-            for number in range(rounds):
+            for number in range(max(rounds[key] for rounds in rounds_by_case.values())):
                 # Reverse both binary and scenario order to reduce thermal/time drift.
                 for case in cases if number % 2 == 0 else list(reversed(cases)):
+                    if number >= rounds_by_case[case][key]:
+                        continue
                     pair = {}
                     for side in ["base", "candidate"] if number % 2 == 0 else ["candidate", "base"]:
                         binary = args.base if stage == "aa" or side == "base" else args.candidate
                         pair[side] = sample(binary, case, stage, number, side)
                     collection[case].append((pair["base"], pair["candidate"]))
             if stage == "aa":
-                report["calibration"], noise_failures = assess(controls, None, policy, cases)
+                report["calibration"], noise_failures = assess(controls, None, policy, cases, judged_metrics)
                 if noise_failures:
                     report.update(status="noisy", failures=noise_failures, metrics=report["calibration"])
                     break
         if report["status"] == "running":
-            report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases)
+            for case in cases:
+                observed = [{key: row[key] for key in ["stage", "round", "side"]}
+                            for row in report["samples"] if row["data"]["case"] == case]
+                assert observed == plan["pairs"][case], "missing/duplicate/unjudged paired observations"
+            report["metrics"], report["failures"] = assess(controls, comparisons, policy, cases, judged_metrics)
             report["status"] = "failed" if report["failures"] else "passed"
     except (AssertionError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
         report["status"] = "invalid"

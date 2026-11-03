@@ -83,8 +83,11 @@ pub fn boot_session_fs(
     }
     // Host spelling: a CLI session's files are host files, so the paths its
     // tools report are the ones its user typed and its `bash` tool can open.
+    // The session's context is its own agent identity (not system); its zone
+    // context is trusted-local via `for_standalone_session` — host-env
+    // metadata, when present, shapes the authorization there.
     Ok(Arc::new(
-        KernelFsBackend::for_agent(kernel, agent_name, ZONE, agent_name, workspace_root)
+        KernelFsBackend::for_standalone_session(kernel, agent_name, workspace_root)
             .with_host_root(workspace.to_string_lossy().into_owned()),
     ))
 }

@@ -7,7 +7,7 @@ use crossterm::style::Color;
 use super::{
     ansi_fg,
     text_layout::{truncate_to_width, wrap_ansi_to_width},
-    BOLD, RESET,
+    RESET,
 };
 
 pub(crate) fn header_width(width: usize) -> usize {
@@ -20,27 +20,23 @@ pub(crate) fn body_width(width: usize) -> usize {
 
 /// Clip the title to one row and keep every body continuation inside the
 /// gutter. There is no right border, so ANSI, tabs and wide text share the
-/// same copyable layout. Callers choose semantic color and cap emphasis.
+/// same copyable layout. Keep every frame stroke at regular weight: some
+/// terminal fonts shift bold rounded corners relative to the vertical bar.
 pub(crate) fn render<'a>(
     header: &str,
     bodies: impl IntoIterator<Item = &'a str>,
     width: usize,
     color: Color,
-    bold_caps: bool,
 ) -> String {
-    let frame = ansi_fg(color);
-    let cap = if bold_caps && color != Color::Reset {
-        format!("{BOLD}{frame}")
-    } else {
-        frame.clone()
-    };
+    // Content may leave bold or dim active; the frame owns its font weight.
+    let frame = format!("{RESET}{}", ansi_fg(color));
     let header = if header.contains(['\n', '\r', '\t']) {
         Cow::Owned(header.replace(['\n', '\r', '\t'], " "))
     } else {
         Cow::Borrowed(header)
     };
     let mut out = format!(
-        "{cap}╭─{RESET} {}",
+        "{frame}╭─{RESET} {}",
         truncate_to_width(&header, header_width(width))
     );
     for body in bodies {
@@ -50,6 +46,6 @@ pub(crate) fn render<'a>(
             }
         }
     }
-    let _ = write!(out, "\n{cap}╰─{RESET}");
+    let _ = write!(out, "\n{frame}╰─{RESET}");
     out
 }

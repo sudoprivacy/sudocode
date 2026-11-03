@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use crate::{
     artifacts,
     capabilities::{self, Request, Response},
+    local_box::LocalBox,
     Result,
 };
 
@@ -41,6 +42,7 @@ struct Runtime {
     discovery: Discovery,
     diagnostics: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
     _lock: File,
+    _node_lock: Option<File>,
 }
 
 impl Drop for Runtime {
@@ -65,9 +67,10 @@ struct ServiceState {
     discovery: Discovery,
     shutdown: tokio::sync::watch::Sender<bool>,
     admission: Arc<tokio::sync::RwLock<bool>>,
+    local_box: Option<Arc<LocalBox>>,
 }
 
-fn lock_file(root: &Path, name: &str) -> Result<File> {
+pub(crate) fn lock_file(root: &Path, name: &str) -> Result<File> {
     let directory = root.join("run");
     fs::create_dir_all(&directory)?;
     #[cfg(unix)]
@@ -155,6 +158,23 @@ fn is_serving(http: &reqwest::blocking::Client, discovery: &Discovery) -> bool {
     })
 }
 
+/// Readiness covers peer messaging, not only the root zone. Nexus mounts the
+/// replicated A2A prefixes as their own zone and loads a hosted zone only on
+/// first access. After a restart, `/` can therefore serve while that zone is
+/// still `HOSTED_NOT_RESIDENT`, and the first client to touch `/agents` pays
+/// the whole load. That measured 0.4–0.7 s locally and exceeded a 3 s client
+/// deadline on Windows CI. A stat of each prefix is that first access, taken
+/// before readiness is published. A prefix this node does not mount is
+/// absent, so there is nothing to wait for.
+fn replicated_prefixes_serve(client: &NexusVfsClient) -> bool {
+    a2a::REPLICATED_PREFIXES
+        .iter()
+        .all(|prefix| match client.stat(prefix, "") {
+            Ok(_) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        })
+}
+
 fn spawn_runtime(root: &Path) -> Result<Child> {
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -164,6 +184,8 @@ fn spawn_runtime(root: &Path) -> Result<Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     hide_console(&mut command);
+    #[cfg(windows)]
+    stdin_peek::prevent_standard_handle_inheritance()?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -176,7 +198,11 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
     if let Some(discovery) = read_discovery(root).filter(|discovery| is_serving(http, discovery)) {
         return Ok(discovery);
     }
-    install(root)?;
+    if let Some(profile) = LocalBox::load(root)? {
+        profile.validate()?;
+    } else {
+        install(root)?;
+    }
     let mut child: Option<Child> = None;
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
@@ -310,24 +336,71 @@ fn stop_existing(root: &Path, http: &reqwest::blocking::Client) -> Result<()> {
                 params: Value::Null,
             },
         )?;
-        let lock = lock_file(root, "service.lock")?;
-        let deadline = Instant::now() + Duration::from_secs(35);
-        loop {
-            match lock.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error) if is_lock_contention(&error) => {}
-                Err(error) => return Err(error.into()),
-            }
-            if Instant::now() >= deadline {
-                return Err("Sudocode service is still draining requests".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        wait_for_retirement(root)?;
     }
     Ok(())
 }
 
+fn wait_for_retirement(root: &Path) -> Result<()> {
+    let lock = lock_file(root, "service.lock")?;
+    let deadline = Instant::now() + Duration::from_secs(35);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_lock_contention(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if Instant::now() >= deadline {
+            return Err("Sudocode service is still draining requests".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Operator-only exact-target stop. Ordinary frontend shutdown cannot stop a
+/// shared Box. The stop uses `Child::kill`/`wait`, not a claimed graceful Raft drain.
+pub fn stop_local_box(
+    node_id: &str,
+    binary_sha256: &str,
+    owner_root: Option<&Path>,
+) -> Result<Value> {
+    let root = artifacts::owner_root(owner_root)?;
+    let profile = LocalBox::load(&root)?.ok_or("No registered local Box")?;
+    profile.validate()?;
+    let params =
+        json!({"nodeId": node_id, "binarySha256": binary_sha256, "acknowledgeSharedOutage": true});
+    if !profile.matches_stop(&params) {
+        return Err("The maintenance target does not match the registered local Box".into());
+    }
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(35))
+        .no_proxy()
+        .build()?;
+    let discovery = read_discovery(&root)
+        .filter(|value| is_serving(&http, value))
+        .ok_or("No managed local Box is running; an external Node is never stopped")?;
+    call(
+        &http,
+        &discovery,
+        &Request {
+            id: json!(0),
+            method: "service.stopLocalBox".into(),
+            params,
+        },
+    )?;
+    wait_for_retirement(&root)?;
+    Ok(
+        json!({"stopped": true, "nodeId": node_id, "binarySha256": binary_sha256,
+        "termination": "child_kill_and_wait", "gracefulRaftDrain": false}),
+    )
+}
+
 fn control_operation(root: &Path, method: &str) -> Result<Value> {
+    if LocalBox::load(root)?.is_some() {
+        return Err(
+            "An existing Box keeps its pinned installation and coordinated Node lifecycle".into(),
+        );
+    }
     match method {
         "service.install" => {
             install(root)?;
@@ -385,12 +458,152 @@ fn control_operation(root: &Path, method: &str) -> Result<Value> {
     }
 }
 
+/// Inspect the same runtime used by frontend channels without installing or starting it.
+pub fn inspect_local_services() -> Result<Value> {
+    inspect_local_services_at(None)
+}
+
+pub fn inspect_local_services_at(owner_root: Option<&Path>) -> Result<Value> {
+    let root = artifacts::owner_root(owner_root)?;
+    let profile = LocalBox::load(&root)?;
+    let installed = if let Some(profile) = &profile {
+        profile.validate()?;
+        json!({"profile": "existing_box", "version": profile.version()})
+    } else {
+        control_operation(&root, "service.checkInstalled")?
+    };
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .build()?;
+    let running = read_discovery(&root).filter(|discovery| is_serving(&http, discovery));
+    Ok(
+        json!({"installation": installed, "running": running.is_some(),
+        "runningVersion": running.map(|discovery| discovery.version)}),
+    )
+}
+
+/// CLI setup uses the frontend's existing install/discovery/lifecycle owner.
+pub fn start_local_services() -> Result<Value> {
+    let root = artifacts::root()?;
+    if LocalBox::load(&root)?.is_some() {
+        return Err("This service root owns an existing Box; use its configured Box record".into());
+    }
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .build()?;
+    let discovery = ensure_runtime(&root, &http)?;
+    if discovery.version != artifacts::version() {
+        return Err("The shared Nexus version differs from this CLI; use the service owner's controlled upgrade before selecting shared mode".into());
+    }
+    call(
+        &http,
+        &discovery,
+        &Request {
+            id: json!(0),
+            method: "service.status".into(),
+            params: Value::Null,
+        },
+    )?
+    .result
+    .ok_or_else(|| "missing service status".into())
+}
+
+/// Resume only an explicitly registered local owner matching the client record.
+/// A remote or unregistered Box remains a connection target, with no process effect.
+pub fn ensure_local_box(endpoint: &str, owner_root: Option<&Path>) -> Result<Option<Value>> {
+    let root = artifacts::owner_root(owner_root)?;
+    let Some(profile) = LocalBox::load(&root)? else {
+        if owner_root.is_some() {
+            return Err("The selected owner root has no registered local Box".into());
+        }
+        return Ok(None);
+    };
+    if profile.box_endpoint != endpoint {
+        return Err("The registered local owner does not match the configured Box".into());
+    }
+    profile.validate()?;
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .build()?;
+    if let Some(discovery) = read_discovery(&root).filter(|value| is_serving(&http, value)) {
+        return call(
+            &http,
+            &discovery,
+            &Request {
+                id: json!(0),
+                method: "service.status".into(),
+                params: Value::Null,
+            },
+        )?
+        .result
+        .ok_or_else(|| "missing service status".into())
+        .map(Some);
+    }
+    // An owner holding its lifetime lock may have bound the Node port before
+    // publishing authenticated readiness. Join its startup instead of probing
+    // that intermediate port as an externally owned Node.
+    let lifetime = lock_file(&root, "service.lock")?;
+    let external = match lifetime.try_lock_exclusive() {
+        Ok(()) => profile.external_running()?,
+        Err(error) if is_lock_contention(&error) => false,
+        Err(error) => return Err(error.into()),
+    };
+    drop(lifetime);
+    if external {
+        return Ok(Some(profile.status(false)));
+    }
+    let discovery = ensure_runtime(&root, &http)?;
+    call(
+        &http,
+        &discovery,
+        &Request {
+            id: json!(0),
+            method: "service.status".into(),
+            params: Value::Null,
+        },
+    )?
+    .result
+    .ok_or_else(|| "missing service status".into())
+    .map(Some)
+}
+
+async fn forward_stdio_request(
+    http: &reqwest::Client,
+    discovery: &Discovery,
+    request: &Request,
+) -> Result<Response> {
+    let endpoint: reqwest::Url = discovery.endpoint.parse()?;
+    validate_endpoint(&endpoint)?;
+    let response = http
+        .post(endpoint)
+        .bearer_auth(&discovery.token)
+        .json(&json!({"id": request.id, "method": request.method, "params": request.params}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Response>()
+        .await?;
+    if response.id != request.id {
+        return Err("service response does not match the request".into());
+    }
+    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
+}
+
 async fn dispatch_stdio(
     root: Arc<PathBuf>,
     http: &reqwest::Client,
     connected: &tokio::sync::Mutex<Option<Discovery>>,
     request: Request,
 ) -> Response {
+    if request.method == "service.stopLocalBox" {
+        return Response::from_result(
+            request.id,
+            Err("Use the explicit local operator maintenance command".into()),
+        );
+    }
     if matches!(
         request.method.as_str(),
         "service.install"
@@ -442,24 +655,7 @@ async fn dispatch_stdio(
             Ok(json!({"running": false, "version": artifacts::version()})),
         );
     };
-    let result = async {
-        let endpoint: reqwest::Url = discovery.endpoint.parse()?;
-        validate_endpoint(&endpoint)?;
-        let response = http
-            .post(endpoint)
-            .bearer_auth(&discovery.token)
-            .json(&json!({"id": request.id, "method": request.method, "params": request.params}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Response>()
-            .await?;
-        if response.id != request.id {
-            return Err("service response does not match the request".into());
-        }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
-    }
-    .await;
+    let result = forward_stdio_request(http, &discovery, &request).await;
     if result.is_err() || request.method == "service.shutdown" {
         let mut current = connected.lock().await;
         if current
@@ -473,8 +669,8 @@ async fn dispatch_stdio(
         Ok(response) => response,
         Err(_)
             if request.method == "service.shutdown"
-                && !read_discovery(&root)
-                    .is_some_and(|value| value.instance == discovery.instance) =>
+                && read_discovery(&root)
+                    .is_none_or(|value| value.instance != discovery.instance) =>
         {
             Response::from_result(request.id, Ok(json!(true)))
         }
@@ -505,7 +701,23 @@ async fn handle(
         );
     }
     let id = request.id.clone();
-    if request.method == "service.shutdown" {
+    if request.method == "service.shutdown" || request.method == "service.stopLocalBox" {
+        let maintenance = request.method == "service.stopLocalBox";
+        if (maintenance
+            && !state
+                .local_box
+                .as_ref()
+                .is_some_and(|profile| profile.matches_stop(&request.params)))
+            || (!maintenance && state.local_box.is_some())
+        {
+            return (
+                StatusCode::OK,
+                Json(Response::from_result(
+                    id,
+                    Err("An existing shared Box requires its coordinated Node owner stop".into()),
+                )),
+            );
+        }
         let mut stopping = state.admission.write().await;
         let client = state.client.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<Value> {
@@ -546,8 +758,18 @@ async fn handle(
         let _admission = admission;
         if request.method == "service.start" || request.method == "service.status" {
             let stat = state.client.stat("/", "")?;
+            if let Some(profile) = &state.local_box {
+                let mut status = profile.status(true);
+                status["instance"] = json!(state.discovery.instance);
+                status["supervisorPid"] = json!(state.discovery.supervisor_pid);
+                status["nexusPid"] = json!(state.discovery.nexus_pid);
+                return Ok(status);
+            }
             return Ok(json!({"running": true, "version": state.discovery.version, "zone_id": stat.zone_id,
                 "instance": state.discovery.instance, "supervisorPid": state.discovery.supervisor_pid, "nexusPid": state.discovery.nexus_pid}));
+        }
+        if state.local_box.is_some() {
+            return Err("Existing Box owner exposes lifecycle status only; use the Agent's native connection".into());
         }
         capabilities::dispatch(&state.client, &request.method, &request.params)
     }).await;
@@ -556,21 +778,12 @@ async fn handle(
 }
 
 /// One supervisor per OS-user service root. File locks are retained for its lifetime.
-pub fn run_daemon() -> Result<()> {
-    let root = artifacts::root()?;
-    let lock = lock_file(&root, "service.lock")?;
-    if let Err(error) = lock.try_lock_exclusive() {
-        if is_lock_contention(&error) {
-            return Ok(());
-        }
-        return Err(error.into());
-    }
-    install(&root)?;
+fn standalone_command(root: &Path) -> Result<(Command, NexusVfsClient)> {
+    install(root)?;
     let nexus_listener = TcpListener::bind("127.0.0.1:0")?;
     let nexus_port = nexus_listener.local_addr()?.port();
     drop(nexus_listener);
-    let endpoint = format!("http://127.0.0.1:{nexus_port}");
-    let mut command = Command::new(artifacts::binary(&root));
+    let mut command = Command::new(artifacts::binary(root));
     command
         .args([
             "serve-local",
@@ -584,39 +797,19 @@ pub fn run_daemon() -> Result<()> {
         .arg("--identity-dir")
         .arg(root.join("identity"))
         .arg("--plugin-dir")
-        .arg(artifacts::plugins(&root))
-        .env("NEXUS_DATA_DIR", root.join("data"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    hide_console(&mut command);
-    let mut child = command.spawn()?;
-    let diagnostics = match crate::diagnostics::attach(&mut child, &root) {
-        Ok(readers) => readers,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error.into());
-        }
-    };
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    listener.set_nonblocking(true)?;
-    let discovery = Discovery {
-        endpoint: format!("http://{}/rpc", listener.local_addr()?),
-        token: format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
-        instance: uuid::Uuid::new_v4().to_string(),
-        supervisor_pid: std::process::id(),
-        nexus_pid: child.id(),
-        version: artifacts::version(),
-    };
-    let runtime = Runtime {
-        child: Arc::new(Mutex::new(child)),
-        root,
-        discovery: discovery.clone(),
-        diagnostics,
-        _lock: lock,
-    };
-    let client = Arc::new(NexusVfsClient::connect(&endpoint)?);
+        .arg(artifacts::plugins(root))
+        .env("NEXUS_DATA_DIR", root.join("data"));
+    Ok((
+        command,
+        NexusVfsClient::connect(&format!("http://127.0.0.1:{nexus_port}"))?,
+    ))
+}
+
+fn await_runtime_ready(
+    runtime: &Runtime,
+    client: &NexusVfsClient,
+    is_local_box: bool,
+) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = runtime
@@ -628,12 +821,14 @@ pub fn run_daemon() -> Result<()> {
             return Err(format!("Nexus exited during startup: {status}").into());
         }
         if client.stat("/", "").is_ok()
-            && capabilities::dispatch(
-                &client,
-                "vault.list",
-                &json!({"namespace": "service:scode-readiness"}),
-            )
-            .is_ok()
+            && replicated_prefixes_serve(client)
+            && (is_local_box
+                || capabilities::dispatch(
+                    client,
+                    "vault.list",
+                    &json!({"namespace": "service:scode-readiness"}),
+                )
+                .is_ok())
         {
             break;
         }
@@ -642,6 +837,74 @@ pub fn run_daemon() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    Ok(())
+}
+
+pub fn run_daemon() -> Result<()> {
+    let root = artifacts::root()?;
+    let lock = lock_file(&root, "service.lock")?;
+    if let Err(error) = lock.try_lock_exclusive() {
+        if is_lock_contention(&error) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    let profile = LocalBox::load(&root)?.map(Arc::new);
+    let mut node_lock = None;
+    let (mut command, client) = if let Some(profile) = &profile {
+        profile.validate()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(profile.data_dir().join("scode-service.lock"))?;
+        file.try_lock_exclusive()
+            .map_err(|_| "Another service owner holds this Node")?;
+        node_lock = Some(file);
+        (profile.command()?, profile.client()?)
+    } else {
+        standalone_command(&root)?
+    };
+    let client = Arc::new(client);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console(&mut command);
+    // Resolve fallible broker setup before the Node exists, so an early broker
+    // error cannot drop a bare Child and leave an unsupervised Node behind.
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let broker_endpoint = format!("http://{}/rpc", listener.local_addr()?);
+    let mut child = command.spawn()?;
+    let diagnostics = match crate::diagnostics::attach(&mut child, &root) {
+        Ok(readers) => readers,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.into());
+        }
+    };
+    let discovery = Discovery {
+        endpoint: broker_endpoint,
+        token: format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
+        instance: uuid::Uuid::new_v4().to_string(),
+        supervisor_pid: std::process::id(),
+        nexus_pid: child.id(),
+        version: profile
+            .as_ref()
+            .map_or_else(artifacts::version, |profile| profile.version()),
+    };
+    let runtime = Runtime {
+        child: Arc::new(Mutex::new(child)),
+        root,
+        discovery: discovery.clone(),
+        diagnostics,
+        _lock: lock,
+        _node_lock: node_lock,
+    };
+    await_runtime_ready(&runtime, &client, profile.is_some())?;
     artifacts::atomic_write(
         &runtime.root.join("run").join("service.json"),
         &serde_json::to_vec(&discovery)?,
@@ -653,9 +916,9 @@ pub fn run_daemon() -> Result<()> {
     let child = runtime.child.clone();
     executor.block_on(async {
         let (shutdown, mut stopping) = tokio::sync::watch::channel(false);
-        let state = ServiceState { client, discovery, shutdown, admission: Arc::new(tokio::sync::RwLock::new(false)) };
+        let state = ServiceState { client, discovery, shutdown, admission: Arc::new(tokio::sync::RwLock::new(false)), local_box: profile };
         let app = Router::new().route("/rpc", post(handle))
-            .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES as usize)).with_state(state);
+            .layer(DefaultBodyLimit::max(usize::try_from(MAX_REQUEST_BYTES).expect("request limit fits usize"))).with_state(state);
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let stop = async move {
             let stopped_child = async {
@@ -665,7 +928,7 @@ pub fn run_daemon() -> Result<()> {
                     if child.lock().is_ok_and(|mut child| !matches!(child.try_wait(), Ok(None))) { break; }
                 }
             };
-            tokio::select! { _ = shutdown_signal() => {}, _ = stopping.changed() => {}, _ = stopped_child => {} }
+            tokio::select! { _ = shutdown_signal() => {}, _ = stopping.changed() => {}, () = stopped_child => {} }
         };
         axum::serve(listener, app).with_graceful_shutdown(stop).await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())

@@ -82,7 +82,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // any of them fails here rather than passing on a partial match.
     sess.expect(r"\[hook PreToolUse\] [Bb]ash: echo hook-observed")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("hook start should be announced: {e}\nPTY screen:\n{screen}");
         });
 
@@ -90,7 +90,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // rather than stalled inside the hook.
     sess.expect(r"\[hook done PreToolUse\] [Bb]ash: echo hook-observed")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("hook completion should be announced: {e}\nPTY screen:\n{screen}");
         });
 
@@ -104,16 +104,130 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // tests, where this one is about the progress lines.
     if env.is_mock() {
         sess.expect("bash completed:").unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
+            let screen = sess.render(common::screen_contents);
             panic!("the hooked tool call should still run: {e}\nPTY screen:\n{screen}");
         });
     }
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
-    assert_eq!(exit, 0, "a hooked turn should exit 0; got {exit}");
+    let screen = sess.render(common::screen_contents);
+    assert_eq!(
+        exit, 0,
+        "a hooked turn should exit 0; got {exit}\nPTY screen:\n{screen}"
+    );
+}
+
+#[test]
+fn early_hook_exit_preserves_its_decision_with_unread_tool_input() {
+    let content = "fixture line\n".repeat(20_000);
+    for (code, progress) in [(0, "done"), (1, "FAILED"), (2, "DENIED")] {
+        let env = TestEnv::new_mock("hook-unread-input");
+        #[cfg(windows)]
+        let command = format!("echo hook-observed & exit /b {code}");
+        #[cfg(not(windows))]
+        let command = format!("printf hook-observed; exit {code}");
+        write_pre_tool_use_hook(&env, &command);
+        let destination = env.workspace_root().join("hook-output.txt");
+        let calls = serde_json::json!([{
+            "id": "write-fixture", "name": "write_file",
+            "input": {"path": destination, "content": content}
+        }]);
+        // Keep the large tool input in the provider response. Passing it through
+        // terminal input or argv would test unrelated platform size limits.
+        let batch = env.workspace_root().join("calls.json");
+        fs::write(&batch, calls.to_string()).unwrap();
+        let prompt = format!(
+            "PARITY_SCENARIO:tool_concurrency TOOL_BATCH_FILE:{}",
+            serde_json::to_string(&batch).unwrap()
+        );
+        let mut session = env.spawn(&[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "write_file",
+        ]);
+        session.resize(50, 160).unwrap();
+        session.expect("❯").unwrap();
+        let marker = common::turn_status_marker(&session);
+        session
+            .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+            .unwrap();
+        common::expect_screen_settled(
+            &session,
+            |screen| common::input_line_of(screen).contains("TOOL_BATCH_FILE:"),
+            env.timeout(),
+            "hook fixture prompt pasted",
+        );
+        session.send("\r").unwrap();
+        session
+            .expect(&format!(r"\[hook {progress} PreToolUse\]"))
+            .unwrap_or_else(|error| {
+                let markers: Vec<_> = env
+                    .captured_message_bodies()
+                    .iter()
+                    .filter_map(|body| {
+                        body.find("TOOL_BATCH_FILE:")
+                            .map(|offset| body[offset..].chars().take(500).collect::<String>())
+                    })
+                    .collect();
+                let screen = session.render(common::screen_contents);
+                panic!("{error}; captured batch markers: {markers:?}\nPTY screen:\n{screen}");
+            });
+        common::expect_turn_complete_after(
+            &session,
+            &marker,
+            env.timeout(),
+            "hook fixture completed",
+        );
+        common::expect_input_line_cleared(&session, env.timeout(), "ready to exit");
+        session.send("/exit\r").unwrap();
+        let exit = session.expect_eof().unwrap();
+        let screen = session.render(common::screen_contents);
+        assert!(!screen.contains("failed to start"), "{screen}");
+        assert_eq!(exit, 0, "{screen}");
+        if code == 0 {
+            assert_eq!(fs::read_to_string(destination).unwrap(), content);
+        } else {
+            assert!(
+                !destination.exists(),
+                "a refused hook allowed the write: {screen}"
+            );
+        }
+    }
+}
+
+/// A command that ignores stdin must retain its denial or failure decision.
+#[test]
+fn quick_hooks_preserve_nonzero_exit_decisions() {
+    for (code, outcome) in [(2, "DENIED"), (7, "FAILED")] {
+        let env = TestEnv::new_mock("hook-quick-exit");
+        let command = if cfg!(windows) {
+            format!("echo hook-observed & exit /b {code}")
+        } else {
+            format!("echo hook-observed; exit {code}")
+        };
+        write_pre_tool_use_hook(&env, &command);
+        let prompt = env.prompt("Run the bash fixture", "bash_stdout_roundtrip");
+        let mut sess = env.spawn(&[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "bash",
+            &prompt,
+        ]);
+        sess.set_default_timeout(common::LIVE_TURN_BUDGET);
+        sess.resize(50, 120).expect("resize pty");
+        sess.expect(&format!(r"\[hook {outcome} PreToolUse\] [Bb]ash:"))
+            .expect("the terminal must retain the hook's exit decision");
+        assert_eq!(sess.expect_eof().expect("hooked turn exits"), 0);
+        let screen = sess.render(common::screen_contents);
+        assert!(screen.contains("hook-observed"), "{screen}");
+        assert!(!screen.contains("Broken pipe"), "{screen}");
+        assert!(!screen.contains("failed to start"), "{screen}");
+    }
 }
 
 /// With no hook configured, none of that output appears.
@@ -139,12 +253,14 @@ fn no_hook_configured_prints_no_hook_progress() {
     sess.set_default_timeout(common::LIVE_TURN_BUDGET);
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
-    assert_eq!(exit, 0, "an unhooked turn should exit 0; got {exit}");
-
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
+    assert_eq!(
+        exit, 0,
+        "an unhooked turn should exit 0; got {exit}\nPTY screen:\n{screen}"
+    );
     assert!(
         !screen.contains("[hook "),
         "no hook is configured, so no hook progress should be printed; PTY screen:\n{screen}"

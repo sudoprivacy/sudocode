@@ -1,9 +1,9 @@
 //! Drive one provider response and its tool lifetimes together.
 use super::{
     build_assistant_message, notify_tool_result, runtime_observer_mut, tool_execution, ApiClient,
-    AssistantEvent, AssistantEventStream, ContentBlock, ConversationMessage, ConversationRuntime,
-    PermissionPrompter, RuntimeError, RuntimeObserver, ToolDispatchContext, ToolExecutor,
-    INTERRUPT_MESSAGE,
+    AssistantEvent, AssistantEventStream, BuiltAssistantMessage, ContentBlock, ConversationMessage,
+    ConversationRuntime, PermissionPrompter, RuntimeError, RuntimeObserver, ToolDispatchContext,
+    ToolExecutor, INTERRUPT_MESSAGE,
 };
 use futures::StreamExt;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 .as_deref()
                 .and_then(RuntimeObserver::background_tasks),
             tool_use_id: None,
+            external_a2a: None,
             parent_permission_mode: Some(self.permission_policy.active_mode()),
             permission_sink: prompter
                 .as_deref()
@@ -118,13 +119,65 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         Ok(())
     }
 
+    fn new_response_scheduler<'a>(
+        &self,
+        executor: &'a T,
+        abort: crate::HookAbortSignal,
+    ) -> tool_execution::ToolScheduler<'a, T> {
+        tool_execution::ToolScheduler::new(
+            executor,
+            self.hook_runner.clone(),
+            self.permission_policy.clone(),
+            abort,
+            self.hook_progress_reporter.clone(),
+        )
+    }
+
+    /// Persist the complete tool block before the scheduler can execute it.
+    fn checkpoint_tool_parent(
+        &mut self,
+        events: &[AssistantEvent],
+        event: AssistantEvent,
+        assistant_index: &mut Option<usize>,
+    ) -> Result<ConversationMessage, RuntimeError> {
+        let mut prefix = events.to_vec();
+        prefix.push(event);
+        prefix.push(AssistantEvent::MessageStop);
+        let BuiltAssistantMessage {
+            message: mut parent,
+            ..
+        } = build_assistant_message(prefix).expect("complete tool block supplies content");
+        parent.model = Some(self.running_model().to_string());
+        self.checkpoint_assistant(assistant_index, parent.clone())?;
+        parent.history.clone_from(
+            &self.session.messages[assistant_index.expect("checkpointed assistant")].history,
+        );
+        Ok(parent)
+    }
+
+    fn checkpoint_stopped_assistant(
+        &mut self,
+        events: &[AssistantEvent],
+        assistant_index: &mut Option<usize>,
+    ) -> Result<(), RuntimeError> {
+        if assistant_index.is_some() {
+            if let Ok(BuiltAssistantMessage { mut message, .. }) =
+                build_assistant_message(events.to_vec())
+            {
+                message.model = Some(self.running_model().to_string());
+                self.checkpoint_assistant(assistant_index, message)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Poll the provider and the same tool lifecycle together. A provider error
     /// after dispatch is never retried as an empty response: retain completed
     /// outputs and close every remaining tool id before returning the error.
     #[allow(clippy::await_holding_lock)]
     pub(super) async fn execute_response(
         &mut self,
-        mut stream: AssistantEventStream,
+        stream: AssistantEventStream,
         iteration: usize,
         allow_tools: bool,
         observer: &mut Option<&mut dyn RuntimeObserver>,
@@ -136,15 +189,17 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let executor = executor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut scheduler = tool_execution::ToolScheduler::new(
-            &*executor,
-            self.hook_runner.clone(),
-            self.permission_policy.clone(),
-            abort.clone(),
-            self.hook_progress_reporter.clone(),
-        );
+        let mut scheduler = self.new_response_scheduler(&*executor, abort.clone());
         let mut events = Vec::new();
+        let mut stream = Some(stream);
         let mut ended = false;
+        let mut yielded = false;
+        let mut at_boundary = true;
+        let inbox = self.turn_inputs.clone();
+        // Subscribe once for this response, rather than locking/re-registering
+        // on every token while an ordinary text block streams.
+        let input_ready = inbox.ready();
+        tokio::pin!(input_ready);
         let mut error = None;
         let mut cancelled = false;
         let mut assistant_index = None;
@@ -156,12 +211,25 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             tokio::select! {
                 biased;
                 () = abort.cancelled() => { cancelled = true; break; }
+                () = &mut input_ready, if !ended && at_boundary => {
+                    // Stop sampling only. Already-admitted tools still settle and
+                    // retain their real results; no interruption marker is added.
+                    drop(stream.take());
+                    ended = true;
+                    yielded = true;
+                    observe_assistant_event(observer, &AssistantEvent::MessageStop);
+                    events.push(AssistantEvent::MessageStop);
+                }
                 update = scheduler.next(prompter), if !scheduler.is_finished() => {
                     self.observe_tool_update(update, &mut scheduler, iteration, observer);
                     if let Err(failure) = self.persist_ready_results(&scheduler, &mut persisted_results) { error = Some(failure); break; }
                 }
-                next = stream.next(), if !ended => match next {
+                next = async { stream.as_mut().expect("active provider stream").next().await }, if !ended => match next {
                     Some(Ok(event)) => {
+                        // Preserve the entire consecutive thinking sequence. A
+                        // non-thinking start can yield before tool admission;
+                        // unfinished tool JSON has caused no external effects.
+                        at_boundary = next_response_boundary(&event, at_boundary);
                         if let AssistantEvent::ToolUse { id, name, input, .. } = &event {
                             if !allow_tools {
                                 error = Some(RuntimeError::new("model requested tools after the computation step limit was reached"));
@@ -170,24 +238,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                             if assistant_index.is_none() {
                                 scheduler.initialize_context(self.dispatch_context(observer, prompter));
                             }
-                            let mut prefix = events.clone();
-                            prefix.push(event.clone());
-                            prefix.push(AssistantEvent::MessageStop);
-                            let (mut parent, ..) = build_assistant_message(prefix).expect("complete tool block supplies content");
-                            parent.model = Some(self.running_model().to_string());
-                            if let Err(failure) = self.checkpoint_assistant(&mut assistant_index, parent.clone()) { error = Some(failure); break; }
-                            if let Err(failure) = scheduler.enqueue(id.clone(), name.clone(), input.clone(), parent) {
-                                error = Some(failure); break;
-                            }
+                            let dispatched = self.checkpoint_tool_parent(&events, event.clone(), &mut assistant_index)
+                                .and_then(|parent| scheduler.enqueue(id.clone(), name.clone(), input.clone(), Some(parent)));
+                            if let Err(failure) = dispatched { error = Some(failure); break; }
                         }
                         observe_assistant_event(observer, &event);
                         let stopped = matches!(event, AssistantEvent::MessageStop);
                         events.push(event);
-                        if stopped && assistant_index.is_some() {
-                            if let Ok((mut message, ..)) = build_assistant_message(events.clone()) {
-                                message.model = Some(self.running_model().to_string());
-                                if let Err(failure) = self.checkpoint_assistant(&mut assistant_index, message) { error = Some(failure); break; }
-                            }
+                        if stopped {
+                            if let Err(failure) = self.checkpoint_stopped_assistant(&events, &mut assistant_index) { error = Some(failure); break; }
                         }
                     }
                     Some(Err(failure)) => { error = Some(failure); break; }
@@ -228,7 +287,92 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             persisted_results,
             error,
             cancelled,
+            yielded,
         }
+    }
+
+    /// Run one tool by name outside any model turn, through the gates a
+    /// model's call passes: pre-hook, the permission policy (prompting through
+    /// `prompter`), this session's own executor, post-hook.
+    ///
+    /// The call is admitted through the session's `background_tasks`, the
+    /// fence a turn's tools take: a paused session refuses it, and a pause
+    /// waits for its worker to finish. It runs under a fresh `external-a2a-` command id and
+    /// with no assistant message, because no model asked for it; nothing is
+    /// written to the session. Returns the tool's output and whether it
+    /// failed. A call cancelled after it was admitted is an error even when a
+    /// partial result exists: the tool may have run, so no result is reported
+    /// as if it were final.
+    #[allow(clippy::await_holding_lock)]
+    pub async fn run_tool_call(
+        &mut self,
+        name: &str,
+        input: &str,
+        mut prompter: Option<&mut dyn PermissionPrompter>,
+        tasks: crate::background_tasks::BackgroundTasks,
+    ) -> Result<crate::external_a2a::ExternalToolResult, RuntimeError> {
+        const CANCELLED: &str = "the call was cancelled after it was admitted and may have run";
+        // This outer operation covers hooks and approval waits. The executor
+        // also clones a lease into its actual blocking worker, so cancellation
+        // cannot make pause acknowledge while that worker is still running.
+        let _operation = tasks.begin_operation().map_err(RuntimeError::new)?;
+        let abort = self.hook_abort_signal.for_current_turn();
+        self.tool_executor_mut().set_abort_signal(abort.clone());
+        let no_observer: Option<&mut dyn RuntimeObserver> = None;
+        let mut context = self.dispatch_context(&no_observer, &prompter);
+        let executor = Arc::clone(&self.tool_executor);
+        let executor = executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let binding = executor
+            .external_a2a_binding()
+            .ok_or_else(|| RuntimeError::new("the actual executor has no bound A2A mailbox"))?;
+        let call = crate::external_a2a::ExternalA2aCall::new(
+            &self.session.session_id,
+            binding,
+            name,
+            input,
+        )
+        .map_err(RuntimeError::new)?;
+        context.background_tasks = Some(tasks);
+        context.external_a2a = Some(Arc::new(call.clone()));
+        let mut scheduler = tool_execution::ToolScheduler::new(
+            &*executor,
+            self.hook_runner.clone(),
+            self.permission_policy.clone(),
+            abort.clone(),
+            self.hook_progress_reporter.clone(),
+        );
+        scheduler.initialize_context(context);
+        scheduler.enqueue(call.command_id.clone(), name.into(), input.into(), None)?;
+        let completed = loop {
+            tokio::select! {
+                biased;
+                () = abort.cancelled() => {
+                    scheduler.cancel();
+                    return Err(RuntimeError::new(CANCELLED));
+                }
+                update = scheduler.next(&mut prompter) => {
+                    if let tool_execution::ToolUpdate::Completed { message, .. } = update {
+                        break message;
+                    }
+                }
+            }
+        };
+        if abort.is_aborted() {
+            return Err(RuntimeError::new(CANCELLED));
+        }
+        completed
+            .blocks
+            .into_iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    output, is_error, ..
+                } => Some((output, is_error)),
+                _ => None,
+            })
+            .map(|(output, is_error)| call.report(output, is_error))
+            .ok_or_else(|| RuntimeError::new("the tool call produced no result"))
     }
 }
 
@@ -239,6 +383,7 @@ pub(super) struct ExecutedResponse {
     pub(super) results: Vec<ConversationMessage>,
     pub(super) error: Option<RuntimeError>,
     pub(super) cancelled: bool,
+    pub(super) yielded: bool,
     pub(super) context_action: Option<crate::image_input::ToolContextAction>,
 }
 
@@ -248,7 +393,7 @@ fn observe_assistant_event(
 ) {
     if let Some(obs) = observer.as_deref_mut() {
         match &event {
-            AssistantEvent::ThinkingStart => {}
+            AssistantEvent::ThinkingStart | AssistantEvent::ResponseBlockStart => {}
             AssistantEvent::Thinking { thinking, .. } => {
                 // A signature-only event carries
                 // no text; forwarding it would
@@ -294,5 +439,19 @@ fn observe_assistant_event(
                 obs.on_message_stop();
             }
         }
+    }
+}
+
+/// Metadata preserves the previous boundary; a consecutive thinking block does not.
+fn next_response_boundary(event: &AssistantEvent, previous: bool) -> bool {
+    match event {
+        AssistantEvent::ThinkingStart
+        | AssistantEvent::Thinking { .. }
+        | AssistantEvent::RedactedThinking { .. } => false,
+        AssistantEvent::ResponseBlockStart
+        | AssistantEvent::TextDelta(_)
+        | AssistantEvent::ToolUse { .. }
+        | AssistantEvent::MessageStop => true,
+        _ => previous,
     }
 }

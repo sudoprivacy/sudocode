@@ -1,7 +1,7 @@
 //! Nexus-backed A2A mailbox - the standalone counterpart to the local
 //! [`crate::agent_mailbox`] (`.sudocode-inbox`).
 //!
-//! A message is one framed append to the recipient's replicated DT_STREAM
+//! A message is one framed append to the recipient's replicated `DT_STREAM`
 //! inbox at `/agents/<recipient>/chat-with-me`; under auth-on the node
 //! stamps an unforgeable `from` by the authenticated writer. The wire type
 //! is [`a2a::MailboxEnvelope`] - the A2A SSOT the in-process co-host
@@ -32,15 +32,76 @@ pub fn node_record_path() -> Option<PathBuf> {
     crate::user_paths::home_dir().map(|home| home.join(".nexus").join("run").join("node.json"))
 }
 
+/// Presence reserves the node namespace even for a dangling or unreadable path.
+/// It does not establish valid configuration, credentials or a live connection.
+#[must_use]
+#[inline]
+pub fn node_record_present() -> bool {
+    node_record_path().is_some_and(|path| {
+        !std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// The fields of the node record `scode` reads. The record also names the
 /// node's deployment role and zone, which are the node owner's concern.
 #[derive(Debug, serde::Deserialize)]
-struct NodeRecord {
+pub struct NodeRecord {
     version: u32,
     /// `host:port`, dialled over mTLS.
     endpoint: String,
     /// Absolute directory holding one credential bundle per agent name.
     agents_dir: String,
+}
+
+impl NodeRecord {
+    /// Read the machine's configured Box without selecting an Agent or dialing it.
+    /// A present but unusable record is an error, never permission to create a
+    /// replacement service. Agent credentials are checked by `Config` later.
+    pub fn load() -> Result<Option<Self>, String> {
+        let Some(path) = node_record_path() else {
+            return Ok(None);
+        };
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && !node_record_present() =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(format!("read node record {}: {error}", path.display())),
+        };
+        let record: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse node record {}: {e}", path.display()))?;
+        if record.version != NODE_RECORD_VERSION {
+            return Err(format!(
+                "node record {} is version {}; this scode reads version {NODE_RECORD_VERSION}",
+                path.display(),
+                record.version
+            ));
+        }
+        if record.endpoint.contains("://") {
+            return Err(format!(
+                "node record {}: endpoint must be host:port without a scheme, got {}",
+                path.display(),
+                record.endpoint
+            ));
+        }
+        if !Path::new(&record.agents_dir).is_absolute() {
+            return Err(format!(
+                "node record {}: agents_dir must be an absolute path, got {}",
+                path.display(),
+                record.agents_dir
+            ));
+        }
+        Ok(Some(record))
+    }
+
+    /// Configured mTLS target; this alone does not prove Agent authentication.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
 }
 
 /// Resolved TLS material paths for an mTLS dial (all three mandatory - the
@@ -146,38 +207,10 @@ impl Config {
     /// with a scheme or a relative `agents_dir`; or `agent` has no credential
     /// there, or the credential belongs to another agent.
     pub fn from_node_record(agent: &str) -> Result<Option<Self>, String> {
-        let Some(path) = node_record_path() else {
+        let Some(record) = NodeRecord::load()? else {
             return Ok(None);
         };
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("read node record {}: {error}", path.display())),
-        };
-        let record: NodeRecord = serde_json::from_str(&raw)
-            .map_err(|e| format!("parse node record {}: {e}", path.display()))?;
-        if record.version != NODE_RECORD_VERSION {
-            return Err(format!(
-                "node record {} is version {}; this scode reads version {NODE_RECORD_VERSION}",
-                path.display(),
-                record.version
-            ));
-        }
-        if record.endpoint.contains("://") {
-            return Err(format!(
-                "node record {}: endpoint must be host:port without a scheme, got {}",
-                path.display(),
-                record.endpoint
-            ));
-        }
         let agents_dir = Path::new(&record.agents_dir);
-        if !agents_dir.is_absolute() {
-            return Err(format!(
-                "node record {}: agents_dir must be an absolute path, got {}",
-                path.display(),
-                record.agents_dir
-            ));
-        }
         let bundle = agents_dir.join(agent);
         if !bundle.join(AgentCredential::MANIFEST).is_file() {
             return Err(format!(
@@ -200,10 +233,10 @@ impl Config {
             tls: credential.tls,
         }))
     }
-    /// Dial the daemon, returning a shared client. mTLS with the credential's
-    /// material when [`Config::tls`] is set (the cert is the whole
-    /// authorization - the node derives identity from its SAN, so no token is
-    /// sent).
+    /// Construct a shared lazy client using this agent's mTLS material.
+    /// Construction does not establish node reachability or authentication;
+    /// actual IO reports those failures. The node derives the authenticated
+    /// identity from the certificate's SAN, so no request token is substituted.
     ///
     /// # Errors
     /// Returns a message if a PEM file cannot be read or the channel fails
@@ -219,19 +252,6 @@ impl Config {
         let client = NexusVfsClient::connect_tls(&self.endpoint, ca, cert, key, &t.server_name)
             .map_err(|e| format!("mTLS dial {}: {e}", self.endpoint))?;
         Ok(Arc::new(client))
-    }
-
-    /// System-prompt section telling the model its A2A identity and how to
-    /// reach peers. Delegates the reply contract + framing to the shared
-    /// [`crate::agent_mailbox::repl_a2a_prompt_section`] (the SSOT every REPL
-    /// receive path renders) and prepends the nexus-specific network note.
-    #[must_use]
-    pub fn peer_system_prompt(&self) -> String {
-        let base = crate::agent_mailbox::repl_a2a_prompt_section(&self.agent);
-        format!(
-            "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
-             be on another machine; addressing it by name still reaches it."
-        )
     }
 }
 
@@ -252,8 +272,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_nanos())
         ));
         std::fs::create_dir_all(&dir).unwrap();
         for f in ["ca.pem", "agent.pem", "agent-key.pem"] {
@@ -267,16 +286,6 @@ mod tests {
         )
         .unwrap();
         dir.to_string_lossy().into_owned()
-    }
-
-    /// A throwaway `TlsPaths` for prompt tests that never dial.
-    fn test_tls() -> TlsPaths {
-        TlsPaths {
-            ca_pem: "ca.pem".into(),
-            client_cert: "agent.pem".into(),
-            client_key: "agent-key.pem".into(),
-            server_name: "nexus-node".into(),
-        }
     }
 
     #[test]
@@ -298,28 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn peer_prompt_names_self_and_points_at_discovery() {
-        let cfg = Config {
-            endpoint: "127.0.0.1:2126".into(),
-            agent: "operator".into(),
-            tls: test_tls(),
-        };
-        let p = cfg.peer_system_prompt();
-        assert!(p.contains("\"operator\""), "prompt must name self: {p}");
-        assert!(p.contains("send"), "prompt must teach the tool: {p}");
-        assert!(
-            p.contains("agent_list"),
-            "prompt must point at agent_list for discovery: {p}"
-        );
-        assert!(
-            p.contains("another machine"),
-            "prompt must carry the nexus network note: {p}"
-        );
-    }
-
-    #[test]
     fn envelope_round_trips_via_unified_type() {
         let env = MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "operator".into(),
             to: "win-ai".into(),
             body: "hi".into(),
@@ -342,7 +332,7 @@ mod tests {
         let env = MailboxEnvelope::from_bytes(wire).expect("3-field wire compat");
         assert_eq!(env.from, "agent-a");
         assert_eq!(env.body, "hello");
-        assert!(env.kind.is_empty());
+        assert_eq!(env.kind, "");
         assert_eq!(env.timestamp, 0);
     }
 }

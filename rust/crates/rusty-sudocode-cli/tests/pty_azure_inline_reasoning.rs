@@ -1,5 +1,5 @@
 //! Real CLI -> local file tool -> compatible reasoning -> persisted answer.
-//! Live acceptance also runs `pty_model_compat` against deepseek-v3.2-azure.
+//! Live acceptance verifies the configured Azure provider separately.
 mod common;
 
 use std::fmt::Write as _;
@@ -41,6 +41,18 @@ impl Provider {
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .unwrap();
                         let (path, request) = read_request(&mut socket);
+                        if let Some(mut capture) = request.clone() {
+                            if !path.ends_with("/count_tokens") {
+                                capture["_fixture_path"] = json!(path);
+                                captured.lock().unwrap().push(capture);
+                            }
+                        }
+                        if case == "model-not-found" && path.ends_with("/chat/completions") {
+                            let body = json!({"error":{"type":"invalid_request_error",
+                                "code":"model_not_found","message":"fixture model has no available channel"}}).to_string();
+                            write!(socket,"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                            continue;
+                        }
                         let (mime, body) = if path.contains("models") {
                             (
                                 "application/json",
@@ -58,9 +70,6 @@ impl Provider {
                                             blocks.iter().any(|b| b["type"] == "tool_result")
                                         })
                                 });
-                            let mut capture = request.clone();
-                            capture["_fixture_path"] = json!(path);
-                            captured.lock().unwrap().push(capture);
                             if has_result {
                                 assert!(
                                     request.to_string().contains(&nonce),
@@ -78,15 +87,14 @@ impl Provider {
                                 ];
                                 (
                                     "text/event-stream",
-                                    frames
-                                        .iter()
-                                        .map(|f| {
-                                            format!(
-                                                "event: {}\ndata: {f}\n\n",
-                                                f["type"].as_str().unwrap()
-                                            )
-                                        })
-                                        .collect(),
+                                    frames.iter().fold(String::new(), |mut fixture_text, f| {
+                                        mock_anthropic_service::append_sse(
+                                            &mut fixture_text,
+                                            f["type"].as_str().unwrap(),
+                                            f,
+                                        );
+                                        fixture_text
+                                    }),
                                 )
                             } else {
                                 ("application/json", json!({"id":"read-fixture","model":model,"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"read-local","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},"finish_reason":"tool_calls"}]}).to_string())
@@ -95,7 +103,7 @@ impl Provider {
                         write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10))
+                        std::thread::sleep(Duration::from_millis(10));
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 }
@@ -113,9 +121,10 @@ impl Provider {
 impl Drop for Provider {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
-        if self.thread.take().unwrap().join().is_err() && !std::thread::panicking() {
-            panic!("provider fixture failed");
-        }
+        assert!(
+            self.thread.take().unwrap().join().is_ok() || std::thread::panicking(),
+            "provider fixture failed"
+        );
     }
 }
 
@@ -210,15 +219,15 @@ fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
         };
         let delta = json!({field: "structured fixture check"});
         let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":delta,"finish_reason":null}]});
-        body.push_str(&format!("data: {chunk}\n\n"));
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("data: {chunk}\n\n"));
     }
     // A character per SSE frame splits both tag boundaries and exercises UTF-8.
     for ch in text.chars() {
         let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":{"content":ch.to_string()},"finish_reason":null}]});
-        body.push_str(&format!("data: {chunk}\n\n"));
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("data: {chunk}\n\n"));
     }
     let stop = json!({"id":"final","model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-    body.push_str(&format!("data: {stop}\n\ndata: [DONE]\n\n"));
+    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("data: {stop}\n\ndata: [DONE]\n\n"));
     ("text/event-stream", body)
 }
 
@@ -291,12 +300,12 @@ fn openai_reasoning_fields_reach_the_terminal_and_session() {
         let sessions = store.list_sessions().unwrap();
         let session = Session::load_from_path(&sessions[0].path).unwrap();
         assert!(session
-            .messages
+            .messages()
             .iter()
             .flat_map(|m| &m.blocks)
             .any(|b| matches!(b,
             ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
-        let blocks = &session.messages.last().unwrap().blocks;
+        let blocks = &session.messages().last().unwrap().blocks;
         let thinking: Vec<_> = blocks
             .iter()
             .filter_map(|block| match block {
@@ -361,17 +370,16 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
             "deepseek-v3.2-azure"
         };
         let provider = Provider::new(model, case, &nonce);
-        let path = env.config_home().join("sudocode.json");
-        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
-        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
-        config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] =
-            json!(if case == "anthropic-error" {
+        configure_provider(
+            &env,
+            &provider,
+            model,
+            if case == "anthropic-error" {
                 "anthropic-messages"
             } else {
                 "openai-completions"
-            });
-        std::fs::write(path, config.to_string()).unwrap();
+            },
+        );
         let mut cli = env.spawn(&[
             "-p",
             "Read fixture.txt and report its contents.",
@@ -394,58 +402,7 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
         let sessions = store.list_sessions().unwrap();
         let session = Session::load_from_path(&sessions[0].path).unwrap();
-        assert!(session.messages.iter().flat_map(|m| &m.blocks).any(|b| matches!(b,ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
-        let final_message = session
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::Assistant)
-            .unwrap();
-        let text: String = final_message
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let thinking: String = final_message
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-                _ => None,
-            })
-            .collect();
-        match case {
-            "stream" | "json" => assert_eq!(thinking, "校验 fixture"),
-            "structured" | "structured-reasoning" => {
-                assert_eq!(thinking, "structured fixture check");
-            }
-            "truncated" | "anthropic-error" => {} // The runtime discards the failed response.
-            _ => assert!(thinking.is_empty(), "{case}: unexpected reasoning"),
-        }
-        if case == "anthropic-error" {
-            assert!(
-                text.is_empty(),
-                "an upstream error must not produce an answer"
-            );
-        } else if case == "truncated" {
-            assert_eq!(
-                text.trim(),
-                "[Provider stream failed; unfinished tool calls were cancelled.]"
-            );
-            assert!(!text.contains("fixture checked") && !text.contains(&nonce));
-        } else if case == "prefaced" {
-            assert_eq!(text, format!("The exact file contents are:\n\n{nonce}"));
-            assert_final_file_answer(&text, &nonce);
-        } else if matches!(case, "structured" | "structured-reasoning" | "ordinary") {
-            assert_eq!(text, format!("<think>校验 fixture</think>\n{nonce}"));
-        } else if case == "literal-prefix" {
-            assert_eq!(text, format!("<thimble>{nonce}"));
-        } else {
-            assert_eq!(text.trim(), nonce);
-        }
+        assert_azure_session_answer(&session, case, &nonce);
         let requests = provider.requests.lock().unwrap();
         assert_eq!(
             requests.len(),
@@ -458,6 +415,45 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         );
         assert!(requests.iter().all(|r| r["model"] == model));
     }
+}
+
+fn configure_provider(env: &common::TestEnv, provider: &Provider, model: &str, api: &str) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] = json!(api);
+    std::fs::write(path, config.to_string()).unwrap();
+}
+
+#[test]
+fn missing_provider_model_exits_without_replaying_or_fabricating_an_answer() {
+    let env = common::TestEnv::new_mock("azure-missing-model");
+    let model = "deepseek-v3.2-azure";
+    let provider = Provider::new(model, "model-not-found", "UNUSED_MODEL_ANSWER");
+    configure_provider(&env, &provider, model, "openai-completions");
+    let mut cli = env.spawn(&[
+        "-p",
+        "Read fixture.txt and report its contents.",
+        "--permission-mode",
+        "read-only",
+        "--output-format",
+        "json",
+    ]);
+    let code = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "provider refusal did not terminate: {error}\n{}",
+            common::screen_tail(&cli, 6000)
+        )
+    });
+    let screen = common::screen_tail(&cli, 6000);
+    assert_ne!(code, 0, "{screen}");
+    assert!(screen.contains("model_not_found"), "{screen}");
+    assert!(!screen.contains("UNUSED_MODEL_ANSWER"), "{screen}");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "an unavailable model is not replayable");
+    assert_eq!(requests[0]["model"], model);
+    assert_eq!(requests[0]["_fixture_path"], "/chat/completions");
 }
 
 #[test]
@@ -483,15 +479,22 @@ fn azure_live_file_roundtrip_has_a_final_answer() {
         "--output-format",
         "json",
     ]);
-    cli.set_default_timeout(Duration::from_secs(120));
-    cli.expect(&nonce).unwrap();
-    assert_eq!(cli.expect_eof().unwrap(), 0);
+    // Wait once for the whole read/model/answer journey. The stored tool result
+    // and final answer below verify the file contents independently of the PTY.
+    cli.set_default_timeout(Duration::from_mins(5));
+    let code = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "live file workflow did not finish: {error}\n{}",
+            common::screen_tail(&cli, 6000)
+        )
+    });
+    assert_eq!(code, 0, "{}", common::screen_tail(&cli, 6000));
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let sessions = store.list_sessions().unwrap();
     assert_eq!(sessions.len(), 1);
     let session = Session::load_from_path(&sessions[0].path).unwrap();
     let results: Vec<_> = session
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|b| match b {
@@ -512,7 +515,7 @@ fn azure_live_file_roundtrip_has_a_final_answer() {
         "provider recovered from a failed tool"
     );
     let final_message = session
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|m| m.role == MessageRole::Assistant)
@@ -548,5 +551,60 @@ fn assert_final_file_answer(text: &str, nonce: &str) {
             !answer.contains(envelope),
             "final answer must not include a reasoning envelope"
         );
+    }
+}
+
+fn assert_azure_session_answer(session: &Session, case: &str, nonce: &str) {
+    assert!(session.messages().iter().flat_map(|m| &m.blocks).any(|b| matches!(b,ContentBlock::ToolResult {output,is_error:false,..} if output.contains(nonce))));
+    let final_message = session
+        .messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant)
+        .unwrap();
+    let text: String = final_message
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let thinking: String = final_message
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+            _ => None,
+        })
+        .collect();
+    match case {
+        "stream" | "json" => assert_eq!(thinking, "校验 fixture"),
+        "structured" | "structured-reasoning" => {
+            assert_eq!(thinking, "structured fixture check");
+        }
+        "truncated" | "anthropic-error" => {} // The runtime discards the failed response.
+        _ => assert!(thinking.is_empty(), "{case}: unexpected reasoning"),
+    }
+    if case == "anthropic-error" {
+        assert!(
+            text.is_empty(),
+            "an upstream error must not produce an answer"
+        );
+    } else if case == "truncated" {
+        assert_eq!(
+            text.trim(),
+            "[Provider stream failed; unfinished tool calls were cancelled.]"
+        );
+        assert!(!text.contains("fixture checked") && !text.contains(nonce));
+    } else if case == "prefaced" {
+        assert_eq!(text, format!("The exact file contents are:\n\n{nonce}"));
+        assert_final_file_answer(&text, nonce);
+    } else if matches!(case, "structured" | "structured-reasoning" | "ordinary") {
+        assert_eq!(text, format!("<think>校验 fixture</think>\n{nonce}"));
+    } else if case == "literal-prefix" {
+        assert_eq!(text, format!("<thimble>{nonce}"));
+    } else {
+        assert_eq!(text.trim(), nonce);
     }
 }

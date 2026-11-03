@@ -20,8 +20,7 @@ use tools::{abort_registered_agent, register_agent_abort_signal, unregister_agen
 fn unique_agent_id(label: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("test-{label}-{nanos}")
 }
 

@@ -147,7 +147,8 @@ fn rev_list_count(a: &str, b: &str, repo_path: &Path) -> usize {
         .current_dir(repo_path)
         .output();
     match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        Ok(o) if o.status.success() => process_text::decode_process_output(&o.stdout)
+            .text
             .trim()
             .parse::<usize>()
             .unwrap_or(0),
@@ -161,7 +162,8 @@ fn missing_fix_subjects(a: &str, b: &str, repo_path: &Path) -> Vec<String> {
         .current_dir(repo_path)
         .output();
     match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        Ok(o) if o.status.success() => process_text::decode_process_output(&o.stdout)
+            .text
             .lines()
             .filter(|l| !l.is_empty())
             .map(String::from)

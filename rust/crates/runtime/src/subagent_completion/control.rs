@@ -1,21 +1,20 @@
 //! Storage-bound control operations. A deleted transcript is never loaded again.
-use super::{checksum, CompletionJournal, Completions};
+use super::{CompletionJournal, Completions};
 use crate::fs_backend::FsBackend;
 use crate::session_writer::SessionWriter;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Binding {
-    version: u32,
-    session_id: String,
-    cwd: std::path::PathBuf,
-    storage_ref: String,
-    deleted: Option<String>,
-}
+use std::sync::Arc;
 
 impl CompletionJournal {
+    /// Resolve durable identity from a bound journal or its original transcript.
+    pub fn storage_identity(
+        fs: &dyn FsBackend,
+        transcript: &Path,
+    ) -> Result<(String, std::path::PathBuf), String> {
+        super::storage::identity(fs, transcript)
+    }
+
     pub fn terminal_page(&self, after: Option<&str>) -> Value {
         let state = self
             .state
@@ -83,30 +82,39 @@ impl CompletionJournal {
             .lock()
             .map_err(|_| "completion journal poisoned")?;
         if state.deleted.is_none() {
-            let _write = self.writer.write()?;
-            if state.active_trace.is_some() {
+            let shared_history = self.writer.has_history()?;
+            let _write = if shared_history {
+                self.writer.write()?
+            } else {
+                self.writer.purge_write()?
+            };
+            if !shared_history && state.active_trace.is_some() {
                 return Err("trace_still_active".into());
             }
-            let _responses =
-                SessionWriter::acquire_response_archive(self.fs.as_ref(), &self.transcript)?;
-            let binding = Binding {
-                version: 2,
-                session_id: state.session_id.clone(),
-                cwd: state.cwd.clone(),
-                storage_ref: state.storage_ref.clone(),
-                deleted: Some(cleanup_id.into()),
+            let deletion = super::storage::Deletion {
+                session_id: &state.session_id,
+                cwd: &state.cwd,
+                storage_ref: &state.storage_ref,
+                cleanup_id,
+                store_root: self.store_root.as_deref(),
             };
-            self.fs
-                .write_atomic(
-                    &self.path,
-                    &serde_json::to_vec(&binding).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?;
+            if shared_history {
+                super::storage::mark_deleted(self.fs.as_ref(), &self.transcript, &deletion)?;
+            } else {
+                super::storage::purge(
+                    self.fs.as_ref(),
+                    &self.transcript,
+                    &deletion,
+                    Some(&self.path),
+                )?;
+            }
+
             // Retire before releasing the same mutex used by terminal callbacks.
             self.writer.retire();
             state.sources.clear();
             state.reducer = Completions::default();
             state.context = None;
+            state.active_trace = None;
             state.closed_traces.clear();
             state.deleted = Some(cleanup_id.into());
         }
@@ -119,6 +127,7 @@ impl CompletionJournal {
         {
             clear();
         }
+        crate::session_cleanup::resume(Arc::clone(&self.fs), &self.transcript)?;
         Ok(json!({"cleanupId": cleanup_id, "disposition": "purged", "storageRef": storage_ref}))
     }
 
@@ -129,77 +138,52 @@ impl CompletionJournal {
         session_id: &str,
         cwd: &Path,
     ) -> Result<Value, String> {
-        let path = transcript.with_extension("completions.json");
-        if fs
-            .exists(&path.to_string_lossy())
-            .map_err(|e| e.to_string())?
-        {
-            let value: Value = serde_json::from_slice(
-                &fs.read(&path.to_string_lossy())
-                    .map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            if value["session_id"] != session_id || value["cwd"] != cwd.to_string_lossy().as_ref() {
-                return Err("completion journal identity mismatch".into());
-            }
-            if value["version"] != 2 {
-                return Err("legacy_writer_unconfirmed".into());
-            }
-            let binding: Binding = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            return Ok(
-                json!({"sessionId": session_id, "storageRef": binding.storage_ref, "deleted": binding.deleted.is_some()}),
-            );
-        }
-        let session =
-            crate::Session::load_from_path_with(fs, transcript).map_err(|e| e.to_string())?;
-        if session.session_id != session_id {
-            return Err("completion session identity mismatch".into());
-        }
-        Ok(
-            json!({"sessionId": session_id, "storageRef": checksum(&serde_json::to_vec(&(1, session_id, transcript)).map_err(|e| e.to_string())?), "deleted": false}),
-        )
+        super::storage::probe(fs, transcript, session_id, cwd)
     }
 
     pub fn purge_stored(
-        fs: &dyn FsBackend,
+        fs: Arc<dyn FsBackend>,
         transcript: &Path,
         session_id: &str,
         cwd: &Path,
         storage_ref: &str,
         cleanup_id: &str,
+        store_root: Option<&Path>,
     ) -> Result<Value, String> {
-        let probe = Self::probe(fs, transcript, session_id, cwd)?;
+        let probe = Self::probe(fs.as_ref(), transcript, session_id, cwd)?;
         if probe["storageRef"] != storage_ref {
             return Err("completion_storage_mismatch".into());
         }
         if cleanup_id.is_empty() || cleanup_id.len() > 512 {
             return Err("invalid cleanup identity".into());
         }
-        if probe["deleted"] != true {
-            let writer = SessionWriter::acquire(fs, transcript)?;
-            let _write = writer.write()?;
-            let _responses = SessionWriter::acquire_response_archive(fs, transcript)?;
-            // Re-read under exclusion, not from the earlier read-only probe.
-            let locked = Self::probe(fs, transcript, session_id, cwd)?;
-            if locked["storageRef"] != storage_ref {
-                return Err("completion_storage_mismatch".into());
+        {
+            if !fs.fenced_locks() {
+                return Err("completion_storage_exclusion_unavailable".into());
             }
-            let binding = Binding {
-                version: 2,
-                session_id: session_id.into(),
-                cwd: cwd.into(),
-                storage_ref: storage_ref.into(),
-                deleted: Some(cleanup_id.into()),
+            let shared_history = fs
+                .exists(&transcript.to_string_lossy())
+                .map_err(|e| e.to_string())?
+                && crate::session::history::is_record_history(
+                    &fs.read_snapshot(&transcript.to_string_lossy())
+                        .map_err(|e| e.to_string())?,
+                );
+            let deletion = super::storage::Deletion {
+                session_id,
+                cwd,
+                storage_ref,
+                cleanup_id,
+                store_root,
             };
-            fs.write_atomic(
-                &transcript
-                    .with_extension("completions.json")
-                    .to_string_lossy(),
-                &serde_json::to_vec(&binding).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            writer.retire();
+            if shared_history {
+                let _write = SessionWriter::commit_lock(fs.as_ref(), transcript)?;
+                super::storage::mark_deleted(fs.as_ref(), transcript, &deletion)?;
+            } else {
+                let _write = SessionWriter::purge_lock(fs.as_ref(), transcript)?;
+                super::storage::purge(fs.as_ref(), transcript, &deletion, None)?;
+            }
         }
+        crate::session_cleanup::resume(fs, transcript)?;
         Ok(json!({"cleanupId": cleanup_id, "disposition": "purged", "storageRef": storage_ref}))
     }
 }

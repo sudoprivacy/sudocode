@@ -15,10 +15,9 @@ use std::sync::Arc;
 
 // `::` because this module shares its name with that crate.
 use ::managed_agent::SpawnOptions;
+use runtime::agent_mailbox::a2a_prompt_section;
 use runtime::mailbox::Mailbox;
-use runtime::spawn_task::{
-    cohost_a2a_prompt_section, cohost_shell_prompt_section, AgentDescriptor, KernelConvenience,
-};
+use runtime::spawn_task::{cohost_shell_prompt_section, AgentDescriptor, KernelConvenience};
 use runtime::{FsBackend, KernelFsAccess, KernelFsBackend, PermissionMode, SystemPrompt};
 
 use crate::config::{require_sudocode_config_for_cwd, resolve_auth_mode};
@@ -32,28 +31,35 @@ const MODEL_LABEL: &str = "model";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Prepared transcript and host resources. A renderer supplies the initial
-/// session options and adopts this into the shared SessionEngine.
+/// session options and adopts this into the shared `SessionEngine`.
 pub struct PreparedManagedAgent {
     host: HostContext,
     session: runtime::Session,
     config: RuntimeConfig,
     abort: runtime::HookAbortSignal,
-    lease: crate::managed_session::SessionLease,
+    lease: Option<crate::managed_session::SessionLease>,
 }
 
 impl PreparedManagedAgent {
+    #[must_use]
     pub fn durable_session_id(&self) -> &str {
         &self.session.session_id
     }
+    #[must_use]
     pub fn model(&self) -> &str {
         &self.config.model
     }
+    /// Stop the host when its lifetime or durable-session admission ends.
+    /// Turn cancellation uses the separate signal installed by `open`.
+    #[must_use]
     pub fn abort_signal(&self) -> runtime::HookAbortSignal {
         self.abort.clone()
     }
+    #[must_use]
     pub fn mailbox(&self) -> Option<Arc<Mailbox>> {
         self.host.mailbox.clone()
     }
+    #[must_use]
     pub fn cwd(&self) -> std::path::PathBuf {
         self.host.shell_root.clone()
     }
@@ -65,15 +71,18 @@ impl PreparedManagedAgent {
         memory: runtime::memory::MemoryMode,
     ) -> Result<crate::SessionEngine, String> {
         self.config.memory = memory;
-        crate::SessionEngine::for_host(
+        let engine = crate::SessionEngine::for_host(
             self.host,
             self.session,
             self.config,
             mcp_servers,
             prompt_overrides,
             runtime::HookAbortSignal::new(),
-            Box::new(self.lease),
-        )
+        )?;
+        Ok(match self.lease {
+            Some(lease) => engine.with_lifetime_guard(lease),
+            None => engine,
+        })
     }
 }
 
@@ -124,13 +133,12 @@ where
         || format!("/proc/{}/workspace", desc.pid),
         |repo| repo.mount_path.clone(),
     );
-    let fs = KernelFsBackend::for_agent(
-        Arc::clone(kernel),
-        &desc.owner_id,
-        &desc.zone_id,
-        &desc.name,
-        workspace_root.clone(),
-    );
+    // Built from the complete planted descriptor so the agent's delegation
+    // reference participates in every target authorization the backend makes
+    // (zone-scoped ResourceRef checks), rather than trusting caller-supplied
+    // owner/zone/name strings.
+    let fs =
+        KernelFsBackend::for_agent_descriptor(Arc::clone(kernel), desc, workspace_root.clone());
     let fs: Arc<dyn FsBackend> = Arc::new(match &local_directory {
         Some(directory) => fs
             .with_local_workspace(directory)
@@ -162,13 +170,10 @@ where
     let auth_mode = resolve_auth_mode(&model, None, &sudocode_config)
         .map_err(|e| format!("co-host: resolve auth mode for model {model:?}: {e}"))?;
 
-    // The one prompt section this host contributes, for the same reason the
-    // CLI contributes its skills listing: it describes something only this host
-    // does. `run_loop` wraps each inbound message as `[message from <sender>]`,
-    // and a model shown that framing without being told what it means answers
-    // the wrapper instead of the sender.
+    // The same A2A section every host renders, plus the one thing only this
+    // host has to explain: where its shell runs.
     let mut system_prompt = SystemPrompt::default();
-    system_prompt.append_dynamic_section(cohost_a2a_prompt_section(&desc.name));
+    system_prompt.append_dynamic_section(a2a_prompt_section(&desc.name));
     if let Some(section) = cohost_shell_prompt_section(
         &host.fs.working_root().map_err(|error| error.to_string())?,
         &host.shell_root,
@@ -191,6 +196,10 @@ where
     };
 
     let abort = runtime::HookAbortSignal::default();
+    let settings = runtime::ConfigLoader::default_for(&host.config_root)
+        .load()
+        .map_err(|error| format!("co-host: load runtime settings: {error}"))?;
+    runtime::experiments::init_config_flags(settings.experiments().clone());
     let (session, lease) = crate::managed_session::prepare_session(
         kernel,
         desc,

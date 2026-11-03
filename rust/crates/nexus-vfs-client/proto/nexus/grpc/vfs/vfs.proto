@@ -41,6 +41,11 @@ service NexusVFSService {
   // Typed metadata stat — the hottest metadata op.
   rpc Stat(StatRequest) returns (StatResponse);
 
+  // Resolve and classify an I/O target, including a missing creation target.
+  // Authorizes the requested operation on each link spelling and its target.
+  // Older nodes return UNIMPLEMENTED.
+  rpc InspectTarget(InspectTargetRequest) returns (InspectTargetResponse);
+
   // Typed directory listing — metastore + backend merge, procfs intercepts.
   rpc Readdir(ReaddirRequest) returns (ReaddirResponse);
 
@@ -101,6 +106,25 @@ message CallResponse {
 }
 
 // --- Typed content messages (Phase 2) ---
+
+message InspectTargetRequest {
+  string path = 1;
+  string auth_token = 2;
+  string zone_id = 3;
+  enum Access {
+    ACCESS_UNSPECIFIED = 0;
+    READ = 1;
+    WRITE = 2;
+  }
+  Access access = 4;
+}
+
+message InspectTargetResponse {
+  string path = 1; // Resolved path in the request's routing zone, even if missing.
+  optional int32 entry_type = 2; // Absent when the target does not exist.
+  bool is_error = 3;
+  bytes error_payload = 4;
+}
 
 message ReadRequest {
   string path = 1;

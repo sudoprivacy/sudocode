@@ -6,6 +6,15 @@ mod common;
 use common::TestEnv;
 use runtime::{ContentBlock, ConversationMessage, Session};
 
+struct DraftWriterGate(std::path::PathBuf);
+
+impl Drop for DraftWriterGate {
+    fn drop(&mut self) {
+        // A failed assertion must also let the waiting shell finish.
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn exit(sess: &mut pty_expect::PtySession) {
     // Both workflows finish on an empty input. Do not send a redundant
     // parent-owned Ctrl-U in the same key burst as TextInput-owned typing.
@@ -25,25 +34,7 @@ fn exit(sess: &mut pty_expect::PtySession) {
 fn short_window_folds_todos_and_restores_the_entire_draft() {
     let env = TestEnv::new("chrome-budget-draft");
     let store = env.workspace_root().join("todos.json");
-    let todos: Vec<_> = (0..3)
-        .map(|i| {
-            serde_json::json!({
-                "content": format!("BudgetTask{i}"),
-                "activeForm": format!("WorkingBudgetTask{i}"),
-                "status": "pending",
-            })
-        })
-        .collect();
-    std::fs::write(&store, serde_json::to_vec(&todos).unwrap()).unwrap();
-    let mut session = Session::new().with_workspace_root(env.workspace_root());
-    session.push_user_text("Saved layout session").unwrap();
-    session
-        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
-            text: "BudgetHistorySentinel".into(),
-        }]))
-        .unwrap();
-    let saved = env.workspace_root().join("session.jsonl");
-    session.save_to_path(&saved).unwrap();
+    let saved = seed_budget_layout_session(&env, &store);
     let mut sess = env.spawn_with_env(
         &["--resume", saved.to_str().unwrap()],
         &[
@@ -51,6 +42,9 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
             ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
         ],
     );
+    // Drop before the PTY, including while an assertion is unwinding.
+    let writer_gate = DraftWriterGate(env.workspace_root().join("draft-held"));
+    std::fs::write(&writer_gate.0, "").unwrap();
     common::expect_screen_settled(
         &sess,
         |s| s.contains("BudgetTask2") && s.contains('❯'),
@@ -60,7 +54,12 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
 
     // Below the literal-paste threshold, but longer than the small viewport.
     let payload = format!("DraftHead{}DraftTail", "_keep_".repeat(90));
-    let command = format!("! echo {payload} > draft.txt");
+    // Hold the shell after redirection creates the file. Existence alone
+    // cannot establish that the restored command has finished writing it.
+    let command = format!(
+        "! : > draft.txt; while [ -f draft-held ]; do sleep 0.01; done; \
+         echo {payload} > draft.txt; printf 'DraftDone%s' '-marker'"
+    );
     sess.send(&format!("\x1b[200~{command}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
@@ -105,9 +104,27 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
     sess.send("\r").unwrap();
     let result = env.workspace_root().join("draft.txt");
     let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    while !result.exists() && std::time::Instant::now() < deadline {
+    // Shell redirection creates the file before echo writes it. Observe the
+    // completed bytes, rather than racing the producer at file creation.
+    while !std::fs::read_to_string(&result).is_ok_and(|text| text.trim() == payload)
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    assert_eq!(
+        std::fs::read_to_string(&result).unwrap(),
+        "",
+        "the file must exist before the shell is allowed to write"
+    );
+    drop(writer_gate);
+    // This marker is assembled by the shell, so an echoed command cannot
+    // satisfy the wait. Check the draft only after its command has completed.
+    common::expect_screen(
+        &sess,
+        |s| s.contains("DraftDone-marker") && common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "restored draft command completed",
+    );
     assert_eq!(
         std::fs::read_to_string(result).unwrap().trim(),
         payload,
@@ -134,11 +151,16 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
     sess.resize(6, 80).unwrap();
     common::expect_screen_settled(
         &sess,
-        |s| s.contains("Enlarge terminal to review"),
+        |s| s.contains("Enlarge terminal to review; Ctrl+C cancels"),
         common::DEFAULT_TIMEOUT,
         "size warning",
     );
-    sess.send("\r").unwrap();
+    // ConPTY input writes and native resize calls have no shared ordering.
+    // Inspect after Enter and wait for the frozen description before growing:
+    // this proves Enter was handled while the controls were still hidden.
+    sess.expect("Enlarge terminal to review").unwrap();
+    sess.send("\r\x0f").unwrap();
+    sess.expect("Current:").unwrap();
     sess.resize(40, 80).unwrap();
     common::expect_screen_settled(
         &sess,
@@ -342,4 +364,27 @@ fn too_narrow_input_preserves_draft_and_middle_cursor() {
     if env.is_mock() {
         assert_eq!(env.captured_message_count(), 0);
     }
+}
+
+fn seed_budget_layout_session(env: &TestEnv, store: &std::path::Path) -> std::path::PathBuf {
+    let todos: Vec<_> = (0..3)
+        .map(|i| {
+            serde_json::json!({
+                "content": format!("BudgetTask{i}"),
+                "activeForm": format!("WorkingBudgetTask{i}"),
+                "status": "pending",
+            })
+        })
+        .collect();
+    std::fs::write(store, serde_json::to_vec(&todos).unwrap()).unwrap();
+    let mut session = Session::new().with_workspace_root(env.workspace_root());
+    session.push_user_text("Saved layout session").unwrap();
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "BudgetHistorySentinel".into(),
+        }]))
+        .unwrap();
+    let saved = env.workspace_root().join("session.jsonl");
+    session.save_to_path(&saved).unwrap();
+    saved
 }

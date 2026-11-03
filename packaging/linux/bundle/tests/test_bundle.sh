@@ -25,10 +25,14 @@ for arch in amd64 arm64; do
 
   bundle="$TMP/dist/scode-linux-${bundle_arch}-bundle.tar.gz"
   test -f "$bundle"
-  tar -tzf "$bundle" | grep -qx "scode-linux-${bundle_arch}-bundle/scode"
-  tar -tzf "$bundle" | grep -qx "scode-linux-${bundle_arch}-bundle/scode-setup"
-  tar -tzf "$bundle" | grep -qx "scode-linux-${bundle_arch}-bundle/README-install.zh-CN.md"
-  tar -tzf "$bundle" | grep -qx "scode-linux-${bundle_arch}-bundle/SHA256SUMS.txt"
+  # Read the complete archive before matching: grep -q can close a producer's
+  # pipe early under pipefail, hiding a valid artifact behind a SIGPIPE result.
+  tar -tzf "$bundle" > "$TMP/archive-members.txt"
+  grep -qx "scode-linux-${bundle_arch}-bundle/scode" "$TMP/archive-members.txt"
+  grep -qx "scode-linux-${bundle_arch}-bundle/scode-setup" "$TMP/archive-members.txt"
+  grep -qx "scode-linux-${bundle_arch}-bundle/README-install.zh-CN.md" "$TMP/archive-members.txt"
+  grep -qx "scode-linux-${bundle_arch}-bundle/SHA256SUMS.txt" "$TMP/archive-members.txt"
+  grep -qx "scode-linux-${bundle_arch}-bundle/THIRD_PARTY_NOTICES.txt" "$TMP/archive-members.txt"
 
   tar -xzf "$bundle" -C "$TMP"
   bundle_dir="$TMP/scode-linux-${bundle_arch}-bundle"

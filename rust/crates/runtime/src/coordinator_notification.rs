@@ -27,6 +27,7 @@ pub fn emit(workspace_root: &Path, from: &str, task_notification_xml: &str) -> R
         return Ok(());
     }
     let envelope = MailboxEnvelope {
+        delivery: crate::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: COORDINATOR_INBOX_RECIPIENT.to_string(),
         body: task_notification_xml.to_string(),

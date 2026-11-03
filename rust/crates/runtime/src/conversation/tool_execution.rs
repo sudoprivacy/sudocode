@@ -32,6 +32,7 @@ enum Phase {
 
 struct Invocation {
     id: String,
+    origin: Option<String>,
     name: String,
     input: String,
     parent: Option<ConversationMessage>,
@@ -116,7 +117,7 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
         id: String,
         name: String,
         input: String,
-        parent: ConversationMessage,
+        parent: Option<ConversationMessage>,
     ) -> Result<(), RuntimeError> {
         if self.calls.iter().any(|call| call.id == id) {
             return Err(RuntimeError::new(format!(
@@ -125,10 +126,14 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
         }
         self.calls.push(Invocation {
             parallel: self.executor.is_concurrency_safe(&name, &input),
+            origin: parent
+                .as_ref()
+                .and_then(|message| message.history.as_ref())
+                .map(|identity| identity.id.clone()),
             id,
             name,
             input,
-            parent: Some(parent),
+            parent,
             phase: Phase::Queued,
             pre_hook: HookRunResult::allow(Vec::new()),
             output: None,
@@ -230,9 +235,12 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
                         .expect("context before first call")
                         .clone();
                     context.tool_use_id = Some(call.id.clone());
-                    let parent = call.parent.take().expect("undispatched parent");
-                    context.parent_session_messages.push(parent.clone());
-                    context.parent_assistant_message = Some(parent);
+                    // A call the host made directly has no assistant message:
+                    // its tool sees the session as it is, not a model turn.
+                    if let Some(parent) = call.parent.take() {
+                        context.parent_session_messages.push(parent.clone());
+                        context.parent_assistant_message = Some(parent);
+                    }
                     self.updates.push_back(ToolUpdate::Started {
                         id: call.id.clone(),
                         name: name.clone(),
@@ -352,7 +360,14 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
         if context_action.is_some() {
             self.context_action = context_action;
         }
-        let message = output.into_message(call.id.clone(), call.name.clone(), is_error);
+        let mut message = output.into_message(call.id.clone(), call.name.clone(), is_error);
+        if let Some(origin) = &call.origin {
+            let mut identity = crate::session_history::MessageIdentity::new(None);
+            identity
+                .tool_origins
+                .insert(call.id.clone(), origin.clone());
+            message.history = Some(std::sync::Arc::new(identity));
+        }
         call.phase = Phase::Complete;
         call.parent = None;
         self.updates.push_back(ToolUpdate::Completed {

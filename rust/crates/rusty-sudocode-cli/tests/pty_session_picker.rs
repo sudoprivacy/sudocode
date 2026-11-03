@@ -55,18 +55,20 @@ fn record_response(
 ) -> PathBuf {
     let session = runtime::Session::load_from_path(path).unwrap();
     let count = session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == runtime::MessageRole::Assistant)
         .count();
     let directory = runtime::Session::response_captures_dir_for(path, &session.session_id).unwrap();
-    child.send(&format!("{prompt}\r")).unwrap();
+    // Persistence can finish while the coordinator still owns the turn. Use
+    // the shared completion gate before issuing session-management commands.
+    common::run_turn(child, prompt, env.timeout(), "record session response");
     common::expect_screen(
         child,
         |_| {
             let persisted = runtime::Session::load_from_path(path).is_ok_and(|session| {
                 session
-                    .messages
+                    .messages()
                     .iter()
                     .filter(|message| message.role == runtime::MessageRole::Assistant)
                     .count()
@@ -85,7 +87,6 @@ fn record_response(
         env.timeout(),
         "persisted answer and finalized raw response",
     );
-    common::expect_input_line_cleared(child, env.timeout(), "response completed");
     directory
 }
 
@@ -161,11 +162,21 @@ fn session_delete_can_cancel_then_confirm_without_force() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
         .map(|path| (path.clone(), std::fs::read(path).unwrap()))
         .collect();
-    assert!(!current_bodies.is_empty());
+    assert_ne!(
+        current_bodies,
+        [] as [(std::path::PathBuf, std::vec::Vec<u8>); 0]
+    );
 
     for cancel in ["\x1b", "\r"] {
         child.send(&format!("/session delete {target}\r")).unwrap();
-        child.expect("This cannot be undone").unwrap();
+        child
+            .expect("This cannot be undone")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "delete confirmation before {cancel:?}: {error}; {}",
+                    common::screen_tail(&child, 6000)
+                )
+            });
         child.send(cancel).unwrap();
         common::expect_input_line_cleared(&child, env.timeout(), "cancel returns to prompt");
         assert!(path.exists(), "cancel must preserve the saved session");
@@ -176,7 +187,14 @@ fn session_delete_can_cancel_then_confirm_without_force() {
         assert_active_session(&mut child, &current);
     }
     child.send(&format!("/session delete {target}\r")).unwrap();
-    child.expect("This cannot be undone").unwrap();
+    child
+        .expect("This cannot be undone")
+        .unwrap_or_else(|error| {
+            panic!(
+                "final delete confirmation: {error}; {}",
+                common::screen_tail(&child, 6000)
+            )
+        });
     child.send("\x1b[B\r").unwrap();
     child.expect("Session deleted").unwrap();
     common::expect_input_line_cleared(&child, common::DEFAULT_TIMEOUT, "session prompt");

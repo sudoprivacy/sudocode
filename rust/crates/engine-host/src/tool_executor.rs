@@ -67,6 +67,41 @@ pub struct CliToolExecutor {
 }
 
 impl CliToolExecutor {
+    fn check_external_tool_dispatch(
+        &self,
+        tool_name: &str,
+        value: &serde_json::Value,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<(), ToolError> {
+        if let Some(call) = &ctx.external_a2a {
+            call.validate_dispatch(
+                tool_name,
+                value,
+                self.external_a2a_binding().as_ref(),
+                ctx.tool_use_id.as_deref(),
+            )
+            .map_err(ToolError::new)?;
+            if self.tool_registry.has_runtime_tool(tool_name) {
+                return Err(ToolError::new(
+                    "external A2A cannot dispatch a shadowing MCP tool",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_allowed_tool(&self, name: &str) -> Result<(), ToolError> {
+        if self.allowed_tools.as_ref().is_some_and(|allowed| {
+            !allowed.contains(name) && !allowed.contains(&tools::canonicalize_tool_name(name))
+        }) {
+            return Err(ToolError::new(format!(
+                "tool `{name}` is not enabled by the current --allowedTools setting"
+            )));
+        }
+        Ok(())
+    }
+
+    #[must_use]
     pub fn new(
         allowed_tools: Option<AllowedToolSet>,
         tool_registry: GlobalToolRegistry,
@@ -243,6 +278,10 @@ fn parse_tool_call_input(input: &str) -> Result<serde_json::Value, ToolError> {
 }
 
 impl ToolExecutor for CliToolExecutor {
+    fn external_a2a_binding(&self) -> Option<runtime::external_a2a::MailboxBinding> {
+        self.mailbox.as_ref().map(|mailbox| mailbox.binding())
+    }
+
     fn is_concurrency_safe(&self, name: &str, input: &str) -> bool {
         let name = tools::canonicalize_tool_name(name);
         if self.tool_registry.has_runtime_tool(&name) {
@@ -304,17 +343,7 @@ impl ToolExecutor for CliToolExecutor {
         // act. Comparing only the canonical name is wrong too — the allow-list
         // parser stores the *spec* name, and not every spec has an alias. Either
         // spelling matching is what "this tool is allowed" means.
-        let gate = |name: &str| -> Result<(), ToolError> {
-            if self.allowed_tools.as_ref().is_some_and(|allowed| {
-                !allowed.contains(name) && !allowed.contains(&tools::canonicalize_tool_name(name))
-            }) {
-                return Err(ToolError::new(format!(
-                    "tool `{name}` is not enabled by the current --allowedTools setting"
-                )));
-            }
-            Ok(())
-        };
-        gate(tool_name)?;
+        self.check_allowed_tool(tool_name)?;
         let value = parse_tool_call_input(input)?;
 
         // Canonicalize ONCE; every intercept below matches the canonical name.
@@ -323,6 +352,8 @@ impl ToolExecutor for CliToolExecutor {
         // spelling `send` as `SendMessage` lost the nexus-A2A route and had its
         // cross-machine message written to a local file instead.
         let tool_name = tools::canonicalize_tool_name(tool_name);
+
+        self.check_external_tool_dispatch(&tool_name, &value, ctx)?;
 
         if tool_name == "AskUserQuestion"
             && self
@@ -497,43 +528,7 @@ struct AskUserQuestionCliOption {
 
 impl AskUserQuestionCliInput {
     fn into_request(self) -> Result<QuestionPromptRequest, ToolError> {
-        let fields = if !self.questions.is_empty() {
-            self.questions
-                .into_iter()
-                .map(|field| {
-                    let options = field
-                        .options
-                        .into_iter()
-                        .map(|option| QuestionOption {
-                            label: option.label,
-                            value: option.value,
-                            description: option.description,
-                            recommended: option.recommended.unwrap_or(false),
-                        })
-                        .collect::<Vec<_>>();
-                    let kind = field
-                        .kind
-                        .as_deref()
-                        .and_then(QuestionKind::from_str)
-                        .unwrap_or_else(|| {
-                            if options.is_empty() {
-                                QuestionKind::Text
-                            } else {
-                                QuestionKind::SingleSelect
-                            }
-                        });
-                    QuestionField {
-                        id: field.id,
-                        prompt: field.prompt,
-                        kind,
-                        required: field.required.unwrap_or(true),
-                        allow_custom_input: field.allow_custom_input.unwrap_or(false),
-                        custom_input_hint: field.custom_input_hint,
-                        options,
-                    }
-                })
-                .collect::<Vec<_>>()
-        } else {
+        let fields = if self.questions.is_empty() {
             let prompt = self
                 .question
                 .map(|question| question.trim().to_string())
@@ -565,9 +560,46 @@ impl AskUserQuestionCliInput {
                 custom_input_hint: None,
                 options,
             }]
+        } else {
+            self.questions
+                .into_iter()
+                .map(|field| {
+                    let options = field
+                        .options
+                        .into_iter()
+                        .map(|option| QuestionOption {
+                            label: option.label,
+                            value: option.value,
+                            description: option.description,
+                            recommended: option.recommended.unwrap_or(false),
+                        })
+                        .collect::<Vec<_>>();
+                    let kind = field
+                        .kind
+                        .as_deref()
+                        .and_then(|kind| kind.parse::<QuestionKind>().ok())
+                        .unwrap_or({
+                            if options.is_empty() {
+                                QuestionKind::Text
+                            } else {
+                                QuestionKind::SingleSelect
+                            }
+                        });
+                    QuestionField {
+                        id: field.id,
+                        prompt: field.prompt,
+                        kind,
+                        required: field.required.unwrap_or(true),
+                        allow_custom_input: field.allow_custom_input.unwrap_or(false),
+                        custom_input_hint: field.custom_input_hint,
+                        options,
+                    }
+                })
+                .collect::<Vec<_>>()
         };
 
         Ok(QuestionPromptRequest {
+            presentation: runtime::QuestionPresentation::Question,
             title: self.title,
             description: self
                 .description
@@ -651,49 +683,16 @@ impl CliToolExecutor {
             .map_err(ToolError::new)?;
         let plan = runtime::plan_store::read_plan(&self.tool_registry.fs_handle())
             .ok_or_else(|| ToolError::new("saved plan could not be read for approval"))?;
+        let plan_file = runtime::plan_store::plan_file_path(&self.tool_registry.fs_handle())
+            .map_err(ToolError::new)?
+            .display()
+            .to_string();
 
         // Ask the user how to proceed — ACROSS THE SEAM. The pump's
         // QuestionAdapter turns this into a QuestionRequest the renderer answers
         // (the REPL / iocraft / ACP each draw the dialog + read the choice their
         // own way), so it works on Windows too (no raw stdin read_line here).
-        let request = QuestionPromptRequest {
-            title: Some("Choose an action".to_string()),
-            description: Some(runtime::PromptText::Markdown(plan.clone().into())),
-            fields: vec![QuestionField {
-                id: "action".to_string(),
-                prompt: "Choose an action".to_string(),
-                kind: QuestionKind::SingleSelect,
-                required: true,
-                allow_custom_input: true,
-                custom_input_hint: Some("type a comment to revise the plan".to_string()),
-                options: vec![
-                    QuestionOption {
-                        label: "Clear context & execute plan".to_string(),
-                        value: "1".to_string(),
-                        description: None,
-                        recommended: true,
-                    },
-                    QuestionOption {
-                        label: "Keep context & execute".to_string(),
-                        value: "2".to_string(),
-                        description: None,
-                        recommended: false,
-                    },
-                    QuestionOption {
-                        label: "Keep planning (provide feedback)".to_string(),
-                        value: "3".to_string(),
-                        description: None,
-                        recommended: false,
-                    },
-                    QuestionOption {
-                        label: "Exit plan (don't execute)".to_string(),
-                        value: "4".to_string(),
-                        description: None,
-                        recommended: false,
-                    },
-                ],
-            }],
-        };
+        let request = plan_review_request(&plan, &plan_file);
 
         let answers = self
             .begin_question(&request)?
@@ -713,17 +712,26 @@ impl CliToolExecutor {
                         "The saved plan changed while approval was pending. Present the current plan with write_plan for review before executing.",
                     ));
                 }
-                let mut output = ToolOutput::text(format!(
-                    "The user APPROVED the plan. Implement it now; do not wait for another \
-                     prompt or request approval of this plan again.\n\n{plan}"
-                ));
+                // No echo of the plan: this result stays paired with its write_plan
+                // call under both options (clearing context keeps the current
+                // exchange), and that call's input already holds the plan, which
+                // the check above proves is exactly what the user approved. A copy
+                // here would only sit in context, twice, for the rest of the session.
+                let mut output = plan_review_output(&runtime::plan_store::PlanReviewResult::new(
+                    runtime::plan_store::PlanReviewStatus::Approved,
+                    plan_file,
+                    "The user APPROVED the plan in this write_plan call. Implement it now."
+                        .to_string(),
+                ))?;
                 if answer.value == "1" {
                     output.context_action = Some(ToolContextAction::RestartFromCurrentExchange);
                 }
                 Ok(output)
             }
-            "4" => Err(ToolError::new(
-                "User chose to exit plan mode without executing. The plan is saved; do not implement it now — wait for further instructions.",
+            "4" => plan_review_output(&runtime::plan_store::PlanReviewResult::new(
+                runtime::plan_store::PlanReviewStatus::Cancelled,
+                plan_file,
+                "User chose to exit plan mode without executing. The plan is saved; wait for further instructions.".into(),
             )),
             // "3" (Keep planning) or any free-text answer is treated as a comment:
             // feed it back so the model revises the plan and calls write_plan again.
@@ -735,10 +743,70 @@ impl CliToolExecutor {
                         "User feedback on the plan: {other}\nRevise the plan accordingly and call write_plan again."
                     )
                 };
-                Err(ToolError::new(feedback))
+                let mut result = runtime::plan_store::PlanReviewResult::new(
+                    runtime::plan_store::PlanReviewStatus::RevisionRequested,
+                    plan_file,
+                    feedback,
+                );
+                if other != "3" && !other.trim().is_empty() {
+                    result.feedback = Some(other.to_owned());
+                }
+                plan_review_output(&result)
             }
         }
     }
+}
+
+fn plan_review_request(plan: &str, plan_file: &str) -> QuestionPromptRequest {
+    QuestionPromptRequest {
+        presentation: runtime::QuestionPresentation::PlanReview {
+            plan_file: plan_file.to_owned(),
+        },
+        title: Some("Choose an action".to_string()),
+        description: Some(runtime::PromptText::Markdown(plan.into())),
+        fields: vec![QuestionField {
+            id: "action".to_string(),
+            prompt: "Choose an action".to_string(),
+            kind: QuestionKind::SingleSelect,
+            required: true,
+            allow_custom_input: true,
+            custom_input_hint: Some("type a comment to revise the plan".to_string()),
+            options: vec![
+                QuestionOption {
+                    label: "Clear context & execute plan".to_string(),
+                    value: "1".to_string(),
+                    description: None,
+                    recommended: true,
+                },
+                QuestionOption {
+                    label: "Keep context & execute".to_string(),
+                    value: "2".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+                QuestionOption {
+                    label: "Keep planning (provide feedback)".to_string(),
+                    value: "3".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+                QuestionOption {
+                    label: "Exit plan (don't execute)".to_string(),
+                    value: "4".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+            ],
+        }],
+    }
+}
+
+fn plan_review_output(
+    result: &runtime::plan_store::PlanReviewResult,
+) -> Result<ToolOutput, ToolError> {
+    serde_json::to_string_pretty(result)
+        .map(ToolOutput::text)
+        .map_err(|error| ToolError::new(error.to_string()))
 }
 
 /// Build a `bash` progress callback that forwards STRUCTURED progress to a seam

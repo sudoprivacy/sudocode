@@ -120,7 +120,7 @@ pub fn render_plain(
     command: &str,
     stdout: &str,
     stderr: &str,
-    exit_status: Option<&str>,
+    exit_status: Option<&runtime::ShellStatus>,
 ) -> String {
     let mut out = String::from("```\n$ ");
     out.push_str(command);
@@ -134,7 +134,7 @@ pub fn render_plain(
     }
     if let Some(status) = exit_status {
         out.push('[');
-        out.push_str(status);
+        out.push_str(&status.label());
         out.push_str("]\n");
     }
     out.push_str("```\n");

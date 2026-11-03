@@ -26,9 +26,82 @@ use runtime::HookAbortSignal;
 /// Blocking-tail wait per receive iteration on the node.
 const INBOX_WAIT_MS: u64 = 500;
 
-/// A connected, verified node session for one agent.
+enum NodeState {
+    Pending {
+        endpoint: Option<String>,
+        error: Option<String>,
+    },
+    Ready {
+        config: Config,
+        backend: Arc<dyn FsBackend>,
+    },
+}
+
+struct NodeBinding {
+    agent: String,
+    state: Mutex<NodeState>,
+}
+
+impl NodeBinding {
+    fn backend(&self) -> Result<Arc<dyn FsBackend>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut endpoint = match &*state {
+            NodeState::Pending { endpoint, .. } => endpoint.clone(),
+            NodeState::Ready { backend, .. } => return Ok(Arc::clone(backend)),
+        };
+        let resolved: Result<(Config, Arc<dyn FsBackend>), String> = (|| {
+            let config = Config::from_node_record(&self.agent)?.ok_or_else(|| {
+                "the selected node record is no longer available; A2A remains on the node namespace".to_string()
+            })?;
+            endpoint = Some(config.endpoint.clone());
+            let client = config.connect()?;
+            // The node authenticates the presented agent certificate. Keep
+            // the existing cert-only backend; no per-request token or local
+            // identity reference is substituted for that server verification.
+            let backend: Arc<dyn FsBackend> = Arc::new(NexusVfsFsBackend::from_arc_mtls(
+                client,
+                String::new(),
+                "root",
+            ));
+            Ok((config, backend))
+        })();
+        match resolved {
+            Ok((config, backend)) => {
+                *state = NodeState::Ready {
+                    config,
+                    backend: Arc::clone(&backend),
+                };
+                Ok(backend)
+            }
+            Err(error) => {
+                *state = NodeState::Pending {
+                    endpoint,
+                    error: Some(error.clone()),
+                };
+                Err(error)
+            }
+        }
+    }
+
+    #[inline]
+    fn snapshot(&self) -> (Option<String>, Option<String>) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            NodeState::Pending { endpoint, error } => (endpoint.clone(), error.clone()),
+            NodeState::Ready { config, .. } => (Some(config.endpoint.clone()), None),
+        }
+    }
+}
+
+/// A selected node namespace, including an agent awaiting its credential.
 pub struct Node {
-    config: Config,
+    binding: Arc<NodeBinding>,
     mailbox: Arc<Mailbox>,
 }
 
@@ -53,12 +126,12 @@ impl Peer {
     }
 
     /// The system-prompt section that teaches the model its identity and how
-    /// to reply on this namespace.
+    /// to reach peers: the same one on every host.
     #[must_use]
     pub fn prompt_section(&self) -> String {
         match self {
-            Self::Node(node) => node.config.peer_system_prompt(),
-            Self::Disk(name) => runtime::agent_mailbox::repl_a2a_prompt_section(name),
+            Self::Node(node) => runtime::agent_mailbox::a2a_prompt_section(&node.binding.agent),
+            Self::Disk(name) => runtime::agent_mailbox::a2a_prompt_section(name),
         }
     }
 
@@ -88,7 +161,7 @@ impl Peer {
                 sink,
             ),
             Self::Disk(name) => runtime::mailbox::spawn_local_poller(
-                runtime::mailbox::local_pair_root(),
+                &runtime::mailbox::local_pair_root(),
                 name.clone(),
                 abort,
                 sink,
@@ -97,70 +170,78 @@ impl Peer {
     }
 }
 
-/// Each agent's attach decision, made once per process: the node it attached
-/// to, or `None` for the disk namespace. Keyed by agent because a host can run
-/// sessions under several identities, each with its own credential. A failed
-/// attach is not cached, so the next session reports the failure again.
+/// Each agent's namespace selection, made once per process. A selected node's
+/// unavailable binding is retained and retried by that same mailbox; it never
+/// becomes `None` (disk) after a credential/configuration failure. A process
+/// that selected disk stays there until an explicit handoff/restart.
 static NODES: OnceLock<Mutex<HashMap<String, Option<Arc<Node>>>>> = OnceLock::new();
 
 /// The node `agent` is attached to, from this machine's node record.
 ///
-/// `None` when the machine has no node. Otherwise the credential is loaded,
-/// the node is dialled, and `/agents` is read once, so an unreachable node, a
-/// failed handshake or a missing mount is reported here rather than on the
-/// session's first message. It is never a silent fall back to disk.
-///
-/// # Errors
-/// The node record or credential is unusable, or the node cannot be reached.
-pub fn node(agent: &str) -> Result<Option<Arc<Node>>, String> {
+/// `None` only when the machine has no node record. A present but unusable
+/// record retains a node mailbox whose IO reports the cause and retries local
+/// configuration resolution. No network or credential error prevents an
+/// ordinary standalone session from starting.
+#[must_use]
+pub fn node(agent: &str) -> Option<Arc<Node>> {
     let mut nodes = NODES
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(decided) = nodes.get(agent) {
-        return Ok(decided.clone());
+        return decided.clone();
     }
-    let decided = match Config::from_node_record(agent)? {
-        None => None,
-        Some(config) => {
-            let client = config.connect()?;
-            // Cert-only auth: the client cert IS the authorization (the node
-            // derives identity from its SAN), so no per-request token is sent.
-            let backend = NexusVfsFsBackend::from_arc(client, String::new());
-            backend.readdir("/agents").map_err(|error| {
-                format!(
-                    "this machine's node at {} is not usable as '{agent}': reading /agents \
-                     failed: {error}",
-                    config.endpoint
-                )
-            })?;
-            let mailbox = Arc::new(Mailbox::daemon_absolute(
-                Arc::new(backend),
-                config.agent.clone(),
-            ));
-            Some(Arc::new(Node { config, mailbox }))
-        }
+    let resolved = Config::from_node_record(agent);
+    // A dangling record symlink is still a configured namespace. So is an
+    // unreadable path: neither is permission to deliver to a different disk.
+    let absent = matches!(&resolved, Ok(None)) && !runtime::nexus_mailbox::node_record_present();
+    let decided = if absent {
+        None
+    } else {
+        let (endpoint, error) = match resolved {
+            Ok(Some(config)) => (Some(config.endpoint), None),
+            Ok(None) => (
+                None,
+                Some("the selected node record is unavailable".to_string()),
+            ),
+            Err(error) => (None, Some(error)),
+        };
+        let binding = Arc::new(NodeBinding {
+            agent: agent.to_string(),
+            state: Mutex::new(NodeState::Pending { endpoint, error }),
+        });
+        let resolving = Arc::clone(&binding);
+        let mailbox = Arc::new(Mailbox::daemon_resolving(agent.to_string(), move || {
+            resolving.backend()
+        }));
+        Some(Arc::new(Node { binding, mailbox }))
     };
     nodes.insert(agent.to_string(), decided.clone());
-    Ok(decided)
+    decided
 }
+
 impl Node {
+    /// The actual authenticated backend shared with this actor's mailbox.
+    /// Resolve only when a configured Nexus model mount needs it.
+    #[inline]
+    pub fn fs(&self) -> Result<Arc<dyn FsBackend>, String> {
+        self.binding.backend()
+    }
+
+    #[inline]
     #[must_use]
     pub fn mailbox(&self) -> Arc<Mailbox> {
         Arc::clone(&self.mailbox)
     }
 }
 
-/// This session's peer namespace: the node when attached, else the pair root
-/// under `agent_name`.
-///
-/// # Errors
-/// The machine has a node but it is unusable for `agent_name`.
-pub fn attach(agent_name: &str) -> Result<Peer, String> {
-    Ok(match node(agent_name)? {
+/// This session's selected peer namespace, independent of node availability.
+#[must_use]
+pub fn attach(agent_name: &str) -> Peer {
+    match node(agent_name) {
         Some(node) => Peer::Node(node),
         None => Peer::Disk(agent_name.to_string()),
-    })
+    }
 }
 
 /// What `/status` and an ACP client report about `agent`'s peers.
@@ -169,15 +250,22 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
     let receiver = runtime::mailbox::receiver_state(agent)
         .map_or("none", runtime::mailbox::ReceiverState::as_str);
     let (namespace, endpoint, error) = match attach(agent) {
-        Ok(Peer::Node(node)) => (Some("node"), Some(node.config.endpoint.clone()), None),
-        Ok(Peer::Disk(_)) => (Some("disk"), None, None),
-        Err(error) => (None, None, Some(error)),
+        Peer::Node(node) => {
+            let (endpoint, error) = node.binding.snapshot();
+            (Some("node"), endpoint, error)
+        }
+        Peer::Disk(_) => (Some("disk"), None, None),
     };
     runtime::mailbox::PeerStatus {
         agent: agent.to_string(),
         namespace,
         endpoint,
         receiver,
+        delivery: "automatic",
+        cursor: runtime::mailbox::cursor_guarantee(agent)
+            .map_or("none", runtime::cursor_fence::CursorGuarantee::as_str),
+        health: runtime::mailbox::receiver_health(agent, error.is_some()),
         error,
+        last_receiver_error: runtime::mailbox::last_receiver_error(agent),
     }
 }

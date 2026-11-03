@@ -99,6 +99,17 @@ pub enum BackgroundTaskEvent {
     Removed(String),
 }
 
+/// Lightweight work metadata, without cloning task output or installing a sink.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackgroundTaskSummary {
+    pub terminals: usize,
+    pub agents: usize,
+    pub execution_unconfirmed: usize,
+    /// Actual workers, including work whose caller has already been cancelled.
+    /// This is independent of the number of background task records.
+    pub tool_operations: usize,
+}
+
 type TaskSink = Arc<dyn Fn(BackgroundTaskEvent) + Send + Sync>;
 struct Record {
     task: BackgroundTask,
@@ -144,6 +155,7 @@ pub struct BackgroundTasks {
     parent_id: Option<String>,
     completion: Arc<Mutex<Option<Arc<crate::subagent_completion::CompletionJournal>>>>,
     tool_id: Option<String>,
+    assistant_message_id: Option<String>,
 }
 
 impl std::fmt::Debug for BackgroundTasks {
@@ -301,9 +313,10 @@ impl BackgroundTasks {
 
     /// Per-invocation identity, never a mutable session-global current tool ID.
     #[must_use]
-    pub fn for_tool(&self, tool: Option<&str>) -> Self {
+    pub fn for_tool(&self, assistant_message_id: Option<&str>, tool: Option<&str>) -> Self {
         let mut tasks = self.clone();
         tasks.tool_id = tool.map(str::to_owned);
+        tasks.assistant_message_id = assistant_message_id.map(str::to_owned);
         tasks
     }
 
@@ -324,6 +337,7 @@ impl BackgroundTasks {
             return Ok(None);
         };
         journal.register_terminal(
+            self.assistant_message_id.as_deref(),
             self.tool_id
                 .as_deref()
                 .ok_or("terminal tool identity missing")?,
@@ -478,6 +492,33 @@ impl BackgroundTasks {
     }
 
     #[must_use]
+    pub fn summary(&self) -> BackgroundTaskSummary {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut summary = BackgroundTaskSummary {
+            tool_operations: registry.operations,
+            ..BackgroundTaskSummary::default()
+        };
+        for record in registry
+            .tasks
+            .values()
+            .filter(|record| record.task.background)
+        {
+            if record.task.status == BackgroundTaskStatus::ExecutionUnconfirmed {
+                summary.execution_unconfirmed += 1;
+            } else if record.task.status.is_active() {
+                match record.task.kind {
+                    BackgroundTaskKind::Terminal => summary.terminals += 1,
+                    BackgroundTaskKind::Agent => summary.agents += 1,
+                }
+            }
+        }
+        summary
+    }
+
+    #[must_use]
     pub fn snapshots(&self) -> Vec<BackgroundTask> {
         let registry = self
             .registry
@@ -498,6 +539,7 @@ impl BackgroundTasks {
             parent_id: Some(id.to_string()),
             completion: Arc::clone(&self.completion),
             tool_id: None,
+            assistant_message_id: None,
         }
     }
 

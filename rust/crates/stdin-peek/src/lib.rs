@@ -1,6 +1,19 @@
-//! Ask whether stdin has data waiting, consuming nothing.
+//! The workspace's Win32 FFI, each call behind the smallest safe wrapper.
 //!
-//! # Why this crate exists
+//! The workspace root sets `unsafe_code = "forbid"`, a lint that cannot be
+//! relaxed from inside a crate that inherits it. So the few OS calls that need
+//! FFI live here, and nothing else does: reviewing the workspace's entire
+//! `unsafe` surface means reviewing this file. Policy — what to wait for, what
+//! to try first, what to do when the OS cannot answer — stays in callers, where
+//! the lint still applies.
+//!
+//! - [`stdin_is_readable`]: whether stdin has data waiting, consuming nothing.
+//! - [`decode_console_bytes`]: what bytes in the console's code page spell.
+//! - On Windows, the owned stderr swap used by the terminal capture owner.
+//! - [`prevent_standard_handle_inheritance`]: keep launcher pipes out of a
+//!   background process on Windows.
+//!
+//! # Why stdin readiness
 //!
 //! `--print` reads piped stdin whenever stdin is not a terminal. When stdin is
 //! a pipe a parent opened and then never writes to and never closes — what a
@@ -10,19 +23,98 @@
 //!
 //! The fix is to check readiness *before* starting a read, because a blocking
 //! read on a pipe cannot be cancelled once parked. Unix has `poll`. Windows has
-//! `PeekNamedPipe`, which is FFI and therefore `unsafe`, and the workspace root
-//! sets `unsafe_code = "forbid"` — a lint that cannot be relaxed from inside a
-//! crate that inherits it.
+//! `PeekNamedPipe`.
 //!
-//! So the exception is isolated here instead of weakened everywhere: this crate
-//! deliberately does **not** opt into the workspace lints, and holds nothing but
-//! the smallest safe wrapper around that one call. Reviewing the workspace's
-//! entire `unsafe` surface means reviewing this file.
+//! # Why console decoding
 //!
-//! Policy — how long to wait, and what to do when readiness cannot be
-//! determined — stays in the caller, where the lint still applies.
+//! A Windows console program writes text in the console's code page, not UTF-8:
+//! Windows PowerShell 5.1 on a Chinese system writes CP936. Read as UTF-8, that
+//! is mojibake for both the model and the user. Only `MultiByteToWideChar`
+//! knows every code page the system can be set to.
 
 use std::time::Duration;
+
+/// Replace stderr for the existing terminal owner, without querying a pipe's
+/// type while synchronous IO may be blocked on it. The caller serializes
+/// standard-stream replacement. A handle still installed on stdin or stdout
+/// remains borrowed; only an exclusively displaced handle is returned owned.
+#[cfg(windows)]
+#[inline]
+pub fn replace_stderr_handle(
+    source: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<Option<std::os::windows::io::OwnedHandle>> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let replacement = source.try_clone_to_owned()?;
+    // SAFETY: these calls read the process's standard handle slots, not buffers.
+    let (previous, input, output) = unsafe {
+        (
+            GetStdHandle(STD_ERROR_HANDLE),
+            GetStdHandle(STD_INPUT_HANDLE),
+            GetStdHandle(STD_OUTPUT_HANDLE),
+        )
+    };
+    // SAFETY: the owned duplicate is valid and remains alive during the call.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, replacement.as_raw_handle()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The successful slot replacement now owns this duplicate. A failed swap
+    // above instead drops it normally and leaves the old slot untouched.
+    let _ = replacement.into_raw_handle();
+    if previous.is_null()
+        || previous == INVALID_HANDLE_VALUE
+        || previous == input
+        || previous == output
+    {
+        return Ok(None);
+    }
+    // SAFETY: this valid handle was removed from stderr and is not installed
+    // on either other standard stream. No owner was constructed before success.
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(previous) }))
+}
+
+/// Keep this process's standard handles out of subsequently spawned children.
+///
+/// Explicit child stdio still works: Rust duplicates the selected handles.
+/// The inherit flags stay cleared so a concurrent spawn cannot inherit a
+/// launcher's pipe during a temporary restoration window. No handle is closed.
+#[cfg(windows)]
+pub fn prevent_standard_handle_inheritance() -> std::io::Result<()> {
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, ERROR_INVALID_HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    for handle in [
+        io::stdin().as_raw_handle(),
+        io::stdout().as_raw_handle(),
+        io::stderr().as_raw_handle(),
+    ] {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        // SAFETY: each handle is borrowed from a live standard stream. This
+        // only clears its inheritance flag; it neither closes nor replaces it.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_INVALID_HANDLE as i32) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unix process spawning does not need the Windows inheritance adjustment.
+#[cfg(not(windows))]
+pub fn prevent_standard_handle_inheritance() -> std::io::Result<()> {
+    Ok(())
+}
 
 /// What a readiness peek concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,4 +212,69 @@ pub fn stdin_is_readable(timeout: Duration) -> Readiness {
 #[must_use]
 pub fn stdin_is_readable(_timeout: Duration) -> Readiness {
     Readiness::Unknown
+}
+
+/// The text `bytes` spell in the code page console programs started from this
+/// process write in: the console's output code page, or the OEM code page when
+/// there is no console or it is set to UTF-8.
+///
+/// `None` when the bytes are not valid in that code page. UTF-8 is never tried
+/// here; callers try it first.
+#[cfg(windows)]
+#[must_use]
+pub fn decode_console_bytes(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar, MB_ERR_INVALID_CHARS};
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+    const CP_UTF8: u32 = 65001;
+
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let length = i32::try_from(bytes.len()).ok()?;
+    // SAFETY: both take no arguments and only read process-wide settings.
+    let console = unsafe { GetConsoleOutputCP() };
+    let code_page = if console == 0 || console == CP_UTF8 {
+        // SAFETY: as above.
+        unsafe { GetOEMCP() }
+    } else {
+        console
+    };
+    if code_page == CP_UTF8 {
+        return None;
+    }
+    // SAFETY: `bytes` is valid for `length` bytes. A null output buffer with a
+    // size of 0 is the documented way to ask only for the required length.
+    let needed = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let mut wide = vec![0u16; usize::try_from(needed).ok().filter(|n| *n > 0)?];
+    // SAFETY: `bytes` as above; `wide` holds exactly `needed` elements.
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            length,
+            wide.as_mut_ptr(),
+            needed,
+        )
+    };
+    if written != needed {
+        return None;
+    }
+    String::from_utf16(&wide).ok()
+}
+
+/// Unix programs write UTF-8; there is no other code page to try.
+#[cfg(not(windows))]
+#[must_use]
+pub fn decode_console_bytes(_bytes: &[u8]) -> Option<String> {
+    None
 }

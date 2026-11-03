@@ -205,7 +205,7 @@ fn empty_shell_completes_before_a_held_sibling() {
         &env,
         &[
             bash("held", &fifo_read("held.fifo")),
-            bash("empty", "head -n 0 empty.fifo"),
+            bash("empty", &fifo_read("empty.fifo")),
         ],
         "10",
     );
@@ -216,8 +216,8 @@ fn empty_shell_completes_before_a_held_sibling() {
         common::at_least(Duration::from_secs(15)),
         "both real shells running before releasing the empty one",
     );
-    // Opening its writer releases head's FIFO open; zero lines produce no
-    // stdout or stderr, and the other shell remains genuinely held.
+    // Both shells already exist, and this is the sole writer in the driver.
+    // Closing it without bytes supplies EOF with no stdout or stderr output.
     drop(writer(&env, "empty.fifo", &sess));
     common::expect_screen(
         &sess,

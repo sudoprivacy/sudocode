@@ -43,14 +43,11 @@ fn spawn_captured_shell(
     // this command's EOF until an unrelated sibling exits. Open an unlinked
     // FIFO with O_CLOEXEC instead: each descriptor is private from creation.
     #[cfg(target_os = "macos")]
-    let (stdout, stderr) = {
+    let (stdout_read, stderr_read) = {
         let (stdout_read, stdout_write) = close_on_exec_pipe()?;
         let (stderr_read, stderr_write) = close_on_exec_pipe()?;
         command.stdout(stdout_write).stderr(stderr_write);
-        (
-            tokio::process::ChildStdout::from_std(stdout_read.into())?,
-            tokio::process::ChildStderr::from_std(stderr_read.into())?,
-        )
+        (stdout_read, stderr_read)
     };
     #[cfg(not(target_os = "macos"))]
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -62,8 +59,10 @@ fn spawn_captured_shell(
     drop(command);
     #[cfg(target_os = "macos")]
     {
-        child.inner().stdout = Some(stdout);
-        child.inner().stderr = Some(stderr);
+        // Match Tokio's normal spawn lifecycle: register readers only after
+        // the child's stdio has been installed and parent writers are closed.
+        child.inner().stdout = Some(tokio::process::ChildStdout::from_std(stdout_read.into())?);
+        child.inner().stderr = Some(tokio::process::ChildStderr::from_std(stderr_read.into())?);
     }
     let stdout = child.inner().stdout.take().expect("stdout piped");
     let stderr = child.inner().stderr.take().expect("stderr piped");

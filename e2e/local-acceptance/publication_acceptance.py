@@ -112,8 +112,10 @@ def verify_publication(directory, work, clean_environment):
                gate_only=False, verified_base=None):
         state.update(runs={item["id"]: item for item in runs}, posts=[], proof=proof)
         event = output / (label + ".json")
-        event.write_text(json.dumps({"pull_request": pull} if gate_only else
-                                    {"workflow_run": {"id": source, "run_attempt": attempt}}))
+        payload = ({"pull_request": pull} if gate_only else
+                   {"workflow_run": {"id": source, "run_attempt": attempt}})
+        payload["repository"] = {"full_name": "acceptance/fixture", "description": "Metadata ❯ 中文"}
+        event.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run([sys.executable, str(bootstrap), f"http://127.0.0.1:{server.server_port}",
                                  str(verifier / ".github/local-acceptance" / ("gate.py" if gate_only else "publish.py"))], cwd=verifier,
             env={**clean_environment, "GITHUB_REPOSITORY": "acceptance/fixture", "GITHUB_EVENT_PATH": str(event),

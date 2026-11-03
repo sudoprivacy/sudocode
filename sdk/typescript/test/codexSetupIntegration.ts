@@ -77,13 +77,26 @@ async function main():Promise<void>{
     assert.equal(fs.readFileSync(raced.target,'utf8'),'independent edit\n');
     assert.match(JSON.parse(fs.readFileSync(raced.config+'.installation.json','utf8')).error,/independent edit is preserved/);
 
+    const runtimeRace=fixture('runtime-change-during-preflight');
+    const runtimeOriginalEntry=fs.readFileSync(runtimeRace.target);
+    const runtimeConfig=JSON.parse(fs.readFileSync(runtimeRace.config,'utf8'));
+    runtimeConfig.native.env.SCODE_SETUP_REPLACE_RUNTIME=runtimeRace.config;
+    fs.writeFileSync(runtimeRace.config,JSON.stringify(runtimeConfig));
+    const changedRuntime=await runtimeRace.install();assert.equal(changedRuntime.code,1);
+    assert.match(changedRuntime.stderr,/runtime changed during preparation/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(runtimeRace.config,'utf8')).peers,['independent-user-setting']);
+    assert(fs.readFileSync(runtimeRace.target).equals(runtimeOriginalEntry));
+    assert(!fs.existsSync(runtimeRace.config+'.installation.json'));
+    assert(!fs.existsSync(path.join(runtimeRace.home,'.sudocode-a2a-installation.json')));
+    assert.equal(runtimeRace.calls().filter(c=>c[0]==='app-server'||c[1]==='add').length,0);
+
     const partial=fixture('lost-result',{SCODE_SETUP_LOST_REGISTRATION:'1'});
     const failed=await partial.install();assert.equal(failed.code,1);assert(fs.existsSync(path.join(partial.work,'registration.json')));
     const attempt=JSON.parse(fs.readFileSync(partial.config+'.installation.json','utf8'));
     assert.equal(attempt.inFlight,'globalMcpRegistration');assert.equal(attempt.phase,'stopped');
     const count=partial.calls().filter(c=>c[1]==='add').length;
     assert.equal((await partial.install()).code,1);assert.equal(partial.calls().filter(c=>c[1]==='add').length,count);
-    console.log('Codex setup process integration PASS: one command installs canonical MCP/entry; actual delegate exit/argv and backup; conflict/racing edit preserved; lost result and completed setup not replayed');
+    console.log('Codex setup process integration PASS: one command installs canonical MCP/entry; actual delegate exit/argv and backup; conflict/racing entry and initial runtime edits preserved; lost result and completed setup not replayed');
   }finally{
     if(windows)for(const task of tasks){
       const xml=execFileSync(system('schtasks.exe'),['/Query','/TN',task.taskName,'/XML'],{windowsHide:true});

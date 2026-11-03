@@ -83,7 +83,14 @@ export async function installCodexMcp(file:string,entry:string,target:string):Pr
 }> {
   if(![file,entry,target].every(value=>path.isAbsolute(value) && !/[\0\r\n]/.test(value)))throw new Error('Absolute private runtime, bridge and ordinary command paths are required');
   if(!/^codex(?:\.ps1)?$/i.test(path.basename(target)))throw new Error('Select the ordinary codex command entry');
+  const runtimeSha256=digest(readFileSync(file));
+  const runtimeUnchanged=()=>{
+    if(digest(readFileSync(file))!==runtimeSha256){
+      throw new Error('The selected runtime changed during preparation; its independent edit is preserved');
+    }
+  };
   const plan=codexMcpInstallationCommands(file,entry);
+  runtimeUnchanged();
   const nativeHome=plan.native.env?.CODEX_HOME;
   if(!nativeHome || !path.isAbsolute(nativeHome) || !lstatSync(nativeHome).isDirectory()){
     throw new Error('Pin the existing selected CODEX_HOME in native.env before installing; the native command and owner must select the same home');
@@ -100,6 +107,7 @@ export async function installCodexMcp(file:string,entry:string,target:string):Pr
   const parent=lstatSync(path.dirname(target));
   if(!parent.isDirectory())throw new Error('The selected command parent must be an existing directory');
   const existing=await registration(plan.native);
+  runtimeUnchanged();
   if(existing!==undefined && !matchesRegistration(existing,file,entry)){
     throw new Error('An existing Nexus MCP registration selects another configuration; explicit migration is required');
   }
@@ -108,7 +116,7 @@ export async function installCodexMcp(file:string,entry:string,target:string):Pr
   const claimBytes=JSON.stringify({version:1,operationId:randomUUID(),runtime:file,journal,commandEntry:target});
   const state:{version:number;phase:string;runtimeSha256:string;commandEntry:string;commandEntrySha256:string;
     backup:EntrySnapshot;completed:string[];inFlight?:string;error?:string;ownerTask?:ReturnType<typeof prepareWindowsCodexOwner>}={
-    version:1,phase:'prepared',runtimeSha256:digest(readFileSync(file)),commandEntry:target,
+    version:1,phase:'prepared',runtimeSha256,commandEntry:target,
     commandEntrySha256:digest(bytes),backup:before,completed:[]};
   // Create-only admission prevents another installer or an uncertain partial
   // operation from replaying native registration/task commands.

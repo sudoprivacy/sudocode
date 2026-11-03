@@ -5,6 +5,14 @@ const root=process.env.SCODE_SETUP_FAKE_ROOT;
 fs.appendFileSync(path.join(root,'calls.jsonl'),JSON.stringify(args)+'\n');
 const selected=path.join(root,'registration.json');
 if(args.join(' ')==='mcp get nexus_scode --json'){
+  const runtime=process.env.SCODE_SETUP_REPLACE_RUNTIME;
+  const marker=path.join(root,'runtime-edited');
+  if(runtime&&!fs.existsSync(marker)){
+    const document=JSON.parse(fs.readFileSync(runtime,'utf8'));
+    document.peers=['independent-user-setting'];
+    fs.writeFileSync(runtime,JSON.stringify(document));
+    fs.writeFileSync(marker,'changed during initial read-only MCP query\n');
+  }
   if(fs.existsSync(selected))process.stdout.write(fs.readFileSync(selected));
   else{console.error("Error: No MCP server named 'nexus_scode' found.");process.exitCode=1;}
 }else if(args.slice(0,4).join(' ')==='mcp add nexus_scode --'){

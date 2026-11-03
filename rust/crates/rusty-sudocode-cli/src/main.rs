@@ -57,14 +57,12 @@ use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
     load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
     parse_args_with_prompt_overrides, permission_mode_from_label, require_sudocode_config_for_cwd,
-    resolve_model_alias, resolve_model_alias_with_config, try_resolve_bare_skill_prompt,
-    try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet, CliAction, CliOutputFormat,
-    LocalHelpTopic,
+    resolve_model_alias, resolve_model_alias_with_config, AllowedToolSet, CliAction,
+    CliOutputFormat, LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
     render_prompt_history_report, resolve_export_path, run_export, truncate_for_prompt,
-    PromptHistoryEntry,
 };
 use cli::format::{
     describe_tool_progress, first_visible_line, format_account_report,
@@ -231,8 +229,9 @@ pub(crate) const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 pub(crate) const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
-const LEGACY_SESSION_EXTENSION: &str = "json";
+/// Where REPL turns auto-save, as the help texts name it.
+pub(crate) const SESSION_AUTO_SAVE_PATH: &str =
+    ".scode/sessions/<workspace>/<session-id>/transcript.jsonl";
 /// This crate's build metadata, packaged for the shared `commands::reports`
 /// doctor report (which is crate-agnostic and takes it as a parameter).
 pub(crate) fn build_info() -> commands::reports::BuildInfo<'static> {
@@ -3406,7 +3405,15 @@ fn run_repl_iocraft_dispatch(
     // handle so `input_rx` can be forwarded into the unified event channel.
     // The panel starts from whatever the session's filesystem has persisted —
     // its own, so a resumed session shows its todos and not the CLI's cwd.
-    let seed_todos = tools::todo_list(&cli.lifecycle.session_snapshot().fs_handle());
+    // ↑ recalls the session's earlier prompts, so a resumed session continues
+    // its own input history.
+    let session = cli.lifecycle.session_snapshot();
+    let seed_todos = tools::todo_list(&session.fs_handle());
+    let input_history = collect_session_prompt_history(&session)
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect();
+    drop(session);
     // The staging-area queue, shared between this coordinator loop and the UI
     // thread's `↑` handler: on empty-buffer `↑` the UI pops the newest human
     // queued message back into the input slot (skipping a2a/peer). Created
@@ -3428,6 +3435,7 @@ fn run_repl_iocraft_dispatch(
         &banner,
         startup_prompts,
         seed_todos,
+        input_history,
         Some(dequeue_hook),
     );
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
@@ -3535,6 +3543,7 @@ fn run_repl_iocraft_dispatch(
             activity.observe_engine_state(engine_events::EngineState::Idle);
         })
         .expect("spawn REPL engine event bridge");
+    let prompt_outbox = cli.prompt_outbox.clone();
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
@@ -3854,6 +3863,12 @@ fn run_repl_iocraft_dispatch(
                     // turn. Keep the input/control dispatcher nonblocking.
                     let trimmed = text.trim();
                     let parsed = SlashCommand::parse(trimmed);
+                    // A command's report follows its own `❯` line in
+                    // scrollback, as a prompt's turn does. Text that is not a
+                    // command (`Ok(None)`) runs as a prompt and is echoed there.
+                    if !matches!(parsed, Ok(None)) {
+                        echo_submit_to_scrollback(&repl_output, &display);
+                    }
                     // Task inspection is local UI, so it remains available
                     // during work without taking the session lock.
                     if matches!(&parsed, Ok(Some(SlashCommand::Tasks { args: None }))) {
@@ -4072,6 +4087,7 @@ fn run_repl_iocraft_dispatch(
                     // in the queue overlay and echoed at the turn boundary when
                     // it actually flushes (see `drain_next`'s `echoes`).
                     if coord.lock().unwrap().has_idle_queue() {
+                        prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
                         coord.lock().unwrap().submit_during_turn(
                             input_queue::QueuedInput::human(text, display),
@@ -4079,6 +4095,7 @@ fn run_repl_iocraft_dispatch(
                         );
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                     } else if !coord.lock().unwrap().is_running() {
+                        prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
                         echo_submit_to_scrollback(&repl_output, &display);
                         let next = coord
@@ -4102,6 +4119,7 @@ fn run_repl_iocraft_dispatch(
                             repl_output.println("Next-turn queue is disabled; use Enter to steer or /config set queue on while idle.");
                             continue;
                         }
+                        prompt_outbox.post(trimmed);
                         let delivery = {
                             let mut queue = coord.lock().unwrap();
                             if delivery == engine_events::InputDelivery::Steer && queue.is_paused()
@@ -4164,7 +4182,8 @@ fn run_repl_iocraft_dispatch(
     // still be alive and the shared CLI mutex must remain accessible. A failed
     // save is reported after teardown, so the terminal is restored first.
     let persisted = {
-        let cli_lock = cli_shared.lock().expect("LiveCli mutex");
+        let mut cli_lock = cli_shared.lock().expect("LiveCli mutex");
+        cli_lock.record_prompt_history();
         cli_lock.persist_before_shutdown()
     };
     // Drop coordinator sender so bridge/poller threads see Disconnected,
@@ -4284,6 +4303,7 @@ fn spawn_iocraft_turn(
         .name("repl-runner".into())
         .spawn(move || {
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
+            cli.record_prompt_history();
             match cli.run_turn_iocraft(
                 &next.prompt,
                 &output,
@@ -4310,6 +4330,32 @@ fn spawn_iocraft_turn(
         .expect("spawn repl-runner thread")
 }
 
+/// Typed prompts on their way to the session's prompt history, in the order
+/// they were typed. The input dispatcher cannot take the `LiveCli` lock while a
+/// turn holds it, so it posts each line here; `LiveCli` records them whenever
+/// it next holds the lock: before a turn, before a `!` command or `/history`,
+/// and before the final save.
+#[derive(Clone, Default)]
+struct PromptOutbox(Arc<Mutex<Vec<String>>>);
+
+impl PromptOutbox {
+    fn post(&self, prompt: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(prompt.to_owned());
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
 /// The composition root above the seam. Holds ONLY the turn handle + the
 /// session-lifecycle port — the engine owns the config/session/runtime SSOT
 /// (audit finding B). It physically cannot drive a turn except through
@@ -4323,7 +4369,9 @@ struct LiveCli {
     /// the renderer's port to it. `Arc<dyn SessionLifecycle>` gives NO access
     /// to `run_turn` — the cut is compiler-enforced.
     lifecycle: Arc<dyn SessionLifecycle>,
-    prompt_history: Vec<PromptHistoryEntry>,
+    /// Typed prompts not yet in the session's prompt history. See
+    /// [`PromptOutbox`].
+    prompt_outbox: PromptOutbox,
     /// Tool-use ids already restored by `/undo`. Used to make repeated
     /// `/undo` calls step further back rather than re-undoing the same edit.
     undone_tool_use_ids: std::collections::HashSet<String>,
@@ -4701,7 +4749,7 @@ impl LiveCli {
         Ok(Self {
             engine_handle,
             lifecycle,
-            prompt_history: Vec::new(),
+            prompt_outbox: PromptOutbox::default(),
             undone_tool_use_ids: std::collections::HashSet::new(),
             shared_queue_mode: None,
             is_repl: false,
@@ -4867,21 +4915,6 @@ impl LiveCli {
         } else {
             turn_status_line(&status)
         })
-    }
-
-    fn repl_completion_candidates(
-        &self,
-    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-        let handle = self.lifecycle.session_handle();
-        Ok(slash_command_completion_candidates_with_sessions(
-            &self.lifecycle.current_model(),
-            self.lifecycle.available_models(),
-            Some(&handle.id),
-            list_managed_sessions()?
-                .into_iter()
-                .map(|session| session.id)
-                .collect(),
-        ))
     }
 
     /// Drive one turn across the seam: send the prompt, pump events into the
@@ -5766,7 +5799,8 @@ impl LiveCli {
     /// `<bash-stderr>` shape) so the model sees it on the next prompt. No
     /// model turn is started — the human ran the command, not the agent.
     fn run_bash_mode(&mut self, command: &str) {
-        self.record_prompt_history(&format!("! {command}"));
+        self.prompt_outbox.post(&format!("! {command}"));
+        self.record_prompt_history();
         let messages = match bash_mode::run(command) {
             Ok(output) => {
                 self.out_println(bash_mode::render_output_block(
@@ -5836,23 +5870,19 @@ impl LiveCli {
         self.out_suspend(|| print_with_pager(&report))
     }
 
-    fn record_prompt_history(&mut self, prompt: &str) {
-        let updated_at_ms = self.lifecycle.session_snapshot().updated_at_ms;
-        let timestamp_ms = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map_or(updated_at_ms, |duration| {
-                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-            });
-        let entry = PromptHistoryEntry {
-            timestamp_ms,
-            text: prompt.to_string(),
-        };
-        self.prompt_history.push(entry);
+    /// Record every posted prompt in the session's prompt history, in order.
+    fn record_prompt_history(&mut self) {
+        let prompts = self.prompt_outbox.take();
+        if prompts.is_empty() {
+            return;
+        }
         let mut push_error = None;
         self.lifecycle.with_session_mut(&mut |session| {
-            if let Err(error) = session.push_prompt_entry(prompt) {
-                push_error = Some(error.to_string());
+            for prompt in &prompts {
+                if let Err(error) = session.push_prompt_entry(prompt.as_str()) {
+                    push_error = Some(error.to_string());
+                    break;
+                }
             }
         });
         if let Some(error) = push_error {
@@ -5860,7 +5890,7 @@ impl LiveCli {
         }
     }
 
-    fn print_prompt_history(&self, count: Option<&str>) {
+    fn print_prompt_history(&mut self, count: Option<&str>) {
         let limit = match parse_history_count(count) {
             Ok(limit) => limit,
             Err(message) => {
@@ -5868,29 +5898,8 @@ impl LiveCli {
                 return;
             }
         };
-        let session = self.lifecycle.session_snapshot();
-        let session_entries = &session.prompt_history;
-        let entries = if session_entries.is_empty() {
-            if self.prompt_history.is_empty() {
-                collect_session_prompt_history(&session)
-            } else {
-                self.prompt_history
-                    .iter()
-                    .map(|entry| PromptHistoryEntry {
-                        timestamp_ms: entry.timestamp_ms,
-                        text: entry.text.clone(),
-                    })
-                    .collect()
-            }
-        } else {
-            session_entries
-                .iter()
-                .map(|entry| PromptHistoryEntry {
-                    timestamp_ms: entry.timestamp_ms,
-                    text: entry.text.clone(),
-                })
-                .collect()
-        };
+        self.record_prompt_history();
+        let entries = collect_session_prompt_history(&self.lifecycle.session_snapshot());
         self.out_println(render_prompt_history_report(&entries, limit));
     }
 
@@ -6206,16 +6215,6 @@ impl LiveCli {
                 Ok(())
             }
         }
-    }
-
-    fn print_config(section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        print_with_pager(&render_config_report(section)?);
-        Ok(())
-    }
-
-    fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
-        print_with_pager(&render_memory_report()?);
-        Ok(())
     }
 
     fn open_in_editor(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -7250,113 +7249,6 @@ pub(crate) const STUB_COMMANDS: &[&str] = &[
     "subagent",
     "agent",
 ];
-
-fn slash_command_completion_candidates_with_sessions(
-    model: &str,
-    available_models: Vec<String>,
-    active_session_id: Option<&str>,
-    recent_session_ids: Vec<String>,
-) -> Vec<(String, String)> {
-    let mut completions = BTreeMap::new();
-
-    for spec in slash_command_specs() {
-        if STUB_COMMANDS.contains(&spec.name) {
-            continue;
-        }
-        completions.insert(format!("/{}", spec.name), spec.summary.to_string());
-        for alias in spec.aliases {
-            if !STUB_COMMANDS.contains(alias) {
-                completions.insert(format!("/{alias}"), spec.summary.to_string());
-            }
-        }
-    }
-
-    for candidate in [
-        "/bughunter ",
-        "/clear --confirm",
-        "/config ",
-        "/config env",
-        "/config hooks",
-        "/config model",
-        "/config plugins",
-        "/context all",
-        "/mcp ",
-        "/mcp list",
-        "/mcp show ",
-        "/export ",
-        "/issue ",
-        "/model ",
-        "/permissions ",
-        "/permissions read-only",
-        "/permissions workspace-write",
-        "/permissions danger-full-access",
-        "/auth ",
-        "/auth subscription",
-        "/auth proxy",
-        "/auth api-key",
-        "/plugin list",
-        "/plugin install ",
-        "/plugin enable ",
-        "/plugin disable ",
-        "/plugin uninstall ",
-        "/plugin update ",
-        "/plugins list",
-        "/pr ",
-        "/resume ",
-        "/session list",
-        "/session switch ",
-        "/session fork ",
-        "/teleport ",
-        "/ultraplan ",
-        "/agents help",
-        "/mcp help",
-        "/skills help",
-    ] {
-        completions
-            .entry(candidate.to_string())
-            .or_insert_with(String::new);
-    }
-
-    // Reuse the live session's account and endpoint for discovery.
-    for id in available_models {
-        completions
-            .entry(format!("/model {id}"))
-            .or_insert_with(String::new);
-    }
-
-    if !model.trim().is_empty() {
-        completions
-            .entry(format!("/model {}", resolve_model_alias_with_config(model)))
-            .or_insert_with(String::new);
-        completions
-            .entry(format!("/model {model}"))
-            .or_insert_with(String::new);
-    }
-
-    if let Some(active_session_id) = active_session_id.filter(|value| !value.trim().is_empty()) {
-        completions
-            .entry(format!("/resume {active_session_id}"))
-            .or_insert_with(String::new);
-        completions
-            .entry(format!("/session switch {active_session_id}"))
-            .or_insert_with(String::new);
-    }
-
-    for session_id in recent_session_ids
-        .into_iter()
-        .filter(|value| !value.trim().is_empty())
-        .take(10)
-    {
-        completions
-            .entry(format!("/resume {session_id}"))
-            .or_insert_with(String::new);
-        completions
-            .entry(format!("/session switch {session_id}"))
-            .or_insert_with(String::new);
-    }
-
-    completions.into_iter().collect()
-}
 
 #[cfg(test)]
 mod wait_notice_tests {

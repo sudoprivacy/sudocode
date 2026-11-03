@@ -1307,6 +1307,8 @@ struct ReplContext {
     /// the queued messages. Same `Arc<Mutex>` rationale as `todo_items` —
     /// avoids shifting hook indices.
     pending: Arc<Mutex<Vec<PendingItem>>>,
+    /// Earlier prompts `↑` walks before anything typed in this process.
+    input_history: Arc<Vec<String>>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
     /// coordinator's staging area and returns its text for the input slot,
     /// skipping inbound A2A/peer items. `None` when no queue is wired (the
@@ -1339,6 +1341,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
     let dequeue_hook = ctx.dequeue_hook.clone();
+    let input_history = Arc::clone(&ctx.input_history);
     let tasks = Arc::clone(&ctx.tasks);
     let tasks_for_future = Arc::clone(&ctx.tasks);
     let tasks_for_events = Arc::clone(&ctx.tasks);
@@ -1362,7 +1365,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
-    let history = hooks.use_state(Vec::<String>::new);
+    let history = hooks.use_state(|| input_history.to_vec());
     let mut history_cursor = hooks.use_state(|| None::<usize>);
     let saved_input = hooks.use_state(String::new);
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
@@ -2824,6 +2827,7 @@ pub fn spawn_repl_ui(
     startup_banner: &str,
     startup_prompts: Vec<usize>,
     todo_items: Vec<runtime::Todo>,
+    input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
@@ -2855,6 +2859,7 @@ pub fn spawn_repl_ui(
         stderr_redir: Arc::clone(&stderr_redir),
         todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),
+        input_history: Arc::new(input_history),
         dequeue_hook,
     };
 

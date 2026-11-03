@@ -105,6 +105,9 @@ fn record(value: &str) {
 #[test]
 fn interactive_file_reads_updated_contents_after_resume() {
     record("first");
+    if let Ok(path) = std::env::var("MODEL_FIXTURE_ENV") {
+        std::fs::write(path, std::env::var("NO_COLOR").is_ok().to_string()).unwrap();
+    }
     if let Ok(reason) = std::env::var("MODEL_FIXTURE_FAILURE") { panic!("{reason}"); }
 }
 #[test]
@@ -127,7 +130,13 @@ fn print_completes_tool_roundtrip_in_each_output_format() { record("second"); }
     assert not marker.exists(), "A preview, unknown target or missing key must not start Cargo"
 
     good = output / "passed"
-    command(sys.executable, helper, "--suite", "smoke", "--execute", "--output", good)
+    observed = output / "observed-environment.txt"
+    # The runner's own environment decisions (here: dropping the launcher's
+    # NO_COLOR) must survive; the inherited environment is not an override.
+    # Passing it as one restored the shell PATH over MSVC's on Windows.
+    command(sys.executable, helper, "--suite", "smoke", "--execute", "--output", good,
+            extra={"NO_COLOR": "1", "MODEL_FIXTURE_ENV": str(observed)})
+    assert observed.read_text() == "false", "inherited variables must not override the runner's environment"
     report = json.loads((good / "result.json").read_text())
     assert report["outcome"] == "passed" and len(report["commands"]) == 2
     assert marker.read_text() == "first\nsecond\n"

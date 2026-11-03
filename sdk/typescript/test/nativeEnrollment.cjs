@@ -5,6 +5,8 @@ const assert=require('node:assert/strict');
 const {createHash,randomUUID}=require('node:crypto');
 const {execFileSync,spawn}=require('node:child_process');
 const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
+if(config.nativeInstalledCommand)assert(config.nativeCodex && config.nativePackageRoot,
+  'Installed-command composition requires the real native managed package');
 const sdk=require(path.join(config.install,'node_modules/@sudocode/acp/dist/index.cjs'));
 const entry=path.join(config.install,'node_modules/@sudocode/acp/dist/server.cjs');
 const digest=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -82,12 +84,13 @@ async function main(){
       const args=[path.join(__dirname,'nativeCodexLifecycle.cjs'),'--codex',config.nativeCodex,'--output',config.root,
         '--case',scenario,'--autojoin','--operator-context',context,'--temp-root',config.root];
       if(config.nativePackageRoot)args.push('--managed-package-root',config.nativePackageRoot);
+      if(config.nativeInstalledCommand)args.push('--installed-command');
       if(config.nativeDriver)args.push('--driver',JSON.stringify(config.nativeDriver));
       const result=await runAsync(process.execPath,args);
       fs.writeFileSync(path.join(config.root,`native-operator-${scenario}.json`),JSON.stringify(result,null,2)+'\n');
       assert.equal(result.result,'PASS',JSON.stringify(result));
     }
-    if(config.nativePackageRoot){
+    if(config.nativePackageRoot && !config.nativeInstalledCommand){
       const migrationArgs=[path.join(__dirname,'nativeCodexLifecycle.cjs'),'--codex',config.nativeCodex,'--output',config.root,
         '--case','idle','--autojoin','--legacy-import','--operator-context',context,'--temp-root',config.root,
         '--managed-package-root',config.nativePackageRoot];
@@ -97,7 +100,8 @@ async function main(){
       assert.equal(migrated.result,'PASS',JSON.stringify(migrated));
     }
   }
-  console.log(JSON.stringify({success:true,realLegacyTlsNode:true,privateSameProjectActors:true,originalAcpSidsReloaded:true,enrollmentInferenceRequests:0}));
+  console.log(JSON.stringify({success:true,realLegacyTlsNode:true,privateSameProjectActors:true,originalAcpSidsReloaded:true,
+    enrollmentInferenceRequests:0,nativeInstalledCommand:config.nativeInstalledCommand===true}));
 }
 main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   await Promise.allSettled(connections.map(connection=>connection.close()));

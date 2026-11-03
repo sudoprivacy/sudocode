@@ -1558,17 +1558,21 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
             ),
         )]),
         (Scenario::SubagentToolChild | Scenario::SubagentSlowChild, Some(_)) => {
-            let empty_final = request.messages.iter().flat_map(|m| &m.content).any(|block| {
-                matches!(block, InputContentBlock::Text { text } if text.contains("EMPTY_SUBAGENT_FINAL"))
-            });
-            SubagentStep::Answer(if empty_final {
-                String::new()
-            } else {
-                SUBAGENT_CHILD_ANSWER.to_string()
-            })
+            SubagentStep::Answer(subagent_child_answer(request))
         }
         (scenario, Some(_)) => SubagentStep::Answer(format!("{} done", scenario.name())),
         (scenario, None) => SubagentStep::Answer(format!("{} has no plan", scenario.name())),
+    }
+}
+
+fn subagent_child_answer(request: &MessageRequest) -> String {
+    let empty_final = request.messages.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, InputContentBlock::Text { text } if text.contains("EMPTY_SUBAGENT_FINAL"))
+    });
+    if empty_final {
+        String::new()
+    } else {
+        SUBAGENT_CHILD_ANSWER.to_string()
     }
 }
 

@@ -132,7 +132,8 @@ impl ChildImp {
 			if Self::wait_imp(pgid, WaitPidFlag::WNOHANG)?.is_break() {
 				break;
 			} else if retry_attempt == MAX_RETRY_ATTEMPT {
-				spawn_blocking(move || Self::wait_imp(pgid, WaitPidFlag::empty())).await??;
+				let _ =
+					spawn_blocking(move || Self::wait_imp(pgid, WaitPidFlag::empty())).await??;
 			}
 		}
 

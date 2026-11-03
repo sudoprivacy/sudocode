@@ -42,7 +42,7 @@ pub enum HookProgressEvent {
         event: HookEvent,
         tool_name: String,
         command: String,
-        /// Plugin id when this hook was contributed by a SudoCode plugin, so
+        /// Plugin id when this hook was contributed by a `SudoCode` plugin, so
         /// the CLI can attribute live progress to the originating plugin.
         plugin_source: Option<String>,
     },
@@ -56,7 +56,7 @@ pub enum HookProgressEvent {
     },
     /// Hook returned exit-code 2 (deny). The CLI surfaces this distinct from
     /// `Completed` so users see *why* a tool was blocked — including the
-    /// owning plugin id when it came from a SudoCode plugin.
+    /// owning plugin id when it came from a `SudoCode` plugin.
     Denied {
         event: HookEvent,
         tool_name: String,
@@ -1054,14 +1054,16 @@ enum CommandExecution {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::thread;
+    #[cfg(unix)]
     use std::time::Duration;
 
-    use super::{
-        HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult,
-        HookRunner,
-    };
+    #[cfg(unix)]
+    use super::HookAbortSignal;
+    use super::{HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner};
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
+    #[cfg(unix)]
     use crate::permissions::PermissionOverride;
 
     struct RecordingReporter {

@@ -1,5 +1,5 @@
 //! Regression for a real Write tool reporting success without a Nexus write.
-//! These calls use the real kernel and the same FsBackend as managed sessions.
+//! These calls use the real kernel and the same `FsBackend` as managed sessions.
 
 use std::sync::Arc;
 

@@ -1,22 +1,18 @@
 //! Input chrome — the separator/footer UI around the REPL prompt.
 //!
-//! Renders a sandwich layout:
+//! Print mode/help above the synchronous editor's input region:
 //!
 //! ```text
 //! ──────────────────────── (top separator)
-//! ❯ <user input here>     (prompt — rendered by rustyline)
-//! ──────────────────────── (bottom separator)
 //!   ⏵⏵ full access mode · /help for commands · /permissions to change
+//! ❯ <user input here>     (prompt — rendered by rustyline)
 //! ```
 //!
-//! `print_before_prompt` prints all four lines then cursors back to the
-//! prompt line. This cursor-up is safe because the lines were just printed
-//! (positions are deterministic, no scrolling has occurred).
-//!
-//! After the user submits, the caller clears the bottom sep + footer with
-//! `\x1b[J` and prints the echo downward via `println!`. The old
-//! `replace_after_submit` (which cursored UP after readline returned) was
-//! the root cause of scrollback jumping and has been permanently removed.
+//! Rustyline owns every row from its prompt downward. Its external printer
+//! moves that region after a peer notice or captured stderr; prepainting a
+//! separator/footer below it lets the relocated prompt overwrite that chrome.
+//! Keep informational output above the editor, with no reserved rows or cursor
+//! movement across the ownership boundary.
 
 use std::io::{self, Write};
 
@@ -45,21 +41,13 @@ fn format_footer(permission_mode: &str) -> String {
     format!("  {DIM}{icon} {label} mode · /help for commands · /permissions to change{RESET}")
 }
 
-/// Print the sandwich chrome (top sep, prompt placeholder, bottom sep,
-/// footer) then cursor back to the prompt line so `read_line()` renders
-/// there.
-///
-/// The `\x1b[2F` is safe: we just printed these lines so positions are
-/// deterministic.
+/// Print the mode/help header before handing the terminal to `read_line()`.
 pub fn print_before_prompt(permission_mode: &str) {
     let w = term_width();
     let sep = separator(w);
     let footer = format_footer(permission_mode);
-    let mut stdout = io::stdout();
-    let _ = writeln!(stdout, "{sep}");
-    let _ = writeln!(stdout); // prompt placeholder
-    let _ = writeln!(stdout, "{sep}");
-    let _ = write!(stdout, "{footer}");
-    let _ = write!(stdout, "\x1b[2F\x1b[2K"); // cursor up 2, clear prompt placeholder
+    let header = format!("{sep}\n{footer}\n");
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(header.as_bytes());
     let _ = stdout.flush();
 }

@@ -87,8 +87,9 @@ struct Status {
     footer: String,
 }
 
-/// Run `/status` and read the newest report: output is appended, so the last
-/// matching line on the settled screen belongs to this run.
+/// Wait for this command's report and resumed prompt before reading the screen.
+/// A cleared input beside the previous report can settle before the queued
+/// terminal handoff starts, so screen stillness alone cannot identify this run.
 fn status(session: &mut PtySession) -> Status {
     session.send("/status").unwrap();
     common::expect_screen_settled(
@@ -97,7 +98,12 @@ fn status(session: &mut PtySession) -> Status {
         common::DEFAULT_TIMEOUT,
         "status command typed",
     );
+    // Discard earlier output only after the current command is visibly typed.
+    // Peers is written by the report, never by an ordinary input/footer repaint.
+    session.expect("(?s).*").unwrap();
     session.send("\r").unwrap();
+    session.expect("Peers").unwrap();
+    session.expect("❯").unwrap();
     let screen = common::expect_screen_settled(
         session,
         |screen| {
@@ -137,7 +143,7 @@ fn status_until(session: &mut PtySession, what: &str, done: impl Fn(&Status) -> 
             "{what}: last status health={:?} footer={:?}\n{}",
             status.health,
             status.footer,
-            session.render(|screen| screen.contents())
+            session.render(common::screen_contents)
         );
         std::thread::sleep(Duration::from_millis(250));
     }

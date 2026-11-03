@@ -70,7 +70,7 @@ fn roundtrip(queue: bool) {
         LIVE_TURN_BUDGET,
         "first framed plan",
     );
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(screen.contains("File:"));
     if env.is_mock() {
         assert!(
@@ -100,7 +100,7 @@ fn roundtrip(queue: bool) {
         LIVE_TURN_BUDGET,
         "feedback and revised plan",
     );
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(
         screen.contains("Feedback:"),
         "feedback is a review result: {screen}"
@@ -243,7 +243,7 @@ fn verify_resume(env: &TestEnv, queue: bool, path: &std::path::Path) {
         env.timeout(),
         "resume restores both recorded proposals",
     );
-    let screen = resumed.render(|s| s.contents());
+    let screen = resumed.render(common::screen_contents);
     for title in ["│ PresentationStageA", "│ PresentationStageB"] {
         assert_eq!(
             screen.lines().filter(|line| line.contains(title)).count(),

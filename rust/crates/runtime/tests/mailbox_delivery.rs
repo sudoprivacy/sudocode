@@ -86,12 +86,10 @@ fn dropped_receipt_replays_and_acknowledged_receipt_does_not() {
     let replay = receiver.read_unread("sender").unwrap().unwrap();
     assert_eq!(replay.messages().len(), 1);
     replay.acknowledge().unwrap();
-    assert!(receiver
-        .read_unread("sender")
-        .unwrap()
-        .unwrap()
-        .messages()
-        .is_empty());
+    assert_eq!(
+        receiver.read_unread("sender").unwrap().unwrap().messages(),
+        []
+    );
 }
 
 #[test]

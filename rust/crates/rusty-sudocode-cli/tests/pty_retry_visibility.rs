@@ -47,24 +47,24 @@ fn provider_retry_is_reported_then_the_turn_completes() {
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
     // The first backoff is a second plus jitter, and the turn still has to
     // finish after it.
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
 
     // Named as the user sees it: which attempt, out of how many, and why.
     // Matched as one line so a report that lost the reason — the only part
     // that says whether to wait or to go fix something — fails here.
     sess.expect(r"retry 1/8 .* 429").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("the retry should be reported: {e}\nPTY screen:\n{screen}");
     });
 
     // And the retry actually retried: the turn produces its answer.
     sess.expect("(?i)hello").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("the turn should complete after the retry: {e}\nPTY screen:\n{screen}");
     });
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "a retried turn should still exit 0; got {exit}");
@@ -85,15 +85,15 @@ fn a_turn_without_retries_reports_none() {
 
     let prompt = env.prompt("Say hello", "streaming_text");
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
 
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(
         !screen.contains("retry"),
         "nothing was retried, so nothing should mention a retry; PTY screen:\n{screen}"

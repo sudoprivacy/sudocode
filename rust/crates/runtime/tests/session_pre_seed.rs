@@ -135,13 +135,13 @@ fn with_messages_supports_empty_vec() {
     let session = Session::new().with_messages(Vec::new());
 
     // then — no messages, session usable
-    assert!(session.messages().is_empty());
+    assert_eq!(session.messages(), []);
 }
 
 // ── Fork subagent shape ─────────────────────────────────────────────
 
 /// A fork subagent's initial session must contain the parent's
-/// assistant tool_use + a placeholder tool_result so the child model's
+/// assistant `tool_use` + a placeholder `tool_result` so the child model's
 /// first API call carries the exact same prefix (byte-identical for
 /// prompt-cache purposes) followed by its directive. This test only
 /// asserts the shape survives round-trip through `with_messages` — the

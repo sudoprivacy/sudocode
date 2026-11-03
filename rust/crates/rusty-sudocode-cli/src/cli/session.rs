@@ -160,7 +160,7 @@ pub(crate) fn format_session_summary(summary: &str) -> String {
         .unwrap_or("")
         .trim_start_matches(['-', '*', ' ']);
     let mut end = summary.len();
-    for (index, _) in summary.char_indices().nth(96).into_iter() {
+    if let Some((index, _)) = summary.char_indices().nth(96) {
         end = index;
     }
     if end < summary.len() {

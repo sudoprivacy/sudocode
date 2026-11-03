@@ -1,15 +1,15 @@
 //! PTY e2e: bracketed-paste UX in the iocraft REPL.
 //!
 //! When text is pasted, the terminal wraps it in a bracketed-paste sequence
-//! (ESC[200~ … ESC[201~). crossterm parses this into a single Event::Paste,
-//! iocraft forwards it as TerminalEvent::Paste, and the REPL's `on_edit`
+//! (ESC[200~ … ESC[201~). crossterm parses this into a single `Event::Paste`,
+//! iocraft forwards it as `TerminalEvent::Paste`, and the REPL's `on_edit`
 //! handler decides — matching Claude Code — whether to collapse it into a
 //! compact `[Pasted text #N +M lines]` placeholder (long or multi-line
 //! pastes) or insert it literally (short single-/double-line pastes). On
 //! submit, placeholders expand back to the real text.
 //!
 //! These are human-fidelity PTY tests: they drive `scode` through a real PTY
-//! (Unix pty / Windows ConPTY) and assert against the VT100-rendered screen,
+//! (Unix pty / Windows `ConPTY`) and assert against the VT100-rendered screen,
 //! exactly what a user sees. They guard three real bugs found by hand:
 //!   1. multi-line paste auto-submitting one turn per line,
 //!   2. Windows CR/CRLF pastes losing their line count (no `+N lines`),
@@ -60,7 +60,7 @@ const FOUR_LINES_CR: &str = "line one\rline two\rline three\rline four";
 /// A multi-line paste collapses into a compact `[Pasted text #N +M lines]`
 /// placeholder and does NOT auto-submit one turn per line. This is the core
 /// regression guard for the original bug where each pasted newline arrived as
-/// KeyCode::Enter and submitted a separate turn.
+/// `KeyCode::Enter` and submitted a separate turn.
 #[test]
 fn multiline_paste_shows_placeholder_and_does_not_submit() {
     let env = TestEnv::new("bracketed-paste-lf");
@@ -71,7 +71,7 @@ fn multiline_paste_shows_placeholder_and_does_not_submit() {
     sess.expect("Pasted text #1")
         .expect("paste placeholder should appear in the input box");
 
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     // Four lines => three newlines => "+3 lines".
     assert!(
         screen.contains("[Pasted text #1 +3 lines]"),
@@ -101,7 +101,7 @@ fn multiline_paste_crlf_counts_lines() {
     sess.expect("Pasted text #1")
         .expect("CRLF paste placeholder should appear");
 
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(
         screen.contains("[Pasted text #1 +3 lines]"),
         "expected +3 lines for CRLF paste, screen was:\n{screen}"
@@ -128,7 +128,7 @@ fn multiline_paste_bare_cr_counts_lines() {
     sess.expect("Pasted text #1")
         .expect("CR paste placeholder should appear");
 
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(
         screen.contains("[Pasted text #1 +3 lines]"),
         "expected +3 lines for bare-CR paste, screen was:\n{screen}"
@@ -151,11 +151,11 @@ fn short_single_line_paste_inserts_literally() {
         .expect("send short paste");
 
     sess.expect("hello world").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("short paste should insert literally: {e}\nPTY:\n{screen}");
     });
 
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     assert!(
         !screen.contains("Pasted text #"),
         "short paste must NOT become a placeholder; screen:\n{screen}"
@@ -195,7 +195,7 @@ fn paste_containing_placeholder_string_then_enter_does_not_hang() {
     // itself goes to the backend and is irrelevant to the freeze regression.)
     sess.send("still alive").expect("type after submit");
     sess.expect("still alive").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL frozen after paste+Enter (expansion hang?): {e}\nPTY:\n{screen}");
     });
 
@@ -225,7 +225,7 @@ fn paste_scrollback_expands_with_continuation_indent() {
     // Poll the rendered screen for the expanded text.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains("first_xyz") && screen.contains("second_xyz") {
             // Expansion worked. Verify continuation-line indent: lines
             // containing "second_xyz" / "third_xyz" / "fourth_xyz" must
@@ -247,7 +247,7 @@ fn paste_scrollback_expands_with_continuation_indent() {
         assert!(
             std::time::Instant::now() < deadline,
             "scrollback should show expanded paste text within 10s, screen:\n{}",
-            sess.render(|s| s.contents()),
+            sess.render(common::screen_contents),
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -259,7 +259,7 @@ fn paste_scrollback_expands_with_continuation_indent() {
 
 /// With bracketed paste enabled (VT console input active for the whole REPL
 /// session on the Windows fork), ordinary keyboard typing must still reach
-/// the TextInput and render — proving the shared ANSI parser path delivers
+/// the `TextInput` and render — proving the shared ANSI parser path delivers
 /// plain characters, not just paste sequences.
 #[test]
 fn typing_still_works_while_bracketed_paste_enabled() {
@@ -268,7 +268,7 @@ fn typing_still_works_while_bracketed_paste_enabled() {
 
     sess.send("/exit\r").expect("type and submit /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY:\n{screen}");
     });
     assert_eq!(exit, 0, "clean exit code");

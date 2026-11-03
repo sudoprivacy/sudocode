@@ -272,7 +272,7 @@ fn local_poller_delivers_sub_agent_message_to_parent() {
     let abort_clone = abort.clone();
 
     let _handle = runtime::mailbox::spawn_local_poller(
-        ws.clone(),
+        &ws,
         "team-lead".to_string(),
         abort_clone,
         move |msg| {
@@ -309,7 +309,7 @@ fn local_poller_delivers_in_order_within_a_conversation() {
     let abort_clone = abort.clone();
 
     let _handle = runtime::mailbox::spawn_local_poller(
-        ws.clone(),
+        &ws,
         "team-lead".to_string(),
         abort_clone,
         move |msg| {
@@ -374,7 +374,7 @@ fn local_poller_stops_on_abort() {
     let abort_clone = abort.clone();
 
     let handle = runtime::mailbox::spawn_local_poller(
-        ws.clone(),
+        &ws,
         "team-lead".to_string(),
         abort_clone,
         move |msg| {
@@ -432,7 +432,7 @@ fn full_send_receive_compose_inject_cycle() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("PARITY_SCENARIO:unified_send_roundtrip start the task"),
         16,
         move |prompt| {
@@ -497,7 +497,7 @@ fn mixed_message_then_shutdown_exits_after_message_turn() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("hello"),
         16,
         move |_prompt| {
@@ -769,7 +769,7 @@ fn peer_message_poller_to_compose_roundtrip() {
     let abort_clone = abort.clone();
 
     let _handle = runtime::mailbox::spawn_local_poller(
-        ws.clone(),
+        &ws,
         "team-lead".to_string(),
         abort_clone,
         move |msg| {
@@ -829,7 +829,7 @@ fn poller_compose_multi_turn_integration() {
     let final_text = run_multi_turn_loop_for_test(
         agent_id,
         &ws,
-        abort,
+        &abort,
         String::from("initial task"),
         16,
         move |prompt| {

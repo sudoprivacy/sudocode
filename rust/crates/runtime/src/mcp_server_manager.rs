@@ -594,8 +594,7 @@ fn lifecycle_phase_for_method(method: &str) -> McpLifecyclePhase {
     match method {
         "initialize" => McpLifecyclePhase::InitializeHandshake,
         "tools/list" => McpLifecyclePhase::ToolDiscovery,
-        "resources/list" => McpLifecyclePhase::ResourceDiscovery,
-        "prompts/list" => McpLifecyclePhase::ResourceDiscovery,
+        "resources/list" | "prompts/list" => McpLifecyclePhase::ResourceDiscovery,
         "prompts/get" | "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
         _ => McpLifecyclePhase::ErrorSurfacing,
     }
@@ -622,7 +621,7 @@ struct ToolRoute {
 }
 
 /// Maximum number of spawn+initialize attempts to make against a single MCP
-/// server within one McpServerManager lifetime. Exceeding this trips a sticky
+/// server within one `McpServerManager` lifetime. Exceeding this trips a sticky
 /// `permanent_failure` so a broken plugin MCP server cannot loop-fork.
 pub(crate) const MCP_SPAWN_ATTEMPT_LIMIT: u32 = 2;
 
@@ -633,10 +632,10 @@ struct ManagedMcpServer {
     initialized: bool,
     generation: u64,
     /// Total spawn attempts (including retries) made against this server.
-    /// Capped at MCP_SPAWN_ATTEMPT_LIMIT to short-circuit the spawn loop.
+    /// Capped at `MCP_SPAWN_ATTEMPT_LIMIT` to short-circuit the spawn loop.
     spawn_attempts: u32,
     /// Sticky terminal failure that disables further spawn attempts and is
-    /// returned verbatim on every future request. Set once spawn_attempts
+    /// returned verbatim on every future request. Set once `spawn_attempts`
     /// reaches the cap.
     permanent_failure: Option<String>,
 }
@@ -842,6 +841,7 @@ impl McpServerManager {
     /// Whether this discovered tool's transport shares an initialized session
     /// across independent requests. Metadata controls *permission to overlap*;
     /// this checks actual transport capability, not that metadata.
+    #[must_use]
     pub fn supports_concurrent_tool(&self, name: &str) -> bool {
         self.tool_index
             .get(name)
@@ -1482,7 +1482,7 @@ impl McpServerManager {
         };
 
         if let Some(process) = process.as_mut() {
-            let _ = process.shutdown().await;
+            let () = process.shutdown().await;
         }
 
         Ok(())
@@ -1495,6 +1495,7 @@ impl McpServerManager {
         )
     }
 
+    #[must_use]
     pub fn should_reset_server(error: &McpServerManagerError) -> bool {
         matches!(
             error,
@@ -1535,6 +1536,53 @@ impl McpServerManager {
         }
     }
 
+    async fn spawn_server_process(
+        &mut self,
+        server_name: &str,
+    ) -> Result<(), McpServerManagerError> {
+        let attempt_count = self
+            .servers
+            .get(server_name)
+            .map_or(0, |server| server.spawn_attempts);
+        if attempt_count >= MCP_SPAWN_ATTEMPT_LIMIT {
+            let reason = format!(
+                        "MCP server `{server_name}` exceeded {MCP_SPAWN_ATTEMPT_LIMIT} initialize attempts; refusing to retry spawn"
+                    );
+            if let Some(server) = self.servers.get_mut(server_name) {
+                server.permanent_failure = Some(reason.clone());
+            }
+            return Err(McpServerManagerError::PermanentlyFailed {
+                server_name: server_name.to_string(),
+                reason,
+            });
+        }
+        let bootstrap = {
+            let server = self.server_mut(server_name)?;
+            server.spawn_attempts = server.spawn_attempts.saturating_add(1);
+            server.bootstrap.clone()
+        };
+        let process = match timeout(
+            Duration::from_millis(MCP_INITIALIZE_TIMEOUT_MS),
+            spawn_mcp_connection(&bootstrap),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(McpServerManagerError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "MCP spawn timed out",
+                )));
+            }
+        };
+        let server = self.server_mut(server_name)?;
+        server.generation = server.generation.wrapping_add(1);
+        server.process = Some(process);
+        server.initialized = false;
+
+        Ok(())
+    }
+
     async fn ensure_server_ready(
         &mut self,
         server_name: &str,
@@ -1567,46 +1615,7 @@ impl McpServerManager {
                 })?;
 
             if needs_spawn {
-                let attempt_count = self
-                    .servers
-                    .get(server_name)
-                    .map(|server| server.spawn_attempts)
-                    .unwrap_or(0);
-                if attempt_count >= MCP_SPAWN_ATTEMPT_LIMIT {
-                    let reason = format!(
-                        "MCP server `{server_name}` exceeded {MCP_SPAWN_ATTEMPT_LIMIT} initialize attempts; refusing to retry spawn"
-                    );
-                    if let Some(server) = self.servers.get_mut(server_name) {
-                        server.permanent_failure = Some(reason.clone());
-                    }
-                    return Err(McpServerManagerError::PermanentlyFailed {
-                        server_name: server_name.to_string(),
-                        reason,
-                    });
-                }
-                let bootstrap = {
-                    let server = self.server_mut(server_name)?;
-                    server.spawn_attempts = server.spawn_attempts.saturating_add(1);
-                    server.bootstrap.clone()
-                };
-                let process = match timeout(
-                    Duration::from_millis(MCP_INITIALIZE_TIMEOUT_MS),
-                    spawn_mcp_connection(&bootstrap),
-                )
-                .await
-                {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        return Err(McpServerManagerError::Io(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "MCP spawn timed out",
-                        )));
-                    }
-                };
-                let server = self.server_mut(server_name)?;
-                server.generation = server.generation.wrapping_add(1);
-                server.process = Some(process);
-                server.initialized = false;
+                self.spawn_server_process(server_name).await?;
             }
 
             let needs_initialize = self
@@ -1754,7 +1763,7 @@ mod tests {
     }
 
     fn stdio_lifecycle_manager(failure: &str) -> McpServerManager {
-        let script = r#"
+        let script = r"
 import json, sys
 failure = sys.argv[1]
 methods = []
@@ -1803,7 +1812,7 @@ for line in sys.stdin:
             'isError': False
         }
     print(json.dumps(response), flush=True)
-"#;
+";
         let mut servers = stub_servers();
         let McpServerConfig::Stdio(config) = &mut servers.get_mut("test-server").unwrap().config
         else {
@@ -1893,7 +1902,10 @@ for line in sys.stdin:
             assert_eq!(error.context["method"], method);
             assert!(!error.recoverable);
             assert!(error.error.contains(method), "{}", error.error);
-            assert!(manager.tools_with_server().is_empty());
+            assert_eq!(
+                manager.tools_with_server(),
+                [] as [(std::string::String, std::string::String); 0]
+            );
             if failure.ends_with("-error") {
                 assert_eq!(error.context["jsonrpc_code"], "-32001");
                 assert!(error.error.contains("rejected"));
@@ -1908,7 +1920,10 @@ for line in sys.stdin:
         let mut manager = stdio_lifecycle_manager("initialize-disconnect");
         for _ in 0..3 {
             let report = manager.discover_tools_best_effort().await;
-            assert!(report.tools.is_empty());
+            assert_eq!(
+                report.tools,
+                [] as [crate::mcp_server_manager::ManagedMcpTool; 0]
+            );
             assert_eq!(report.failed_servers.len(), 1);
             let failure = &report.failed_servers[0];
             assert_eq!(failure.phase, McpLifecyclePhase::InitializeHandshake);

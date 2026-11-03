@@ -229,8 +229,7 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         .unwrap_or_default();
     let mut system_tools = Vec::new();
     let mut mcp_tools = Vec::new();
-    for definition in client.request_tool_definitions(&session.messages(), &pre_compact_discovered)
-    {
+    for definition in client.request_tool_definitions(session.messages(), &pre_compact_discovered) {
         let loaded = !definition.defer_loading;
         let tokens = if loaded {
             estimate_serialized_tokens(&definition)
@@ -256,24 +255,7 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         }
     }
 
-    let custom_agent_names: BTreeSet<String> = standard_custom_agent_dirs(cwd)
-        .iter()
-        .flat_map(|dir| load_md_agents(dir))
-        .map(|def| def.name)
-        .collect();
-    let agent_types = available_agent_types(cwd)
-        .iter()
-        .map(|listing| ContextEntry {
-            tokens: estimate_text_tokens(&format_agent_line(listing)),
-            source: if custom_agent_names.contains(&listing.name) {
-                "Custom".to_string()
-            } else {
-                "Built-in".to_string()
-            },
-            name: listing.name.clone(),
-            loaded: true,
-        })
-        .collect();
+    let agent_types = collect_agent_type_usage(cwd);
 
     let memory_files = ProjectContext::discover(cwd, runtime::today_local())
         .map(|context| {
@@ -323,4 +305,25 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         message_tokens: estimate_session_tokens(session),
         message_count: session.messages().len(),
     }
+}
+
+fn collect_agent_type_usage(cwd: &Path) -> Vec<ContextEntry> {
+    let custom_agent_names: BTreeSet<String> = standard_custom_agent_dirs(cwd)
+        .iter()
+        .flat_map(|dir| load_md_agents(dir))
+        .map(|def| def.name)
+        .collect();
+    available_agent_types(cwd)
+        .iter()
+        .map(|listing| ContextEntry {
+            tokens: estimate_text_tokens(&format_agent_line(listing)),
+            source: if custom_agent_names.contains(&listing.name) {
+                "Custom".to_string()
+            } else {
+                "Built-in".to_string()
+            },
+            name: listing.name.clone(),
+            loaded: true,
+        })
+        .collect()
 }

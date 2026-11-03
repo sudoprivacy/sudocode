@@ -12,13 +12,13 @@ use std::{
 use crossterm::style::ContentStyle;
 
 use crate::render::{
-    prompt_style,
     styled_text::{AnsiDecoder, StyledText},
-    text_layout,
+    text_layout, theme,
 };
 
 const NONE: u64 = u64::MAX;
-const HEADER_BYTES: u64 = 32;
+const HEADER_SIZE: usize = 32;
+const HEADER_BYTES: u64 = HEADER_SIZE as u64;
 const MAX_RECORD_BYTES: usize = 32 * 1024;
 const CACHE_BYTES: usize = 512 * 1024;
 const CACHE_ENTRIES: usize = 256;
@@ -178,7 +178,7 @@ impl Transcript {
         }
         self.flush_disk()?;
         self.file.seek(SeekFrom::Start(id))?;
-        let mut header = [0; HEADER_BYTES as usize];
+        let mut header = [0; HEADER_SIZE];
         self.file.read_exact(&mut header)?;
         let field = |offset| {
             u64::from_le_bytes(header[offset..offset + 8].try_into().expect("fixed field"))
@@ -316,7 +316,7 @@ impl Transcript {
         let caption = prefix.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut styled = StyledText::default();
         styled.push(
-            prompt_style(false),
+            theme().prompt_style(false),
             &text_layout::truncate_to_width(&caption, width.saturating_sub(1)),
         );
         let caption = Arc::new(styled);

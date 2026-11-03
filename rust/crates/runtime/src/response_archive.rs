@@ -2,16 +2,17 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
 use telemetry::{ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder};
 
 use crate::fs_backend::FsLock;
 use crate::json::JsonValue;
 use crate::{ConfigError, FsBackend, Session};
+
+mod gzip;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseRecordingConfig {
@@ -66,7 +67,7 @@ impl ResponseRecordingConfig {
 /// This lock never takes the transcript commit barrier.
 pub(crate) struct ResponseArchiveWriter {
     lock: Arc<dyn FsLock>,
-    writes: Mutex<()>,
+    renewal: Mutex<()>,
 }
 
 impl ResponseArchiveWriter {
@@ -97,21 +98,21 @@ impl ResponseArchiveWriter {
         crate::subagent_completion::check_response_storage(fs, transcript)?;
         Ok(Arc::new(Self {
             lock,
-            writes: Mutex::new(()),
+            renewal: Mutex::new(()),
         }))
     }
 
     fn check(&self) -> Result<(), String> {
+        // The backend lease excludes deletion for this Arc's whole lifetime.
+        // Serialize renewals, not independent files' compression or fsyncs.
+        let _guard = self
+            .renewal
+            .lock()
+            .map_err(|_| "response writer poisoned")?;
         if !self.lock.renew().map_err(|error| error.to_string())? {
             return Err("session_writer_lost".into());
         }
         Ok(())
-    }
-
-    fn write(&self) -> Result<MutexGuard<'_, ()>, String> {
-        let guard = self.writes.lock().map_err(|_| "response writer poisoned")?;
-        self.check()?;
-        Ok(guard)
     }
 }
 
@@ -201,7 +202,7 @@ impl ResponseArchive for SessionResponseArchive {
     fn begin(&self, metadata: ResponseCaptureMetadata) -> io::Result<Box<dyn ResponseRecorder>> {
         let writer = self.capture_writer()?;
         self.initialize_budget()?;
-        let write_guard = writer.write().map_err(io::Error::other)?;
+        writer.check().map_err(io::Error::other)?;
         self.fs.create_dir_all(&self.directory.to_string_lossy())?;
         {
             let mut used = self
@@ -225,7 +226,6 @@ impl ResponseArchive for SessionResponseArchive {
         let body_path = self.directory.join(format!("{stem}.sse.gz"));
         let metadata_path = self.directory.join(format!("{stem}.json"));
         self.fs.create_append_log(&body_path.to_string_lossy(), 0)?;
-        drop(write_guard);
         let output = ArchiveWriter {
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
@@ -233,8 +233,8 @@ impl ResponseArchive for SessionResponseArchive {
             used: Arc::clone(&self.used),
             limit: self.config.max_session_bytes,
         };
-        let recording = SessionResponseRecorder {
-            encoder: Some(GzEncoder::new(output, Compression::fast())),
+        let mut recording = SessionResponseRecorder {
+            encoder: None,
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
             metadata_path,
@@ -247,9 +247,12 @@ impl ResponseArchive for SessionResponseArchive {
             finished: false,
         };
         {
-            let _guard = writer.write().map_err(io::Error::other)?;
+            writer.check().map_err(io::Error::other)?;
             recording.write_metadata("recording", false)?;
         }
+        // Keep the compressor's large buffer out of the initial metadata I/O.
+        // Slow storage must not retain one for every pending capture.
+        recording.encoder = Some(gzip::Encoder::new(output)?);
         Ok(Box::new(recording))
     }
 }
@@ -264,18 +267,22 @@ struct ArchiveWriter {
 
 impl Write for ArchiveWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let _guard = self.writer.write().map_err(io::Error::other)?;
-        let mut used = self
-            .used
-            .lock()
-            .map_err(|_| io::Error::other("response budget poisoned"))?;
-        let current = used.unwrap_or(0);
-        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if current.saturating_add(length) > self.limit {
-            return Err(io::Error::other("session_response_budget_exhausted"));
+        self.writer.check().map_err(io::Error::other)?;
+        {
+            let mut used = self
+                .used
+                .lock()
+                .map_err(|_| io::Error::other("response budget poisoned"))?;
+            let current = used.unwrap_or(0);
+            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if current.saturating_add(length) > self.limit {
+                return Err(io::Error::other("session_response_budget_exhausted"));
+            }
+            // Reserve before I/O: an error may have committed these bytes.
+            // Independent response files share this budget, not their I/O.
+            *used = Some(current.saturating_add(length));
         }
         self.fs.append(&self.path.to_string_lossy(), bytes)?;
-        *used = Some(current.saturating_add(length));
         Ok(bytes.len())
     }
 
@@ -285,7 +292,7 @@ impl Write for ArchiveWriter {
 }
 
 struct SessionResponseRecorder {
-    encoder: Option<GzEncoder<ArchiveWriter>>,
+    encoder: Option<gzip::Encoder>,
     fs: Arc<dyn FsBackend>,
     writer: Arc<ResponseArchiveWriter>,
     metadata_path: PathBuf,
@@ -360,14 +367,14 @@ impl ResponseRecorder for SessionResponseRecorder {
             .encoder
             .take()
             .is_some_and(|encoder| match encoder.finish() {
-                Ok(_) => true,
+                Ok(()) => true,
                 Err(error) => {
                     self.error = Some(error.to_string());
                     false
                 }
             });
-        // Serialize the final metadata with deletion, without failing inference.
-        if let Ok(_guard) = self.writer.write() {
+        // Retain the attachment lease through this file's final atomic write.
+        if self.writer.check().is_ok() {
             let _ = self.write_metadata(end.reason, complete);
         }
     }

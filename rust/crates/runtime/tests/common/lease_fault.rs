@@ -51,7 +51,7 @@ pub enum Fault {
 
 /// The longest [`Fault::ReaderRenewHeld`] holds a renewal if the test never
 /// releases it, so a failed test cannot hang on the hold.
-pub const HOLD_CAP: Duration = Duration::from_secs(120);
+pub const HOLD_CAP: Duration = Duration::from_mins(2);
 
 /// How long [`Fault::ReaderRegisterWriteFailsAfterLeaseLoss`] waits after the
 /// failed renewal before failing the write: the worker marks the lease lost on

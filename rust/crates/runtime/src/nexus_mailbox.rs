@@ -1,7 +1,7 @@
 //! Nexus-backed A2A mailbox - the standalone counterpart to the local
 //! [`crate::agent_mailbox`] (`.sudocode-inbox`).
 //!
-//! A message is one framed append to the recipient's replicated DT_STREAM
+//! A message is one framed append to the recipient's replicated `DT_STREAM`
 //! inbox at `/agents/<recipient>/chat-with-me`; under auth-on the node
 //! stamps an unforgeable `from` by the authenticated writer. The wire type
 //! is [`a2a::MailboxEnvelope`] - the A2A SSOT the in-process co-host
@@ -272,8 +272,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_nanos())
         ));
         std::fs::create_dir_all(&dir).unwrap();
         for f in ["ca.pem", "agent.pem", "agent-key.pem"] {
@@ -333,7 +332,7 @@ mod tests {
         let env = MailboxEnvelope::from_bytes(wire).expect("3-field wire compat");
         assert_eq!(env.from, "agent-a");
         assert_eq!(env.body, "hello");
-        assert!(env.kind.is_empty());
+        assert_eq!(env.kind, "");
         assert_eq!(env.timestamp, 0);
     }
 }

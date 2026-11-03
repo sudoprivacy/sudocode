@@ -1,7 +1,15 @@
 //! Exercise the interactive parent → preset → file tools → parent result chain.
 mod common;
+#[path = "support/wire_requests.rs"]
+#[allow(dead_code)]
+mod wire_requests;
 
-use std::{fs, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Write,
+    time::Duration,
+};
 
 use common::TestEnv;
 use serde_json::Value;
@@ -38,6 +46,107 @@ enum Workflow {
 }
 
 #[test]
+fn parallel_agents_preserve_active_staging_and_publish_results() {
+    let env = TestEnv::new_mock("parallel-agent-publication");
+    let evidence = format!(
+        "CHILD_EVIDENCE_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    fs::write(env.workspace_root().join("evidence.txt"), &evidence).unwrap();
+    let store = env.workspace_root().join(".sudocode-agents");
+    fs::create_dir_all(&store).unwrap();
+    let active = store.join("active-upload.tmp");
+    let mut staging = fs::File::create(&active).unwrap();
+    staging.write_all(b"active producer").unwrap();
+
+    let batch: Vec<_> = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("publication-{index}"),
+                "name": "agent_spawn",
+                "input": {
+                    "description": format!("read evidence {index}"),
+                    "subagent_type": "Explore",
+                    "model": "claude-sonnet",
+                    "auth_mode": "api-key",
+                    "run_in_background": false,
+                    "prompt": "PARITY_SCENARIO:subagent_workflow_child Read evidence.txt and return its actual contents.",
+                },
+            })
+        })
+        .collect();
+    let mut parent = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    common::expect_input_line_cleared(&parent, Duration::from_secs(15), "ready");
+    let before = common::turn_status_marker(&parent);
+    let prompt = env.prompt(
+        &format!(
+            "Run these synchronous agents. TOOL_BATCH:{}",
+            serde_json::to_string(&batch).unwrap()
+        ),
+        "tool_concurrency",
+    );
+    parent.send(&format!("{prompt}\r")).unwrap();
+    common::expect_turn_complete_after(
+        &parent,
+        &before,
+        Duration::from_mins(3),
+        "parallel children completed",
+    );
+    parent.send("/exit\r").unwrap();
+    assert_eq!(parent.expect_eof().unwrap(), 0);
+
+    // This producer owns an open staging file throughout the agent launches.
+    // Launch-time directory cleanup must not unlink its in-flight publication.
+    staging.write_all(b" completed").unwrap();
+    drop(staging);
+    let published = store.join("published-upload.json");
+    fs::rename(&active, &published).expect("active staging survives parallel agent launches");
+    assert_eq!(fs::read(&published).unwrap(), b"active producer completed");
+
+    let outputs = manifests(&env);
+    assert_eq!(outputs.len(), 3, "all three children published a manifest");
+    for output in outputs {
+        assert_eq!(output["status"], "completed", "{output}");
+        assert!(output["result"].as_str().unwrap().contains(&evidence));
+        assert!(fs::read_to_string(output["outputFile"].as_str().unwrap())
+            .unwrap()
+            .contains(&evidence));
+    }
+    let mut starts = BTreeSet::new();
+    let mut results = BTreeMap::new();
+    for body in env.captured_message_bodies() {
+        let request: Value = serde_json::from_str(&body).unwrap();
+        for block in wire_requests::request_tool_blocks(&request) {
+            if block["type"] == "tool_use"
+                && tools::canonicalize_tool_name(block["name"].as_str().unwrap()) == "agent_spawn"
+            {
+                starts.insert(block["id"].as_str().unwrap().to_owned());
+            }
+            if block["type"] == "tool_result" {
+                results.insert(block["tool_use_id"].as_str().unwrap().to_owned(), block);
+            }
+        }
+    }
+    assert_eq!(
+        starts.len(),
+        3,
+        "no failed spawn may cause a fourth attempt"
+    );
+    for id in starts {
+        let result = results.get(&id).expect("each child returned to the parent");
+        assert_ne!(result["is_error"], true, "{result}");
+        let output: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+        assert_eq!(output["status"], "completed");
+    }
+}
+
+#[test]
 fn coordinator_does_not_duplicate_completion() {
     let env = TestEnv::new("coordinator-completion");
     let evidence = "COORDINATOR_CHILD_EVIDENCE_7531";
@@ -52,7 +161,7 @@ fn coordinator_does_not_duplicate_completion() {
     common::expect_input_line_cleared(&parent, Duration::from_secs(15), "coordinator ready");
     let prompt = env.prompt("Use agent_spawn with agent Explore and run_in_background true to read evidence.txt and return its exact contents. Finish your turn after spawning, without polling. When the completion arrives, report it verbatim.", "subagent_workflow");
     parent.send(&format!("{prompt}\r")).unwrap();
-    parent.set_default_timeout(Duration::from_secs(180));
+    parent.set_default_timeout(Duration::from_mins(3));
     parent
         .expect(evidence)
         .expect("coordinator must receive actual child evidence");
@@ -96,88 +205,22 @@ fn run_background_verification(workflow: Workflow) {
     common::expect_turn_complete_after(
         &parent,
         &before,
-        Duration::from_secs(180),
+        Duration::from_mins(3),
         "background launch",
     );
     assert_eq!(manifests(&env).len(), 1, "child must actually launch");
-    if !natural {
-        assert_eq!(manifests(&env)[0]["subagentType"], "Verification");
-    } else {
+    if natural {
         eprintln!(
             "Proactive delegation selected {}",
             manifests(&env)[0]["subagentType"]
         );
-    }
-    let before = common::turn_status_marker(&parent);
-    if busy_parent {
-        parent.send("HOLD_PARENT: while CI runs, use bash yourself to run `touch parent-ready; while [ ! -f parent-release ]; do sleep 0.2; done; echo PARENT_WORK_FINISHED`. Then report that command's output.\r").unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(180);
-        while !env.workspace_root().join("parent-ready").exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "parent did not start independent work"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        // Inspect the child during a foreground tool, then dismiss the view.
-        // Escape belongs to the browser and must not cancel that tool/turn.
-        parent.send("\x1b[B").unwrap();
-        common::expect_screen(
-            &parent,
-            |s| s.contains("Enter to view"),
-            Duration::from_secs(30),
-            "background footer selected",
-        );
-        parent.send("\r").unwrap();
-        common::expect_screen(
-            &parent,
-            |s| s.contains("Enter details"),
-            Duration::from_secs(30),
-            "task browser during parent tool",
-        );
-        parent.send("\x1b").unwrap();
-        // The foreground spinner intentionally keeps animating: wait for
-        // browser dismissal and the empty input, not a stationary whole screen.
-        common::expect_screen(
-            &parent,
-            |screen| !screen.contains("Enter details") && common::input_line_of(screen).is_empty(),
-            Duration::from_secs(30),
-            "back to running parent input",
-        );
-        assert!(!parent.render(|s| s.contents()).contains("[Interrupted"));
     } else {
-        parent
-            .send("While CI runs, what is 17 + 25? Answer the number only.\r")
-            .unwrap();
-        common::expect_turn_complete_after(
-            &parent,
-            &before,
-            Duration::from_secs(180),
-            "independent parent work",
-        );
-        assert!(parent.render(|s| s.contents()).contains("42"));
+        assert_eq!(manifests(&env)[0]["subagentType"], "Verification");
     }
+    exercise_parent_work(&env, &mut parent, busy_parent);
     let before = common::turn_status_marker(&parent);
     fs::write(env.workspace_root().join("ci-ready"), "ready").unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(180);
-    loop {
-        let children = manifests(&env);
-        if children.iter().any(|child| child["status"] == "completed") {
-            assert!(
-                children[0]["result"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains(&evidence),
-                "{children:?}"
-            );
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "child did not finish: {children:?}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_for_child_evidence(&env, &evidence);
     if busy_parent {
         assert_eq!(
             common::turn_status_marker(&parent),
@@ -185,7 +228,7 @@ fn run_background_verification(workflow: Workflow) {
             "background completion must not interrupt the parent"
         );
         fs::write(env.workspace_root().join("parent-release"), "ready").unwrap();
-        parent.set_default_timeout(Duration::from_secs(180));
+        parent.set_default_timeout(Duration::from_mins(3));
         parent
             .expect(&evidence)
             .expect("parent must report the queued evidence");
@@ -199,47 +242,21 @@ fn run_background_verification(workflow: Workflow) {
         &parent,
         &before,
         if env.is_live() {
-            Duration::from_secs(180)
+            Duration::from_mins(3)
         } else {
             Duration::from_secs(15)
         },
         "automatic result delivery",
     );
     assert!(
-        common::screen_contains(&parent.render(|s| s.contents()), &evidence),
+        common::screen_contains(&parent.render(common::screen_contents), &evidence),
         "{}",
         common::screen_tail(&parent, 4000)
     );
     parent.send("/exit\r").unwrap();
     assert_eq!(parent.expect_eof().unwrap(), 0);
     if busy_parent {
-        // A fast queued follow-up can scroll the foreground card out of the
-        // viewport between polls. Verify its actual persisted result instead.
-        let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
-            .expect("saved parent transcript");
-        let saved = runtime::Session::load_from_path(&path).unwrap();
-        assert!(
-            saved
-                .messages()
-                .iter()
-                .flat_map(|m| &m.blocks)
-                .any(|block| {
-                    let runtime::ContentBlock::ToolResult {
-                        tool_name, output, ..
-                    } = block
-                    else {
-                        return false;
-                    };
-                    tool_name.eq_ignore_ascii_case("bash")
-                        && serde_json::from_str::<Value>(output).is_ok_and(|result| {
-                            result["exit_code"] == 0
-                                && result["stdout"]
-                                    .as_str()
-                                    .is_some_and(|text| text.trim() == "PARENT_WORK_FINISHED")
-                        })
-                }),
-            "foreground tool must finish normally after task view dismissal"
-        );
+        assert_foreground_completion(&env);
     }
     assert_parent_prefix_stable(&env);
 }
@@ -333,7 +350,7 @@ fn explicitly_collected_result_does_not_trigger_another_turn() {
     let before = common::turn_status_marker(&parent);
     let prompt = env.prompt("COLLECT_RESULT: Use agent_spawn with agent Verification and run_in_background true to run `while [ ! -f ci-ready ]; do sleep 0.2; done; cat ci-result.txt` in bash. Then explicitly use pid_output with block true to retrieve its result, and report it verbatim.", "subagent_workflow");
     parent.send(&format!("{prompt}\r")).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    let deadline = std::time::Instant::now() + Duration::from_mins(3);
     while manifests(&env).is_empty() {
         assert!(std::time::Instant::now() < deadline, "child did not start");
         std::thread::sleep(Duration::from_millis(100));
@@ -342,7 +359,7 @@ fn explicitly_collected_result_does_not_trigger_another_turn() {
     common::expect_turn_complete_after(
         &parent,
         &before,
-        Duration::from_secs(180),
+        Duration::from_mins(3),
         "explicit result collection",
     );
     // Results are append-only transcript output and may already have scrolled
@@ -357,12 +374,7 @@ fn explicitly_collected_result_does_not_trigger_another_turn() {
     parent
         .send("While CI runs, what is 17 + 25? Answer the number only.\r")
         .unwrap();
-    common::expect_turn_complete_after(
-        &parent,
-        &before,
-        Duration::from_secs(180),
-        "next user turn",
-    );
+    common::expect_turn_complete_after(&parent, &before, Duration::from_mins(3), "next user turn");
     parent.send("/exit\r").unwrap();
     assert_eq!(parent.expect_eof().unwrap(), 0);
     let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
@@ -446,7 +458,7 @@ fn resumed_explore_returns_file_evidence() {
     common::expect_turn_complete_after(
         &parent,
         &before,
-        Duration::from_secs(240),
+        Duration::from_mins(4),
         "resumed Explore result",
     );
     let children = manifests(&env);
@@ -463,10 +475,116 @@ fn resumed_explore_returns_file_evidence() {
         "{child}"
     );
     assert!(
-        common::screen_contains(&parent.render(|s| s.contents()), &evidence),
+        common::screen_contains(&parent.render(common::screen_contents), &evidence),
         "{}",
         common::screen_tail(&parent, 4000)
     );
     parent.send("/exit\r").unwrap();
     assert_eq!(parent.expect_eof().unwrap(), 0);
+}
+
+fn exercise_parent_work(env: &TestEnv, parent: &mut pty_expect::PtySession, busy_parent: bool) {
+    let before = common::turn_status_marker(parent);
+    if busy_parent {
+        parent.send("HOLD_PARENT: while CI runs, use bash yourself to run `touch parent-ready; while [ ! -f parent-release ]; do sleep 0.2; done; echo PARENT_WORK_FINISHED`. Then report that command's output.\r").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_mins(3);
+        while !env.workspace_root().join("parent-ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent did not start independent work"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Inspect the child during a foreground tool, then dismiss the view.
+        // Escape belongs to the browser and must not cancel that tool/turn.
+        parent.send("\x1b[B").unwrap();
+        common::expect_screen(
+            parent,
+            |s| s.contains("Enter to view"),
+            Duration::from_secs(30),
+            "background footer selected",
+        );
+        parent.send("\r").unwrap();
+        common::expect_screen(
+            parent,
+            |s| s.contains("Enter details"),
+            Duration::from_secs(30),
+            "task browser during parent tool",
+        );
+        parent.send("\x1b").unwrap();
+        // The foreground spinner intentionally keeps animating: wait for
+        // browser dismissal and the empty input, not a stationary whole screen.
+        common::expect_screen(
+            parent,
+            |screen| !screen.contains("Enter details") && common::input_line_of(screen).is_empty(),
+            Duration::from_secs(30),
+            "back to running parent input",
+        );
+        assert!(!parent
+            .render(common::screen_contents)
+            .contains("[Interrupted"));
+    } else {
+        parent
+            .send("While CI runs, what is 17 + 25? Answer the number only.\r")
+            .unwrap();
+        common::expect_turn_complete_after(
+            parent,
+            &before,
+            Duration::from_mins(3),
+            "independent parent work",
+        );
+        assert!(parent.render(common::screen_contents).contains("42"));
+    }
+}
+
+fn assert_foreground_completion(env: &TestEnv) {
+    // A fast queued follow-up can scroll the foreground card out of the
+    // viewport between polls. Verify its actual persisted result instead.
+    let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
+        .expect("saved parent transcript");
+    let saved = runtime::Session::load_from_path(&path).unwrap();
+    assert!(
+        saved
+            .messages()
+            .iter()
+            .flat_map(|m| &m.blocks)
+            .any(|block| {
+                let runtime::ContentBlock::ToolResult {
+                    tool_name, output, ..
+                } = block
+                else {
+                    return false;
+                };
+                tool_name.eq_ignore_ascii_case("bash")
+                    && serde_json::from_str::<Value>(output).is_ok_and(|result| {
+                        result["exit_code"] == 0
+                            && result["stdout"]
+                                .as_str()
+                                .is_some_and(|text| text.trim() == "PARENT_WORK_FINISHED")
+                    })
+            }),
+        "foreground tool must finish normally after task view dismissal"
+    );
+}
+
+fn wait_for_child_evidence(env: &TestEnv, evidence: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_mins(3);
+    loop {
+        let children = manifests(env);
+        if children.iter().any(|child| child["status"] == "completed") {
+            assert!(
+                children[0]["result"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(evidence),
+                "{children:?}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child did not finish: {children:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

@@ -54,7 +54,7 @@ impl std::fmt::Debug for McpWsConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpWsConnection")
             .field("closed", &self.closed.load(Ordering::Relaxed))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -112,7 +112,7 @@ impl McpWsConnection {
                             break;
                         }
                     }
-                    Ok(Message::Close(_)) => {
+                    Ok(Message::Close(_)) | Err(_) => {
                         closed_task.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -122,13 +122,7 @@ impl McpWsConnection {
                         | Message::Pong(_)
                         | Message::Binary(_)
                         | Message::Frame(_),
-                    ) => {
-                        continue;
-                    }
-                    Err(_) => {
-                        closed_task.store(true, Ordering::Relaxed);
-                        break;
-                    }
+                    ) => {}
                 }
             }
             closed_task.store(true, Ordering::Relaxed);

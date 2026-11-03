@@ -18,8 +18,6 @@ use common::TestEnv;
 #[cfg(windows)]
 #[test]
 fn windows_verbatim_paths_read_the_same_file() {
-    use runtime::{ContentBlock, SessionStore};
-
     // Feed every spelling through the CLI's tool loop as an exact fixture.
     // The assertion covers Windows path handling in the VFS and transcript.
     let env = TestEnv::new_mock("verbatim-file-paths");
@@ -60,10 +58,8 @@ fn windows_verbatim_paths_read_the_same_file() {
                 })
             })
             .collect();
-        prompt.push_str(&format!(
-            " TOOL_BATCH:{}",
-            serde_json::to_string(&calls).unwrap()
-        ));
+        prompt.push_str(" TOOL_BATCH:");
+        prompt.push_str(&serde_json::to_string(&calls).unwrap());
     }
     let mut sess = env.spawn_with_env(
         &[
@@ -89,13 +85,20 @@ fn windows_verbatim_paths_read_the_same_file() {
     common::expect_input_line(&sess, "/exit", common::DEFAULT_TIMEOUT, "exit input");
     sess.send("\r").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);
-    let saved = SessionStore::from_cwd(env.workspace_root())
+    assert_exact_path_results(env.workspace_root(), &paths, &nonce);
+}
+
+#[cfg(windows)]
+fn assert_exact_path_results(root: &std::path::Path, paths: &[String], nonce: &str) {
+    use runtime::{ContentBlock, SessionStore};
+
+    let saved = SessionStore::from_cwd(root)
         .unwrap()
         .load_session("latest")
         .unwrap()
         .session;
     let blocks: Vec<_> = saved.messages().iter().flat_map(|m| &m.blocks).collect();
-    for path in &paths {
+    for path in paths {
         let id = blocks
             .iter()
             .find_map(|block| match block {
@@ -120,7 +123,7 @@ fn windows_verbatim_paths_read_the_same_file() {
             .expect("every requested read must persist its result");
         assert!(!result.1, "read failed for {path:?}: {}", result.0);
         assert!(
-            result.0.contains(&nonce),
+            result.0.contains(nonce),
             "file contents missing for {path:?}"
         );
     }
@@ -131,7 +134,7 @@ fn windows_verbatim_paths_read_the_same_file() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Write a file, verify it exists on disk with correct content.
-/// Agent trigger: model must select write_file tool.
+/// Agent trigger: model must select `write_file` tool.
 #[test]
 fn write_then_read_back() {
     let env = TestEnv::new("write-read");
@@ -188,7 +191,7 @@ fn write_then_read_back() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Pre-create file → edit (alpha→omega) → verify on disk.
-/// Agent trigger: model must select edit_file tool.
+/// Agent trigger: model must select `edit_file` tool.
 #[test]
 fn edit_then_verify_on_disk() {
     let env = TestEnv::new("edit-verify");
@@ -253,7 +256,7 @@ fn edit_then_verify_on_disk() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Create files → glob to discover → grep to find content.
-/// Agent trigger: model must select grep_search (at minimum).
+/// Agent trigger: model must select `grep_search` (at minimum).
 #[test]
 fn glob_then_grep_discovery() {
     let env = TestEnv::new("glob-grep");
@@ -287,7 +290,7 @@ fn glob_then_grep_discovery() {
 
     sess.set_default_timeout(common::LIVE_TURN_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("glob-grep scode should exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "glob-grep should exit 0; got {exit}");

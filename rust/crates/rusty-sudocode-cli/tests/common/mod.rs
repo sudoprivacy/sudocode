@@ -1193,12 +1193,6 @@ fn spawn_binary_with_workspace(
         shell_quote("scode-test@example.com")
     )
     .unwrap();
-    // Default to sync REPL for tests — the async REPL doesn't reprint `❯`
-    // after each turn (the prompt is persistent from the input thread), which
-    // breaks tests that `expect("❯")` to detect turn completion. Tests that
-    // want async mode set SUDOCODE_INTERRUPT_QUEUE_MODE explicitly in
-    // `env_vars`, which appears later and overrides this default.
-    cmd.push_str(" SUDOCODE_INTERRUPT_QUEUE_MODE=off");
     // Scripted text pastes must not attach an image from the host clipboard.
     // The documented clipboard source treats a missing image as empty. Image
     // paste journeys override this default in `env_vars` below.

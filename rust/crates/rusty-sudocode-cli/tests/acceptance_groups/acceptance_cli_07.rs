@@ -32,6 +32,9 @@ mod pty_input_batch;
 #[path = "../pty_model_discovery.rs"]
 mod pty_model_discovery;
 
+#[path = "../pty_peer_crash_redelivery.rs"]
+mod pty_peer_crash_redelivery;
+
 #[path = "../pty_permission_prompt.rs"]
 mod pty_permission_prompt;
 
@@ -43,9 +46,6 @@ mod pty_repl_iocraft_features;
 
 #[path = "../pty_sleep.rs"]
 mod pty_sleep;
-
-#[path = "../pty_sync_repl_crash_redelivery.rs"]
-mod pty_sync_repl_crash_redelivery;
 
 #[path = "../pty_tool_history.rs"]
 mod pty_tool_history;

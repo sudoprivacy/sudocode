@@ -37,16 +37,25 @@ fn tab_completion_shows_slash_commands() {
     let env = TestEnv::new("tab-complete");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "REPL input ready");
 
-    // Type partial command then Tab.
+    // Type a partial command, wait for the editor to show it, then Tab.
     sess.send("/mod").expect("type partial command");
-    std::thread::sleep(Duration::from_millis(100));
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/mod",
+        common::DEFAULT_TIMEOUT,
+        "partial command reached the editor",
+    );
     sess.send("\t").expect("send Tab");
 
-    // Completion list should show /model.
-    sess.expect("(?i)model")
-        .expect("tab completion should suggest /model");
+    // Tab completes the input to the first matching command.
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/model",
+        common::DEFAULT_TIMEOUT,
+        "tab completion should complete /mod to /model",
+    );
 
     // Clean exit.
     sess.send_ctrl('c').expect("cancel");

@@ -44,9 +44,6 @@ mod pty_resume;
 #[path = "../pty_smoke.rs"]
 mod pty_smoke;
 
-#[path = "../pty_sync_repl_receive.rs"]
-mod pty_sync_repl_receive;
-
 #[path = "../pty_tool_pause.rs"]
 mod pty_tool_pause;
 

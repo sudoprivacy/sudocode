@@ -139,7 +139,7 @@ fn assert_tls_refusal(host: &str, trusted: bool, cause: &str) {
     let ca = if trusted { &gateway.ca } else { &unrelated };
     let prompt = env.prompt("Compute two plus two.", "single_turn_text");
     let mut cli = env.spawn_with_env(
-        &["-p", &prompt],
+        &[],
         &[
             ("SSL_CERT_FILE", ca.to_str().unwrap()),
             ("SSL_CERT_DIR", ""),
@@ -147,6 +147,10 @@ fn assert_tls_refusal(host: &str, trusted: bool, cause: &str) {
             ("no_proxy", "*"),
         ],
     );
+    // Consume initial diagnostics before the actual foreground model request.
+    cli.expect("❯").expect("HTTPS refusal fixture input prompt");
+    cli.send_line(&prompt)
+        .expect("submit the TLS model request");
     cli.expect(cause)
         .expect("the actual certificate verification failure must be visible");
     assert_eq!(

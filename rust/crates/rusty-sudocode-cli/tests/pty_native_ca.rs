@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
 use serde_json::Value;
@@ -82,6 +82,9 @@ impl Drop for HttpsGateway {
 
 fn write_certificates(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "SudoCode fixture CA");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let ca_key = KeyPair::generate().unwrap();

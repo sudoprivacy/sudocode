@@ -59,7 +59,7 @@ against the release checksum manifest. To inspect it first, download
 | Platform | Release architectures | Installation options |
 | --- | --- | --- |
 | macOS | Apple silicon, Intel | Shell installer or release archive |
-| Linux | ARM64, x64 | Shell installer or release archive; [Debian/Ubuntu package](docs/linux-deb-install.md) for x64 |
+| Linux | ARM64, x64 | Shell installer, release archive, or [Debian/Ubuntu package](docs/linux-deb-install.md) |
 | Windows | ARM64, x64 | Extract the matching ZIP and add its directory to `PATH` |
 
 Downloads are on [GitHub Releases](https://github.com/sudoprivacy/sudocode/releases/latest).

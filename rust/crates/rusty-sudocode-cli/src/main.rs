@@ -4992,6 +4992,17 @@ impl LiveCli {
                         "is_error": is_error,
                     }));
                 }
+                EngineEvent::HostContextRequest { id } => {
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::HostContextAnswer {
+                            id: *id,
+                            context: Err(
+                                "No host context provider is configured for the terminal renderer"
+                                    .into(),
+                            ),
+                        })?;
+                }
                 EngineEvent::PromptCache(event) => {
                     outcome.prompt_cache_events.push(serde_json::json!({
                         "unexpected": event.unexpected,
@@ -6141,6 +6152,24 @@ impl LiveCli {
                     ));
                 } else {
                     eprintln!("queue is only available in the interactive REPL");
+                }
+                Ok(())
+            }
+            // Persisted like any setting, and applied to the running session.
+            "autoCompactEnabled" => {
+                let is_enabled = match value.trim().to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        eprintln!("Error: setting requires true or false");
+                        return Ok(());
+                    }
+                };
+                match self.lifecycle.set_auto_compaction(is_enabled) {
+                    Ok(()) => {
+                        self.out_println(format!("{DIM}autoCompactEnabled = {is_enabled}{RESET}"));
+                    }
+                    Err(err) => eprintln!("Error: {err}"),
                 }
                 Ok(())
             }

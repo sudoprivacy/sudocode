@@ -292,6 +292,10 @@ pub struct TurnComplete {
 /// — `PartialEq` is all any consumer (tests included) needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    /// Resolve caller-owned context at execution time, including queued turns.
+    HostContextRequest {
+        id: RequestId,
+    },
     InputState(InputState),
     /// Persisted into this turn, rather than merely accepted by its input channel.
     InputCommitted(InputView),
@@ -455,6 +459,11 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    /// Answer the matching host-context request. Failure forbids a stale turn.
+    HostContextAnswer {
+        id: RequestId,
+        context: Result<String, String>,
+    },
     /// Read current runtime metadata without starting or interrupting a turn.
     /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
     RuntimeStatus {

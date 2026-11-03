@@ -371,6 +371,15 @@ impl ColorTheme {
         }
     }
     pub(super) fn is_light_background() -> bool {
+        // An explicit `theme` wins over detection, for terminals that answer
+        // neither the palette query nor COLORFGBG.
+        let configured = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| runtime::ConfigLoader::default_for(cwd).load().ok())
+            .and_then(|config| config.light_theme());
+        if let Some(is_light) = configured {
+            return is_light;
+        }
         if let Some(background) = terminal_palette::background() {
             return terminal_palette::is_light(background);
         }

@@ -4471,6 +4471,7 @@ dependencies = [
  "shell-words",
  "sudo-contracts",
  "telemetry",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tonic 0.14.6",

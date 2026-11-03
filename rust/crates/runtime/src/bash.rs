@@ -3,7 +3,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use command_group::{AsyncCommandGroup, CommandGroup};
+use command_group::CommandGroup;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
@@ -16,6 +16,9 @@ use crate::sandbox::{
 };
 use crate::workspace_root::current_workspace_root;
 use crate::ConfigLoader;
+
+mod capture;
+use capture::spawn_captured_shell;
 
 /// Keep shell lifetime under the engine's cancellation and process-tree control.
 #[must_use]
@@ -619,17 +622,9 @@ async fn execute_bash_async(
     // Detect and emit ship provenance for git push operations
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    command.kill_on_drop(true);
+    let command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = shell_process_group(command.group()).spawn()?;
-    let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
+    let (mut child, mut stdout_pipe, mut stderr_pipe) = spawn_captured_shell(command)?;
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout_sleep);
     let abort_wait = async {
@@ -777,16 +772,9 @@ async fn execute_bash_streaming(
 
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.kill_on_drop(true);
-
+    let command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = shell_process_group(command.group()).spawn()?;
-
-    let stdout = child.inner().stdout.take().expect("stdout piped");
-    let stderr = child.inner().stderr.take().expect("stderr piped");
+    let (mut child, stdout, stderr) = spawn_captured_shell(command)?;
 
     let mut stdout_reader = tokio::io::BufReader::new(stdout);
     let mut stderr_reader = tokio::io::BufReader::new(stderr);

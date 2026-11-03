@@ -63,14 +63,17 @@ telemetry = { path = "../telemetry" }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 tracing = "0.1"
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 tower-http = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["poll", "process", "signal"] }
+nix = { version = "0.29", features = ["fs", "poll", "process", "signal"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tempfile = "3"
 
 [dev-dependencies]
 backends = { workspace = true }

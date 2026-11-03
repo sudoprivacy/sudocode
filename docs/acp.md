@@ -402,6 +402,57 @@ cleanup. The join includes the worker's lock-release attempts; a failed remote
 unlock can still require backend TTL recovery. This changes no lease, cursor,
 delivery acknowledgement or retry policy.
 
+### Execution-time host context
+
+`initialize` advertises `_meta.sudocode.hostContext = {"version":1}`. A trusted
+controller can require it for one session by supplying the same `hostContext`
+object in `session/new` or `session/load`. Absent means the existing fixed prompt
+behavior. Unsupported versions and malformed values are rejected.
+
+Before each actual model turn, including automatically resumed queued inputs,
+the engine emits a request over its existing command/event boundary. ACP maps it
+to `_sudocode/session/host_context` with `{"sessionId":"..."}`. The controller
+returns `{"appendSystemPrompt":"exact current context"}`. The controller owns
+source selection and authorization; the model cannot select a provider or grant
+access through this request. This interface performs no model summarization.
+
+The engine replaces only the caller's appended prompt and preserves the existing
+session, history, model, memory mode and execution policy. Byte-identical content
+does not rebuild the runtime. A failed, disconnected, malformed, empty or timed
+out response fails the turn before model work; it never falls back to a stale
+append. The provider has a 30-second response budget and cancellation releases
+its pending request. Slash and shell management commands do not call the provider.
+Host context uses the same request ID allocator, cancellation lock and request
+lease as permissions and questions. It stays queryable as foreground `running`
+while waiting for the machine response; only human prompts claim `awaiting_input`.
+An answer for a cancelled request cannot satisfy a later turn's request.
+The question bridge is installed after context and image preparation, so runtime
+rebuilding preserves interactive questions and their human-input status.
+CLI and managed cohost sessions use this same execution boundary. A managed
+runtime opens once through its controller; restoration uses
+`managed_agent.start_session_v1` with its durable session ID. Context refresh does
+not require reopening the runtime.
+The cohost mailbox acceptance enables the provider when opening a fresh managed
+instance, resolves two different contexts, answers a question after each refresh,
+and checks both Nexus process state and ACP status against captured model requests.
+Context stays fixed during a turn, including in-turn steering. The following
+turn resolves anew. The provider mode is transport state, so controllers must
+negotiate it again when restoring a session.
+
+The shared native release profile also drives the actual CLI with a pinned Sudograph
+compiler installed in a dedicated Python environment. Two turns around a model
+edit must receive the exact compiled context for their respective revisions;
+the graph must expose the same new revision. Captured provider requests must
+retain user history without copying context into user messages, and a synthetic
+host denial must prevent another model request. The loopback provider returns
+fixed responses: this checks the compiler/engine contract, not model reasoning,
+production host authorization or Sudowork's UI. Evidence retains the executable
+checksum, compiler identity, revisions, request bodies and ACP diagnostics.
+`e2e/compiler-context/source.json` owns the compiler revision for both local and
+complementary native CI acceptance. `e2e/compiler-context/run.py` runs the same
+check locally with engine and evidence-directory arguments; an optional existing
+source checkout must match that clean pinned revision. It does not rebuild Rust.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

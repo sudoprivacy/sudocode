@@ -113,14 +113,31 @@ def workspace_nextest_options(output, grouped):
     return options
 
 
+def committed_git(root, *arguments):
+    """Inspect this checkout independently of caller Git bindings."""
+    return subprocess.check_output(
+        ["git", *arguments], cwd=root,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        stderr=subprocess.PIPE)
+
+
 def committed_input_paths(root, base):
     """Read this checkout's committed inputs independently of caller Git bindings."""
     if not base:
         raise ValueError("No committed base")
-    return subprocess.check_output(
-        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
-        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-        stderr=subprocess.PIPE).decode().split("\0")[:-1]
+    return committed_git(root, "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD").decode().split("\0")[:-1]
+
+
+def compiler_context_driver_present(root):
+    """Permit genuine older source, but refuse removal of an introduced journey."""
+    relative = "e2e/compiler-context/run.py"
+    if (root / relative).is_file():
+        return True
+    if committed_git(root, "rev-parse", "--is-shallow-repository").strip() != b"false":
+        raise RuntimeError("Cannot prove historical compiler-driver absence from shallow Git history")
+    if committed_git(root, "log", "-1", "--format=%H", "HEAD", "--", relative).strip():
+        raise RuntimeError("Required compiler context acceptance driver is missing from this source")
+    return False
 
 
 def changed_cli_test_targets(root, base):
@@ -520,6 +537,12 @@ def run(name, root, output, base, execute):
         with stable_performance_power(output):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                     "--report", str(output / "startup.json"))
+        if compiler_context_driver_present(root):
+            command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
+                    "--directory", str(output / "compiler-context"))
+        else:
+            print("This historical source predates the host-context compiler driver; "
+                  "its existing native release checks remain required.", flush=True)
     elif name == "native-services":
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
@@ -631,7 +654,7 @@ def native_guard_files():
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/publication_acceptance.py": "5667fdfa6197ff362299d6f7ee59fc6930ec28e88aabec4d15eeba641aa03f5e",
-        "e2e/local-acceptance/release_acceptance.py": "16798841782cf0044d5d37a3d4238709451e54d5ff5dc4e047dc709f5b7b266c",
+        "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/run.py": "00c48f7d34d774423b63dcefad7984032fdad8d962858c347d8ac9004e035a26",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
@@ -677,7 +700,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "3b54077f8ef509cd0b886ae5d33cd8168334503841d31fcd790b54eedb5d0654":
+    if actual_scope != "6353d4b13ab2a119e502dc0748a8b01479860223027b17bcb44cc82ea3619f54":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -690,7 +713,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "840594ba60ec7a92ccfc784451fbd0b9ef391eb3492855974b7eefb17b5db9b4"
+    expected = "7bf79728e2ec8d1115fb357ead698f0b24ab9bbb8bda6c3972fce89d188bafbf"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

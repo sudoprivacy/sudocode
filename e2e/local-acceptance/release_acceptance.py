@@ -260,6 +260,76 @@ fn nonignored_case_must_not_run() { panic!("resize widened its ignored-only sele
             "scope": "Git/Cargo/process enforcement only; installer/npm acquisition is controlled, no product journey credit."}
 
 
+def compiler_contract(profiles, root, output, execute):
+    """Prove required compiler dispatch/artifact identity with actual child exits.
+
+    This controls the compiler boundary, not the product compiler journey.
+    The selected real source separately installs the pinned Sudograph compiler.
+    """
+    scripts = root / "e2e/compiler-context"
+    scripts.mkdir(parents=True)
+    driver = scripts / "run.py"
+    driver.write_text('''import argparse, hashlib, json, subprocess
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('--engine', type=Path, required=True)
+p.add_argument('--directory', type=Path, required=True)
+a = p.parse_args()
+actual = subprocess.check_output([str(a.engine)], text=True).strip()
+assert actual == 'debug=false,flavor=normal', actual
+a.directory.mkdir(parents=True)
+(a.directory / 'native-child.json').write_text(json.dumps({
+    'actual': actual, 'engine_sha256': hashlib.sha256(a.engine.read_bytes()).hexdigest()}))
+''', encoding="utf-8")
+    records = profiles.run("native-release", root, output / "compiler", "fixture-base", execute)
+    assert len(records) == 4, "The installed-compiler boundary must run after all release checks"
+    binary = output / "compiler" / ("scode.exe" if os.name == "nt" else "scode")
+    evidence = json.loads((output / "compiler/compiler-context/native-child.json").read_text(encoding="utf-8"))
+    assert evidence["engine_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert "e2e/compiler-context/run.py" in records[-1]["command"]
+    driver.write_text(driver.read_text(encoding="utf-8") + "\nraise SystemExit(17)\n", encoding="utf-8")
+    try:
+        profiles.run("native-release", root, output / "compiler-failure", "fixture-base", execute)
+        raise AssertionError("A failed compiler contract was accepted")
+    except RuntimeError:
+        failed = json.loads((output / "compiler-failure/003.command.json").read_text(encoding="utf-8"))
+        assert failed["exit_code"] == 17, failed
+        assert not (output / "compiler-failure/004.log").exists()
+    execute(["git", "add", "e2e/compiler-context/run.py"], root, output / "compiler-history-add.log")
+    execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-m", "Introduce required compiler journey"],
+            root, output / "compiler-history-commit.log")
+    driver.unlink()
+    try:
+        profiles.run("native-release", root, output / "compiler-missing", "fixture-base", execute)
+        raise AssertionError("Deleting a required compiler journey silently skipped acceptance")
+    except RuntimeError as error:
+        assert "Required compiler context acceptance driver is missing" in str(error), error
+        assert not (output / "compiler-missing/003.log").exists()
+    execute(["git", "add", "-u", "e2e/compiler-context/run.py"], root, output / "compiler-delete-add.log")
+    execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-m", "Remove introduced compiler journey"],
+            root, output / "compiler-delete-commit.log")
+    shallow = output / "shallow-source"
+    execute(["git", "clone", "--depth=1", root.resolve().as_uri(), str(shallow)],
+            root, output / "compiler-shallow-clone.log")
+    previous_target = os.environ["CARGO_TARGET_DIR"]
+    os.environ["CARGO_TARGET_DIR"] = str(output / "shallow-target")
+    try:
+        try:
+            profiles.run("native-release", shallow, output / "compiler-shallow", "fixture-base", execute)
+            raise AssertionError("Shallow history falsely proved a source predates the required journey")
+        except RuntimeError as error:
+            assert "shallow Git history" in str(error), error
+            assert not (output / "compiler-shallow/003.log").exists()
+    finally:
+        os.environ["CARGO_TARGET_DIR"] = previous_target
+    return {"commands": records, "failed_compiler_exit": failed["exit_code"],
+            "introduced_driver_removal_refused": True,
+            "shallow_history_absence_not_treated_as_proof": True,
+            "scope": "Native executor/CLI artifact boundary only; not product compiler coverage"}
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     profiles = load("release_profiles", SOURCE / ".github/local-acceptance/checks.py")
@@ -347,7 +417,13 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
     def cargo(*args, name):
         return execute(["cargo", *args], rust, output / (name + ".log"))
 
-    cargo("generate-lockfile", name="lockfile")
+    execute(["git", "init", "--initial-branch=main"], root, output / "source-history-init.log")
+    # Git-derived controls need the same complete, locked Cargo inputs.
+    cargo("generate-lockfile", "--offline", name="lockfile")
+    execute(["git", "add", "rust", "e2e/startup"], root, output / "source-history-add.log")
+    execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-m", "Historical source without compiler journey"],
+            root, output / "source-history-commit.log")
     cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
           "--no-run", "--message-format=json-render-diagnostics", name="workspace-driver")
     artifacts = [json.loads(line) for line in (output / "workspace-driver.log").read_text(encoding="utf-8").splitlines()
@@ -390,6 +466,7 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
         assert "debug=true,flavor=dev" in (output / "wrong-artifact.log").read_text(encoding="utf-8")
     os.environ["CARGO_TARGET_DIR"] = str(target)
     try:
+        compiler = compiler_contract(profiles, root, output, execute)
         services = service_graph(profiles, root, output, target, execute, driver)
         resize = resize_graph(profiles, root, output, target, execute)
     finally:
@@ -401,6 +478,7 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
     (output / "result.json").write_text(json.dumps({
         "status": "PASS", "commands": commands, "release_sha256": digest,
         "color_environment_commands": color_records,
+        "compiler_contract": compiler,
         "service_graph": services,
         "resize_graph": resize,
         "driver_sha256": before[1], "startup": startup_report,

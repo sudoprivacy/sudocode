@@ -200,6 +200,23 @@ actual unload before resume and zero extra resume requests. It uses the same
 private fake provider and preserves the existing lifecycle deadlines and
 request counts; it does not qualify a production installation or new machine.
 
+The isolated real-Node fixture can also exercise the one-command installation.
+Alongside its pinned scode/daemon inputs, set `NEXUS_OPERATOR_BIN`,
+`NEXUS_OPERATOR_SHA256`, `NEXUS_OPERATOR_SOURCE`, `CODEX_ENROLLMENT_TEST_BIN`
+and `CODEX_ENROLLMENT_PACKAGE_ROOT`, then run
+`CODEX_ENROLLMENT_INSTALL_ENTRY=1 npm run test:native` after creating the clean
+source-bound archive. Windows also supplies `CODEX_ENROLLMENT_DRIVER` as JSON
+argv for the existing ConPTY driver. This selects the same idle,
+cancelled-resume and completed-resume journeys, installs one private `codex`
+command (`codex.ps1` on Windows), and launches every TUI through that command
+with the human-review flags. Actual enrollment, MCP send/receive, identity,
+history, request-count and retirement assertions remain in the same fixture.
+The first frontend uses the daemon started by installation, without a restart
+to pick up registration. This installation variant is separate from the
+unchanged cold-daemon and legacy-import cases; it does not modify a live user
+home or certify a production migration. A setup result alone still reports
+`a2aJourneyVerified: false`.
+
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:

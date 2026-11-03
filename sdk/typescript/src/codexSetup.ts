@@ -146,8 +146,11 @@ export async function installCodexMcp(file:string,entry:string,target:string):Pr
       // registration has no trigger and does not start the task.
       await step('ownerTaskRegistration',owner.installationArgv);
     }
-    const native=await step('officialNativePreparation',plan.nativePreparationArgv);
-    if(JSON.parse(native.stdout).status!=='running')throw new Error('Official native preparation did not report running');
+    await step('officialNativePreparation',plan.nativePreparationArgv);
+    // Start reports an action (for example "started"); version reads whether
+    // the selected default daemon is actually running after that action.
+    const native=await step('officialNativeReadback',[...plan.native.codexArgv,'app-server','daemon','version']);
+    if(JSON.parse(native.stdout).status!=='running')throw new Error('Official native daemon readback did not report running');
     unchanged();
     const current=await registration(plan.native);
     if(current!==undefined && !matchesRegistration(current,file,entry))throw new Error('MCP registration changed during preparation; independent configuration is preserved');

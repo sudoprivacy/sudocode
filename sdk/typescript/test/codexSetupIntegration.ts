@@ -53,6 +53,7 @@ async function main():Promise<void>{
     assert.equal(report.a2aJourneyVerified,false);assert.equal(report.currentTerminal,'not inferred');
     const journal=JSON.parse(fs.readFileSync(report.journal,'utf8'));
     assert.equal(journal.phase,'installed');assert.equal(journal.inFlight,undefined);
+    assert(journal.completed.includes('officialNativeReadback'));
     assert(Buffer.from(journal.backup.bytes,'base64').equals(before));
     const args=['resume','original-id','a prompt with spaces','semi;colon'];
     const launch=windows
@@ -90,13 +91,22 @@ async function main():Promise<void>{
     assert(!fs.existsSync(path.join(runtimeRace.home,'.sudocode-a2a-installation.json')));
     assert.equal(runtimeRace.calls().filter(c=>c[0]==='app-server'||c[1]==='add').length,0);
 
+    const unhealthy=fixture('start-succeeded-but-daemon-stopped',{SCODE_SETUP_UNHEALTHY_DAEMON:'1'});
+    const unhealthyEntry=fs.readFileSync(unhealthy.target);
+    const noDaemon=await unhealthy.install();assert.equal(noDaemon.code,1);
+    const unhealthyJournal=JSON.parse(fs.readFileSync(unhealthy.config+'.installation.json','utf8'));
+    assert.equal(unhealthyJournal.phase,'stopped');
+    assert.match(unhealthyJournal.error,/daemon readback did not report running/);
+    assert(fs.readFileSync(unhealthy.target).equals(unhealthyEntry));
+    assert.equal(unhealthy.calls().filter(c=>c[1]==='add').length,0);
+
     const partial=fixture('lost-result',{SCODE_SETUP_LOST_REGISTRATION:'1'});
     const failed=await partial.install();assert.equal(failed.code,1);assert(fs.existsSync(path.join(partial.work,'registration.json')));
     const attempt=JSON.parse(fs.readFileSync(partial.config+'.installation.json','utf8'));
     assert.equal(attempt.inFlight,'globalMcpRegistration');assert.equal(attempt.phase,'stopped');
     const count=partial.calls().filter(c=>c[1]==='add').length;
     assert.equal((await partial.install()).code,1);assert.equal(partial.calls().filter(c=>c[1]==='add').length,count);
-    console.log('Codex setup process integration PASS: one command installs canonical MCP/entry; actual delegate exit/argv and backup; conflict/racing entry and initial runtime edits preserved; lost result and completed setup not replayed');
+    console.log('Codex setup process integration PASS: one command installs canonical MCP/entry; started action plus running readback, stopped readback refuses; actual delegate exit/argv and backup; conflict/racing entry and initial runtime edits preserved; lost result and completed setup not replayed');
   }finally{
     if(windows)for(const task of tasks){
       const xml=execFileSync(system('schtasks.exe'),['/Query','/TN',task.taskName,'/XML'],{windowsHide:true});

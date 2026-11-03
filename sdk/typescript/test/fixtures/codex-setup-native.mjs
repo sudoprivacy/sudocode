@@ -21,7 +21,9 @@ if(args.join(' ')==='mcp get nexus_scode --json'){
   if(process.env.SCODE_SETUP_REPLACE_ENTRY)fs.writeFileSync(process.env.SCODE_SETUP_REPLACE_ENTRY,'independent edit\n');
   if(process.env.SCODE_SETUP_LOST_REGISTRATION){console.error('fixture lost acknowledgement after persistence');process.exitCode=1;}
 }else if(args.join(' ')==='app-server daemon start'){
-  console.log(JSON.stringify({status:'running',managedCodexVersion:'fixture'}));
+  console.log(JSON.stringify({status:'started',managedCodexVersion:'fixture'}));
+}else if(args.join(' ')==='app-server daemon version'){
+  console.log(JSON.stringify({status:process.env.SCODE_SETUP_UNHEALTHY_DAEMON?'stopped':'running',managedCodexVersion:'fixture'}));
 }else{
   console.log(JSON.stringify({foregroundArgs:args}));process.exitCode=17;
 }

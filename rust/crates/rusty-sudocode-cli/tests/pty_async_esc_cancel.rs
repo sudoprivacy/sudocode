@@ -72,7 +72,7 @@ fn esc_cancels_turn_in_async_repl() {
     sess.send("\r").expect("submit exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);

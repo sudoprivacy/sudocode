@@ -19,11 +19,7 @@ fn strip_ansi(input: &str) -> Cow<'_, str> {
 pub(crate) fn single_line(input: &str) -> Cow<'_, str> {
     // Reuse the decoder's fast-path predicate: C0 controls also need removal
     // when there is no ESC byte. Ordinary progress text stays borrowed.
-    let plain = if StyledText::needs_decoding(input) {
-        Cow::Owned(StyledText::from_ansi(input).text)
-    } else {
-        Cow::Borrowed(input)
-    };
+    let plain = StyledText::plain_source(input);
     if plain.contains(['\n', '\r', '\t']) {
         Cow::Owned(plain.replace(['\n', '\r', '\t'], " "))
     } else {
@@ -34,18 +30,25 @@ pub(crate) fn single_line(input: &str) -> Cow<'_, str> {
 pub(crate) fn display_width(input: &str) -> usize {
     let plain = strip_ansi(input);
     if !plain.contains('\t') {
-        return plain.width();
+        return terminal_width(&plain);
     }
     plain
         .graphemes(true)
         .fold(0, |col, grapheme| col + grapheme_width(grapheme, col))
 }
 
+/// Codex's terminal-cell correction for visible halfwidth sound marks.
+/// Source: openai/codex 970111f6cb tui/src/width.rs (Apache-2.0).
+#[inline]
+fn terminal_width(text: &str) -> usize {
+    text.width() + text.matches(['\u{FF9E}', '\u{FF9F}']).count()
+}
+
 fn grapheme_width(grapheme: &str, col: usize) -> usize {
     if grapheme == "\t" {
         8 - col % 8
     } else {
-        grapheme.width()
+        terminal_width(grapheme)
     }
 }
 
@@ -61,7 +64,7 @@ pub(crate) fn wrap_line(
     wrap_line_with_indent(source, range, width, initial_col, 0)
 }
 
-fn wrap_line_with_indent(
+pub(crate) fn wrap_line_with_indent(
     source: &StyledText,
     range: Range<usize>,
     width: usize,
@@ -108,6 +111,8 @@ fn wrap_line_with_indent(
 pub(crate) fn wrap_ansi_to_width(input: &str, width: usize) -> Vec<String> {
     wrap_ansi_with_indent(input, width, 0)
 }
+
+pub(crate) use super::word_wrap::wrap_words;
 
 /// Wrap styled list content with hanging indentation on continuation rows.
 pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) -> Vec<String> {

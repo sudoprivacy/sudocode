@@ -59,6 +59,12 @@ mod platform {
             Ok(())
         }
 
+        /// Observe readiness without holding the redirect mutex while waiting.
+        #[inline]
+        pub fn poll_handle(&self) -> std::io::Result<OwnedFd> {
+            self.read_file.as_fd().try_clone_to_owned()
+        }
+
         /// Non-blocking drain: returns captured text or `None`.
         pub fn drain(&self) -> Option<Vec<u8>> {
             let mut buf = [0u8; 4096];
@@ -90,7 +96,7 @@ mod platform {
 /// Win32 stderr cannot be made nonblocking like a Unix pipe. One reader drains
 /// the real pipe into a bounded queue; the UI tick never waits for pipe IO.
 /// Pipe creation reuses the PTY dependency. Standard-handle ownership uses std
-/// OwnedHandle and the existing Win32 wrapper crate, without pipe-type probes.
+/// `OwnedHandle` and the existing Win32 wrapper crate, without pipe-type probes.
 #[cfg(windows)]
 mod platform {
     use std::io::{self, Read};
@@ -145,14 +151,11 @@ mod platform {
                     }
                 })
                 .ok()?;
-            let previous = match redirect(&writer) {
-                Ok(previous) => previous,
-                Err(_) => {
-                    drop(writer);
-                    drop(rx);
-                    let _ = reader.join();
-                    return None;
-                }
+            let Ok(previous) = redirect(&writer) else {
+                drop(writer);
+                drop(rx);
+                let _ = reader.join();
+                return None;
             };
             Some(Self {
                 original: previous.unwrap_or(original),

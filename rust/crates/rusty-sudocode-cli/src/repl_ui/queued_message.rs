@@ -3,6 +3,7 @@
 
 use crate::render::styled_text::StyledText;
 use crate::render::text_layout::{display_width, truncate_to_width};
+use crate::render::TextRole;
 use crate::render::{ColorSupport, ColorTheme, RESET};
 
 const LABEL: &str = "↳ queued: ";
@@ -21,7 +22,7 @@ pub(super) fn render(
     steering: bool,
     width: usize,
     support: ColorSupport,
-    theme: &ColorTheme,
+    theme: ColorTheme,
 ) -> String {
     let full_label = if steering { "↳ steering: " } else { LABEL };
     if width == 0 {
@@ -41,7 +42,10 @@ pub(super) fn render(
         let plain = StyledText::from_ansi(first).text;
         return truncate_to_width(&format!("{label}{plain}"), width);
     }
-    let line = format!("{RESET}{}{label}{RESET}{first}{RESET}", theme.muted_fg());
+    let line = format!(
+        "{RESET}{}{label}{RESET}{first}{RESET}",
+        theme.fg_seq(TextRole::Secondary)
+    );
     // A clipped preview must not leave an inherited style on the next item.
     format!("{}{RESET}", truncate_to_width(&line, width))
 }

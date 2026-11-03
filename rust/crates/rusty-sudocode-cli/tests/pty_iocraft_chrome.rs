@@ -1,7 +1,7 @@
-//! PTY tests for the TurnRenderer chrome.
+//! PTY tests for the `TurnRenderer` chrome.
 //!
 //! These tests verify that the turn-scoped chrome (spinner + output
-//! routing) works correctly. TurnRenderer is active by default when
+//! routing) works correctly. `TurnRenderer` is active by default when
 //! stdout is a terminal (which it is in PTY tests).
 //!
 //! ```bash
@@ -72,7 +72,7 @@ fn turn_renderer_spinner_shows_model() {
     assert_eq!(exit, 0);
 }
 
-/// Tool output with TurnRenderer — process exits cleanly.
+/// Tool output with `TurnRenderer` — process exits cleanly.
 #[test]
 fn turn_renderer_tool_output() {
     let env = TestEnv::new("tr-tool-output");

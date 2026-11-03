@@ -153,17 +153,17 @@ fn resume_list_shows_sessions_and_exits() {
     sess2.set_default_timeout(common::at_least(Duration::from_secs(5)));
 
     sess2.expect("Available sessions").unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("should list sessions: {e}\nPTY screen:\n{screen}");
     });
 
     sess2.expect("scode --resume").unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("should show usage tip: {e}\nPTY screen:\n{screen}");
     });
 
     let exit2 = sess2.expect_eof().unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("should exit after listing: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit2, 0);
@@ -191,7 +191,7 @@ fn resume_no_args_resumes_latest() {
     );
     sess2.set_default_timeout(common::at_least(Duration::from_secs(10)));
     sess2.expect("❯").unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!(
             "bare --resume should resume latest (enter REPL), not list: {e}\nPTY screen:\n{screen}"
         );
@@ -229,7 +229,7 @@ fn resume_latest_renders_messages_after_banner() {
 
     // Should see the banner.
     sess2.expect("Code").unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("should see banner: {e}\nPTY screen:\n{screen}");
     });
 
@@ -240,7 +240,7 @@ fn resume_latest_renders_messages_after_banner() {
     common::expect_input_line_cleared(&sess2, Duration::from_secs(15), "resume ready");
 
     // Verify no duplicate: "Session resumed" should appear at most once.
-    let screen = sess2.render(|s| s.contents());
+    let screen = sess2.render(common::screen_contents);
     let resume_count = screen.matches("Session resumed").count();
     assert!(
         resume_count <= 1,
@@ -252,7 +252,7 @@ fn resume_latest_renders_messages_after_banner() {
     common::expect_input_line(&sess2, "/exit", Duration::from_secs(15), "exit typed");
     sess2.send("\r").expect("submit exit");
     let exit = sess2.expect_eof().unwrap_or_else(|e| {
-        let screen2 = sess2.render(|s| s.contents());
+        let screen2 = sess2.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen2}");
     });
     assert_eq!(exit, 0);
@@ -300,7 +300,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
     );
     sess2.set_default_timeout(common::at_least(Duration::from_secs(15)));
     sess2.expect(expected_reply).unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!(
             "resumed iocraft REPL must replay history to scrollback: {e}\nPTY screen:\n{screen}"
         );
@@ -309,7 +309,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
     // The restored user message must be echoed with the same `❯` prompt glyph
     // the live input uses — NOT the old `›` style — so resume looks identical
     // to the pre-exit scrollback.
-    let screen = sess2.render(|s| s.contents());
+    let screen = sess2.render(common::screen_contents);
     assert!(
         !screen.contains("› say hello world"),
         "resumed user message used the `›` echo style instead of `❯`:\n{screen}"
@@ -318,7 +318,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
     std::thread::sleep(Duration::from_millis(400));
     sess2.send("/exit\r").expect("send exit");
     let exit = sess2.expect_eof().unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
+        let screen = sess2.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);

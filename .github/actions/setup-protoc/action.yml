@@ -1,0 +1,8 @@
+name: Set up the workspace protobuf compiler
+description: Install the compatible compiler shared by strict checks and cohost releases.
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned compiler
+      shell: bash
+      run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} "$GITHUB_ACTION_PATH/../../scripts/setup_protoc.py"

@@ -2,10 +2,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
+const git = require('./sourceGit.cjs');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.argv[2] || path.join(root, 'artifacts'));
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 if (manifest.dirty || git('status', '--porcelain=v1') || manifest.sourceCommit !== git('rev-parse', 'HEAD')) {
   throw new Error('Build and package a clean committed source tree');
 }

@@ -1,10 +1,10 @@
-//! Integration tests for the AgentSummary auto-summarize path.
+//! Integration tests for the `AgentSummary` auto-summarize path.
 //!
 //! ## What this locks in (long-workflow, data-flow chained)
 //!
 //! 1. **Under-threshold path** — a short result passes through
 //!    verbatim; no summarizer sub-turn spawns; no `.full.md`
-//!    sibling gets written; manifest.result_full_path stays `None`.
+//!    sibling gets written; `manifest.result_full_path` stays `None`.
 //! 2. **Over-threshold path** — a result whose char-count exceeds
 //!    the configured threshold triggers the sidecar-write step BEFORE
 //!    the summarizer LLM call. Assertions on the sidecar file's
@@ -28,14 +28,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn unique_workspace(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "sudocode-agent-summary-{label}-{nanos}-{}",
         std::process::id()
@@ -46,7 +45,7 @@ fn unique_workspace(label: &str) -> PathBuf {
 
 /// Write a minimal on-disk manifest for the fake agent so
 /// `maybe_summarize_for_test` has something to read + update.
-/// Returns (manifest_path, output_md_path).
+/// Returns (`manifest_path`, `output_md_path`).
 fn seed_fake_agent(dir: &std::path::Path, agent_id: &str) -> (PathBuf, PathBuf) {
     let output_md = dir.join(format!("{agent_id}.md"));
     let manifest = dir.join(format!("{agent_id}.json"));

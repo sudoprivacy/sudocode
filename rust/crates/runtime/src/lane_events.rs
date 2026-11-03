@@ -1000,7 +1000,7 @@ mod tests {
         );
 
         assert_eq!(fp1, fp2, "same inputs should produce same fingerprint");
-        assert!(!fp1.is_empty());
+        assert_ne!(fp1, "");
         assert_eq!(fp1.len(), 16, "fingerprint should be 16 hex chars");
     }
 

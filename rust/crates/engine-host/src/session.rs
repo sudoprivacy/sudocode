@@ -85,35 +85,7 @@ pub fn load_session_reference(
 }
 
 pub fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = runtime::fs_backend::StdFsBackend;
-    let (session_id, cwd) =
-        runtime::subagent_completion::CompletionJournal::storage_identity(&backend, path)?;
-    let binding =
-        runtime::subagent_completion::CompletionJournal::probe(&backend, path, &session_id, &cwd)?;
-    runtime::subagent_completion::CompletionJournal::purge_stored(
-        &backend,
-        path,
-        &session_id,
-        &cwd,
-        binding["storageRef"]
-            .as_str()
-            .ok_or("missing completion storage identity")?,
-        "native-session-delete",
-    )?;
-    if !path.exists() {
-        return Ok(());
-    }
-    fs::remove_file(path)?;
-    // GC the session's offloaded tool-results subtree (write-once blobs spilled
-    // from oversized tool outputs). The managed file is `<session-id>.jsonl`, so
-    // its stem is the session-id that namespaces the offload dir. Best-effort:
-    // an absent dir (session never offloaded anything) is not an error.
-    if let Some(dir) = Session::tool_results_dir_for(path, &session_id) {
-        let _ = fs::remove_dir_all(dir);
-    }
-    if let Some(dir) = Session::response_captures_dir_for(path, &session_id) {
-        let _ = fs::remove_dir_all(dir);
-    }
+    current_session_store()?.delete_session(path)?;
     Ok(())
 }
 
@@ -153,6 +125,7 @@ pub fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, String> {
 /// The user-facing message shown when a turn's context still overflows the
 /// model limit after (or without) compaction — distinguishing a too-long
 /// history from a single oversized request so the advice fits the cause.
+#[must_use]
 pub fn context_overflow_user_message(
     session: &Session,
     estimated_tokens: usize,
@@ -182,6 +155,27 @@ pub fn context_overflow_user_message(
             3. 使用支持更大上下文的模型"
         )
     }
+}
+
+/// Compose a durable control session without constructing a model runtime.
+pub fn completion_engine(
+    session: &runtime::Session,
+    cwd: &Path,
+    create: bool,
+) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
+    Ok(engine_core::EngineSession::deferred(
+        engine_core::subagent_completion::CompletionState::open(session, cwd, create)?,
+    ))
+}
+
+/// Compose a read-only storage probe; journal ownership is acquired on replay.
+pub fn stored_completion_engine(
+    session_id: &str,
+    cwd: &Path,
+) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
+    Ok(engine_core::EngineSession::deferred(
+        engine_core::subagent_completion::CompletionState::stored(session_id, cwd)?,
+    ))
 }
 
 #[cfg(test)]
@@ -220,25 +214,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&sessions_dir);
     }
-}
-
-/// Compose a durable control session without constructing a model runtime.
-pub fn completion_engine(
-    session: &runtime::Session,
-    cwd: &Path,
-    create: bool,
-) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
-    Ok(engine_core::EngineSession::deferred(
-        engine_core::subagent_completion::CompletionState::open(session, cwd, create)?,
-    ))
-}
-
-/// Compose a read-only storage probe; journal ownership is acquired on replay.
-pub fn stored_completion_engine(
-    session_id: &str,
-    cwd: &Path,
-) -> Result<(engine_core::EngineHandle, engine_core::EngineAttachment), String> {
-    Ok(engine_core::EngineSession::deferred(
-        engine_core::subagent_completion::CompletionState::stored(session_id, cwd)?,
-    ))
 }

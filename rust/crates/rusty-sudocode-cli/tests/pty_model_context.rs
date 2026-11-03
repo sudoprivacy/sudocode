@@ -30,7 +30,7 @@ fn messages(env: &TestEnv) -> Vec<Value> {
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap()["message"].clone())
-        .filter(|message| message.is_object())
+        .filter(serde_json::Value::is_object)
         .collect()
 }
 
@@ -71,7 +71,7 @@ fn model_context_follows_switches_and_switching_back() {
             cli.expect("Model updated").unwrap_or_else(|error| {
                 panic!(
                     "model switch accepted: {error}\n{}",
-                    cli.render(|screen| screen.contents())
+                    cli.render(common::screen_contents)
                 );
             });
             common::expect_input_line_cleared(&cli, budget, "input after switch");

@@ -4,8 +4,16 @@
 mod render {
     pub const RESET: &str = "\x1b[0m";
     #[path = "hyperlink.rs"]
+    #[expect(
+        dead_code,
+        reason = "This Canvas boundary fixture imports only the ANSI adapter's subset of the production module."
+    )]
     pub(crate) mod hyperlink;
     #[path = "styled_text.rs"]
+    #[expect(
+        dead_code,
+        reason = "This Canvas boundary fixture imports only the ANSI adapter's subset of the production module."
+    )]
     pub(crate) mod styled_text;
 }
 

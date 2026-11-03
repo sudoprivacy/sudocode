@@ -2,7 +2,7 @@
 //! counterfactual scenarios, never proof of expiry or a subscription invoice.
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,33 +11,16 @@ use api::CacheRequestObservation;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const MAX_BYTES: u64 = 512 * 1024;
+use crate::cache_report::{
+    request_history, RequestHistory, RequestRow as Row, MAX_LEDGER_BYTES as MAX_BYTES,
+};
+
 const MAX_DECISIONS: usize = 16;
 /// Reuse intervals the replay needs before it suggests anything.
 pub const MIN_INTERVALS: usize = 8;
 const SWITCH_MARGIN: f64 = 0.10;
 
-#[derive(Clone, Default, Deserialize)]
-struct Row {
-    #[serde(default)]
-    gateway_request_id: Option<String>,
-    #[serde(default)]
-    provider_request_id: Option<String>,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
-    observation: Option<CacheRequestObservation>,
-}
-
 impl Row {
-    fn cached(&self) -> u64 {
-        self.cache_read_input_tokens
-            .saturating_add(self.cache_creation_input_tokens)
-    }
-
     fn eligible(&self) -> Option<&CacheRequestObservation> {
         let o = self.observation.as_ref()?;
         (o.schema_version == 1
@@ -73,56 +56,23 @@ struct Coverage {
 }
 
 fn history(directory: &Path) -> (Vec<Row>, Coverage) {
-    let mut coverage = Coverage::default();
-    let Ok(mut file) = File::open(directory.join("requests.jsonl")) else {
-        return (Vec::new(), coverage);
+    advisor_history(&request_history(&directory.join("requests.jsonl")))
+}
+
+fn advisor_history(history: &RequestHistory) -> (Vec<Row>, Coverage) {
+    let mut coverage = Coverage {
+        sampled_tail: history.sampled_tail,
+        duplicate_snapshots_ignored: history.duplicate_snapshots_ignored,
+        ..Coverage::default()
     };
-    let length = file.metadata().map_or(0, |m| m.len());
-    let offset = length.saturating_sub(MAX_BYTES);
-    coverage.sampled_tail = offset > 0;
-    if file.seek(SeekFrom::Start(offset)).is_err() {
-        return (Vec::new(), coverage);
-    }
-    let mut reader = BufReader::new(file.take(MAX_BYTES));
-    if offset > 0 {
-        let _ = reader.read_line(&mut String::new());
-    }
-    let mut rows = Vec::new();
-    let mut final_positions = HashMap::new();
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(row) = serde_json::from_str::<Row>(&line) else {
-            coverage.legacy_or_malformed_rows += 1;
-            rows.push(Some(Row::default()));
-            continue;
-        };
+    let mut rows = Vec::with_capacity(history.rows.len());
+    for row in &history.rows {
+        let row = row.clone().unwrap_or_default();
         if row.observation.is_none() {
             coverage.legacy_or_malformed_rows += 1;
         }
-        if let (Some(id), Some(o)) = (
-            row.gateway_request_id
-                .as_ref()
-                .filter(|id| !id.is_empty())
-                .or(row.provider_request_id.as_ref().filter(|id| !id.is_empty())),
-            &row.observation,
-        ) {
-            let identity = (
-                id.clone(),
-                row.model.clone(),
-                o.route_key.clone(),
-                o.request_started_ms,
-                o.attempts,
-                o.context_segment,
-            );
-            if let Some(before) = final_positions.insert(identity, rows.len()) {
-                // A final cumulative snapshot replaces earlier snapshots of
-                // this attempt; different attempt start times remain separate.
-                rows[before] = None;
-                coverage.duplicate_snapshots_ignored += 1;
-            }
-        }
-        rows.push(Some(row));
+        rows.push(row);
     }
-    let rows: Vec<Row> = rows.into_iter().flatten().collect();
     coverage.rows = rows.len();
     coverage.ineligible_rows = rows.iter().filter(|r| r.eligible().is_none()).count();
     (rows, coverage)
@@ -287,7 +237,7 @@ fn cost(
             // Preserve a hit actually observed under this same requested TTL,
             // including late hits; a hard timing cutoff cannot erase evidence.
             if uniform_ttl(row.eligible().unwrap()) == Some(ttl) {
-                read = read.max(row.cache_read_input_tokens);
+                read = read.max(row.cache_read_input_tokens.unwrap_or_default());
             }
         }
     }
@@ -496,10 +446,17 @@ fn decide_into(
 /// or public request/route/session identifiers are introduced.
 #[must_use]
 pub fn report(directory: &Path) -> Value {
+    report_from_history(
+        directory,
+        &request_history(&directory.join("requests.jsonl")),
+    )
+}
+
+pub(crate) fn report_from_history(directory: &Path, history: &RequestHistory) -> Value {
     let state = state(directory);
     // Unpinned sessions follow their latest decision; pinned ones only advise.
     let applied = state.decisions.last().is_some_and(|d| d.applied);
-    let (rows, coverage) = history(directory);
+    let (rows, coverage) = advisor_history(history);
     let table = prices();
     let mut seen = HashSet::new();
     let mut forward = Vec::new();

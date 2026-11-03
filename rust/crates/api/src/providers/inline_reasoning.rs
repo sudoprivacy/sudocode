@@ -1,4 +1,4 @@
-//! Azure DeepSeek deployments can return leading `<think>` content instead of
+//! Azure `DeepSeek` deployments can return leading `<think>` content instead of
 //! `reasoning_content`. Keep that protocol envelope out of the final answer.
 
 use crate::error::ApiError;

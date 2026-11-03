@@ -5,9 +5,6 @@
 
 mod common;
 
-#[path = "support/terminal_palette.rs"]
-mod terminal_palette;
-
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -67,7 +64,7 @@ fn exit_with_context(sess: &mut PtySession, context: &str) {
     let code = sess.expect_eof().unwrap_or_else(|error| {
         // The method item cannot satisfy render's higher-ranked Screen lifetime.
         #[allow(clippy::redundant_closure_for_method_calls)]
-        let screen = sess.render(|screen| screen.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
     assert_eq!(code, 0, "{context} should exit successfully");
@@ -454,7 +451,10 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let colors = if no_color {
         ["Default".to_owned(), "Default".to_owned()]
     } else {
-        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
+        [
+            "Rgb(118, 118, 118)".to_owned(),
+            "Rgb(158, 158, 158)".to_owned(),
+        ]
     };
     let muted = &colors[usize::from(background == "15;0")];
     let vars = [

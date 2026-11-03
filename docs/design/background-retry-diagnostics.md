@@ -35,6 +35,14 @@ period. The message describes receive checks recovering; it does not prove a
 peer is online, a send was delivered or every message was acknowledged. Abort,
 standby and process exit are not successful delivery.
 
+`outage()` exposes the same rule read-only: when the unrecovered outage began,
+and each scope still failing with its latest detail. It is `None` once recovery
+is confirmed. The start is set when the first failure turns the outage on and
+cleared when recovery turns it off, so a change of scope or error text never
+moves it. The mailbox receiver registers its instance with its agent's receiver
+state, and peer `health` derives from it. That way the footer and `/status`
+apply this rule instead of a second one.
+
 ## Repository audit
 
 The audit inspected tracked Rust, TypeScript/JavaScript and shell sources,
@@ -100,9 +108,13 @@ Darwin can cancel an in-flight global stderr write with `BrokenPipe`, even
 while both pipe ends remain open. The retry reporter handles that error without
 panicking; this capture does not promise lossless writes from arbitrary
 third-party code which panics on stderr failure.
-The forwarder parks only when idle. Windows' existing pipe reader unparks it
-when a chunk arrives, so bounded batches do not impose a sleep between pending
-chunks. The iocraft owner retains its existing tick; neither path adds a reader.
+The forwarder waits only when idle. Unix polls the captured pipe and a
+nonblocking notification socket together, without holding the redirect mutex.
+Captured bytes, peer notices and shutdown wake that same worker; draining a
+small pipe does not incur an 80 ms sleep each time its writer reschedules.
+Windows' existing pipe reader unparks it when a chunk arrives, so bounded
+batches do not impose a sleep between pending chunks. The iocraft owner retains
+its existing tick; neither path adds a reader.
 The completion reporter is boxed behind its lazy cell: healthy completion
 states reserve only the cell/pointer, rather than the reporter's map and strings.
 This reduces inline layout; it does not establish the rendering workload's
@@ -189,6 +201,11 @@ must record one real `BrokenPipe` notice failure, retain both original operation
 errors and their scope recoveries, and continue to observe a second operation.
 All cases retain the original deadlines and release the gate before reporting
 assertions. Raw IO results and handoff stages survive a child timeout.
+Linux additionally requests a 4 KiB real pipe, records its actual capacity
+(the kernel may round up to its page size), and requires the same 8 MiB write
+to finish within the original five seconds. Every case also sends
+a peer notice after the worker becomes idle and requires its delivery before
+shutdown; the process deadline bounds joining the worker.
 These isolate pipe/lock ordering with
 a controlled printer; they do not replace the native-editor PTY assertions.
 Exact-head CI and platform results are reported in the PR;

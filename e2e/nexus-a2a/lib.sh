@@ -45,6 +45,21 @@ cargo_in_workspace() {
   (cd "$RUST_DIR" && cargo "$@")
 }
 
+# Windows can expose a non-working python3 app alias. Require an actual Python
+# 3 interpreter before starting the batch, while keeping Unix's usual spelling.
+python3_bin() {
+  local candidate
+  for candidate in "${PYTHON:-}" python3 python; do
+    [ -n "$candidate" ] || continue
+    if [ "$("$candidate" -c 'import sys; print(sys.version_info.major)' 2>/dev/null)" = 3 ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "!! Python 3 is required for mailbox fault acceptance; install it or set PYTHON to its executable" >&2
+  return 1
+}
+
 # ── Auth-on bring-up, shared by every A2A harness ──────────────────────────────
 #
 # scode is cert-only: it dials mTLS with a minted credential and never plaintext,
@@ -187,9 +202,10 @@ grpcurl_bin() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) exe=".exe" ;;
   esac
-  local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/grpcurl${exe}"
+  local version="1.9.4" os suffix
+  # Keep downloads versioned so an older cached client cannot survive an update.
+  local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/${version}/grpcurl${exe}"
   if [ -x "$cache" ]; then printf '%s' "$cache"; return; fi
-  local version="1.9.3" os suffix
   case "$(uname -s)" in
     Linux) os=linux; suffix=tar.gz ;;
     Darwin) os=osx; suffix=tar.gz ;;

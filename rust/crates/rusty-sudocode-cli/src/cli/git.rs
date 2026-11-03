@@ -11,7 +11,7 @@ use crate::CliOutputFormat;
 pub(crate) use commands::reports::{
     find_git_root_in, parse_git_status_branch, parse_git_status_metadata,
     parse_git_status_metadata_for, parse_git_workspace_summary, resolve_git_branch_for,
-    resolve_git_head_label_for, run_git_capture_in, GitWorkspaceSummary,
+    resolve_git_position_for, run_git_capture_in, GitWorkspaceSummary,
 };
 
 /// Run git in `cwd` and return its stdout. A non-zero exit is an error that

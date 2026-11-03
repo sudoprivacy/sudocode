@@ -33,6 +33,21 @@ module.exports = async function contract({ github, context, core, root }) {
       ...context, repo: context.repo, eventName: 'pull_request',
       payload: { pull_request: { ...pr, head: { ...pr.head, sha: stale } } },
     }, 'PR advanced; run the current commit');
+    const files = await github.paginate(github.rest.pulls.listFiles, {
+      ...context.repo, pull_number: pr.number, per_page: 100,
+    });
+    const ordinaryTest = name => /^rust\/crates\/[^/]+\/tests\//.test(name)
+      && !name.startsWith('rust/crates/rusty-sudocode-cli/tests/common/')
+      && name !== 'rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs';
+    if (files.length && files.every(file => ordinaryTest(file.filename)
+      && (!file.previous_filename || ordinaryTest(file.previous_filename)))) {
+      const outputs = {};
+      await review({ github, context: {
+        ...context, eventName: 'pull_request', payload: { pull_request: pr },
+      }, core: { ...core, setOutput: (key, value) => { outputs[key] = value; } }, root, output });
+      if (outputs.is_needed !== 'false') throw new Error('Test-only PR requested a release performance rebuild');
+      core.info(`Live test-only PR #${pr.number}: release performance rebuild skipped`);
+    }
   } finally {
     fs.rmSync(output, { recursive: true, force: true });
   }

@@ -214,10 +214,10 @@ fn question_owns_the_status_until_answered_then_running_resumes() {
         common::DEFAULT_TIMEOUT,
         "question panel owns input without an animation or duplicate waiting row",
     );
-    let waiting = session.render(|screen| screen.contents());
+    let waiting = session.render(common::screen_contents);
     std::thread::sleep(Duration::from_millis(320));
     assert_eq!(
-        session.render(|screen| screen.contents()),
+        session.render(common::screen_contents),
         waiting,
         "waiting does not animate"
     );
@@ -334,14 +334,14 @@ fn brand_animation_and_parallel_summary_share_one_status_row() {
                         .unwrap()
                         .fgcolor()
                 ),
-                "Idx(214)",
+                "Rgb(245, 158, 11)",
                 "logo uses brand amber"
             );
         }
         for (text, color) in [
             ("Running", "Default"),
-            ("[claude", "Idx(247)"),
-            ("s)", "Idx(247)"),
+            ("[claude", "Rgb(158, 158, 158)"),
+            ("s)", "Rgb(158, 158, 158)"),
         ] {
             let column = unicode_width::UnicodeWidthStr::width(&line[..line.find(text).unwrap()]);
             let cell = raw

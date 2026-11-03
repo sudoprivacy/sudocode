@@ -4,6 +4,7 @@
 //! and peer inputs were batched. Decode only complete, top-level envelopes;
 //! examples inside code blocks and malformed wrappers remain ordinary input.
 
+use crate::render::TextRole;
 use pulldown_cmark::{Event, Parser, Tag};
 
 use crate::render::{
@@ -141,9 +142,9 @@ impl ReceivedMessage<'_> {
         };
         format!(
             "{RESET}{}Message from {RESET}{}{sender}{RESET}{}{suffix}{RESET}",
-            theme().muted_fg(),
-            theme().peer_sender_fg(),
-            theme().muted_fg(),
+            theme().fg_seq(TextRole::Secondary),
+            theme().fg_seq(TextRole::Accent),
+            theme().fg_seq(TextRole::Secondary),
         )
     }
 
@@ -162,7 +163,7 @@ impl ReceivedMessage<'_> {
                 .into_iter()
                 .chain(std::iter::once(body.trim_end_matches('\n'))),
             width,
-            theme().muted,
+            theme().color(TextRole::Secondary),
         );
         if renderer.color_support() == ColorSupport::NoColor {
             StyledText::from_ansi(&output).text
@@ -176,11 +177,11 @@ impl ReceivedMessage<'_> {
 pub(crate) fn render_prompt(text: &str, width: usize, renderer: &TerminalRenderer) -> String {
     let mut output = String::new();
     for part in prompt_parts(text) {
-        let rendered = match part {
+        let formatted_text = match part {
             PromptPart::Human(text) => super::format::format_input_echo(text, width).0,
             PromptPart::Peer(message) => message.render(width, renderer),
         };
-        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
+        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &formatted_text);
     }
     output
 }

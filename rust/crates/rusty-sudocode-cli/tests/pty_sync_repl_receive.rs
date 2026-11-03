@@ -44,7 +44,7 @@ fn send_from(pair_root: &Path, peer: &str, body: &str) {
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }
@@ -54,6 +54,51 @@ fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// A notice must leave a genuinely empty editor, including before any key has
+/// caused rustyline to redraw it. Prepainted rows below the editor used to be
+/// mistaken for input after the notice moved the prompt onto those rows.
+#[test]
+fn a_notice_at_an_empty_sync_prompt_preserves_the_editor() {
+    let env = TestEnv::new("sync-empty-notice");
+    node_home::pin_agent_name(env.workspace_root(), AGENT);
+    let mut session = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "off"), ("PAGER", "")],
+    );
+    session.set_default_timeout(BUDGET);
+    session.expect("❯").expect("the REPL should start");
+    common::expect_input_line_cleared(&session, BUDGET, "empty editor before notice");
+
+    let pair_root = local_pair_root_in(env.config_home());
+    send_from(&pair_root, PEER, "leave this message unread");
+    expect_on_screen(&mut session, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line_cleared(&session, BUDGET, "empty editor after notice");
+
+    // Box-drawing characters are valid input; the screen parser must preserve
+    // them rather than trim a stale separator until an empty check passes.
+    let draft = "literal──draft";
+    session.send(draft).expect("type a literal draft");
+    common::expect_screen_settled(
+        &session,
+        |screen| common::input_line_of(screen) == draft,
+        BUDGET,
+        "literal draft after notice",
+    );
+    session.send("\x15/exit").expect("replace draft with exit");
+    common::expect_screen_settled(
+        &session,
+        |screen| common::input_line_of(screen) == "/exit",
+        BUDGET,
+        "exit reached the editor",
+    );
+    session
+        .send("\r")
+        .expect("exit without running the message");
+    assert_eq!(session.expect_eof().expect("the REPL exits"), 0);
+    let inbox = Mailbox::workspace_local(&pair_root, AGENT.to_string());
+    assert_eq!(inbox.read_position(PEER).unwrap().unwrap_or(0), 0);
 }
 
 #[test]

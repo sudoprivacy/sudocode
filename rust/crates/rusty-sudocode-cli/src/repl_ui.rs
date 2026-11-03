@@ -22,6 +22,7 @@
 //! [FooterSlot]    ← permission · tasks · one prioritized tip
 //! ```
 
+use crate::render::TextRole;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -41,12 +42,15 @@ mod prompt_text;
 mod queued_message;
 mod tasks;
 mod transcript;
+mod transcript_view;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, AnsiText, RichText};
 use choice_text::ChoiceText;
+pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
+use transcript_view::TextFrame;
 pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
@@ -62,7 +66,7 @@ use crate::stderr_capture as stderr_redirect;
 enum StatusSlot {
     /// Running model, tool, or retry activity; input panels own waiting states.
     Active(String),
-    /// Static task conclusion; shares the footer's event-fed task projection.
+    /// Task conclusion; shares the footer's event-fed task projection.
     Background {
         full: Arc<StyledText>,
         summary: Arc<StyledText>,
@@ -300,8 +304,10 @@ pub enum UiCommand {
     },
     SetTip(engine_core::Tip),
     SetCacheTip(CacheTip),
-    /// The workspace's branch, or short commit when detached, for the footer.
-    SetBranch(Option<String>),
+    /// A persistent tip owned by `source`; `None` clears it.
+    SetStatusTip(StatusSource, Option<engine_core::Tip>),
+    /// Where the workspace is, `repo ⎇ branch`, for the footer.
+    SetWorkspacePosition(Option<String>),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -387,8 +393,12 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::SetCacheTip(tip));
     }
 
-    pub(crate) fn set_branch(&self, label: Option<String>) {
-        let _ = self.tx.send(UiCommand::SetBranch(label));
+    pub(crate) fn set_status_tip(&self, source: StatusSource, tip: Option<engine_core::Tip>) {
+        let _ = self.tx.send(UiCommand::SetStatusTip(source, tip));
+    }
+
+    pub(crate) fn set_workspace_position(&self, label: Option<String>) {
+        let _ = self.tx.send(UiCommand::SetWorkspacePosition(label));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -589,21 +599,18 @@ fn expand_paste_inner(
             Some((id_end + close + 1, real_text))
         });
 
-        match matched {
-            Some((consumed_after_prefix, real_text)) => {
-                if let Some((before, after)) = wrap {
-                    result.push_str(before);
-                    result.push_str(real_text);
-                    result.push_str(after);
-                } else {
-                    result.push_str(real_text);
-                }
-                rest = &after_prefix[consumed_after_prefix..];
+        if let Some((consumed_after_prefix, real_text)) = matched {
+            if let Some((before, after)) = wrap {
+                result.push_str(before);
+                result.push_str(real_text);
+                result.push_str(after);
+            } else {
+                result.push_str(real_text);
             }
-            None => {
-                result.push_str(placeholder_prefix);
-                rest = after_prefix;
-            }
+            rest = &after_prefix[consumed_after_prefix..];
+        } else {
+            result.push_str(placeholder_prefix);
+            rest = after_prefix;
         }
     }
     result.push_str(rest);
@@ -723,7 +730,7 @@ fn format_question_panel(
                 .unwrap_or("type your own answer");
             if on_row {
                 // Show a caret so it reads as an active field once selected.
-                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint),)
+                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint))
             } else {
                 choice.muted(hint)
             }
@@ -1130,7 +1137,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
                     *delivery == engine_events::InputDelivery::Steer,
                     term_width,
                     support,
-                    theme,
+                    *theme,
                 ));
             }
             PendingItem::Tool(_) => {
@@ -1177,8 +1184,8 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
     }
 
     let t = theme();
-    let success = ansi_fg(t.success);
-    let info = ansi_fg(t.info());
+    let success = t.fg_seq(TextRole::Success);
+    let info = ansi_fg(t.color(crate::render::TextRole::Info));
 
     let completed_count = todos
         .iter()
@@ -1346,6 +1353,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
+    let mut background_frame = hooks.use_state(|| 0usize);
+    let mut background_animation = hooks.use_ref_default::<bool>();
     let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
     let mut turn_result = hooks.use_state(|| None::<(u32, Arc<StyledText>)>);
@@ -1369,7 +1378,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
-    let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
+    let mut paste_store = hooks.use_state(std::collections::HashMap::<u32, String>::new);
     let mut next_paste_id = hooks.use_state(|| 1u32);
     let mut input_reviewable = hooks.use_state(|| true);
     let mut measurements = hooks.use_ref_default::<Measurements>();
@@ -1408,7 +1417,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let question = match &current_slot {
                         InputSlot::DialPad(question) => Some(question),
                         InputSlot::FuzzySelect(state) => Some(&state.question),
-                        _ => None,
+                        InputSlot::TextInput => None,
                     };
                     if let Some(question) = question.filter(|q| q.description.is_some()) {
                         let document = prompt_text::render_document(
@@ -1422,9 +1431,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
-                if (!input_reviewable.get() || !input_frame.is_current())
-                    && code != KeyCode::Esc
-                    && !(code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+                if !(code == KeyCode::Esc
+                    || input_reviewable.get() && input_frame.is_current()
+                    || code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
                 }
@@ -1593,7 +1602,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             InputSlot::DialPad(q) | InputSlot::FuzzySelect(FuzzySelectState { question: q, .. }) => {
                                 q.back_value.clone()
                             }
-                            _ => None,
+                            InputSlot::TextInput => None,
                         };
                         if let Some(val) = back {
                             let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(val));
@@ -1839,6 +1848,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut todo_hide_deadline: Option<Instant> = None;
         let mut stderr_text = Utf8Stream::default();
         let mut task_clock_tick = Instant::now();
+        let mut background_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
             let mut is_preview_changed = false;
@@ -1852,7 +1862,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if let Some(captured) = redir.drain() {
                         write_iocraft_output(
                             &stdout_for_future,
-                            &transcript_for_future,
+                            transcript_for_future.as_ref(),
                             &stderr_text.push(&captured),
                             false,
                         );
@@ -1901,7 +1911,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     };
-                    write_iocraft_output(&stdout_for_future, &transcript_for_future, &text, terminated);
+                    write_iocraft_output(&stdout_for_future, transcript_for_future.as_ref(), &text, terminated);
                     is_transcript_changed |= transcript_for_future.is_some();
                 }
             }
@@ -1937,7 +1947,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         &question.presentation,
                                         crate::render::query_terminal_width(),
                                     );
-                                    write_iocraft_output(&stdout_for_future, &transcript_for_future, &document, true);
+                                    write_iocraft_output(&stdout_for_future, transcript_for_future.as_ref(), &document, true);
                                     is_transcript_changed |= transcript_for_future.is_some();
                                 }
                             }
@@ -1971,14 +1981,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::SetTip(tip)) => footer_tips.write().set(tip),
                         Ok(UiCommand::SetCacheTip(view)) => {
-                            footer_tips.write().cache(view.tip);
+                            footer_tips.write().status(StatusSource::Cache, view.tip);
                             tasks_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .set_cache_advice(view.advice, view.actionable);
                             frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
+                        Ok(UiCommand::SetWorkspacePosition(label)) => {
+                            footer_tips.write().position(label);
+                        }
+                        Ok(UiCommand::SetStatusTip(source, tip)) => {
+                            footer_tips.write().status(source, tip);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                         Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
                         Ok(UiCommand::SetTurnResult { text, turn }) => {
                             turn_result.set(Some((turn, text)));
@@ -2099,11 +2115,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 footer_hint.set(None);
             }
 
-            // One lifecycle snapshot drives the status and footer. Animate
-            // only Running; waiting hides the row, Idle changes no UI state.
+            // One lifecycle snapshot drives the status and footer. Foreground
+            // activity owns the fast cadence; visible background work reuses
+            // this clock at 400ms. It never records model/task progress.
             // Identical idle State::set calls starve keyboard delivery in iocraft.
             let idx = frame.get();
             let state = spinner_for_future.engine_state();
+            if state == EngineState::Idle && background_animation.get() {
+                if background_tick.elapsed() >= Duration::from_millis(400) {
+                    background_frame.set(background_frame.get().wrapping_add(1));
+                    background_tick = Instant::now();
+                }
+            } else {
+                background_tick = Instant::now();
+            }
             if state == EngineState::Running || is_preview_changed || is_transcript_changed {
                 frame.set(idx.wrapping_add(1));
             }
@@ -2155,12 +2180,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut browser = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Output-only task events do not invalidate these bounded static strings.
+    // Task events and the slow icon frame invalidate only this bounded row.
     // Both surfaces consume the browser's existing event projection, even idle.
     let completed_turn = turn_result.read().as_ref().map(|(turn, _)| *turn);
+    let background_animates = browser.summary().animates_status();
     let background_status = hooks.use_memo(
-        || browser.summary().status_lines(w, completed_turn),
-        (browser.summary(), w, completed_turn),
+        || {
+            browser
+                .summary()
+                .status_lines(w, completed_turn, background_frame.get())
+        },
+        (browser.summary(), w, completed_turn, background_frame.get()),
     );
 
     // StatusSlot: Foreground > Background > TurnResult > Empty
@@ -2184,7 +2214,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Format with the same iocraft width snapshot as the other chrome,
         // including the very first frame after a resize.
         StatusSlot::Active(spinner.render_frame(frame.get(), activity_state, tools, w))
-    } else if activity_state == EngineState::AwaitingInput {
+    } else if matches!(activity_state, EngineState::AwaitingInput(_)) {
         // The existing question/approval panel owns this interaction. No
         // animation or duplicate waiting instruction above InputSlot.
         StatusSlot::Empty
@@ -2226,12 +2256,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    let controls = if turn_active {
-        Some(running_input_controls(pending_input))
+    // The keys for the current state follow the workspace position. Only turn
+    // and queue state choose them — never typing — so the footer changes when
+    // a turn starts or ends, as the rest of the screen does, and keystrokes
+    // never redraw it. While queued input exists, Esc flushes it.
+    let keys = if turn_active {
+        running_input_controls(pending_input)
     } else if pending_input {
-        Some("Enter send · Esc flush · ↑ edit queued")
+        "Enter send · Esc flush · ↑ edit queued"
+    } else if submitted {
+        "/help"
     } else {
-        None
+        "Type /help for commands"
     };
     let explicit_hint = footer_hint.read().clone();
     let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
@@ -2241,13 +2277,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tips = footer_tips.read();
         let hints = FooterHints {
             transient: native_hint,
-            controls,
+            keys,
         };
         hooks.use_memo(
             || {
-                let render = |permission| {
-                    Arc::new(tips.render(permission, &browser, submitted, turn_active, hints, w))
-                };
+                let render =
+                    |permission| Arc::new(tips.render(permission, &browser, turn_active, hints, w));
                 (render(&perm), render("compact · enlarge to expand"))
             },
             (
@@ -2256,7 +2291,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 browser.footer_label(false),
                 browser.footer_label(true),
                 browser.focus,
-                submitted,
                 turn_active,
                 hints,
                 w,
@@ -2307,10 +2341,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ..crossterm::style::ContentStyle::default()
     };
     let chrome_border = chrome_has_color
-        .then_some(chrome_theme.border)
+        .then_some(chrome_theme.color(TextRole::Border))
         .and_then(ansi_text::ui_color);
-    let chrome_muted = chrome_style(chrome_theme.muted);
-    let question_style = chrome_style(chrome_theme.primary);
+    let chrome_muted = chrome_style(chrome_theme.color(TextRole::Secondary));
+    let question_style = chrome_style(chrome_theme.color(TextRole::Brand));
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::Background { full, .. } => full.clone(),
@@ -2420,6 +2454,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         &mut measured,
     );
+    // Do not wake the canvas when the allocator has hidden this row/icon or
+    // a question owns input. This presentation flag derives from the same
+    // task summary; it is neither a task registry nor an engine lifecycle.
+    *background_animation.write() = background_animates
+        && matches!(status_slot, StatusSlot::Background { .. })
+        && matches!(current_input_slot, InputSlot::TextInput)
+        && layout.status.rows > 0
+        && layout
+            .status
+            .content
+            .text
+            .starts_with(crate::render::activity::spinner_frame(
+                background_frame.get(),
+            ));
     if task_panel.is_some() {
         // The browser chooses its visible rows from the shared allocation.
         // Its lazy output cache survives both projections; fixed controls are
@@ -2508,15 +2556,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         });
     let input_background = transcript
         .as_ref()
-        .and_then(|_| crate::render::prompt_style(true).background_color)
+        .and_then(|_| crate::render::theme().prompt_style(true).background_color)
         .and_then(ansi_text::ui_color);
     let input_foreground = transcript
         .as_ref()
-        .and_then(|_| crate::render::prompt_style(true).foreground_color)
+        .and_then(|_| crate::render::theme().prompt_style(true).foreground_color)
         .and_then(ansi_text::ui_color);
     let header_background = transcript
         .as_ref()
-        .and_then(|_| crate::render::prompt_style(false).background_color)
+        .and_then(|_| crate::render::theme().prompt_style(false).background_color)
         .and_then(ansi_text::ui_color);
     let viewport_enabled = transcript.is_some();
     // Present an empty live frame before exiting. iocraft otherwise retains
@@ -2531,12 +2579,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
             View(height: row_height(transcript_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 #(transcript_frame.map(|display| element! {
-                    View(flex_direction: FlexDirection::Column, width: slot_width) {
-                        View(height: 1, width: slot_width, background_color: header_background) {
-                            RichText(content: display.header, width: slot_width, wrap: TextWrap::NoWrap)
-                        }
-                        RichText(content: display.body, width: slot_width, wrap: TextWrap::NoWrap)
-                    }
+                    TextFrame(header: display.header, body: display.body,
+                        width: u32::from(term_width), header_background)
                 }))
             }
             // Keep the preview parent mounted across streaming handoff so it
@@ -2557,7 +2601,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
                 View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.warning).and_then(ansi_text::ui_color))
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.color(TextRole::Warning)).and_then(ansi_text::ui_color))
                 }
             }))
             #(row_text("heading", heading, visible.heading))
@@ -2748,7 +2792,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// Adapt the shared line framing to iocraft for every captured/output stream.
 fn write_iocraft_output(
     stdout: &StdoutHandle,
-    transcript: &Option<Arc<Mutex<transcript::Transcript>>>,
+    transcript: Option<&Arc<Mutex<transcript::Transcript>>>,
     text: &str,
     terminated: bool,
 ) {
@@ -2974,7 +3018,7 @@ mod tests {
             "expected overflow summary: {plain}"
         );
         let shown = plain.matches("╭─").count();
-        assert!(shown >= 1 && shown < 8, "shown={shown}: {plain}");
+        assert!((1..8).contains(&shown), "shown={shown}: {plain}");
     }
 
     fn question_with_options() -> QuestionPromptView {

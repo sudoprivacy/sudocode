@@ -1,7 +1,9 @@
 //! Explicit default model -> actual file read -> resume/headless wire requests.
 //! CI checks CLI precedence with a deterministic transport on all platforms.
-//! SCODE_TEST_BACKEND=live additionally probes the compiled-in default provider.
+//! `SCODE_TEST_BACKEND=live` additionally probes the compiled-in default provider.
 mod common;
+#[path = "support/request_dumps.rs"]
+mod request_dumps;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;
 
@@ -97,7 +99,7 @@ fn assert_requests(env: &TestEnv, model: &str, minimum: usize, nonce: &str) {
     let requests: Vec<Value> = fs::read_dir(request_directory(env))
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| wire_requests::is_inference_request_dump(path))
+        .filter(|path| request_dumps::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&fs::read(path).unwrap()).unwrap())
         .collect();
     assert!(
@@ -129,8 +131,6 @@ fn assert_requests(env: &TestEnv, model: &str, minimum: usize, nonce: &str) {
 
 fn assistant_answer(env: &TestEnv) -> Option<String> {
     let store = SessionStore::from_cwd(env.workspace_root()).ok()?;
-    // Resume startup also creates an empty placeholder session. Select the
-    // conversation instead of relying on filesystem enumeration order.
     let transcript = store
         .list_sessions()
         .ok()?
@@ -157,6 +157,15 @@ fn assistant_answer(env: &TestEnv) -> Option<String> {
 }
 
 fn assert_answer(env: &TestEnv, nonce: &str) {
+    assert_eq!(
+        SessionStore::from_cwd(env.workspace_root())
+            .unwrap()
+            .list_sessions()
+            .unwrap()
+            .len(),
+        1,
+        "changing the resumed runtime model must retain the same persisted session",
+    );
     let text = assistant_answer(env).expect("the CLI must persist an assistant answer");
     assert!(
         text.contains(nonce),

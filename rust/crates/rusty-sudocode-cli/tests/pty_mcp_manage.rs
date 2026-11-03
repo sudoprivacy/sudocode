@@ -26,11 +26,10 @@ fn spawn_mcp_in_workspace(workspace: &HarnessWorkspace, args: &[&str]) -> pty_ex
     let home = workspace.home.display().to_string();
 
     let mut cmd = format!(
-        "cd '{}' && exec /usr/bin/env SUDO_CODE_CONFIG_HOME='{}' HOME='{}' NO_COLOR=1 TERM=xterm '{}'",
-        workspace_root, config_home, home, bin_str
+        "cd '{workspace_root}' && exec /usr/bin/env SUDO_CODE_CONFIG_HOME='{config_home}' HOME='{home}' NO_COLOR=1 TERM=xterm '{bin_str}'"
     );
     for arg in args {
-        cmd.push_str(&format!(" '{arg}'"));
+        let _ = std::fmt::Write::write_fmt(&mut cmd, format_args!(" '{arg}'"));
     }
     // Resolve `sh` through the shared SSOT: on Windows a bare "sh" handed to
     // CreateProcessW fails with `os error 2` (no PATH lookup); `resolve_sh`

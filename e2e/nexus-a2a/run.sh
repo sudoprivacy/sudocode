@@ -236,39 +236,17 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   --test acp_integration live_pending_node_recovers_send_and_the_original_receiver \
   -- --ignored --test-threads=1 --nocapture
 
-# The baseline lease path against the node's real lease table: one renewal of a
-# conversation reader's lock is failed by a test-only wrapper (INJECTED, it never
-# reaches the node). The commit must be refused, the durable read position left
-# alone, and the reader re-acquired so the batch is redelivered and committed.
-echo "== [deterministic] a failed reader renewal refuses the commit; the reader re-acquires =="
+# Each fault case owns a fresh agent and its own injected fault boundary. Run
+# the same seven assertions together while their real lease clocks elapse.
+# The shared pinned executor retains zero retries and first-failure behavior;
+# inventory and JUnit checks refuse missing, skipped or non-ignored cases.
+# Daemon restart and the following SIGSTOP case stay outside this batch.
+echo "== [deterministic] independent reader, stall and receiver-seat lease faults =="
+PYTHON_BIN="$(python3_bin)"
+MAILBOX_FAULT_OUTPUT="${NEXUS_A2A_FAULT_OUTPUT:-$AUTHON_DATA_DIR/mailbox-faults}"
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset -- --ignored --nocapture
-
-# A stalled batch is recorded by the step that stopped it: a lease lost
-# mid-batch (INJECTED worker renewal failure) is LeaseLost, a consumer that
-# refused under a held lease is ConsumerRefused.
-echo "== [deterministic] a stalled batch records the step that stopped it =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_stall_from_lease_lost_mid_batch_is_recorded_as_lease_lost -- --ignored --nocapture
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_refusal_under_a_held_lease_is_recorded_as_consumer_refused -- --ignored --nocapture
-
-# A lease whose renewal never answers lapses on its own (INJECTED: the renewal
-# is held in flight), and its stall carries the lapse; a commit refused by its
-# register write (INJECTED, with the lease lost meanwhile) carries no lease loss.
-echo "== [deterministic] a stall carries the loss that caused it, captured when it happened =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age -- --ignored --nocapture
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_commit_refused_by_its_register_write_records_no_lease_loss -- --ignored --nocapture
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_retry_diagnostics_distinguish_commit_lapse_from_register_io -- --ignored --nocapture
-# The receiver seat trusts only fresh renewals: a late reply, a partition and a
-# slow-but-successful renewal are injected by the test-only wrapper; the node's
-# TTL is what any takeover waits on.
-echo "== [deterministic] the receiver seat trusts only fresh renewals =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_receiver_seat_trusts_only_fresh_renewals -- --ignored --nocapture
+  "$PYTHON_BIN" ./mailbox_faults.py --manifest "$(native_path "$RUST_DIR/Cargo.toml")" \
+    --output "$(native_path "$MAILBOX_FAULT_OUTPUT")"
 
 # A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #

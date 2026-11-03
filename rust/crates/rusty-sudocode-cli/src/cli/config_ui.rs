@@ -5,12 +5,13 @@
 //! showing fields + current values; selecting a leaf dispatches to the
 //! appropriate InputSlot variant for editing.
 
+use crate::render::TextRole;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use runtime::config_schema::{self, ConfigInputKind, FieldSchema, FieldType};
 
-use crate::render::{ansi_fg, theme, DIM, RESET};
+use crate::render::{theme, DIM, RESET};
 use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::{LiveCli, SlashSelectionHandler};
 
@@ -119,7 +120,7 @@ fn show_schema_level(
     for f in &visible {
         let val_summary = current_obj
             .and_then(|obj| obj.get(f.key))
-            .map_or_else(|| "(not set)".to_string(), |v| truncate_json_value(v));
+            .map_or_else(|| "(not set)".to_string(), truncate_json_value);
         let is_object = f.children.is_some() && f.field_type == FieldType::Object;
         let hint = if is_object { " \u{25b8}" } else { "" };
         keys.push(f.key.to_string());
@@ -156,7 +157,7 @@ fn show_schema_level(
     let ui2 = ui.clone();
     let file_path = file_path.to_path_buf();
     let file_label = file_label.to_string();
-    let breadcrumb2 = breadcrumb.clone();
+    let breadcrumb2 = breadcrumb;
 
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
         let selected = resolve_answer(answer, &keys);
@@ -209,17 +210,7 @@ fn show_schema_level(
         }
 
         // Leaf field — dispatch to appropriate editor.
-        let input_kind = config_schema::resolve_input_kind(field);
-        handle_leaf_edit(
-            &ui2,
-            field,
-            &input_kind,
-            &file_path,
-            &file_label,
-            &breadcrumb2,
-            cli,
-            out,
-        )
+        handle_leaf_edit(&ui2, field, &file_path, &file_label, &breadcrumb2, cli, out)
     }))
 }
 
@@ -228,7 +219,6 @@ fn show_schema_level(
 fn handle_leaf_edit(
     ui: &UiCommandSender,
     field: &'static FieldSchema,
-    input_kind: &ConfigInputKind,
     file_path: &Path,
     file_label: &str,
     breadcrumb: &[String],
@@ -241,9 +231,11 @@ fn handle_leaf_edit(
     let current_obj = navigate_json(&json_root, breadcrumb);
     let current_val = current_obj.and_then(|obj| obj.get(field.key));
 
-    match input_kind {
+    match config_schema::resolve_input_kind(field) {
         ConfigInputKind::BoolToggle => {
-            let current_bool = current_val.and_then(|v| v.as_bool()).unwrap_or(false);
+            let current_bool = current_val
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let new_val = !current_bool;
             match write_config_value(file_path, breadcrumb, field.key, serde_json::json!(new_val)) {
                 Ok(()) => out.println(&format!(
@@ -253,14 +245,14 @@ fn handle_leaf_edit(
                 )),
                 Err(e) => out.println(&format!(
                     "{}Error writing config: {e}{}",
-                    ansi_fg(theme().error),
+                    theme().fg_seq(TextRole::Error),
                     RESET
                 )),
             }
             None
         }
         ConfigInputKind::Enum(opts) => {
-            let items: Vec<String> = opts.clone();
+            let items: Vec<String> = opts;
             let current_str = current_val.and_then(|v| v.as_str()).unwrap_or("");
             let options: Vec<QuestionOptionView> = items
                 .iter()
@@ -311,7 +303,7 @@ fn handle_leaf_edit(
                         )),
                         Err(e) => out.println(&format!(
                             "{}Error writing config: {e}{}",
-                            ansi_fg(theme().error),
+                            theme().fg_seq(TextRole::Error),
                             RESET
                         )),
                     }
@@ -376,7 +368,7 @@ fn handle_leaf_edit(
                         )),
                         Err(e) => out.println(&format!(
                             "{}Error writing config: {e}{}",
-                            ansi_fg(theme().error),
+                            theme().fg_seq(TextRole::Error),
                             RESET
                         )),
                     }

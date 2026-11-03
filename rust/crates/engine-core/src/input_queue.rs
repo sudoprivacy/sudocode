@@ -351,6 +351,7 @@ impl<R> TurnInputCoordinator<R> {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn peek_display(&self) -> Vec<String> {
         self.queue.iter().map(|q| q.input.display.clone()).collect()
     }
@@ -484,7 +485,7 @@ mod queue_docs {
         let mut c = TurnInputCoordinator::<()>::new();
         let next = c.submit_when_idle(human("hello"));
         assert_eq!(next.prompt, "hello");
-        assert!(next.echoes.is_empty());
+        assert_eq!(next.echoes, [] as [engine_events::InputView; 0]);
         assert_eq!(next.consumed, 1);
         assert_eq!(c.pending(), 0);
     }

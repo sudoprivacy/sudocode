@@ -4,6 +4,7 @@ use crate::fs_backend::FsBackend;
 use crate::session_writer::SessionWriter;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::Arc;
 
 impl CompletionJournal {
     /// Resolve durable identity from a bound journal or its original transcript.
@@ -81,25 +82,39 @@ impl CompletionJournal {
             .lock()
             .map_err(|_| "completion journal poisoned")?;
         if state.deleted.is_none() {
-            let _write = self.writer.purge_write()?;
-            if state.active_trace.is_some() {
+            let shared_history = self.writer.has_history()?;
+            let _write = if shared_history {
+                self.writer.write()?
+            } else {
+                self.writer.purge_write()?
+            };
+            if !shared_history && state.active_trace.is_some() {
                 return Err("trace_still_active".into());
             }
-            super::storage::purge(
-                self.fs.as_ref(),
-                &self.transcript,
-                &state.session_id,
-                &state.cwd,
-                &state.storage_ref,
+            let deletion = super::storage::Deletion {
+                session_id: &state.session_id,
+                cwd: &state.cwd,
+                storage_ref: &state.storage_ref,
                 cleanup_id,
-                Some(&self.path),
-            )?;
+                store_root: self.store_root.as_deref(),
+            };
+            if shared_history {
+                super::storage::mark_deleted(self.fs.as_ref(), &self.transcript, &deletion)?;
+            } else {
+                super::storage::purge(
+                    self.fs.as_ref(),
+                    &self.transcript,
+                    &deletion,
+                    Some(&self.path),
+                )?;
+            }
 
             // Retire before releasing the same mutex used by terminal callbacks.
             self.writer.retire();
             state.sources.clear();
             state.reducer = Completions::default();
             state.context = None;
+            state.active_trace = None;
             state.closed_traces.clear();
             state.deleted = Some(cleanup_id.into());
         }
@@ -112,6 +127,7 @@ impl CompletionJournal {
         {
             clear();
         }
+        crate::session_cleanup::resume(Arc::clone(&self.fs), &self.transcript)?;
         Ok(json!({"cleanupId": cleanup_id, "disposition": "purged", "storageRef": storage_ref}))
     }
 
@@ -126,30 +142,48 @@ impl CompletionJournal {
     }
 
     pub fn purge_stored(
-        fs: &dyn FsBackend,
+        fs: Arc<dyn FsBackend>,
         transcript: &Path,
         session_id: &str,
         cwd: &Path,
         storage_ref: &str,
         cleanup_id: &str,
+        store_root: Option<&Path>,
     ) -> Result<Value, String> {
-        let probe = Self::probe(fs, transcript, session_id, cwd)?;
+        let probe = Self::probe(fs.as_ref(), transcript, session_id, cwd)?;
         if probe["storageRef"] != storage_ref {
             return Err("completion_storage_mismatch".into());
         }
         if cleanup_id.is_empty() || cleanup_id.len() > 512 {
             return Err("invalid cleanup identity".into());
         }
-        let _write = SessionWriter::purge_lock(fs, transcript)?;
-        super::storage::purge(
-            fs,
-            transcript,
-            session_id,
-            cwd,
-            storage_ref,
-            cleanup_id,
-            None,
-        )?;
+        {
+            if !fs.fenced_locks() {
+                return Err("completion_storage_exclusion_unavailable".into());
+            }
+            let shared_history = fs
+                .exists(&transcript.to_string_lossy())
+                .map_err(|e| e.to_string())?
+                && crate::session::history::is_record_history(
+                    &fs.read_snapshot(&transcript.to_string_lossy())
+                        .map_err(|e| e.to_string())?,
+                );
+            let deletion = super::storage::Deletion {
+                session_id,
+                cwd,
+                storage_ref,
+                cleanup_id,
+                store_root,
+            };
+            if shared_history {
+                let _write = SessionWriter::commit_lock(fs.as_ref(), transcript)?;
+                super::storage::mark_deleted(fs.as_ref(), transcript, &deletion)?;
+            } else {
+                let _write = SessionWriter::purge_lock(fs.as_ref(), transcript)?;
+                super::storage::purge(fs.as_ref(), transcript, &deletion, None)?;
+            }
+        }
+        crate::session_cleanup::resume(fs, transcript)?;
         Ok(json!({"cleanupId": cleanup_id, "disposition": "purged", "storageRef": storage_ref}))
     }
 }

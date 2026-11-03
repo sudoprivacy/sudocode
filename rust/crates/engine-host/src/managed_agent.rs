@@ -31,7 +31,7 @@ const MODEL_LABEL: &str = "model";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Prepared transcript and host resources. A renderer supplies the initial
-/// session options and adopts this into the shared SessionEngine.
+/// session options and adopts this into the shared `SessionEngine`.
 pub struct PreparedManagedAgent {
     host: HostContext,
     session: runtime::Session,
@@ -41,20 +41,25 @@ pub struct PreparedManagedAgent {
 }
 
 impl PreparedManagedAgent {
+    #[must_use]
     pub fn durable_session_id(&self) -> &str {
         &self.session.session_id
     }
+    #[must_use]
     pub fn model(&self) -> &str {
         &self.config.model
     }
     /// Stop the host when its lifetime or durable-session admission ends.
     /// Turn cancellation uses the separate signal installed by `open`.
+    #[must_use]
     pub fn abort_signal(&self) -> runtime::HookAbortSignal {
         self.abort.clone()
     }
+    #[must_use]
     pub fn mailbox(&self) -> Option<Arc<Mailbox>> {
         self.host.mailbox.clone()
     }
+    #[must_use]
     pub fn cwd(&self) -> std::path::PathBuf {
         self.host.shell_root.clone()
     }

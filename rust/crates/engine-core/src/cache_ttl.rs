@@ -84,9 +84,8 @@ struct Entry {
     /// or resuming the same context reports the same segment.
     segment: Option<u64>,
     new_context: bool,
-    /// `Some(false)`: the TTL follows this session's history. Set from whether
-    /// a setting pinned the client, and by a choice.
-    pinned: Option<bool>,
+    /// Set from whether a setting pinned the client, and by a choice.
+    mode: Option<Mode>,
     /// The latest decision, while automatic, and whether a boundary made it
     /// since the last request, so the cold request after it need not repeat it.
     verdict: Option<Verdict>,
@@ -94,9 +93,31 @@ struct Entry {
     since_decision: usize,
     /// Apply the next automatic switch now rather than at a cold point.
     force_next: bool,
+
     switches: u64,
     /// Switches already reported by [`take_switch_notice`].
     announced: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The TTL follows this session's history.
+    Auto,
+    /// Pinned by the saved setting the client was built from, or the auth
+    /// mode's default while the advisor is off.
+    Setting,
+    /// Pinned by a choice made in this process: a rebuilt client's starting
+    /// value does not override it, even if saving the choice failed.
+    Chosen,
+}
+
+/// The mode for a session first seen with a client pinned or not.
+fn initial_mode(pinned: bool) -> Mode {
+    if pinned || !automatic_enabled() {
+        Mode::Setting
+    } else {
+        Mode::Auto
+    }
 }
 
 fn sessions() -> MutexGuard<'static, HashMap<String, Entry>> {
@@ -119,13 +140,13 @@ pub fn choose(session_id: &str, choice: TtlChoice, force_now: bool) {
     let mut map = sessions();
     let entry = map.entry(session_id.to_owned()).or_default();
     if choice == TtlChoice::Auto && automatic_enabled() {
-        entry.pinned = Some(false);
+        entry.mode = Some(Mode::Auto);
         entry.pending = None;
         entry.force_next = force_now;
         entry.fresh = false;
         entry.since_decision = DECIDE_EVERY;
     } else {
-        entry.pinned = Some(true);
+        entry.mode = Some(Mode::Chosen);
         entry.pending = Some(PendingTtl { choice, force_now });
     }
 }
@@ -138,7 +159,7 @@ pub fn status(session_id: &str) -> TtlStatus {
             effective_seconds: entry.last.map(|last| last.ttl_seconds),
             pending: entry.pending,
             last_request_ms: entry.last.map(|last| last.started_ms),
-            auto: entry.pinned == Some(false),
+            auto: entry.mode == Some(Mode::Auto),
             switches: entry.switches,
         })
 }
@@ -164,7 +185,7 @@ pub(crate) fn context_boundary(session_id: &str, segment: u64, pinned: bool) {
         entry.new_context = true;
     }
     entry.segment = Some(segment);
-    entry.pinned.get_or_insert(pinned || !automatic_enabled());
+    entry.mode.get_or_insert(initial_mode(pinned));
 }
 
 /// The advisor's verdict at a context boundary, for an automatic TTL, and
@@ -173,10 +194,14 @@ pub(crate) fn context_boundary(session_id: &str, segment: u64, pinned: bool) {
 pub(crate) fn advised(session_id: &str, verdict: Verdict, decided: bool) {
     let mut map = sessions();
     let entry = map.entry(session_id.to_owned()).or_default();
-    if entry.pinned == Some(false) {
+    if entry.mode == Some(Mode::Auto) {
         entry.verdict = Some(verdict);
         entry.fresh = decided;
-        entry.since_decision = 0;
+        // A kept verdict leaves a decision already owed (after `/cache ttl
+        // auto`) still owed.
+        if decided {
+            entry.since_decision = 0;
+        }
     }
 }
 
@@ -188,18 +213,49 @@ pub(crate) fn advised(session_id: &str, verdict: Verdict, decided: bool) {
 /// compaction rewrote the conversation), or there was none. The
 /// first request of a process falls back to the ledger, so a quick restart is
 /// not mistaken for a cold cache.
+///
+/// The advisor's replay reads and writes files, so it runs without the
+/// registry lock; a choice made meanwhile is respected when it is retaken.
 pub(crate) fn before_request(
     session_id: &str,
     ttl: &api::CacheTtl,
     advisor: Option<&AdvisorInput<'_>>,
     now_ms: u64,
 ) {
+    let (last, cold, due) = prepare(session_id, ttl, advisor, now_ms);
+    if let (true, Some(advisor)) = (due, advisor) {
+        let verdict = crate::cache_advisor::decide(
+            advisor.directory,
+            advisor.segment,
+            advisor.model,
+            advisor.route,
+            ttl.seconds(),
+            if cold {
+                Trigger::Cold
+            } else {
+                Trigger::Periodic
+            },
+        );
+        let mut map = sessions();
+        let entry = map.entry(session_id.to_owned()).or_default();
+        entry.verdict = Some(verdict);
+        entry.since_decision = 0;
+    }
+    apply(session_id, ttl, advisor.is_some(), last, cold, now_ms);
+}
+
+/// Settle the TTL the client starts from, and whether this request is cold
+/// and owes an automatic decision.
+fn prepare(
+    session_id: &str,
+    ttl: &api::CacheTtl,
+    advisor: Option<&AdvisorInput<'_>>,
+    now_ms: u64,
+) -> (Option<LastRequest>, bool, bool) {
     let mut map = sessions();
     let entry = map.entry(session_id.to_owned()).or_default();
-    let pinned = *entry
-        .pinned
-        .get_or_insert(ttl.pinned() || !automatic_enabled());
-    let automatic = (!pinned).then_some(advisor).flatten();
+    let mode = *entry.mode.get_or_insert(initial_mode(ttl.pinned()));
+    let automatic = mode == Mode::Auto && advisor.is_some();
     let last = entry
         .last
         .or_else(|| advisor.and_then(|advisor| last_from_ledger(advisor.directory)));
@@ -207,12 +263,13 @@ pub(crate) fn before_request(
     // for /model or /auth) may ask for a TTL the previous request did not use.
     // That is a switch too: it goes through the same rule rather than straight
     // to the wire, and a choice already pending stays the one that counts.
-    // An automatic TTL ignores the client's starting value altogether.
+    // An automatic TTL, or one chosen in this session, ignores the client's
+    // starting value altogether.
     if let Some(last) = last {
         let wanted = ttl.one_hour();
         if (last.ttl_seconds == 3600) != wanted {
             ttl.set_one_hour(last.ttl_seconds == 3600);
-            if automatic.is_none() {
+            if !automatic && mode != Mode::Chosen {
                 entry.pending.get_or_insert(PendingTtl {
                     choice: if wanted {
                         TtlChoice::OneHour
@@ -228,25 +285,27 @@ pub(crate) fn before_request(
         || last.is_none_or(|last| {
             now_ms.saturating_sub(last.started_ms) >= u64::from(last.ttl_seconds) * 1000
         });
-    if let Some(advisor) = automatic {
-        let due = entry.verdict.is_none()
+    let due = automatic
+        && (entry.verdict.is_none()
             || (cold && !entry.fresh)
-            || entry.since_decision >= DECIDE_EVERY;
-        if due {
-            entry.verdict = Some(crate::cache_advisor::decide(
-                advisor.directory,
-                advisor.segment,
-                advisor.model,
-                advisor.route,
-                ttl.seconds(),
-                if cold {
-                    Trigger::Cold
-                } else {
-                    Trigger::Periodic
-                },
-            ));
-            entry.since_decision = 0;
-        }
+            || entry.since_decision >= DECIDE_EVERY);
+    (last, cold, due)
+}
+
+/// Turn an automatic verdict into a pending switch, apply a pending switch if
+/// this is the moment for it, and record this request.
+fn apply(
+    session_id: &str,
+    ttl: &api::CacheTtl,
+    has_advisor: bool,
+    last: Option<LastRequest>,
+    cold: bool,
+    now_ms: u64,
+) {
+    let mut map = sessions();
+    let entry = map.entry(session_id.to_owned()).or_default();
+    let automatic = entry.mode == Some(Mode::Auto) && has_advisor;
+    if automatic {
         let one_hour = match entry.verdict {
             Some(Verdict::Seconds(seconds)) => seconds == 3600,
             Some(Verdict::Keep) => ttl.one_hour(),
@@ -274,7 +333,7 @@ pub(crate) fn before_request(
             entry.pending = None;
         }
     }
-    if automatic.is_some() {
+    if automatic {
         // The first request ever sent is not a switch, whatever the client
         // started from.
         if last.is_some_and(|last| (last.ttl_seconds == 3600) != ttl.one_hour()) {
@@ -288,7 +347,6 @@ pub(crate) fn before_request(
         ttl_seconds: ttl.seconds(),
     });
 }
-
 #[derive(Deserialize)]
 struct LedgerRow {
     observation: Option<LedgerObservation>,

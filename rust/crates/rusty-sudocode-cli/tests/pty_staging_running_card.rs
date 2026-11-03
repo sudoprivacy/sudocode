@@ -1,6 +1,6 @@
 //! PTY probe: does the staging overlay actually render a *running* tool card
 //! during a long-running tool call? The staging design shows an in-flight call
-//! as a card in the overlay (above the prompt) until its ToolResult arrives.
+//! as a card in the overlay (above the prompt) until its `ToolResult` arrives.
 //! For a fast tool the running phase is sub-frame and invisible; this uses the
 //! `bash_interrupt_long_running` scenario (`printf 'interrupt-start'; sleep 30`)
 //! so the in-flight window is ~30 s — plenty for the 80 ms tick to render it.

@@ -1,14 +1,14 @@
 //! Live E2E: a nexus-A2A peer message reaches an ACP client.
 //!
 //! The send half of standalone A2A has worked since #508 — `scode` advertises
-//! a `send_message` tool and writes to the peer's replicated DT_STREAM inbox.
+//! a `send_message` tool and writes to the peer's replicated `DT_STREAM` inbox.
 //! The receive half was only ever wired into the interactive REPL, which
 //! printed `📨 A2A from <peer>` to the terminal. Anything driving `scode acp`
 //! programmatically — which is what an agent does, and the reason the ACP cut
 //! exists — saw nothing at all. A duet between two such agents could send and
 //! never receive.
 //!
-//! This proves the other half over a real daemon and a real DT_STREAM: a peer
+//! This proves the other half over a real daemon and a real `DT_STREAM`: a peer
 //! writes into the agent's inbox and the ACP client is told, out of band, with
 //! no turn in flight.
 //!
@@ -118,7 +118,7 @@ struct AcpStdio {
 }
 
 impl AcpStdio {
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    fn request(&mut self, method: &str, params: &Value) -> Value {
         self.next_id += 1;
         let id = self.next_id;
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
@@ -227,13 +227,13 @@ fn live_session_close_releases_an_acquired_receiver_seat_before_reply() {
     );
     let initialized = acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     assert!(initialized.get("result").is_some(), "{initialized}");
     let opened_at = Instant::now();
     let opened = acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     let sid = opened["result"]["sessionId"]
         .as_str()
@@ -241,31 +241,14 @@ fn live_session_close_releases_an_acquired_receiver_seat_before_reply() {
         .to_string();
     let second = acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     let second_sid = second["result"]["sessionId"]
         .as_str()
         .expect("second SID")
         .to_string();
-    let await_seat = || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match backend
-                .try_lock(&path, 30_000)
-                .expect("probe the real seat")
-            {
-                None => break,
-                Some(probe) => drop(probe),
-            }
-            assert!(
-                Instant::now() < deadline,
-                "receiver never acquired its real seat"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    };
-    await_seat();
-    let first_close = acp.request("session/close", json!({"sessionId": sid}));
+    await_real_receiver_seat(&backend, &path);
+    let first_close = acp.request("session/close", &json!({"sessionId": sid}));
     assert!(first_close.get("result").is_some(), "{first_close}");
     assert!(
         backend
@@ -274,7 +257,7 @@ fn live_session_close_releases_an_acquired_receiver_seat_before_reply() {
             .is_none(),
         "closing one session must preserve its agent's other live session"
     );
-    let last_close = acp.request("session/close", json!({"sessionId": second_sid}));
+    let last_close = acp.request("session/close", &json!({"sessionId": second_sid}));
     assert!(last_close.get("result").is_some(), "{last_close}");
     assert!(
         opened_at.elapsed() < Duration::from_secs(15),
@@ -292,11 +275,11 @@ fn live_session_close_releases_an_acquired_receiver_seat_before_reply() {
     // Re-entry on this connection exercises the retained retirement handle.
     let loaded = acp.request(
         "session/load",
-        json!({"sessionId": second_sid, "cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"sessionId": second_sid, "cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     assert!(loaded.get("result").is_some(), "{loaded}");
-    await_seat();
-    let closed = acp.request("session/close", json!({"sessionId": second_sid}));
+    await_real_receiver_seat(&backend, &path);
+    let closed = acp.request("session/close", &json!({"sessionId": second_sid}));
     assert!(closed.get("result").is_some(), "{closed}");
     let probe = backend
         .try_lock(&path, 30_000)
@@ -329,7 +312,7 @@ fn spawn_acp_from_binary(
     binary: &std::ffi::OsStr,
     endpoint: &str,
     agent: &str,
-    peer: &str,
+    _peer: &str,
     workspace: &tempfile::TempDir,
     config_home: &tempfile::TempDir,
 ) -> AcpStdio {
@@ -407,7 +390,7 @@ fn a2a_peer_message_reaches_an_acp_client() {
 
     let init = acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     assert!(init.get("result").is_some(), "initialize failed: {init}");
 
@@ -415,7 +398,7 @@ fn a2a_peer_message_reaches_an_acp_client() {
     // nobody to notify.
     let new_session = acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     let session_id = new_session["result"]["sessionId"]
         .as_str()
@@ -490,11 +473,11 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
         let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
         acp.request(
             "initialize",
-            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            &json!({"protocolVersion": 1, "clientCapabilities": {}}),
         );
         acp.request(
             "session/new",
-            json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+            &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
         );
         // Wait for the cursor to actually exist before killing the process.
         // The premise of this test is "a client that HAS read this inbox
@@ -520,11 +503,11 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
     let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
     acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
     let notification = acp.await_notification(|msg| {
         msg["method"] == "session/update"
@@ -571,11 +554,11 @@ fn a_first_time_receiver_does_not_replay_history() {
     let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
     acp.request(
         "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        &json!({"protocolVersion": 1, "clientCapabilities": {}}),
     );
     acp.request(
         "session/new",
-        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        &json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
     );
 
     // A live message proves the receiver is working, and its arrival is the
@@ -595,4 +578,19 @@ fn a_first_time_receiver_does_not_replay_history() {
         text.contains(live) && !text.contains("ancient history"),
         "the first delivery should be the live message, not replayed history: {text}"
     );
+}
+
+fn await_real_receiver_seat(backend: &dyn runtime::FsBackend, path: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match backend.try_lock(path, 30_000).expect("probe the real seat") {
+            None => break,
+            Some(probe) => drop(probe),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "receiver never acquired its real seat"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

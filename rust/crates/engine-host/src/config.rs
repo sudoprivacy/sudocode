@@ -25,16 +25,17 @@ pub const DEFAULT_MODEL: &str = "claude-opus-5";
 pub enum ModelSource {
     /// Explicit `--model` / `--model=` CLI flag.
     Flag,
-    /// ANTHROPIC_MODEL environment variable (when no flag was passed).
+    /// `ANTHROPIC_MODEL` environment variable (when no flag was passed).
     Env,
     /// `model` key in `.scode.json` / `.nexus/sudocode/settings.json` (when neither
     /// flag nor env set it).
     Config,
-    /// Compiled-in DEFAULT_MODEL fallback.
+    /// Compiled-in `DEFAULT_MODEL` fallback.
     Default,
 }
 
 impl ModelSource {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             ModelSource::Flag => "flag",
@@ -48,6 +49,7 @@ impl ModelSource {
 /// Single source of truth for the env-or-config default model lookup. Returns
 /// `(resolved, raw, source)` when env or config wins, `None` to defer to the
 /// compiled-in default.
+#[must_use]
 pub fn lookup_default_model() -> Option<(String, String, ModelSource)> {
     if let Some(env_model) = env::var("ANTHROPIC_MODEL")
         .ok()
@@ -74,6 +76,7 @@ pub fn lookup_default_model() -> Option<(String, String, ModelSource)> {
 // Model / alias resolution
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn resolve_model_alias(model: &str) -> &str {
     match model {
         // `auto` means "no explicit model chosen — use the default". It resolves
@@ -82,18 +85,18 @@ pub fn resolve_model_alias(model: &str) -> &str {
         // user's configured default. Kept as a concrete constant rather than a
         // re-lookup so there is no recursion when a config default is itself
         // `auto`.
-        "auto" => DEFAULT_MODEL,
         "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
         // `opus` follows the compiled-in default rather than pinning a family of
         // its own. Two constants both meaning "the opus to use" drifted apart:
         // the default said one generation while this alias said an older one, so
         // `scode` and `scode --model opus` reached different models. One source.
-        "claude-opus" | "opus" => DEFAULT_MODEL,
+        "auto" | "claude-opus" | "opus" => DEFAULT_MODEL,
         "claude-haiku" | "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
     }
 }
 
+#[must_use]
 pub fn resolve_model_alias_with_config(model: &str) -> String {
     let trimmed = model.trim();
     let config = load_sudocode_config_for_current_dir();
@@ -106,6 +109,7 @@ pub fn resolve_model_alias_with_config(model: &str) -> String {
     resolve_model_alias(trimmed).to_string()
 }
 
+#[must_use]
 pub fn resolve_config_model_alias(
     model: &str,
     config: &engine_core::SudoCodeConfig,
@@ -133,6 +137,7 @@ fn config_alias_for_current_dir(alias: &str) -> Option<String> {
 // Config loaders
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn load_sudocode_config_for_current_dir() -> engine_core::SudoCodeConfig {
     let Ok(cwd) = runtime::current_workspace_root() else {
         return engine_core::SudoCodeConfig::default();
@@ -176,6 +181,7 @@ fn apply_cli_account_override(config: &mut engine_core::SudoCodeConfig) {
     }
 }
 
+#[must_use]
 pub fn load_sudocode_config_for_cwd(cwd: &Path) -> engine_core::SudoCodeConfig {
     let loader = ConfigLoader::default_for(cwd);
     let mut config = loader.load_sudocode_config().unwrap_or_default();
@@ -206,6 +212,7 @@ pub type AllowedToolSet = BTreeSet<String>;
 // Permission mode helpers
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn permission_mode_from_label(mode: &str) -> PermissionMode {
     match mode {
         "read-only" => PermissionMode::ReadOnly,
@@ -268,6 +275,7 @@ pub fn extract_sudorouter_credentials(
     Some((base_url.clone(), api_key.to_string()))
 }
 
+#[must_use]
 pub fn resolve_repl_model(cli_model: String) -> String {
     if cli_model != DEFAULT_MODEL {
         return cli_model;
@@ -279,6 +287,7 @@ pub fn resolve_repl_model(cli_model: String) -> String {
 
 /// Canonicalize a user-supplied permission-mode label to its wire form, or
 /// `None` if it is not one of the three supported modes.
+#[must_use]
 pub fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
     match mode.trim() {
         "read-only" => Some("read-only"),

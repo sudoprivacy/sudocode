@@ -218,7 +218,7 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
     // One deadline for the entire process. A model name or request ID containing
     // "4" is not an answer, and a timeout after that match is not success.
     let exit = sess.expect_eof();
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
     let request_error = latest_request_failure(&request_log);
     let refusal = latest_provider_refusal(&request_log);
     let unsupported = unsupported_tool_capability(&request_log, model);

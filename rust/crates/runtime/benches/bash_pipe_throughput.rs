@@ -13,7 +13,7 @@
 //!    path `runtime::bash` exercises every time the LLM (or `!`-bash mode)
 //!    issues a command.
 //!
-//! Reference point for DT_PIPE comparison and the rationale for keeping
+//! Reference point for `DT_PIPE` comparison and the rationale for keeping
 //! the bash spawn path on host OS pipes live in
 //! `docs/plans/active/bash-mode-design.md`.
 //!

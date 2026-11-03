@@ -6,10 +6,10 @@
 //! When a parent spawns 3+ fork children in parallel, each child
 //! immediately sends a `/v1/messages` request whose message list is:
 //!
-//!   [full_parent_assistant_message,
-//!    user_message = [tool_result_1, tool_result_2, …, directive_text]]
+//!   [`full_parent_assistant_message`,
+//!    `user_message` = [`tool_result_1`, `tool_result_2`, …, `directive_text`]]
 //!
-//! The parent assistant message + all tool_result blocks are meant
+//! The parent assistant message + all `tool_result` blocks are meant
 //! to be BYTE-IDENTICAL across every fork so the Anthropic prompt
 //! cache treats them as one shared prefix — only the final
 //! directive text (which carries the child-specific instructions)
@@ -23,9 +23,9 @@
 //! parent assistant message:
 //!
 //! 1. Message 0 (assistant) is byte-identical across a, b, c.
-//! 2. Message 1's ToolResult blocks are byte-identical across
-//!    a, b, c — same tool_use_id, same tool_name, same placeholder
-//!    output, same is_error flag.
+//! 2. Message 1's `ToolResult` blocks are byte-identical across
+//!    a, b, c — same `tool_use_id`, same `tool_name`, same placeholder
+//!    output, same `is_error` flag.
 //! 3. Message 1's trailing Text block DIFFERS across a, b, c
 //!    (this is the only block that carries child-specific content).
 //! 4. There is exactly ONE Text block in each user message — a
@@ -69,7 +69,7 @@ fn parent_assistant_with_two_tool_uses() -> ConversationMessage {
 }
 
 /// Slot a `Vec<ConversationMessage>` into a shape a test can slice
-/// per-block: (parent_assistant_message, user_message_blocks).
+/// per-block: (`parent_assistant_message`, `user_message_blocks`).
 fn split(messages: &[ConversationMessage]) -> (&ConversationMessage, Vec<&ContentBlock>) {
     assert_eq!(messages.len(), 2, "fork must produce 2 messages");
     let assistant = &messages[0];
@@ -153,13 +153,13 @@ fn parallel_forks_differ_only_in_trailing_directive_text_block() {
     let b_last = b_blocks[2];
     let c_last = c_blocks[2];
 
-    let (a_text, b_text, c_text) = match (a_last, b_last, c_last) {
-        (
-            ContentBlock::Text { text: at },
-            ContentBlock::Text { text: bt },
-            ContentBlock::Text { text: ct },
-        ) => (at, bt, ct),
-        _ => panic!("trailing block must be Text (the fork directive)"),
+    let (
+        ContentBlock::Text { text: a_text },
+        ContentBlock::Text { text: b_text },
+        ContentBlock::Text { text: c_text },
+    ) = (a_last, b_last, c_last)
+    else {
+        panic!("trailing block must be Text (the fork directive)")
     };
 
     // The 3 directives must produce 3 DIFFERENT trailing texts.

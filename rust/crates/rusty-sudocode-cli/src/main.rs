@@ -6202,6 +6202,24 @@ impl LiveCli {
                 }
                 Ok(())
             }
+            // Persisted like any setting, and applied to the running session.
+            "autoCompactEnabled" => {
+                let is_enabled = match value.trim().to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        eprintln!("Error: setting requires true or false");
+                        return Ok(());
+                    }
+                };
+                match self.lifecycle.set_auto_compaction(is_enabled) {
+                    Ok(()) => {
+                        self.out_println(format!("{DIM}autoCompactEnabled = {is_enabled}{RESET}"));
+                    }
+                    Err(err) => eprintln!("Error: {err}"),
+                }
+                Ok(())
+            }
             _ => {
                 // Everything else routes through the single SSOT config writer
                 // (`tools::set_config_setting`) so `/config set` persists to the

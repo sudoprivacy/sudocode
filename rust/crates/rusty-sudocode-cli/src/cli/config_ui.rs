@@ -112,7 +112,10 @@ fn show_schema_level(
     // Navigate to the nested object indicated by breadcrumb.
     let current_obj = navigate_json(&json_root, &breadcrumb);
 
-    let visible: Vec<&FieldSchema> = schema.iter().filter(|f| !f.is_deprecated).collect();
+    let visible: Vec<&FieldSchema> = schema
+        .iter()
+        .filter(|f| !f.is_deprecated && !f.is_compat_only)
+        .collect();
 
     let mut keys: Vec<String> = Vec::new();
     let mut options: Vec<QuestionOptionView> = Vec::new();

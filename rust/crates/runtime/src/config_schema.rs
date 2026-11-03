@@ -64,6 +64,10 @@ pub struct FieldSchema {
     pub deprecated_replacement: &'static str,
     /// Child fields for Object types — enables tree navigation in the UI.
     pub children: Option<&'static [FieldSchema]>,
+    /// A Claude Code setting scode tolerates in a settings file but does not
+    /// implement. `/config set` refuses it and the config browser hides it, so
+    /// nothing offers a setting that changes nothing.
+    pub is_compat_only: bool,
 }
 
 impl FieldSchema {
@@ -78,6 +82,7 @@ impl FieldSchema {
             is_deprecated: false,
             deprecated_replacement: "",
             children: None,
+            is_compat_only: false,
         }
     }
 
@@ -96,6 +101,7 @@ impl FieldSchema {
             is_deprecated: false,
             deprecated_replacement: "",
             children: None,
+            is_compat_only: false,
         }
     }
 
@@ -114,6 +120,7 @@ impl FieldSchema {
             is_deprecated: false,
             deprecated_replacement: "",
             children: Some(children),
+            is_compat_only: false,
         }
     }
 
@@ -132,6 +139,15 @@ impl FieldSchema {
             is_deprecated: true,
             deprecated_replacement: replacement,
             children: None,
+            is_compat_only: false,
+        }
+    }
+
+    /// Mark a tolerated Claude Code setting that scode does not implement.
+    const fn compat_only(self) -> Self {
+        Self {
+            is_compat_only: true,
+            ..self
         }
     }
 }
@@ -325,55 +341,33 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     // configuration down with it, silently, back to defaults. These thirteen
     // were settable and unlisted, so setting any of them disabled the file that
     // was just written.
-    FieldSchema::leaf("theme", FieldType::String, "Colour theme"),
-    FieldSchema::enumerated("editorMode", EDITOR_MODE_OPTIONS, "Line-editing mode"),
-    FieldSchema::leaf("language", FieldType::String, "Preferred response language"),
-    FieldSchema::leaf("verbose", FieldType::Bool, "Verbose output"),
-    FieldSchema::leaf(
-        "preferredNotifChannel",
-        FieldType::String,
-        "Where turn-completion notifications go",
+    FieldSchema::enumerated(
+        "theme",
+        THEME_OPTIONS,
+        "Terminal background the colours suit (auto: detect)",
     ),
+    FieldSchema::leaf("language", FieldType::String, "Language replies use"),
     FieldSchema::leaf(
         "autoCompactEnabled",
         FieldType::Bool,
-        "Compact the session automatically as it approaches the context limit",
+        "Compact the session automatically as it approaches the context limit (default: true)",
     ),
-    FieldSchema::leaf("autoDreamEnabled", FieldType::Bool, "Enable auto-dream"),
-    FieldSchema::leaf(
-        "fileCheckpointingEnabled",
-        FieldType::Bool,
-        "Checkpoint files before a tool edits them",
-    ),
-    FieldSchema::leaf(
-        "showTurnDuration",
-        FieldType::Bool,
-        "Show each turn's duration",
-    ),
-    FieldSchema::leaf(
-        "terminalProgressBarEnabled",
-        FieldType::Bool,
-        "Show the terminal progress bar",
-    ),
-    FieldSchema::leaf(
-        "todoFeatureEnabled",
-        FieldType::Bool,
-        "Enable the todo list",
-    ),
-    FieldSchema::leaf(
-        "alwaysThinkingEnabled",
-        FieldType::Bool,
-        "Always request extended thinking",
-    ),
+    FieldSchema::deprecated("alwaysThinkingEnabled", FieldType::Bool, "thinking"),
+    // Claude Code settings scode does not implement. Earlier scode versions
+    // wrote them through `/config set`, so files may still carry them.
+    FieldSchema::enumerated("editorMode", EDITOR_MODE_OPTIONS, IGNORED).compat_only(),
+    FieldSchema::leaf("verbose", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("preferredNotifChannel", FieldType::String, IGNORED).compat_only(),
+    FieldSchema::leaf("autoDreamEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("fileCheckpointingEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("showTurnDuration", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("terminalProgressBarEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("todoFeatureEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::enumerated("teammateMode", TEAMMATE_MODE_OPTIONS, IGNORED).compat_only(),
     FieldSchema::enumerated(
         "effortLevel",
         &["auto", "low", "medium", "high", "xhigh", "max"],
         "Reasoning effort (max applies only to the current session)",
-    ),
-    FieldSchema::enumerated(
-        "teammateMode",
-        TEAMMATE_MODE_OPTIONS,
-        "How a teammate agent is run",
     ),
     // This session's mailbox identity — the name peers address and the receiver
     // polls. Unset, `runtime::mailbox::local_agent_name` derives one from the
@@ -381,6 +375,9 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     FieldSchema::leaf("agentName", FieldType::String, "This session's A2A name"),
 ];
 
+const IGNORED: &str = "Claude Code setting; scode ignores it";
+/// Shared with the `config` tool so a set accepts exactly what this offers.
+pub const THEME_OPTIONS: &[&str] = &["auto", "dark", "light"];
 const EDITOR_MODE_OPTIONS: &[&str] = &["default", "vim", "emacs"];
 
 const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
@@ -464,6 +461,12 @@ pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
         .filter(|f| !f.is_deprecated)
         .map(|f| f.key)
         .collect()
+}
+
+/// Whether `key` is a tolerated settings key that scode does not implement.
+#[must_use]
+pub fn is_compat_only_setting(key: &str) -> bool {
+    find_field(SETTINGS_SCHEMA, key).is_some_and(|field| field.is_compat_only)
 }
 
 /// Collect deprecated field entries from a schema slice.
@@ -625,6 +628,40 @@ mod tests {
         let keys: Vec<&str> = OAUTH_CHILDREN.iter().map(|f| f.key).collect();
         for key in &expected {
             assert!(keys.contains(key), "OAUTH_CHILDREN missing: {key}");
+        }
+    }
+
+    /// Every ignored Claude Code key stays tolerated in a file, and nothing
+    /// scode reads is marked ignored.
+    #[test]
+    fn compat_only_settings_are_tolerated_but_marked() {
+        let ignored: Vec<_> = SETTINGS_SCHEMA
+            .iter()
+            .filter(|field| field.is_compat_only)
+            .map(|field| field.key)
+            .collect();
+        assert_eq!(
+            ignored,
+            [
+                "editorMode",
+                "verbose",
+                "preferredNotifChannel",
+                "autoDreamEnabled",
+                "fileCheckpointingEnabled",
+                "showTurnDuration",
+                "terminalProgressBarEnabled",
+                "todoFeatureEnabled",
+                "teammateMode",
+            ]
+        );
+        for key in [
+            "theme",
+            "language",
+            "autoCompactEnabled",
+            "thinking",
+            "effortLevel",
+        ] {
+            assert!(!is_compat_only_setting(key), "{key} has a reader");
         }
     }
 

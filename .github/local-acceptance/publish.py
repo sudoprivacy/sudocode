@@ -21,7 +21,7 @@ def applicable_run(run):
 
 
 def main():
-    source = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
+    source = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))["workflow_run"]
     repository = os.environ["GITHUB_REPOSITORY"]
     run = gate.api(f"repos/{repository}/actions/runs/{source['id']}")
     if run["path"].split("@")[0] != ".github/workflows/local-acceptance.yml" or run["status"] != "completed":

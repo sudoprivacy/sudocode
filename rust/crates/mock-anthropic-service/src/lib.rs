@@ -575,7 +575,7 @@ async fn handle_connection(
     });
 
     if scenario == Scenario::ToolConcurrency
-        && concurrency_batch_complete(&request)
+        && pending_concurrency_calls(&request).is_empty()
         && request.messages.iter().flat_map(|m| &m.content).any(|block| {
             matches!(block, InputContentBlock::Text { text } if text.contains("FAIL_AFTER_TOOLS"))
         })

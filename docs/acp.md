@@ -1,7 +1,8 @@
 # Agent Communication Protocol
 
-`scode` speaks the **Agent Communication Protocol (ACP)** natively, in two
-transports that share a single handler chain.
+`scode acp` starts an **Agent Communication Protocol (ACP) server**. Editors,
+Sudowork, and other frontends act as its clients. The stdio and WebSocket
+transports use the same request handler and agent engine.
 
 ## TypeScript client and MCP bridge
 
@@ -28,6 +29,33 @@ scode acp serve --port 8080
 
 Both transports share streaming, tool use, elicitation, and permission
 prompting.
+
+### Server composition
+
+```mermaid
+flowchart TB
+    Client["ACP client: editor or Sudowork"] --> Transport
+    subgraph Server["One scode ACP server process"]
+        Transport["stdio or WebSocket adapter"] --> Handler["Shared ACP request handler"]
+        Handler --> Engine["engine-core → SessionEngine"]
+    end
+```
+
+The adapter calls the handler directly in Rust; there is no additional socket
+or server between them. Pipes and WebSockets connect the external client to
+this server.
+
+Nexus cohost reuses the same handler over its managed ACP transport
+(`SessionMailbox`), inside the Nexus process. This transport uses Nexus A2A
+conversation records for protocol messages; those frames are distinct from peer
+text delivered to the model. Cohost prepares a hosted engine rather than
+launching `scode acp` inside itself. Transport adapters own their shutdown rules:
+stdin EOF ends a standalone stdio server process; closing a cohost mailbox ends
+that managed session.
+
+The native `scode` terminal UI consumes `engine-core` commands and events
+directly. It shares the engine with ACP without sending terminal input through
+an ACP client/server round trip.
 
 ## Use cases
 

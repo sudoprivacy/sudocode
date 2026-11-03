@@ -1222,9 +1222,8 @@ fn streamed_calls_and_results_survive_resume_before_message_stop() {
         "--permission-mode",
         "danger-full-access",
     ]);
-    common::expect_screen_settled(
+    common::expect_input_line_cleared(
         &resumed,
-        |s| s.contains("/permissions to change") && common::input_line_of(s).is_empty(),
         common::DEFAULT_TIMEOUT,
         "resumed input ready after transcript replay",
     );

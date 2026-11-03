@@ -1,11 +1,14 @@
-//! Unified agent mailbox envelope + filesystem-backed local mailbox.
+//! Unified agent mailbox envelope, the A2A prompt contract, and the
+//! per-recipient JSONL inbox helpers.
 //!
 //! [`MailboxEnvelope`] is the SINGLE envelope type for all inter-agent
-//! messaging — both the local JSONL mailbox (`.sudocode-inbox/*.jsonl`,
-//! used by coordinator sub-agents) and the nexus `DT_STREAM` A2A path
-//! (`/agents/<name>/chat-with-me`, used for cross-machine messaging).
-//! The a2a substrate's `from`-stamping hook operates on raw JSON and
-//! only touches `from`, so the extra fields are transparent to it.
+//! messaging. Peers append it to their pair's conversation transcript
+//! ([`crate::mailbox::Mailbox`]): on a nexus node, on the same-machine pair
+//! root, or in the workspace. The per-recipient JSONL inbox
+//! (`{root}/agents/<name>/chat-with-me`, built by [`inbox_path_under`])
+//! carries coordinator notifications. The a2a substrate's `from`-stamping
+//! hook operates on raw JSON and only touches `from`, so the extra fields are
+//! transparent to it.
 //!
 //! ## Wire compatibility
 //!
@@ -19,10 +22,10 @@
 //! - An envelope written with extras is ignored by old readers that
 //!   use `a2a::MailboxEnvelope` (which silently drops unknown fields).
 //!
-//! ## Local JSONL mailbox
+//! ## Per-recipient JSONL inbox
 //!
 //! Each recipient has one append-only JSONL file at
-//! `<workspace>/.sudocode-inbox/<recipient>.jsonl`.
+//! `{root}/agents/<recipient>/chat-with-me`.
 //!
 //! For structured messages (`shutdown_request`,
 //! `shutdown_response`, `plan_approval_response`), `body` is the

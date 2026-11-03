@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_TIP_CHARS: usize = 160;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TipPriority {
     Normal,
@@ -11,7 +11,7 @@ pub enum TipPriority {
     Urgent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tip {
     pub priority: TipPriority,

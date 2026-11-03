@@ -1,0 +1,51 @@
+name: ACP client package
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/typescript/**'
+      - '.github/workflows/acp-client.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: acp-client-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    name: Package integration (${{ matrix.os }})
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - run: npm ci
+      # PR tests are mandatory in Local acceptance: signed author-local tests
+      # plus the policy-selected missing targets. Dispatch is diagnostic only.
+      - name: Explicit diagnostic integration run
+        if: github.event_name == 'workflow_dispatch'
+        run: npm test
+      - name: Build the merged revision for publication
+        if: github.event_name == 'push'
+        # Preserve main's exact-revision artifacts without repeating the PR's
+        # integration journeys on all four hosts.
+        run: npm run build
+      - run: npm run pack:runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scode-acp-${{ matrix.os }}-${{ github.sha }}
+          path: sdk/typescript/artifacts/*

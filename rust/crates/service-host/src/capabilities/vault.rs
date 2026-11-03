@@ -58,22 +58,7 @@ fn rpc<I: Message, O: Message + Default>(
 
 pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) -> Result<Value> {
     match method {
-        "vault.get" => {
-            let request = get_request(params)?;
-            if request.version.is_some() {
-                let response: proto::GetSecretResponse = rpc(client, "secret_get", &request)?;
-                return Ok(json!(response.value));
-            }
-            let key = format!("{}:{}", request.namespace, request.key);
-            let response: proto::BatchGetSecretsResponse = rpc(
-                client,
-                "secret_batch_get",
-                &proto::BatchGetSecretsRequest {
-                    queries: vec![request],
-                },
-            )?;
-            Ok(json!(response.secrets.get(&key)))
-        }
+        "vault.get" => get_secret(client, params),
         "vault.put" => {
             let response: proto::PutSecretResponse =
                 rpc(client, "secret_put", &put_request(params)?)?;
@@ -81,29 +66,7 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
                 &response.metadata.ok_or("vault put returned no metadata")?,
             ))
         }
-        "vault.list" => {
-            let response: proto::ListSecretsResponse = rpc(
-                client,
-                "secret_list",
-                &proto::ListSecretsRequest {
-                    namespace: params
-                        .get("namespace")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    include_deleted: params
-                        .get("includeDeleted")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                },
-            )?;
-            Ok(Value::Array(
-                response
-                    .secrets
-                    .into_iter()
-                    .map(|value| metadata(&value))
-                    .collect(),
-            ))
-        }
+        "vault.list" => list_secrets(client, params),
         "vault.delete" => {
             let request = get_request(params)?;
             let response: proto::DeleteSecretResponse = rpc(
@@ -140,42 +103,8 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
             )?;
             Ok(json!(response.versions.into_iter().map(|value| json!({"version": value.version, "createdAt": timestamp(value.created_at)})).collect::<Vec<_>>()))
         }
-        "vault.batchGet" => {
-            let queries = params
-                .get("queries")
-                .and_then(Value::as_array)
-                .ok_or("missing queries array")?
-                .iter()
-                .map(get_request)
-                .collect::<Result<Vec<_>>>()?;
-            let response: proto::BatchGetSecretsResponse = rpc(
-                client,
-                "secret_batch_get",
-                &proto::BatchGetSecretsRequest { queries },
-            )?;
-            Ok(json!(response.secrets))
-        }
-        "vault.batchPut" => {
-            let secrets = params
-                .get("secrets")
-                .and_then(Value::as_array)
-                .ok_or("missing secrets array")?
-                .iter()
-                .map(put_request)
-                .collect::<Result<Vec<_>>>()?;
-            let response: proto::BatchPutSecretsResponse = rpc(
-                client,
-                "secret_batch_put",
-                &proto::BatchPutSecretsRequest { secrets },
-            )?;
-            Ok(Value::Array(
-                response
-                    .results
-                    .into_iter()
-                    .map(|value| metadata(&value))
-                    .collect(),
-            ))
-        }
+        "vault.batchGet" => batch_get_secrets(client, params),
+        "vault.batchPut" => batch_put_secrets(client, params),
         "vault.deleteVersion" => {
             let request = get_request(params)?;
             let response: proto::DeleteSecretVersionResponse = rpc(
@@ -206,4 +135,83 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
         }
         _ => Err(format!("unknown service capability: {method}").into()),
     }
+}
+
+fn get_secret(client: &NexusVfsClient, params: &Value) -> Result<Value> {
+    let request = get_request(params)?;
+    if request.version.is_some() {
+        let response: proto::GetSecretResponse = rpc(client, "secret_get", &request)?;
+        return Ok(json!(response.value));
+    }
+    let key = format!("{}:{}", request.namespace, request.key);
+    let response: proto::BatchGetSecretsResponse = rpc(
+        client,
+        "secret_batch_get",
+        &proto::BatchGetSecretsRequest {
+            queries: vec![request],
+        },
+    )?;
+    Ok(json!(response.secrets.get(&key)))
+}
+
+fn list_secrets(client: &NexusVfsClient, params: &Value) -> Result<Value> {
+    let response: proto::ListSecretsResponse = rpc(
+        client,
+        "secret_list",
+        &proto::ListSecretsRequest {
+            namespace: params
+                .get("namespace")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            include_deleted: params
+                .get("includeDeleted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+    )?;
+    Ok(Value::Array(
+        response
+            .secrets
+            .into_iter()
+            .map(|value| metadata(&value))
+            .collect(),
+    ))
+}
+
+fn batch_get_secrets(client: &NexusVfsClient, params: &Value) -> Result<Value> {
+    let queries = params
+        .get("queries")
+        .and_then(Value::as_array)
+        .ok_or("missing queries array")?
+        .iter()
+        .map(get_request)
+        .collect::<Result<Vec<_>>>()?;
+    let response: proto::BatchGetSecretsResponse = rpc(
+        client,
+        "secret_batch_get",
+        &proto::BatchGetSecretsRequest { queries },
+    )?;
+    Ok(json!(response.secrets))
+}
+
+fn batch_put_secrets(client: &NexusVfsClient, params: &Value) -> Result<Value> {
+    let secrets = params
+        .get("secrets")
+        .and_then(Value::as_array)
+        .ok_or("missing secrets array")?
+        .iter()
+        .map(put_request)
+        .collect::<Result<Vec<_>>>()?;
+    let response: proto::BatchPutSecretsResponse = rpc(
+        client,
+        "secret_batch_put",
+        &proto::BatchPutSecretsRequest { secrets },
+    )?;
+    Ok(Value::Array(
+        response
+            .results
+            .into_iter()
+            .map(|value| metadata(&value))
+            .collect(),
+    ))
 }

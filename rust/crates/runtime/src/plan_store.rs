@@ -15,6 +15,62 @@ use std::sync::Arc;
 
 use crate::fs_backend::FsBackend;
 
+/// Shared framing for plans and delegated tasks, with stable source bytes.
+#[must_use]
+pub fn compose_task_framing(context: &str, constraints: &str, acceptance: &str) -> String {
+    format!(
+        "## Context\n{}\n\n## Constraints\n{}\n\n## Acceptance Criteria\n{}\n",
+        context.trim(),
+        constraints.trim(),
+        acceptance.trim(),
+    )
+}
+
+/// Construct the exact document saved by dispatch and reconstructed on replay.
+#[must_use]
+pub fn compose_document(context: &str, constraints: &str, acceptance: &str, body: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        compose_task_framing(context, constraints, acceptance),
+        body.trim()
+    )
+}
+
+/// Successful review decisions are tool results, not execution failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewStatus {
+    DraftSaved,
+    Approved,
+    RevisionRequested,
+    Cancelled,
+}
+
+/// Shared result contract for plan dispatch, terminal cards and saved replay.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanReviewResult {
+    pub ok: bool,
+    pub status: PlanReviewStatus,
+    pub plan_file: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+}
+
+impl PlanReviewResult {
+    #[must_use]
+    pub fn new(status: PlanReviewStatus, plan_file: String, message: String) -> Self {
+        Self {
+            ok: true,
+            status,
+            plan_file,
+            message,
+            feedback: None,
+        }
+    }
+}
+
 /// Where the plan file is, and the filesystem that path is spelled for.
 ///
 /// One decision, because the two cannot be chosen apart — see
@@ -87,7 +143,7 @@ mod tests {
     /// Holds the process-wide env lock because `SUDOCODE_PLAN_FILE` is global —
     /// parallel tests mutating it would race each other.
     struct ScopedPlanFile {
-        _dir: PathBuf,
+        dir: PathBuf,
         _guard: std::sync::MutexGuard<'static, ()>,
     }
     impl ScopedPlanFile {
@@ -97,16 +153,13 @@ mod tests {
                 std::env::temp_dir().join(format!("plan_store_{label}_{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             std::env::set_var("SUDOCODE_PLAN_FILE", dir.join("plan.md"));
-            Self {
-                _dir: dir,
-                _guard: guard,
-            }
+            Self { dir, _guard: guard }
         }
     }
     impl Drop for ScopedPlanFile {
         fn drop(&mut self) {
             std::env::remove_var("SUDOCODE_PLAN_FILE");
-            let _ = std::fs::remove_dir_all(&self._dir);
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 

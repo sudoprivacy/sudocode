@@ -88,7 +88,7 @@ fn multi_turn_references_prior() {
 
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("scode should exit after /exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "interactive scode should exit 0; got {exit}");
@@ -118,7 +118,7 @@ fn streaming_tokens_render_incrementally() {
 // 4. Multi-tool turn roundtrip — read_file + grep_search in one turn
 // ──────────────────────────────────────────────────────────────────────
 
-/// Model calls read_file + grep_search, results feed the final response.
+/// Model calls `read_file` + `grep_search`, results feed the final response.
 /// Agent trigger test: verifies LLM selected the correct tools.
 #[test]
 fn multi_tool_roundtrip() {
@@ -149,7 +149,7 @@ fn multi_tool_roundtrip() {
     // Mock: deterministic requests, independently completing tools. Live: model may call tools
     // in any order or use different tools — verify at least one tool
     // call appears and the response references the fixture content.
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     if env.is_mock() {
         // The card header now shows the canonical tool label (`Read`, `Grep`),
         // not the wire name (`read_file`, `grep_search`), consistently in the
@@ -161,7 +161,7 @@ fn multi_tool_roundtrip() {
                     && screen.contains("╭─ Grep(")
                     && screen.contains("multi-tool roundtrip complete:")
             },
-            common::at_least(Duration::from_secs(60)),
+            common::at_least(Duration::from_mins(1)),
             "both completed tool identities and final response, in any order",
         );
     } else {
@@ -173,9 +173,9 @@ fn multi_tool_roundtrip() {
     sess.expect("(?i)(parity|2|two|lines|occurrences|matches|complete|result|found)")
         .expect("final response should reference tool results");
 
-    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(2)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("multi-tool scode should exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "multi-tool should exit 0; got {exit}");

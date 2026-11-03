@@ -74,7 +74,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
         "unused_live_only",
     );
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
 
     // The spinner shows `↓` in the raw PTY byte stream while tokens
     // are being received. We must catch it before the response text
@@ -99,7 +99,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
 #[test]
 fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
     use std::time::Instant;
-    let warning = terminal_palette::expected_color("Idx(220)");
+    let warning = terminal_palette::expected_color("Idx(3)");
     let env = TestEnv::new_mock("spinner-activity");
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],
@@ -127,7 +127,7 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
             raw.rows(0, raw.size().1)
                 .enumerate()
                 .filter_map(|(row, line)| {
-                    let col = line.find("Thinking")?;
+                    let col = line.find("Working...")?;
                     let column = unicode_width::UnicodeWidthStr::width(&line[..col]);
                     let cell = raw.cell(u16::try_from(row).ok()?, u16::try_from(column).ok()?)?;
                     Some((line, format!("{:?}", cell.fgcolor())))
@@ -135,19 +135,19 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
                 .last()
         });
         if let Some((line, color)) = snapshot {
-            if line.contains("(3.") && !line.contains('↓') {
-                assert_eq!(color, "Rgb(166, 227, 161)", "initial wait remains green");
+            if line.contains("(3s)") && !line.contains('↓') {
+                assert_eq!(color, "Default", "initial wait keeps terminal foreground");
                 saw_initial_wait = true;
             }
             if line.contains("↓ 9 tokens") || line.contains("↓ 11 tokens") {
                 if color == warning {
                     saw_stall = true;
                 } else {
-                    assert_eq!(color, "Rgb(166, 227, 161)");
+                    assert_eq!(color, "Default");
                     saw_long_progress = true;
                 }
             }
-            if line.contains("↓ 13 tokens") && color == "Rgb(166, 227, 161)" {
+            if line.contains("↓ 13 tokens") && color == "Default" {
                 saw_recovery = true;
                 break;
             }

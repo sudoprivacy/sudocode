@@ -34,7 +34,7 @@ const AGENT: &str = "identity-seat-probe";
 const RECEIVING: &str = "Receiver         receiving";
 /// Substring of the `/status` line of an instance that does not (field-matched,
 /// not a whole-line compare, so D3 adding a `delivery` field won't break it).
-const STANDBY: &str = "standing by: another instance of this agent is receiving";
+const STANDBY: &str = "Receiver         standing by";
 
 #[test]
 fn a_frozen_seat_holder_keeps_the_seat_and_a_peer_stays_on_standby() {
@@ -106,7 +106,7 @@ fn a_frozen_seat_holder_keeps_the_seat_and_a_peer_stays_on_standby() {
 /// item cannot satisfy.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn screen_dump(sess: &pty_expect::PtySession) -> String {
-    sess.render(|s| s.contents())
+    sess.render(common::screen_contents)
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {

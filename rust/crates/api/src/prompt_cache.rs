@@ -4,7 +4,7 @@
 //! and Codex clients never call in, so a session routed through them leaves
 //! no record here — empty stats mean "not measured", not "no cache problems".
 //!
-//! Extending it is not just wiring. OpenAI reports `cached_tokens` but has no
+//! Extending it is not just wiring. `OpenAI` reports `cached_tokens` but has no
 //! cache-write concept, so `cache_creation_input_tokens` is always zero there
 //! and a read/(read+write) ratio over mixed providers would read 100% no
 //! matter what actually happened. Break detection would still work; the
@@ -839,7 +839,7 @@ fn stable_hash_bytes(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
+
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{

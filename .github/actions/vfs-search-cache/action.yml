@@ -1,0 +1,53 @@
+name: Fixed VFS search compiler inputs
+description: Restore or build pinned drivers; never cache the candidate or a test result
+inputs:
+  publish:
+    description: Save a missing key only on a protected main push
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Resolve fixed VFS compiler identity
+      id: identity
+      shell: bash
+      run: python3 .github/scripts/vfs_search_cache.py key
+    - name: Resolve the exact fixed checkout and compiler outputs
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: .native-vfs
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.restore_keys }}
+        # A warm main publisher needs neither a download nor another build.
+        # Queue consumers always restore and ask Cargo to build normally.
+        lookup-only: ${{ inputs.publish == 'true' }}
+    - name: Restore compatible compiler inputs for a missing main key
+      id: compatible_restore
+      if: inputs.publish == 'true' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: .native-vfs
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.restore_keys }}
+    - name: Report restored compiler input key
+      shell: bash
+      env:
+        RESTORED_KEY: ${{ steps.compatible_restore.outputs.cache-matched-key || (inputs.publish != 'true' && steps.restore.outputs.cache-matched-key) || '' }}
+      run: |
+        if [[ -n "$RESTORED_KEY" && ! "$RESTORED_KEY" =~ ^vfs-search-v[12]-[a-f0-9]{64}(-[a-f0-9]{40})?$ ]]; then
+          echo "::error::Unexpected VFS compiler cache key; no source or compiler started"
+          exit 1
+        fi
+        printf 'SCODE_VFS_RESTORED_CACHE_KEY=%s\n' "$RESTORED_KEY" >> "$GITHUB_ENV"
+    - name: Build compiler inputs for a missing main cache
+      # The consumer's ordinary cargo test verifies source and builds the driver.
+      # A separate build here switches plugin feature variants unnecessarily.
+      if: inputs.publish == 'true' && steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: python3 .github/scripts/vfs_search_cache.py build --output "${{ runner.temp }}/vfs-search-build"
+    - name: Publish missing fixed compiler inputs from main
+      if: inputs.publish == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .native-vfs
+        key: ${{ steps.identity.outputs.key }}

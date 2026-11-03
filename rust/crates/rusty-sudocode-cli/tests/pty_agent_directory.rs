@@ -18,7 +18,7 @@ fn discovered_agent_list_address_delivers_to_the_peer() {
         UNIFIED_SEND_RECIPIENT.into(),
     );
     peer.ensure_presence().unwrap();
-    let mut cli = env.spawn(&["--permission-mode", "danger-full-access"]);
+    let mut cli = spawn_interactive(&env, &["--permission-mode", "danger-full-access"]);
     cli.resize(50, 120).unwrap();
     common::expect_input_line_cleared(&cli, env.timeout(), "directory ready");
     if env.is_mock() {
@@ -56,9 +56,10 @@ fn discovered_agent_list_address_delivers_to_the_peer() {
         // fixture supplying either the address or the tool calls.
         complete_turn(
             &mut cli,
-            &format!("Discover the reachable Agents. Copy the address returned for {UNIFIED_SEND_RECIPIENT} and send it this message: {BODY}"),
+            &format!("Discover the reachable Agents using agent_list. Copy the send_to address returned for {UNIFIED_SEND_RECIPIENT} and use send to send it exactly this message: {BODY}. Use summary: directory address roundtrip. Do not use a shell or create files."),
         );
     }
+    assert_cards(&cli, env.timeout());
     let conversations = peer.list_conversations().unwrap();
     if conversations.is_empty() && env.is_mock() {
         for body in env.captured_message_bodies() {
@@ -78,11 +79,107 @@ fn discovered_agent_list_address_delivers_to_the_peer() {
         .all(|message| message.to == UNIFIED_SEND_RECIPIENT));
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);
+    let path = assert_saved_send(&env);
+    let mut resumed = spawn_interactive(
+        &env,
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "read-only",
+        ],
+    );
+    resumed.resize(70, 120).unwrap();
+    common::expect_input_line_cleared(&resumed, env.timeout(), "restored directory ready");
+    assert_cards(&resumed, env.timeout());
+    resumed.send("/exit").unwrap();
+    common::expect_input_line(&resumed, "/exit", env.timeout(), "resumed exit typed");
+    resumed.send("\r").unwrap();
+    assert_eq!(resumed.expect_eof().unwrap(), 0);
+}
+
+fn spawn_interactive(env: &TestEnv, args: &[&str]) -> pty_expect::PtySession {
+    // Exercise the shipped async input path without the legacy image-paste
+    // binding reading the developer's clipboard. Replay tests cover both modes.
+    env.spawn_with_env(args, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")])
+}
+
+fn assert_saved_send(env: &TestEnv) -> std::path::PathBuf {
+    let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
+        .expect("the actual conversation was saved");
+    let saved = runtime::Session::load_from_path(&path).unwrap();
+    let raw_result = saved
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .find_map(|block| match block {
+            runtime::ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error: false,
+                ..
+            } if tool_name == "send" => Some(output.as_str()),
+            _ => None,
+        })
+        .expect("the live model must choose send, with a successful real result");
+    let result: Value = serde_json::from_str(raw_result).unwrap();
+    assert_eq!(
+        result["routing"]["content"], BODY,
+        "presentation never clips model context"
+    );
+    assert!(
+        result["routing"]["mailbox_path"].is_string(),
+        "retain the full source result"
+    );
+    if env.is_mock() {
+        assert_eq!(
+            raw_result,
+            captured_tool_result(env, "directory-send"),
+            "the provider and saved transcript retain the same result bytes"
+        );
+    }
+    path
+}
+
+fn assert_cards(cli: &pty_expect::PtySession, timeout: Duration) {
+    let screen = common::expect_screen_settled(
+        cli,
+        |screen| screen.contains("AgentList") && screen.contains("Sent to inbox"),
+        timeout,
+        "discovery and delivery cards",
+    );
+    for expected in [
+        "peer  ",
+        UNIFIED_SEND_RECIPIENT,
+        &format!("Send → {UNIFIED_SEND_RECIPIENT} · Sent to inbox"),
+        "Summary: directory address roundtrip",
+        BODY,
+    ] {
+        assert!(screen.contains(expected), "missing {expected}: {screen}");
+    }
+    assert!(
+        !screen.contains("routing:"),
+        "nested receipt JSON should not be rendered: {screen}"
+    );
+    assert!(
+        !screen.contains("mailbox_path:"),
+        "physical paths should stay in the source result"
+    );
+    let send_card = screen
+        .split_once("╭─ Send →")
+        .and_then(|(_, card)| card.split_once("╰─"))
+        .expect("the completed send card is framed")
+        .0;
+    assert!(
+        !send_card.contains("To: "),
+        "recipient must not be repeated in the card: {send_card}"
+    );
 }
 
 fn complete_turn(cli: &mut pty_expect::PtySession, prompt: &str) {
     let before = common::turn_status_marker(cli);
-    cli.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    // This journey enters text; bracketed paste can read the desktop image clipboard.
+    cli.send(prompt).unwrap();
     common::expect_input_line(
         cli,
         &prompt[..prompt.len().min(60)],

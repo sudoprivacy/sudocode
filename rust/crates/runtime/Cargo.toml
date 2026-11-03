@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+process-text = { path = "../process-text" }
 # P1a (§8.11 R6.1)：仅 common/auth 子集的派生 Rust 契约（zone-id/path owner
 # validators + ResourceRef）。Git exact pin 到 sudostack feat/contract-zone
 # assembly revision；本 crate 不引入 Moss business policy。

@@ -1,6 +1,7 @@
 //! Foreground activity projection. Engine lifecycle owns busy/input/idle;
 //! animation and temporary output suspension never change that lifecycle.
 
+use crate::render::TextRole;
 use std::{
     fmt::Write,
     sync::{Arc, Mutex},
@@ -9,12 +10,13 @@ use std::{
 
 use engine_events::EngineState;
 
-use super::{spinner_progress::SpinnerProgress, text_layout, theme, RESET};
+use super::{spinner_progress::SpinnerProgress, text_layout};
 
 mod brand_spinner;
+pub(crate) use brand_spinner::frame as spinner_frame;
 
-pub(crate) const THINKING_LABEL: &str = "Thinking...";
-pub(super) const REASONING_LABEL: &str = "Reasoning...";
+pub(crate) const WORKING_LABEL: &str = "Working...";
+pub(super) const THINKING_LABEL: &str = "Thinking...";
 
 #[derive(Clone)]
 enum ActivityPhase {
@@ -126,7 +128,7 @@ impl ActivityState {
             ActivityPhase::Working if tools.count > 0 || tools.progress.is_some() => {
                 StatusContent::Tools(tools)
             }
-            ActivityPhase::Working => StatusContent::Thinking,
+            ActivityPhase::Working => StatusContent::Working,
         };
         let reasoning = matches!(content, StatusContent::Reasoning);
         let warning =
@@ -160,7 +162,7 @@ pub(crate) struct ToolActivity<'a> {
 
 /// Mutually exclusive content modules inside the existing status row.
 enum StatusContent<'a> {
-    Thinking,
+    Working,
     Reasoning,
     Tools(ToolActivity<'a>),
     Retry {
@@ -174,8 +176,8 @@ impl StatusContent<'_> {
     #[inline]
     fn label(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            Self::Thinking => THINKING_LABEL.into(),
-            Self::Reasoning => REASONING_LABEL.into(),
+            Self::Working => WORKING_LABEL.into(),
+            Self::Reasoning => THINKING_LABEL.into(),
             Self::Retry {
                 attempt,
                 max_retries,
@@ -208,25 +210,22 @@ pub(super) struct ProgressValues<'a> {
 
 /// One formatter for inline and one-shot model/time/token/budget/ETA display.
 #[inline]
-pub(super) fn progress_line(
-    frame_index: usize,
-    label: &str,
-    values: ProgressValues<'_>,
-    width: usize,
-    metric: text_layout::ColumnMetric,
-    warning: bool,
-) -> String {
+fn progress_details(values: ProgressValues<'_>) -> String {
     let ProgressValues {
         model,
         elapsed,
         bytes,
         token_budget,
     } = values;
+    // Keep time-derived metadata stable between seconds while the logo keeps
+    // animating. Token changes still refresh immediately; turn statistics use
+    // the original precise duration outside this presentation formatter.
+    let elapsed = elapsed.floor();
     let mut details = String::new();
     if let Some(model) = model {
         let _ = write!(details, " [{model}]");
     }
-    let _ = write!(details, " ({elapsed:.1}s)");
+    let _ = write!(details, " ({elapsed:.0}s)");
     if bytes > 0 && elapsed >= 1.0 {
         let tokens = bytes / 4;
         if let Some(budget) = token_budget {
@@ -252,16 +251,37 @@ pub(super) fn progress_line(
             let _ = write!(details, " ↓ {tokens} tokens");
         }
     }
-    let logo = brand_spinner::frame(frame_index);
+    details
+}
+
+/// Lay out the activity row using the shared metadata and semantic colors.
+#[inline]
+pub(super) fn progress_line(
+    frame_index: usize,
+    label: &str,
+    values: ProgressValues<'_>,
+    width: usize,
+    metric: text_layout::ColumnMetric,
+    warning: bool,
+) -> String {
+    let details = progress_details(values);
+    let logo = spinner_frame(frame_index);
     let reserved = metric.width(logo) + 1 + metric.width(&details);
     let label = text_layout::single_line(label);
     let label = metric.truncate(&label, width.saturating_sub(reserved));
-    let theme = theme();
-    let line = format!(
-        "{}{logo}{} {label}{details}{RESET}",
-        theme.logo_fg(),
-        theme.spinner_fg(warning),
+
+    let mut spans = crate::render::StyledLine::muted();
+    spans.push_role(logo, TextRole::Brand);
+    spans.push_role(
+        format!(" {label}"),
+        if warning {
+            TextRole::Warning
+        } else {
+            TextRole::Body
+        },
     );
+    spans.push(&details);
+    let line = spans.to_string();
     // On extremely narrow terminals even metadata cannot fit. Keep one row.
     if reserved > width {
         metric.truncate(&line, width)

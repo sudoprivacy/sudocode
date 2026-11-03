@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+process-text = { path = "../process-text" }
 api = { path = "../api" }
 plugins = { path = "../plugins" }
 runtime = { path = "../runtime" }

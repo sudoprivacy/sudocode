@@ -10,7 +10,10 @@
 mod common;
 #[path = "support/node_home.rs"]
 mod node_home;
+#[path = "support/sync_input.rs"]
+mod sync_input;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -21,10 +24,27 @@ const AGENT: &str = "sync-receiver";
 const PEER: &str = "sync-peer";
 const BUDGET: Duration = Duration::from_secs(30);
 
+#[inline]
+fn send_from(pair_root: &Path, peer: &str, body: &str) {
+    Mailbox::workspace_local(pair_root, peer.to_string())
+        .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
+            from: peer.to_string(),
+            to: AGENT.to_string(),
+            body: body.to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
+            request_id: None,
+        })
+        .expect("the peer writes on the pair root");
+}
+
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }
@@ -34,6 +54,51 @@ fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// A notice must leave a genuinely empty editor, including before any key has
+/// caused rustyline to redraw it. Prepainted rows below the editor used to be
+/// mistaken for input after the notice moved the prompt onto those rows.
+#[test]
+fn a_notice_at_an_empty_sync_prompt_preserves_the_editor() {
+    let env = TestEnv::new("sync-empty-notice");
+    node_home::pin_agent_name(env.workspace_root(), AGENT);
+    let mut session = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "off"), ("PAGER", "")],
+    );
+    session.set_default_timeout(BUDGET);
+    session.expect("❯").expect("the REPL should start");
+    common::expect_input_line_cleared(&session, BUDGET, "empty editor before notice");
+
+    let pair_root = local_pair_root_in(env.config_home());
+    send_from(&pair_root, PEER, "leave this message unread");
+    expect_on_screen(&mut session, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line_cleared(&session, BUDGET, "empty editor after notice");
+
+    // Box-drawing characters are valid input; the screen parser must preserve
+    // them rather than trim a stale separator until an empty check passes.
+    let draft = "literal──draft";
+    session.send(draft).expect("type a literal draft");
+    common::expect_screen_settled(
+        &session,
+        |screen| common::input_line_of(screen) == draft,
+        BUDGET,
+        "literal draft after notice",
+    );
+    session.send("\x15/exit").expect("replace draft with exit");
+    common::expect_screen_settled(
+        &session,
+        |screen| common::input_line_of(screen) == "/exit",
+        BUDGET,
+        "exit reached the editor",
+    );
+    session
+        .send("\r")
+        .expect("exit without running the message");
+    assert_eq!(session.expect_eof().expect("the REPL exits"), 0);
+    let inbox = Mailbox::workspace_local(&pair_root, AGENT.to_string());
+    assert_eq!(inbox.read_position(PEER).unwrap().unwrap_or(0), 0);
 }
 
 #[test]
@@ -46,20 +111,21 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     );
     session.set_default_timeout(BUDGET);
     session.expect("❯").expect("the REPL should start");
+    common::expect_input_line_cleared(&session, BUDGET, "sync receiver ready");
+    session
+        .send("draft-界-keep")
+        .expect("type a fast Unicode draft");
+    common::expect_input_line(&session, "draft-界-keep", BUDGET, "draft before notice");
+    session
+        .send("\x1b[D\x1b[D\x1b[D\x1b[D")
+        .expect("move before keep");
 
     let pair_root = local_pair_root_in(env.config_home());
-    Mailbox::workspace_local(&pair_root, PEER.to_string())
-        .send(MailboxEnvelope {
-            from: PEER.to_string(),
-            to: AGENT.to_string(),
-            body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),
-            summary: None,
-            timestamp: 0,
-            color: None,
-            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
-            request_id: None,
-        })
-        .expect("the peer writes on the pair root");
+    send_from(
+        &pair_root,
+        PEER,
+        "for the sync REPL PARITY_SCENARIO:single_turn_text",
+    );
     let inbox = Mailbox::workspace_local(&pair_root, AGENT.to_string());
     let position = || {
         inbox
@@ -70,6 +136,13 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
 
     // Announced while the prompt waits, and not yet taken.
     expect_on_screen(&mut session, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line(&session, "draft-界-keep", BUDGET, "draft after notice");
+    session.send("X").expect("type at the preserved cursor");
+    common::expect_input_line(&session, "draft-界-Xkeep", BUDGET, "cursor after notice");
+    // A single control-key burst also exercises the upstream buffered-input
+    // fix. The draft is not submitted as a user or peer turn.
+    session.send("\x05\x15").expect("end then clear the draft");
+    common::expect_input_line_cleared(&session, BUDGET, "draft cleared before peer turn");
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         position(),
@@ -78,6 +151,7 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     );
 
     // Enter hands the prompt back, and the waiting message runs as a turn.
+    let marker = common::turn_status_marker(&session);
     session.send("\r").expect("press Enter");
     if env.is_mock() {
         expect_on_screen(&mut session, "The answer is 4");
@@ -91,13 +165,29 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    sync_input::expect_prompt_after_turn(&session, &marker, BUDGET, "status at ready prompt");
+
     // And the session says how it receives, not just that it does.
     session.send("/status\r").expect("send /status");
     expect_on_screen(
         &mut session,
         "receiving; waiting messages run at the next prompt",
     );
+    common::expect_input_line_cleared(&session, BUDGET, "status completed");
 
-    session.send("/exit\r").expect("exit the REPL");
+    // Closing with an announced, unconsumed delivery must release the receiver
+    // and the printer worker. The notice is fresh (a distinct peer), and its
+    // actual message must remain unread for the next owner.
+    session
+        .send("/exit")
+        .expect("type exit before the next notice");
+    send_from(&pair_root, "sync-exit-peer", "LEAVE_UNREAD_ON_EXIT");
+    expect_on_screen(&mut session, "Message from sync-exit-peer is waiting");
+    common::expect_input_line(&session, "/exit", BUDGET, "exit draft after notice");
+    session.send("\r").expect("exit the REPL");
     assert_eq!(session.expect_eof().expect("the REPL exits"), 0);
+    assert_eq!(
+        inbox.read_position("sync-exit-peer").unwrap().unwrap_or(0),
+        0
+    );
 }

@@ -4,6 +4,10 @@ Day-to-day `scode` workflows.
 
 ## Installation and updates
 
+Choose daemon-free execution or shared local services with
+[`scode setup`](shared-services.md). The runtime owner, installation behavior
+and separate collaboration-enrollment boundary are defined there.
+
 Install macOS/Linux with the [installer](../install.sh), or choose a platform
 package from [GitHub Releases](https://github.com/sudoprivacy/sudocode/releases/latest).
 Release builds check for updates in the background when an interactive terminal
@@ -38,6 +42,45 @@ from the immutable sibling `vX.Y.Z` directory. A versioned mirror directory pins
 its own version. The publisher verifies the complete mirror before promoting the
 pointer; the client verifies the downloaded archive's SHA-256 before installation.
 
+## Persistent peer descriptions
+
+Enable `experimental.peerDescriptions` in settings to let model-backed
+compaction publish a short description of each peer's ongoing work:
+
+```json
+{"experimental":{"peerDescriptions":true}}
+```
+
+The existing compaction call produces optional description metadata alongside
+its checkpoint. It adds no separate summarizer or repair request. New agents
+have no description until one is published. Tool-output pruning, skipped or
+failed compaction, and ordinary turns preserve the previous description and
+its timestamp. Child agents retain their existing task descriptions.
+
+The source of truth is `/agents/<name>/description.json` in the actual peer
+mailbox namespace. Without a Nexus node, that path is relative to
+`~/.nexus/sudocode/local-mailbox/`. The record contains `description`,
+`updated_at`, and `source_session_id`. It survives process exit and resume;
+resuming an older session does not restore an older description. The owning
+agent publishes only after its checkpoint commits. A description changed
+during compaction is preserved. Native filesystem locks exclude concurrent
+writers; node backends retain their advisory lease guarantee unless they
+provide conditional writes.
+
+`agent_list` reads these records and returns optional `description` and
+`description_updated_at` fields. Terminal cards show the description and its
+age. Missing or unreadable metadata never removes an otherwise reachable peer.
+The timestamp records the last description refresh and does not assert that a
+peer is running. Descriptions persist until replaced or explicitly removed.
+
+Stored descriptions are not injected into ordinary system prompts or compacted
+continuations. Description instructions and a bounded hint of the latest
+preserved user intent are appended only to the existing final compaction
+instruction. Cached system/tool definitions, historical messages, and the
+retained recent tail keep their existing bytes and boundaries. The experiment
+is off by default; disabling it preserves the original request and listing
+shape.
+
 ## Editing a prompt
 
 `Ctrl+U` clears the current draft. You can immediately continue typing or paste
@@ -51,6 +94,43 @@ not terminal wrapping, define these boundaries. Navigation and subsequent
 typing share the editor's current buffer and cursor, even in one key burst;
 no redraw is required between them. On an empty draft, `Up` recalls queued
 human messages before history, leaving inbound peer messages queued.
+
+## Steering, queueing and cancellation
+
+These controls apply to the default asynchronous REPL. Starting with
+`SUDOCODE_INTERRUPT_QUEUE_MODE=off` selects the legacy synchronous REPL,
+which retains turn-boundary delivery.
+
+While the model or tools are working:
+
+| Key | Behavior |
+| --- | --- |
+| Enter | Offer the message within the current task. |
+| Tab | Queue the message for the next turn; slash command completion keeps Tab. |
+| Esc with pending messages | Flush the entire queue into the current task. |
+| Esc without pending messages, or Ctrl+C | Cancel the current turn. Ctrl+C always cancels. |
+
+Steering adds ordinary input to the conversation, without an instruction to
+abandon the original task. The model can use a suggestion or treat it as FYI.
+Sampling yields at replayable text or before a tool is admitted. Consecutive
+thinking blocks remain complete and unchanged. Already admitted tools finish
+and their results reach the model before the new input.
+Flush preserves the unsent draft and does not add an interruption marker.
+Cancelling with Esc also keeps the unsent draft; Ctrl+C clears it.
+
+The pending area distinguishes `queued` from `steering`. A steering message
+stays visible until it enters the conversation. `Up` recalls explicitly queued
+human input, keeping peer messages and accepted steering out of the editor.
+Cancellation preserves unapplied messages without automatically restarting
+work; Enter or Esc resumes that retained queue. A second Ctrl+C within 800 ms
+exits. Session management commands require an idle turn and return immediately
+when work is active.
+
+For an interactive peer, `send` accepts `delivery: "steer"` (default) or
+`delivery: "queue"`. Peer provenance and message bodies remain intact. Other
+hosts deliver at their turn boundaries. Delivery intent never grants a peer
+permission to cancel the human's task; the existing structured subagent
+shutdown request remains a separate control operation.
 
 ## Global and project directories
 
@@ -75,6 +155,73 @@ machine-local overrides. Legacy global `scode.json` and project `.scode.json`
 remain readable. Existing files keep their names; no duplicate config file or
 automatic migration is introduced. The account selection (`auth_profile`)
 remains owned by global `settings.json` and project `settings.local.json`.
+
+### Standalone sessions and the local Nexus node
+
+Standalone `scode` reads `~/.nexus/run/node.json` when selecting its peer
+namespace. Starting or resuming an ordinary session does not require that node
+to answer or this agent's bundle to be ready. A present but unusable record,
+missing credential files or an identity mismatch leave A2A unavailable with
+the actual cause in `/status` and tool results. They do not redirect messages
+to a disk inbox or prevent ordinary model and workspace work.
+
+Background receive failures share one diagnostic reporter across the receiver's
+conversations. It retains the first error, changed errors and repeat counts in
+the existing rotated local `scode.log` / `sudoclaw.log`; `SCODE_LOG_PATH` can
+select the file. A healthy peer does not hide another peer's failure. Retrying
+task-completion persistence uses the same reporting implementation. Services
+which own terminal notices emit at most one reminder per minute and report
+recovery only after all observed failures clear and checks stay healthy.
+See [background retry diagnostics](design/background-retry-diagnostics.md)
+for the shared implementation and repository audit.
+
+Background receiver errors are available as `Last RX error` in `/status` and
+`last_receiver_error` in the structured peer status. This is the most recent
+failure in the current process, not a claim that the node remains offline.
+It is retained with the receiver's transient state and removed when its last
+receiver stops. Hosts can also subscribe to structured tracing. Ordinary
+receivers use this status and the local log without emitting terminal notices;
+retries continue without writing into the terminal's input area.
+
+The current condition is reported separately as `Health` in `/status` and
+`health` in the structured peer status. It reads the same retry diagnostics, so
+it clears when they confirm recovery: every failed check has succeeded again
+after a short quiet period. An outage younger than 30 seconds stays `ok`, and
+`/status` lists the scope being retried; most outages recover on the next
+attempt. A longer one is `degraded`, with each failing scope and its detail.
+The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
+receiving recovers. `failing` means the node binding itself cannot be used.
+`SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
+
+The connection record alone does not start Nexus or mint an agent credential.
+An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
+can resume the same locally owned Box after shared selection. A missing record still
+selects the same-machine disk namespace for that process. When a node was
+selected, its tools and original receiver share one binding: the receiver
+retries local configuration and credential resolution, then retries node IO
+through the same client. Preparing the missing bundle can therefore make
+that binding usable without starting another receiver. A failed or uncertain
+send is never automatically resent. Receiver `unavailable` means the receiver
+could not initialize; `standby` means another instance holds its seat.
+
+Automatic shared-service preparation keeps ordinary startup usable when that
+configured record is unusable; the receiver retains the selected namespace and
+reports its cause. Explicit `scode setup` and `setup --check` still return their
+actual failures. A dangling node-record symlink is a configured but unusable
+record, not permission to prepare a replacement service.
+
+A constructed client is not proof that TLS authentication succeeds. The
+client's credentials remain fixed after construction; rotation or replacing
+an unusable constructed client is not covered by local binding retries.
+Changing a running session from disk to node remains an explicit handoff.
+Receiver ownership and a selected node endpoint in `/status` are not proof
+that a remote peer is online. Cohost continues using its injected mailbox and
+requires its host services.
+
+An ordinary HTTP model can run while A2A is unavailable. A model explicitly
+configured through a `nexus://` mount still needs the selected node's
+authenticated filesystem; model traffic keeps that mount's authorization and
+hooks.
 
 ### CLI packages
 
@@ -170,14 +317,20 @@ The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
 The live status follows the foreground engine lifecycle. A four-cell amber
-animation approximates the Sudoprivacy logo in one row. Model work
-shows `Thinking...` or `Reasoning...`, with model, elapsed time and tokens.
+animation approximates the rotating Sudoprivacy logo in one row, using twelve
+precomputed frames. Model work shows `Working...` or `Thinking...`.
+The activity label uses the terminal foreground, with the theme's warning color
+for retries or stalled output; model, elapsed time and
+tokens use its muted color so they remain secondary to the activity.
+Elapsed time and ETA refresh in whole seconds; tokens and the brand animation
+remain live. Final turn statistics retain their precise duration.
 Foreground tools use the same row and show available progress first. Quiet
 tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
-footer return. Background work keeps its separate task summary in the footer.
+footer return. Remaining background work uses the same status row as described
+under [Background tasks](#background-tasks-in-the-repl).
 
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
@@ -197,28 +350,52 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
-Unfinished ordinary paragraphs stream above the live status area by default.
+Unfinished ordinary paragraphs and top-level fenced code stream above the live status area by default.
 Finalized text
 moves into native scrollback in the same presentation as preview removal,
 and a draft typed during the response stays available. Parallel tool output
 keeps unfinished Markdown formatting intact. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
-Code, tables, lists, headings and emoji with ambiguous terminal widths use
+Complete code lines retain syntax parser state across deltas; the unfinished
+last line stays literal until its newline arrives. Finalization uses the same
+highlighter as replay. Nested/indented fences, Mermaid diagrams, tables, lists, headings and emoji with ambiguous terminal widths use
 the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
 unusually long result summary can still change its visible position.
 
+Completed `mermaid` fences render as terminal diagrams through the same Markdown
+path for streamed answers, replay and Markdown prompts. The renderer reuses
+Codex's pinned native engine; no browser, JavaScript runtime or external process
+is needed. Diagram borders use the existing theme and `NO_COLOR` remains supported.
+
+Use compact flowcharts, sequence diagrams, flat state diagrams, class diagrams
+or ER diagrams. Prefer `flowchart TD` on narrow terminals. See the upstream
+[supported syntax and limits](../rust/vendor/codex-mermaid/README.md): this is a
+bounded subset rather than full Mermaid support. Unfinished fences stay source;
+unsupported syntax or diagrams that cannot fit show a reason and the original
+source. Control characters in source fallback display as escapes. The persisted
+Markdown stays unchanged, and replay renders against its current terminal width;
+diagrams already committed to native scrollback do not reflow on resize.
+
+The default system prompt advertises when a diagram helps and how to stay within
+this subset. Explicit system-prompt replacement still replaces those defaults.
+
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
 hooks, approval, or an execution slot; amber while running; the code theme's
-green on success; and red on failure. The opening and closing
-caps stay bold to separate adjacent calls; long vertical borders use normal
-weight without dimming. Colors adapt to dark/light backgrounds and terminal
-color depth. `ColorTheme` is the single semantic color interface; its `info`
-role (including Thinking/Reasoning) and successful tool borders share one
-soft-green definition. Syntax-backed colors load on demand and stay cached.
+green on success; and red on failure. Frame strokes use normal weight without
+dimming so corners align with vertical borders across terminal fonts.
+Colors adapt to dark/light backgrounds and terminal
+color depth. `ColorTheme` resolves semantic text roles into complete styles for
+transcript, chrome and input surfaces. Brand accents and the activity logo use
+Sudoprivacy amber (#F59E0B), with a darker shade on light backgrounds. Error and
+success roles use the terminal's regular red and green slots, as Codex does;
+the emulator owns their exact RGB values. Informational marks and successful
+tool borders share the syntax theme's soft green. Thinking/Reasoning labels use
+the terminal foreground; stalled activity uses the warning role. Syntax-backed
+roles and terminal capabilities are resolved once and cached.
 Tool names use the shared Codex blue accent. Titles occupy one
 row and use an ellipsis when they exceed the available width. Running titles
 reflow on resize; completed titles remain as printed in terminal scrollback.
@@ -271,8 +448,15 @@ request or combining usage from the two responses. HTTP failures before a
 response starts remain eligible for the normal transport retry policy.
 
 Incoming peer messages appear in a separate `Message from <peer>` frame with
-muted content and a blue peer name. This presentation does not alter the
-message envelope or content supplied to the model.
+muted framing and a blue peer name. Sender-supplied `Summary:` text appears above
+the complete body and is preferred in the one-line queued preview. Live display
+and resumed history use the same presentation; older messages without a summary
+continue to show their body. The summary travels with the existing envelope into
+the saved turn and model context.
+
+Outgoing `send` cards keep the summary concise and preview up to six source
+lines of the body, with a character cap. Lines wrap to the terminal width; a
+truncation notice points to the complete message preserved in the session.
 
 Queued messages use muted labels and normal-intensity bodies, and Todo
 items distinguish active and completed states. This uses the same palette as
@@ -282,25 +466,46 @@ labels and punctuation, with every count in bold terminal foreground, including
 zero. Ordinary task descriptions also retain the terminal foreground instead
 of a slot-wide grey; active labels remain bold and completed labels retain dim
 strikethrough. Amber is reserved for accent/activity, not neutral quantities.
-Per-turn status uses the same
-theme-selected muted foreground without an additional dim attribute; cache
-health indicators keep their semantic colors. Emphasis and color are scoped
+Per-turn status uses syntax-derived accents for the model and usage, with
+secondary labels and separators. The footer's workspace path and branch use
+accents from that same syntax asset. Cache health indicators keep their semantic
+colors. None of these accents adds a dim attribute. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
 Ordinary footer tips use the theme's readable muted foreground, actionable
-recommendations use its primary accent, and urgent tips use its warning role,
+recommendations use its subdued notice role, and urgent tips use its warning role,
 without an additional dim attribute; separators use the border role. The input draft
 retains the terminal foreground. A slot's initial color is decoded as text
 state, not applied again as a fallback to every span: ANSI foreground/full
 resets restore the terminal default instead of silently inheriting a parent
 color. The same structured spans feed the live UI and transcript adapters.
-No-color chrome does not force a palette color.
+No-color chrome does not force a palette color. Secondary text blends the
+reported terminal foreground and background and maintains readable contrast.
+On explicit selection surfaces, role colors are checked against the selected
+background. ANSI status colors remain terminal-owned.
+
+Markdown, code, links, tables and chrome share structured text runs. Live prose
+and question documents consume those runs directly; native scrollback serializes
+ANSI only at the terminal boundary. External program output still has one ANSI
+decoder. There is no second Markdown implementation for the live canvas, and
+these presentation changes do not alter stored messages or model input.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
+Write and Edit share numbered, syntax-highlighted source previews. New files
+show added lines; replacements show removed/added lines with nearby context.
+Running Write previews show the submitted content; completed cards use the
+tool's returned content. Preview lines and characters are bounded before
+highlighting, with explicit omission notices. The complete source is preserved
+in the session and file. Markdown files keep literal Markdown source in these
+tool cards rather than becoming rendered documents.
+When a large tool result is offloaded, the card labels its retained request
+content as an input preview instead of claiming an empty file or guessing
+whether the operation created or replaced it. Replay uses the recorded request;
+the complete tool result remains available through the session's output record.
 On Unix, the default REPL queries the terminal palette once at startup, with
 a shared 250 ms deadline and preservation of queued keys and pastes. Windows
 does not send OSC 10/11 color queries: some console hosts deliver replies as
@@ -317,6 +522,11 @@ Markdown uses Codex's typographic hierarchy: headings and emphasis keep the
 terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
+Tables follow Codex's column allocation: paths and long tokens surrender width
+before prose and compact values. Cells wrap with their styles and links;
+tables that cannot remain readable become labeled key/value records. Layout
+uses the available width when rendering, including replay and plan review.
+Already printed native scrollback keeps the terminal's own resize/reflow behavior.
 
 Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
 show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);
@@ -351,12 +561,21 @@ same editor, preserving the complete text and cursor.
 The choice controls stay visible while the document is read in native history
 or the pager. If the terminal is too small to show those controls
 safely, an enlargement warning replaces the panel; confirmation and hidden
-edits are disabled, but Esc/Ctrl-C can still cancel. Resizing does not answer a
-question, alter the saved plan, or clear conversation history.
+edits are disabled. Ctrl+C can still cancel; Esc follows the pending-message
+controls described above. Resizing does not answer a question, alter the saved
+plan, or clear conversation history.
 
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The
 saved document is the source for both the preview and the approved tool result.
+Both REPLs show it in a distinct `Plan · awaiting review` frame with the saved
+file path. Reasoning stays above the review, and the choices stay below it.
+Completed `WritePlan` cards show the review decision and file path rather than
+abbreviated plan arguments. Revision feedback and cancellation are normal
+review outcomes; failures to save or validate a plan remain errors.
+On resume, review documents are reconstructed from their recorded tool inputs
+with the same document composer. A later edit to the current plan file does
+not rewrite an earlier proposal in conversation history.
 If it changes while review is pending, it must be presented again for approval.
 “Clear context & execute” discards exploration messages after the current tool
 exchange completes, then continues execution in the same turn without another
@@ -372,14 +591,16 @@ conversation. The current input draft is retained. For UI that fits within
 the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
-While a turn is running, messages you submit wait in the staging area.
+While a turn is running, Enter steers the current task and Tab queues a message
+for the next turn. Pending messages stay visible in the staging area until
+consumed, with `queued` and `steering` labels indicating their delivery state.
 Each queued preview uses a muted label and normal-intensity message text;
 narrow windows shorten the label and clip the preview, not the queued text.
 Press ↑ on an empty input to bring all queued human messages back for editing,
 joined in their original submit order. Their staging entries disappear;
 peer/A2A messages remain queued. The cursor starts at the end of the recalled
-text, and further arrow presses use normal cursor navigation. Submitting it
-queues the edited text again. On an empty input with no queued human message,
+text, and further arrow presses use normal cursor navigation. Enter steers with
+the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
 
 A line starting with `!` runs the rest as a shell command instead of
@@ -404,6 +625,31 @@ For the canonical, live command list:
 ```bash
 scode --help
 ```
+
+### Experimental pinned composer
+
+Enable `experimental.promptViewport` to try a fixed composer, shaded submitted
+prompts and a one-line header for the answer currently being read:
+
+```json
+{"experimental":{"promptViewport":true}}
+```
+
+This temporary experiment is off by default and applies to the default REPL.
+Use the mouse wheel to browse; the composer also accepts Page Up / Page Down
+and Alt+End to return to the latest output. Typing preserves the reading
+position. The draft survives scrolling and resize. Use your terminal's native
+selection gesture (often Shift+drag) while mouse reporting is enabled.
+
+The experiment keeps the terminal's main buffer and existing inline renderer;
+it does not enter alternate-screen mode. On normal exit it restores rendered
+conversation output to native terminal history. Saved sessions remain the
+durable record and `--resume` restores their prompt boundaries.
+Older presentation rows live in a disposable disk spool; only nearby row layouts
+and the visible frame remain cached. Colors respect the terminal palette and
+`NO_COLOR`. This changes presentation only and adds no model requests or prompt
+context. Validation and graduation requirements live in the
+[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
 
 ## Bash tool results
 
@@ -434,8 +680,20 @@ one contextual tip. General startup guidance also lives here. The highest
 priority applicable tip wins: immediate local interaction feedback, then model
 tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
-over cache advice. Routine `/help` guidance fills otherwise unused space.
-While a turn runs, only urgent tips are shown.
+over cache advice. While a turn runs, only urgent tips are shown.
+
+Below the tips, the slot shows where the workspace is, then the keys for the
+current turn and queue state: `sudocode ⎇ main · /help` when idle, `· Enter
+steer · Tab queue · Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C
+cancel` in place of the cancel keys when input is queued, and `· Enter send ·
+Esc flush · ↑ edit queued` for queued input when idle. Typing never changes it,
+so keystrokes never redraw the footer; it changes when a turn starts or ends,
+as the rest of the screen does. The repository is named by its shared git
+directory, so every worktree of one repository shows the same name; a detached
+HEAD names the branch tip it sits on, `sudocode ⎇ origin/main@4d3c4ad4`, or
+just the commit. The position is state rather than advice, so every tip takes
+the slot from it; it is read at startup and refreshed when each turn ends, and
+the per-turn status line no longer repeats it.
 
 The model has an always-loaded, read-only `set_tip` tool:
 
@@ -473,6 +731,15 @@ and agents automatically moved to the background use the same view. It shows
 running terminal/agent counts and unread completion results. When neither
 exists, the entry is hidden; no additional permanent row is reserved.
 
+After the foreground turn finishes, the status row shows outstanding work, for
+example `1 task still running · turn 549 finished`. Running or stopping tasks
+use the amber activity accent and the same logo at a slower 400 ms cadence;
+the completed-turn suffix uses the muted theme color and stays fixed. Unconfirmed
+or failed tasks take priority with static warning/error text. Foreground work
+and input questions retain priority. Animation stops when the row is hidden or
+no work remains. The status and footer consume the same task-event projection;
+the animation does not indicate new task output or advance elapsed counters.
+
 The task summary normally shows just the counts. With an empty prompt, press
 **↓** to focus it; **Enter to view** then appears. Press **Enter** to open the task list.
 **↑/↓** selects a task, **Enter** opens its details, and **k** stops the selected
@@ -483,11 +750,19 @@ the footer entry disappears. Existing `/tasks list|get|stop` commands remain
 available for persisted agent manifests.
 
 Shell details update while the parent is idle and include stdout/stderr,
-elapsed time, status, and the actual exit code. The preview retains at most
+labelled runtime, status, and the actual exit code. Long commands wrap across
+up to three preview rows. Output sits in a theme-colored frame that shrinks
+with the terminal; its row range refers to the wrapped, retained output tail.
+Internal blank lines and output colors are preserved, and the stop hint only
+appears for active tasks. The preview retains at most
 24 KiB per task; complete shell output is stored in the private temporary log
 shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
 directory after completion. The session retains at most 50 completed tasks
-in memory. Agent details show current activity and recent output, then their
+in memory, plus active work. The list shows its current entry count; the oldest
+ended tasks leave it automatically as newer tasks finish, without a restart.
+There is no age-based expiration within this limit. This does not delete their
+complete logs. Agent details use the same layout,
+showing current activity and recent output, then their
 final result. These are tasks owned by this session, not a view of other agents
 on the machine.
 
@@ -527,6 +802,7 @@ scode --resume path/to/session.jsonl
 ```
 
 `--resume` replays the named session into the REPL with full context.
+The restored session ID scopes the runtime, default plan file, and session trace.
 
 `latest` prefers your most recently used interactive session with saved history. A newer
 `--print`/`-p` run keeps its own transcript without displacing that session.
@@ -765,9 +1041,19 @@ scode --model <vision-model> 'Describe @/absolute/path/screenshot.png'
 scode --model <vision-model> 'Describe @"screenshots/home page.png"'
 ```
 
-The synchronous REPL also submits clipboard images pasted alongside a text
-prompt. Image bytes are validated and preflighted before being sent; a missing
-or invalid referenced image produces an error rather than a text-only request.
+In the REPL, paste a clipboard image with **Alt+V**, with **Ctrl+V** where the
+terminal passes it through, or with the terminal's own paste (Cmd+V on macOS)
+when the clipboard holds only an image. On Windows Terminal, Ctrl+V is the
+terminal's text paste, so use Alt+V there. The image shows as `[Image #N]` in
+the default REPL and as its `@"path"` reference in the classic synchronous REPL,
+and it is attached on submit exactly like a typed reference: a copied image file
+is referenced where it is, and pasted image data is stored in the image cache
+first. For scripts and tests, `SUDOCODE_CLIPBOARD_IMAGE=<file>` stands in for
+the system clipboard, which is then never read: the clipboard holds only the
+image in that file, or no image when the file is not one.
+
+Image bytes are validated and preflighted before being sent; a missing or
+invalid referenced image produces an error rather than a text-only request.
 Repeated references to the same spelling of a path attach it once per prompt.
 
 Agents can inspect images using `Read` (`read_file`). For example, after the

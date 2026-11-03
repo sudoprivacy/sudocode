@@ -38,11 +38,18 @@ fn showcase(env: &TestEnv, background: &str, no_color: bool) -> PtySession {
         common::DEFAULT_TIMEOUT,
         "pasted input",
     );
+    let marker = common::turn_status_marker(&sess);
     sess.send("\r").expect("submit");
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "completed reference turn",
+    );
     common::expect_screen(
         &sess,
-        |screen| screen.contains("Color reference done.") && screen.contains("ctx "),
-        common::LIVE_TURN_BUDGET,
+        |screen| screen.contains("Color reference done."),
+        common::DEFAULT_TIMEOUT,
         "completed reference response",
     );
     sess
@@ -168,6 +175,51 @@ fn no_color_preserves_code_without_theme_escapes() {
     assert_reference(false, true);
 }
 
+#[test]
+fn provider_errors_use_regular_red_and_leave_the_next_draft_readable() {
+    for (background, no_color) in [("15;0", false), ("0;15", false), ("15;0", true)] {
+        let env = TestEnv::new_mock("semantic-provider-error");
+        let mut sess = env.spawn_with_env(
+            &["--permission-mode", "read-only"],
+            &[
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                ("COLORFGBG", background),
+                ("NO_COLOR", if no_color { "1" } else { "" }),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor"),
+            ],
+        );
+        sess.resize(50, 120).unwrap();
+        common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "ready for error");
+        // The shared transport rejects a request without a fixture scenario
+        // with a real, non-retryable HTTP 400. Exercise EngineEvent::Error.
+        sess.send("Request without a parity scenario\r").unwrap();
+        common::expect_screen_settled(
+            &sess,
+            |screen| screen.contains("missing parity scenario"),
+            common::LIVE_TURN_BUDGET,
+            "provider error is visible",
+        );
+        assert_cell(
+            &sess,
+            "missing parity scenario",
+            if no_color { "Default" } else { "Idx(1)" },
+            "Default",
+        );
+        sess.send("AfterErrorDraft").unwrap();
+        common::expect_input_line(
+            &sess,
+            "AfterErrorDraft",
+            common::DEFAULT_TIMEOUT,
+            "type after error",
+        );
+        assert_cell(&sess, "AfterErrorDraft", "Default", "Default");
+        sess.send("\x15").unwrap();
+        common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear draft");
+        finish(&mut sess);
+    }
+}
+
 fn colored_session(env: &TestEnv, light: bool) -> PtySession {
     env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
@@ -278,7 +330,7 @@ fn unsupported_probe_keeps_typing_and_late_replies_separate() {
         "Alt bracket does not swallow keys",
     );
     assert_eq!(
-        common::input_line_of(&sess.render(|s| s.contents())).trim(),
+        common::input_line_of(&sess.render(common::screen_contents)).trim(),
         "aftertyping"
     );
     sess.send("\x15").unwrap();
@@ -375,18 +427,7 @@ fn diff_roundtrip(light: bool) {
     std::fs::write(env.workspace_root().join("colors.rs"), &original).unwrap();
     // Hold the real tool at a user hook so the running preview can be
     // inspected and resized without racing an instant filesystem edit.
-    let config = env.workspace_root().join(".nexus/sudocode");
-    std::fs::create_dir_all(&config).unwrap();
-    let hook = if cfg!(windows) {
-        r#"if /I "%HOOK_TOOL_NAME%"=="edit_file" (for /L %i in (1,1,60) do @if not exist color-diff-release (ping -n 2 127.0.0.1 >nul))"#
-    } else {
-        r#"case "$HOOK_TOOL_NAME" in edit_file|Edit) while [ ! -f color-diff-release ]; do sleep 0.05; done;; esac"#
-    };
-    std::fs::write(
-        config.join("settings.json"),
-        serde_json::json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
-    )
-    .unwrap();
+    seed_diff_reader_hook(&env);
     let mut sess = colored_session(&env, light);
     sess.resize(60, 100).unwrap();
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
@@ -538,7 +579,7 @@ fn expect_bash_sample(sess: &PtySession, sample: &Value, prefix: &str, no_color:
     );
 }
 
-fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str, no_color: bool) {
+fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str) {
     common::expect_screen(
         sess,
         |_| {
@@ -566,14 +607,14 @@ fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str, no_colo
                         let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
                         format!("{:?}", cell.fgcolor()) == foreground
                             && format!("{:?}", cell.bgcolor()) == "Default"
-                            && cell.bold() == (cap && !no_color)
+                            && !cell.bold()
                             && !cell.dim()
                     })
                 })
             })
         },
         common::DEFAULT_TIMEOUT,
-        "tool status color, bold endpoints and normal vertical border",
+        "tool status color and regular frame strokes",
     );
 }
 
@@ -591,9 +632,8 @@ fn expect_completed_bash_borders(sess: &PtySession, light: bool, no_color: bool)
         sess,
         &format!("Bash({})", mock_anthropic_service::CODEX_BASH_SINGLE),
         success,
-        no_color,
     );
-    expect_tool_border(sess, "Bash(# Shell colors", success, no_color);
+    expect_tool_border(sess, "Bash(# Shell colors", success);
 }
 
 fn assert_running_title_resizes(sess: &mut PtySession, header: &str, light: bool, no_color: bool) {
@@ -709,11 +749,11 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     let queued = if no_color {
         "Default"
     } else if light {
-        "Idx(241)"
+        "Rgb(118, 118, 118)"
     } else {
-        "Idx(247)"
+        "Rgb(158, 158, 158)"
     };
-    expect_tool_border(&sess, &header, queued, no_color);
+    expect_tool_border(&sess, &header, queued);
     assert_running_title_resizes(&mut sess, &header, light, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
@@ -726,7 +766,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
     sess.resize(80, 78).unwrap();
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
-    expect_tool_border(&sess, &header, queued, no_color);
+    expect_tool_border(&sess, &header, queued);
     sess.send("\x15").unwrap();
     common::expect_screen(
         &sess,
@@ -789,7 +829,7 @@ fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
         common::DEFAULT_TIMEOUT,
         "denied Bash result",
     );
-    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(9)", false);
+    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(1)");
     finish(&mut sess);
 }
 
@@ -969,4 +1009,19 @@ fn bash_diff_handles_new_deleted_and_truncated_files() {
         .render(|s| s.raw().contents())
         .contains("full output preserved in session"));
     finish(&mut sess);
+}
+
+fn seed_diff_reader_hook(env: &TestEnv) {
+    let config = env.workspace_root().join(".nexus/sudocode");
+    std::fs::create_dir_all(&config).unwrap();
+    let hook = if cfg!(windows) {
+        r#"if /I "%HOOK_TOOL_NAME%"=="edit_file" (for /L %i in (1,1,60) do @if not exist color-diff-release (ping -n 2 127.0.0.1 >nul))"#
+    } else {
+        r#"case "$HOOK_TOOL_NAME" in edit_file|Edit) while [ ! -f color-diff-release ]; do sleep 0.05; done;; esac"#
+    };
+    std::fs::write(
+        config.join("settings.json"),
+        serde_json::json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
+    )
+    .unwrap();
 }

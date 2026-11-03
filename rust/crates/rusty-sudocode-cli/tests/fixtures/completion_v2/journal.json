@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "storage_ref": "a30171786f13d38f223f1523918c65a50143c58c30014955166a0aeff9e0a2ed",
+  "deleted": null,
+  "closed_traces": ["legacy-prefix"],
+  "watermark": 3,
+  "session_id": "session-legacy-shared-migration",
+  "cwd": "FIXTURE_WORKSPACE",
+  "context": {
+    "sessionId": "session-legacy-shared-migration",
+    "revision": 1,
+    "digest": "FIXTURE_RAW_SHA256",
+    "lastTraceId": "legacy-prefix"
+  },
+  "active_trace": null,
+  "reducer": {
+    "active": false,
+    "workers": {},
+    "collected": []
+  },
+  "sources": {}
+}

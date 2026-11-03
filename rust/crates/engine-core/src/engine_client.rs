@@ -60,7 +60,14 @@ pub struct EngineApiClient {
 
 impl Drop for EngineApiClient {
     fn drop(&mut self) {
-        // Covers every host, including runtimes taken out of BuiltRuntime.
+        self.flush_response_captures();
+    }
+}
+
+impl EngineApiClient {
+    /// Drain session-owned response evidence before the host retires its
+    /// persistence writer. Other lifecycle readers may still retain this client.
+    pub fn flush_response_captures(&self) {
         if !api::flush_response_captures(&self.session_id, Duration::from_secs(2)) {
             if let Some(tracer) = self.session_tracer() {
                 tracer.record("response_capture_shutdown_timeout", serde_json::Map::new());
@@ -70,6 +77,37 @@ impl Drop for EngineApiClient {
 }
 
 impl EngineApiClient {
+    /// Let a chosen TTL reach this request when it is cheapest to switch; see
+    /// [`crate::cache_ttl`].
+    fn prepare_cache_ttl(&self) {
+        let Some(ttl) = self.client.cache_ttl() else {
+            return;
+        };
+        let context = self.client.cache_advisor_context();
+        let directory = context
+            .as_ref()
+            .map(|(cache, _, _)| cache.paths().session_dir);
+        let advisor =
+            context
+                .as_ref()
+                .zip(directory.as_deref())
+                .map(
+                    |((cache, route, _), directory)| crate::cache_ttl::AdvisorInput {
+                        directory,
+                        segment: cache.context_segment(),
+                        model: &self.model,
+                        route,
+                    },
+                );
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        crate::cache_ttl::before_request(&self.session_id, ttl, advisor.as_ref(), now_ms);
+    }
+
     #[must_use]
     pub fn with_response_archive(mut self, archive: Arc<dyn telemetry::ResponseArchive>) -> Self {
         if let Some(tracer) = self.client.session_tracer().cloned() {
@@ -137,6 +175,7 @@ impl EngineApiClient {
     /// Build a client for `model`, resolving the provider from config + auth
     /// mode (identical resolution to the old CLI client, minus the render
     /// plumbing).
+    #[inline]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: &str,
@@ -148,18 +187,71 @@ impl EngineApiClient {
         allowed_tools: Option<BTreeSet<String>>,
         access: &api::ModelAccess,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_access(
+            session_id,
+            sudocode_config,
+            model,
+            auth_mode,
+            tool_registry,
+            enable_tools,
+            allowed_tools,
+            |_| Ok(access.clone()),
+        )
+    }
+
+    /// Resolve the provider once, then obtain its model filesystem only if
+    /// that resolved provider actually uses a Nexus mount. Ordinary HTTP
+    /// clients do not need a node credential merely to start their session.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_access(
+        session_id: &str,
+        sudocode_config: &SudoCodeConfig,
+        model: &str,
+        auth_mode: AuthMode,
+        tool_registry: GlobalToolRegistry,
+        enable_tools: bool,
+        allowed_tools: Option<BTreeSet<String>>,
+        access: impl FnOnce(bool) -> Result<api::ModelAccess, Box<dyn std::error::Error>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let resolved: ResolvedProvider =
             api::resolve_provider_from_config(model, Some(auth_mode), sudocode_config)?;
+        let access = access(resolved.base_url.starts_with("nexus://"))?;
+        Self::from_resolved_with_access(
+            session_id,
+            sudocode_config,
+            model,
+            auth_mode,
+            tool_registry,
+            enable_tools,
+            allowed_tools,
+            &resolved,
+            &access,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_resolved_with_access(
+        session_id: &str,
+        sudocode_config: &SudoCodeConfig,
+        model: &str,
+        auth_mode: AuthMode,
+        tool_registry: GlobalToolRegistry,
+        enable_tools: bool,
+        allowed_tools: Option<BTreeSet<String>>,
+        resolved: &ResolvedProvider,
+        access: &api::ModelAccess,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let catalog = if resolved.base_url.starts_with("nexus://") || access.require_mount {
             None
         } else {
-            api::model_discovery::model_catalog_for_resolved(&resolved)
+            api::model_discovery::model_catalog_for_resolved(resolved)
         };
         if let Some(catalog) = &catalog {
             catalog.refresh_in_background();
         }
         let mut client =
-            ProviderClient::from_resolved_with_access(&resolved, Some(auth_mode), access)?
+            ProviderClient::from_resolved_with_access(resolved, Some(auth_mode), access)?
                 .with_prompt_cache(PromptCache::new(session_id));
         let sink = Arc::new(SudoclawLogSink::new()?);
         client = client.with_session_tracer(SessionTracer::new(session_id, sink));
@@ -283,13 +375,13 @@ impl EngineApiClient {
     /// [`AssistantEvent`]s; dropping it cancels the underlying HTTP request.
     async fn try_start_stream(
         &self,
-        message_request: &MessageRequest,
+        message_request: Arc<MessageRequest>,
         apply_stall_timeout: bool,
         is_post_tool: bool,
     ) -> Result<AssistantEventStream, RuntimeError> {
         let mut provider_stream = self
             .client
-            .stream_message(message_request, None)
+            .stream_message(&message_request, None)
             .await
             .map_err(|error| self.runtime_error(&error))?;
 
@@ -327,94 +419,15 @@ impl EngineApiClient {
             session_id: self.session_id.clone(),
             account: self.account.clone(),
             model: self.model.clone(),
-            retry_request: Some(build_empty_response_retry_request(
-                message_request,
+            retry_request: Some(EmptyResponseRetry {
+                request: message_request,
                 is_post_tool,
-            )),
+            }),
         };
 
         Ok(Box::pin(futures::stream::try_unfold(
             state,
-            |mut state| async move {
-                if let Some(event) = state.buffer.pop_front() {
-                    return Ok(Some((event, state)));
-                }
-                if state.done {
-                    return Ok(None);
-                }
-
-                loop {
-                    let next = if let Some(prefetched_next) = state.prefetched_next.take() {
-                        prefetched_next
-                    } else {
-                        state.provider_stream.next_event().await.map_err(|error| {
-                            runtime_error_from_api(
-                                &state.session_id,
-                                state.account.as_deref(),
-                                &state.model,
-                                &error,
-                            )
-                        })?
-                    };
-
-                    let Some(event) = next else {
-                        // Provider stream ended — emit prompt cache + a synthetic
-                        // stop if needed, then retry once if the stream produced
-                        // nothing usable.
-                        if let Some(record) = state.client.take_last_prompt_cache_record() {
-                            if let Some(evt) = prompt_cache_record_to_event(record) {
-                                state.buffer.push_back(AssistantEvent::PromptCache(evt));
-                            }
-                        }
-                        if !state.saw_stop && state.has_content {
-                            // Tools may already have run while streaming. EOF
-                            // cannot certify that the response finished, and a
-                            // retry could repeat their side effects.
-                            return Err(RuntimeError::new("provider stream ended without message_stop; partial progress preserved"));
-                        }
-                        // A terminal frame and cache/usage metadata do not make
-                        // an empty response useful. Retry it once regardless of
-                        // how the gateway framed the end of the stream.
-                        if !state.has_content {
-                            if let Some(retry_request) = state.retry_request.take() {
-                                let response = state
-                                    .client
-                                    .send_message_streamed(&retry_request, None)
-                                    .await
-                                    .map_err(|error| {
-                                        runtime_error_from_api(
-                                            &state.session_id,
-                                            state.account.as_deref(),
-                                            &state.model,
-                                            &error,
-                                        )
-                                    })?;
-                                state.buffer.extend(response_to_events(response));
-                                if let Some(record) = state.client.take_last_prompt_cache_record() {
-                                    if let Some(evt) = prompt_cache_record_to_event(record) {
-                                        state.buffer.push_back(AssistantEvent::PromptCache(evt));
-                                    }
-                                }
-                            }
-                        }
-                        state.done = true;
-                        return Ok(state.buffer.pop_front().map(|evt| (evt, state)));
-                    };
-
-                    process_provider_event(
-                        event,
-                        &mut state.buffer,
-                        &mut state.pending_tool,
-                        &mut state.saw_stop,
-                        &mut state.has_content,
-                        &mut state.usage,
-                    );
-
-                    if let Some(event) = state.buffer.pop_front() {
-                        return Ok(Some((event, state)));
-                    }
-                }
-            },
+            StreamState::next_event,
         )))
     }
 }
@@ -581,16 +594,20 @@ impl ApiClient for EngineApiClient {
     }
 
     fn cache_context_boundary(&mut self, segment: u64) {
+        let pinned = self.client.cache_ttl().is_none_or(api::CacheTtl::pinned);
+        crate::cache_ttl::context_boundary(&self.session_id, segment, pinned);
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
             if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
                 cache.set_context_segment(segment);
-                crate::cache_advisor::context_boundary(
+                let (verdict, decided) = crate::cache_advisor::context_boundary(
                     &cache.paths().session_dir,
                     segment,
                     &self.model,
                     &route,
                     ttl,
+                    crate::cache_ttl::status(&self.session_id).auto,
                 );
+                crate::cache_ttl::advised(&self.session_id, verdict, decided);
             }
         }
     }
@@ -613,6 +630,7 @@ impl EngineApiClient {
         request: ApiRequest,
         allow_tools: bool,
     ) -> Result<AssistantEventStream, RuntimeError> {
+        self.prepare_cache_ttl();
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
@@ -631,13 +649,18 @@ impl EngineApiClient {
             );
             message_request.tool_choice =
                 (self.enable_tools && allow_tools).then_some(ToolChoice::Auto);
+            let message_request = Arc::new(message_request);
 
             // Post-tool continuations get one stall-timeout retry (a nudge); other
             // turns run a single attempt.
             let max_attempts = if is_post_tool { 2 } else { 1 };
             for attempt in 1..=max_attempts {
                 match self
-                    .try_start_stream(&message_request, is_post_tool && attempt == 1, is_post_tool)
+                    .try_start_stream(
+                        Arc::clone(&message_request),
+                        is_post_tool && attempt == 1,
+                        is_post_tool,
+                    )
                     .await
                 {
                     Ok(stream) => return Ok(stream),
@@ -697,6 +720,8 @@ fn runtime_error_from_api(
         RuntimeError::context_window_blocked(message)
     } else if error.is_thinking_replay_rejected() {
         RuntimeError::thinking_replay_rejected(message)
+    } else if error.is_interrupted_stream() {
+        RuntimeError::stream_interrupted(message)
     } else {
         RuntimeError::new(message).retryable(error.is_retryable())
     }
@@ -721,9 +746,111 @@ struct StreamState {
     /// way as failures raised before it — one wording, not two.
     account: Option<String>,
     model: String,
-    /// Sent once if the stream ends having produced nothing usable. `None` once
-    /// spent, so an empty answer costs at most one extra turn.
-    retry_request: Option<MessageRequest>,
+    /// Share the original request with startup retries rather than eagerly
+    /// cloning the entire history and tool schemas for a rare empty response.
+    /// Released on usable content; consumed at most once on an empty EOF.
+    retry_request: Option<EmptyResponseRetry>,
+}
+
+/// The original request and its continuation policy live only until usable output.
+struct EmptyResponseRetry {
+    request: Arc<MessageRequest>,
+    is_post_tool: bool,
+}
+
+impl StreamState {
+    /// Advance one stream while retaining ownership of its retry and usage state.
+    async fn next_event(mut self) -> Result<Option<(AssistantEvent, Self)>, RuntimeError> {
+        if let Some(event) = self.buffer.pop_front() {
+            return Ok(Some((event, self)));
+        }
+        if self.done {
+            return Ok(None);
+        }
+
+        loop {
+            let next = if let Some(prefetched_next) = self.prefetched_next.take() {
+                prefetched_next
+            } else {
+                self.provider_stream.next_event().await.map_err(|error| {
+                    runtime_error_from_api(
+                        &self.session_id,
+                        self.account.as_deref(),
+                        &self.model,
+                        &error,
+                    )
+                })?
+            };
+
+            let Some(event) = next else {
+                // Provider stream ended — emit prompt cache + a synthetic
+                // stop if needed, then retry once if the stream produced
+                // nothing usable.
+                if let Some(record) = self.client.take_last_prompt_cache_record() {
+                    if let Some(evt) = prompt_cache_record_to_event(record) {
+                        self.buffer.push_back(AssistantEvent::PromptCache(evt));
+                    }
+                }
+                if !self.saw_stop && self.has_content {
+                    // Tools may already have run while streaming. EOF
+                    // cannot certify that the response finished, and a
+                    // retry could repeat their side effects.
+                    return Err(RuntimeError::new(
+                        "provider stream ended without message_stop; partial progress preserved",
+                    ));
+                }
+                // A terminal frame and cache/usage metadata do not make
+                // an empty response useful. Retry it once regardless of
+                // how the gateway framed the end of the stream.
+                if !self.has_content {
+                    if let Some(retry_request) = self.retry_request.take() {
+                        let retry_request = build_empty_response_retry_request(
+                            Arc::unwrap_or_clone(retry_request.request),
+                            retry_request.is_post_tool,
+                        );
+                        let response = self
+                            .client
+                            .send_message_streamed(&retry_request, None)
+                            .await
+                            .map_err(|error| {
+                                runtime_error_from_api(
+                                    &self.session_id,
+                                    self.account.as_deref(),
+                                    &self.model,
+                                    &error,
+                                )
+                            })?;
+                        self.buffer.extend(response_to_events(response));
+                        if let Some(record) = self.client.take_last_prompt_cache_record() {
+                            if let Some(evt) = prompt_cache_record_to_event(record) {
+                                self.buffer.push_back(AssistantEvent::PromptCache(evt));
+                            }
+                        }
+                    }
+                }
+                self.done = true;
+                return Ok(self.buffer.pop_front().map(|evt| (evt, self)));
+            };
+
+            process_provider_event(
+                event,
+                &mut self.buffer,
+                &mut self.pending_tool,
+                &mut self.saw_stop,
+                &mut self.has_content,
+                &mut self.usage,
+            );
+            if self.has_content {
+                // Partial progress cannot be replayed. Release the
+                // original history/schema snapshot as soon as it is usable.
+                self.retry_request = None;
+            }
+
+            if let Some(event) = self.buffer.pop_front() {
+                return Ok(Some((event, self)));
+            }
+        }
+    }
 }
 
 /// Translate one provider event into zero or more [`AssistantEvent`]s. Pure — no
@@ -820,6 +947,7 @@ fn push_output_block(
 ) {
     match block {
         OutputContentBlock::Text { text } => {
+            buffer.push_back(AssistantEvent::ResponseBlockStart);
             if !text.is_empty() {
                 *has_content = true;
                 buffer.push_back(AssistantEvent::TextDelta(text));
@@ -831,6 +959,7 @@ fn push_output_block(
             input,
             thought_signature,
         } => {
+            buffer.push_back(AssistantEvent::ResponseBlockStart);
             let initial_input = if streaming_tool_input
                 && input.is_object()
                 && input.as_object().is_some_and(serde_json::Map::is_empty)
@@ -925,11 +1054,11 @@ fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
 /// So the shape is unchanged and the remedy is about content: after a tool
 /// result, drop the tools and ask for a plain final message, which is what
 /// turns a stalled tool loop into an answer.
+#[cold]
 fn build_empty_response_retry_request(
-    request: &MessageRequest,
+    mut retry: MessageRequest,
     is_post_tool: bool,
 ) -> MessageRequest {
-    let mut retry = request.clone();
     if is_post_tool {
         retry.tools = None;
         retry.tool_choice = None;

@@ -14,6 +14,7 @@ default). The transport lives in `runtime::mailbox` +
 | Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
 | Cross-node replication and PTY duet | `e2e/nexus-a2a/run-cross-node.sh` | scripted by default |
+| Offline message before first receiver start | `bash e2e/nexus-a2a/run-live-offline.sh` | funded, real model |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
 
 The **live round-trip** (`mailbox_nexus_live`, an ignored `runtime` integration
@@ -21,6 +22,49 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 `Mailbox::send` + `Mailbox::poll` through a real gRPC server and a real
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
+
+The seven independent reader/stall/receiver-seat fault cases run with the
+repository's checksum-pinned nextest runner and at most four test workers.
+They keep their original real daemon, lease clocks, assertions and deadlines;
+daemon restart and SIGSTOP remain serial. The batch requires all seven ignored
+case names before execution and all seven successful JUnit results afterward.
+Retries are disabled. The first failure cancels this independent batch;
+the outer harness still closes its owned private daemon. Cancelled cases are
+not passes. This path requires Python 3, like the acceptance tooling.
+`mailbox_faults_acceptance.py --output FRESH_DIRECTORY` exercises the executor
+using real Cargo/native control processes; it adds no daemon coverage.
+Harness-only edits are validated by the real Linux queue journey and the
+author's realistic harness acceptance. They omit unrelated native workspace
+Cargo/PTY reruns; mixed Rust changes still require those native suites.
+
+The funded offline script uses a private `SUDO_CODE_CONFIG_HOME` containing the
+normal proxy configuration, `SCODE_LIVE_AUTH_PROFILE`, and `SCODE_LIVE_MODEL`.
+It starts the pinned daemon with mTLS, waits for its writable data plane, and
+runs the existing two-CLI PTY journey. The sender's real model stores the exact
+message before the receiver first starts; the receiver's real model consumes
+it and commits its durable reader position. A skipped journey fails this script.
+The live API CI job runs it on main and on authorized workflow dispatches.
+Participant fixtures share one live-test permit while keeping separate homes,
+configuration and workspaces, so independent tests remain serialized.
+
+The same harness runs `fs_record_log` against four independent mTLS clients,
+appends 32 large JSON records to a new WAL with unlimited retention, restarts
+its owned daemon, and checks every record and the next committed cursor. It
+rejects a regular-file path instead of falling back to read/concatenate/write.
+Native record locking and interrupted-write recovery use real subprocesses in
+the regular `cargo test --workspace` suite on all three operating systems.
+
+`shared_history_records` uses the same restart to verify two contexts of one
+durable SID. A runs a real child tool while B restores the completed prefix and
+compacts its own continuation. Restart preserves both completed branches and A's
+real tool-result association. The same restart also exercises product Session
+and ConversationRuntime persistence, including a real subprocess tool and cold
+restore after sibling compaction. CLI/cohost admission, completion ownership
+and release adoption retain their separate acceptance checks.
+
+On Linux the harness also uses `strace` to fail the actual native append's
+`fdatasync`. Replay must successfully sync that same file before allowing a
+real file effect. CI installs the injector; local Linux runs need `strace`.
 
 The cross-node harness boots two authenticated daemons. It checks an idle tail,
 a peer write that wakes it, four concurrent tails receiving all 128 ordered

@@ -262,6 +262,7 @@ pub fn unchanged_compaction(session: &Session) -> CompactionResult {
         summary_source: CompactionSummarySource::Llm,
         report: None,
         source_revision: None,
+        agent_description: None,
     }
 }
 
@@ -270,6 +271,7 @@ pub fn unchanged_compaction(session: &Session) -> CompactionResult {
 pub fn prune_tool_results(session: &mut Session) -> usize {
     let mut pruned = 0;
     for message in &mut session.messages {
+        let before = pruned;
         for block in &mut message.blocks {
             if let ContentBlock::ToolResult {
                 tool_name, output, ..
@@ -288,6 +290,14 @@ pub fn prune_tool_results(session: &mut Session) -> usize {
                 }
             }
         }
+        if pruned > before {
+            if let Some(identity) = &mut message.history {
+                std::sync::Arc::make_mut(identity).id = uuid::Uuid::new_v4().to_string();
+            }
+        }
+    }
+    if pruned > 0 {
+        session.record_context_replacement();
     }
     pruned
 }
@@ -407,6 +417,7 @@ pub(crate) struct PreparedCompaction {
     todo: Option<String>,
     pub raw_summary_budget: usize,
     ideal_summary_budget: usize,
+    description: Option<crate::agent_description::DescriptionSnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -427,7 +438,7 @@ impl PreparedCompaction {
                 .saturating_sub(config.preserve_recent_messages),
             0,
         );
-        let todo = render_todo_continuity_block(source.fs_handle());
+        let todo = render_todo_continuity_block(&source.fs_handle());
         let fixed_cost = |boundary| {
             let framing =
                 frozen_continuation("", todo.as_deref(), boundary < source.messages.len());
@@ -469,7 +480,16 @@ impl PreparedCompaction {
             todo,
             raw_summary_budget: target.saturating_sub(fixed + 32),
             ideal_summary_budget: ideal.saturating_sub(fixed + 32),
+            description: None,
         }
+    }
+
+    pub fn with_description(
+        mut self,
+        description: Option<crate::agent_description::DescriptionSnapshot>,
+    ) -> Self {
+        self.description = description;
+        self
     }
 
     pub fn has_source(&self) -> bool {
@@ -477,7 +497,7 @@ impl PreparedCompaction {
     }
 
     pub fn todo_unchanged(&self) -> bool {
-        self.todo == render_todo_continuity_block(self.source.fs_handle())
+        self.todo == render_todo_continuity_block(&self.source.fs_handle())
     }
 
     /// One request only. Retry and provider fallback share the caller's run scope.
@@ -519,10 +539,13 @@ impl PreparedCompaction {
                 "protected history leaves no summary budget",
             ));
         }
-        let mut prompt = build_compaction_prompt(custom);
+        let mut prompt = build_compaction_prompt_with_metadata(custom, self.description.is_some());
         let _ = write!(prompt, "\n\nThis run requires the entire summary to fit within {visible_cap} tokens. Aim for {} tokens. Preserve all task-critical facts; consolidate redundant history. This is a strict ceiling, including all eight sections and summary tags.", if self.ideal_summary_budget == 0 { visible_cap.min(8_000) } else { self.ideal_summary_budget.min(8_000).min(visible_cap) });
         if quality_retry {
             let _ = write!(prompt, "\nThe preceding checkpoint was rejected. Start again from the full original source above. Remove repetition and superseded details, keep every active constraint and pending action, and aim below {} tokens so the checkpoint closes completely. Do not copy the rejected checkpoint.", visible_cap.min(self.ideal_summary_budget.max(visible_cap * 3 / 4)));
+        }
+        if let Some(description) = &self.description {
+            description.append_instruction(&mut prompt, &self.source.messages[self.keep_from..]);
         }
         let mut request = ApiRequest {
             system_prompt: if cache_safe {
@@ -587,6 +610,10 @@ impl PreparedCompaction {
             )
             .await?
         };
+        let (summary, agent_description) = match &self.description {
+            Some(description) => description.split_response(summary),
+            None => (summary, None),
+        };
         validate_summary(&summary, &self.source.messages[..self.keep_from]).map_err(
             |e| match e {
                 CompactionError::InvalidSummary(reason) => {
@@ -607,6 +634,7 @@ impl PreparedCompaction {
         );
         let mut session = self.source.clone();
         session.messages = vec![ConversationMessage {
+            history: None,
             role: MessageRole::System,
             blocks: vec![ContentBlock::Text { text: continuation }],
             usage: None,
@@ -633,6 +661,7 @@ impl PreparedCompaction {
             summary_source: CompactionSummarySource::Llm,
             report: None,
             source_revision: None,
+            agent_description,
         })
     }
 }
@@ -663,6 +692,8 @@ pub struct CompactionResult {
     pub report: Option<CompactionReport>,
     /// Durable source observed before this run; checked by the commit owner.
     pub source_revision: Option<String>,
+    /// Optional peer metadata; published by the owning runtime after commit.
+    pub agent_description: Option<crate::agent_description::DescriptionUpdate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -769,15 +800,15 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// Tasks". Re-injecting the structured list keeps the next `TodoWrite` faithful.
 /// Mirrors Claude Code's todo-continuity on compaction.
 ///
-/// Shared: auto-compaction and the write_plan clear-context path both call this
+/// Shared: auto-compaction and the `write_plan` clear-context path both call this
 /// so a manual "clear context & execute" carries the todo list forward the same
 /// way an automatic compaction does.
 #[inline]
 #[must_use]
 pub fn render_todo_continuity_block(
-    fs: std::sync::Arc<dyn crate::fs_backend::FsBackend>,
+    fs: &std::sync::Arc<dyn crate::fs_backend::FsBackend>,
 ) -> Option<String> {
-    let todos = crate::todo_store::TodoStore::open(&fs).list();
+    let todos = crate::todo_store::TodoStore::open(fs).list();
     format_todo_continuity_block(&todos)
 }
 
@@ -811,7 +842,7 @@ pub fn get_compact_continuation_message(
     // `None` means "do not read the todo list": the validator below builds a
     // candidate only to MEASURE it, and a measurement that depends on what is on
     // disk is a measurement that changes under it.
-    fs: Option<std::sync::Arc<dyn crate::fs_backend::FsBackend>>,
+    fs: Option<&std::sync::Arc<dyn crate::fs_backend::FsBackend>>,
 ) -> String {
     let mut base = format!(
         "{COMPACT_CONTINUATION_PREAMBLE}{}",
@@ -845,21 +876,49 @@ pub fn get_compact_continuation_message(
 
 /// Build the compaction prompt, optionally injecting custom instructions.
 fn build_compaction_prompt(custom_instructions: Option<&str>) -> String {
+    build_compaction_prompt_with_metadata(custom_instructions, false)
+}
+
+fn build_compaction_prompt_with_metadata(
+    custom_instructions: Option<&str>,
+    peer_metadata: bool,
+) -> String {
     let mut prompt = String::with_capacity(
         NO_TOOLS_PREAMBLE.len()
             + BASE_COMPACT_PROMPT.len()
             + NO_TOOLS_TRAILER.len()
             + custom_instructions.map_or(0, |s| s.len() + 30),
     );
-    prompt.push_str(NO_TOOLS_PREAMBLE);
-    prompt.push_str(BASE_COMPACT_PROMPT);
+    if peer_metadata {
+        // Only this uncached instruction changes; the production format and
+        // custom instructions keep their original bytes and ordering.
+        prompt.push_str(&NO_TOOLS_PREAMBLE.replace(
+            "a <summary> block.",
+            "a <summary> block followed by the peer-description metadata requested below.",
+        ));
+        prompt.push_str(&BASE_COMPACT_PROMPT.replacen(
+            "Output only a <summary> block with these sections",
+            "Output a <summary> block with these sections",
+            1,
+        ));
+    } else {
+        prompt.push_str(NO_TOOLS_PREAMBLE);
+        prompt.push_str(BASE_COMPACT_PROMPT);
+    }
     if let Some(instructions) = custom_instructions {
         if !instructions.trim().is_empty() {
             prompt.push_str("\n\nAdditional Instructions:\n");
             prompt.push_str(instructions);
         }
     }
-    prompt.push_str(NO_TOOLS_TRAILER);
+    if peer_metadata {
+        prompt.push_str(&NO_TOOLS_TRAILER.replace(
+            "a <summary> block.",
+            "a <summary> block followed by the requested peer-description metadata.",
+        ));
+    } else {
+        prompt.push_str(NO_TOOLS_TRAILER);
+    }
     prompt
 }
 
@@ -931,6 +990,7 @@ fn build_compaction_messages(
             };
 
             Some(ConversationMessage {
+                history: None,
                 role,
                 blocks,
                 usage: None,
@@ -1079,10 +1139,11 @@ async fn compact_session_inner<C: ApiClient>(
         &summary,
         true,
         !preserved.is_empty(),
-        Some(session.fs_handle()),
+        Some(&session.fs_handle()),
     );
 
     let mut compacted_messages = vec![ConversationMessage {
+        history: None,
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
@@ -1108,6 +1169,7 @@ async fn compact_session_inner<C: ApiClient>(
         summary_source: CompactionSummarySource::Llm,
         report: None,
         source_revision: None,
+        agent_description: None,
     })
 }
 
@@ -1245,10 +1307,11 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
         &summary,
         true,
         !preserved.is_empty(),
-        Some(session.fs_handle()),
+        Some(&session.fs_handle()),
     );
 
     let mut compacted_messages = vec![ConversationMessage {
+        history: None,
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
@@ -1274,6 +1337,7 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
         summary_source: CompactionSummarySource::Llm,
         report: None,
         source_revision: None,
+        agent_description: None,
     })
 }
 
@@ -1308,6 +1372,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
             },
             report: None,
             source_revision: None,
+            agent_description: None,
         };
     }
 
@@ -1338,10 +1403,11 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         &summary,
         true,
         !preserved.is_empty(),
-        Some(session.fs_handle()),
+        Some(&session.fs_handle()),
     );
 
     let mut compacted_messages = vec![ConversationMessage {
+        history: None,
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
@@ -1369,6 +1435,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         },
         report: None,
         source_revision: None,
+        agent_description: None,
     }
 }
 
@@ -1390,10 +1457,16 @@ fn find_safe_compaction_boundary(
             for block in &message.blocks {
                 match block {
                     ContentBlock::ToolUse { id, .. } => {
-                        pending.insert(id, index);
+                        pending.insert(
+                            (crate::session_history::tool_origin(message, id), id),
+                            index,
+                        );
                     }
                     ContentBlock::ToolResult { tool_use_id, .. } => {
-                        pending.remove(tool_use_id);
+                        pending.remove(&(
+                            crate::session_history::tool_origin(message, tool_use_id),
+                            tool_use_id,
+                        ));
                     }
                     _ => {}
                 }
@@ -1672,8 +1745,8 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
     lines
 }
 
-/// Extract tool names previously discovered via ToolSearch from the
-/// session's messages. Scans ToolSearch result blocks for the `matches`
+/// Extract tool names previously discovered via `ToolSearch` from the
+/// session's messages. Scans `ToolSearch` result blocks for the `matches`
 /// array and collects the tool names. Also merges any names carried
 /// forward from prior compactions (`pre_compact_discovered_tools`).
 pub(crate) fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
@@ -1784,8 +1857,8 @@ mod tests {
         let result = compact_session_sync(&session, CompactionConfig::default());
         assert_eq!(result.removed_message_count, 0);
         assert_eq!(result.compacted_session, session);
-        assert!(result.summary.is_empty());
-        assert!(result.formatted_summary.is_empty());
+        assert_eq!(result.summary, "");
+        assert_eq!(result.formatted_summary, "");
     }
 
     #[test]
@@ -1798,6 +1871,7 @@ mod tests {
             }]),
             ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
             ConversationMessage {
+                history: None,
                 role: MessageRole::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: "recent".to_string(),
@@ -2179,6 +2253,7 @@ mod tests {
         let mut session = Session::new();
         session.messages = vec![
             ConversationMessage {
+                history: None,
                 role: MessageRole::System,
                 blocks: vec![ContentBlock::Text {
                     text: get_compact_continuation_message(summary, true, true, None),
@@ -2258,7 +2333,7 @@ mod tests {
                     "message[{}] is a ToolResult but message[{}] has no ToolUse: {:?}",
                     i,
                     i - 1,
-                    &messages[i - 1].blocks
+                    messages[i - 1].blocks
                 );
             }
         }
@@ -2293,6 +2368,7 @@ mod tests {
                 },
             ]),
             ConversationMessage {
+                history: None,
                 role: MessageRole::User,
                 blocks: vec![ContentBlock::Image {
                     data: "base64data".to_string(),
@@ -2310,7 +2386,7 @@ mod tests {
         assert_eq!(result.len(), 4);
 
         // Thinking block should be stripped
-        assert!(result[1].blocks.len() == 1);
+        assert_eq!(result[1].blocks.len(), 1);
         assert!(matches!(&result[1].blocks[0], ContentBlock::Text { text } if text == "response"));
 
         // Image should be replaced with placeholder
@@ -2648,9 +2724,8 @@ mod tests {
                 // The last message is the compaction prompt — verify it
                 // contains the custom instructions.
                 let last = messages.last().expect("messages should not be empty");
-                let prompt_text = match &last.blocks[0] {
-                    ContentBlock::Text { text } => text,
-                    _ => panic!("last message should be text"),
+                let ContentBlock::Text { text: prompt_text } = &last.blocks[0] else {
+                    panic!("last message should be text")
                 };
                 if prompt_text.contains("Focus on TypeScript changes only") {
                     SAW_INSTRUCTIONS.store(true, Ordering::Relaxed);

@@ -129,6 +129,7 @@ mod tests {
 
     fn tool_result(id: &str, name: &str, output: String, is_error: bool) -> ConversationMessage {
         ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: id.to_string(),

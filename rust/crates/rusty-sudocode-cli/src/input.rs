@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
@@ -16,7 +16,10 @@ use rustyline::{
     EventHandler, Helper, KeyCode, KeyEvent, Modifiers, Movement, RepeatCount,
 };
 
-use crate::render::{BOLD, DIM, RESET};
+use crate::render::{DIM, RESET};
+
+mod stderr;
+pub(crate) use stderr::BackgroundPrinter;
 
 /// Rustyline handler for `↑`: moves cursor to the line above (or to the
 /// beginning of the current line on single-line input), and only navigates
@@ -101,16 +104,23 @@ pub enum ReadOutcome {
     Exit,
 }
 
-/// Shared map of pasted images: hash -> (base64, mime_type).
-type ImageMap = Arc<Mutex<HashMap<String, (String, String)>>>;
+/// How an image paste was asked for.
+#[derive(Clone, Copy)]
+enum ImagePasteTrigger {
+    /// A bracketed paste began. Cmd+V on macOS sends an empty one when the
+    /// clipboard holds only an image; clipboard text keeps the normal paste.
+    Paste,
+    /// Ctrl+V: attaches an image, and otherwise keeps its default binding.
+    CtrlV,
+    /// Alt+V: attaches an image, and otherwise says there is none.
+    AltV,
+}
 
-/// Intercepts `BracketedPasteStart` (fired by Cmd+V on macOS).  If the
-/// clipboard contains only image data (no text), register the image and
-/// display an `[Image #HASH_PREFIX]` indicator above the prompt.  When
-/// the clipboard has text, returns `None` so rustyline's default
-/// paste-text path runs instead.
+/// Inserts the clipboard image as an `@"path"` reference at the cursor, the
+/// same reference a user can type. The prompt resolves it into the image when
+/// it is submitted, exactly as in every other input path.
 struct ImagePasteHandler {
-    images: ImageMap,
+    trigger: ImagePasteTrigger,
 }
 
 impl ConditionalEventHandler for ImagePasteHandler {
@@ -119,47 +129,42 @@ impl ConditionalEventHandler for ImagePasteHandler {
         _evt: &rustyline::Event,
         _n: RepeatCount,
         _positive: bool,
-        _ctx: &EventContext<'_>,
+        ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        let mut cb = arboard::Clipboard::new().ok()?;
-
-        // If the clipboard has text, let rustyline's default bracketed-paste
-        // handler insert it (return None → fall through to default keymap).
-        if cb.get_text().ok().is_some_and(|t| !t.is_empty()) {
+        let line = ctx.line();
+        let image = match self.trigger {
+            ImagePasteTrigger::Paste => crate::clipboard_image::read_image_for_paste(),
+            ImagePasteTrigger::CtrlV | ImagePasteTrigger::AltV => {
+                if crate::clipboard_image::is_held_repeat(line) {
+                    return Some(Cmd::Noop);
+                }
+                crate::clipboard_image::read_image()
+            }
+        };
+        let notice = match image {
+            Ok(Some(path)) => {
+                let (before, after) = line.split_at(ctx.pos());
+                let reference = format!(
+                    "{}{} ",
+                    crate::clipboard_image::separator_before(before),
+                    crate::clipboard_image::reference(&path)
+                );
+                crate::clipboard_image::note_paste_key(&format!("{before}{reference}{after}"));
+                return Some(Cmd::Insert(1, reference));
+            }
+            Ok(None) => crate::clipboard_image::NO_IMAGE_NOTICE.to_string(),
+            Err(error) => format!("Could not read the clipboard: {error}"),
+        };
+        if !matches!(self.trigger, ImagePasteTrigger::AltV) {
             return None;
         }
-
-        let img_data = cb.get_image().ok()?;
-        let registry = runtime::ImageRegistry::default_cache().ok()?;
-        let rgba: Vec<u8> = img_data.bytes.to_vec();
-        let registered = registry
-            .register_rgba(
-                u32::try_from(img_data.width).unwrap_or(0),
-                u32::try_from(img_data.height).unwrap_or(0),
-                &rgba,
-            )
-            .ok()?;
-
-        let (b64, mime) = registry.load(&registered.hash).ok()?;
-
-        let mut images = self.images.lock().ok()?;
-        // If this exact hash is already inserted, don't duplicate.
-        if images.contains_key(&registered.hash) {
-            return Some(Cmd::Noop);
-        }
-        images.insert(registered.hash.clone(), (b64, mime));
-        drop(images);
-
-        // Print a simple indicator on the current line. When running
-        // inside mp.suspend() (REPL mode), bars are hidden and this is
-        // safe. The indicator appears above the prompt on the next
-        // redraw.
-        let hash_prefix = &registered.hash[..12];
+        crate::clipboard_image::note_paste_key(line);
+        // Like other editor notices, shown above the prompt; the next redraw
+        // restores the line being edited.
         let mut stdout = std::io::stdout();
-        write!(stdout, "\r\x1b[2K  {BOLD}[Image #{hash_prefix}]{RESET}\n").ok();
+        write!(stdout, "\r\x1b[2K  {DIM}{notice}{RESET}\n").ok();
         stdout.flush().ok();
-
-        Some(Cmd::Noop)
+        Some(Cmd::Repaint)
     }
 }
 
@@ -288,10 +293,12 @@ pub struct LineEditor {
     /// pending exit. A second Ctrl-C within [`cancel::DOUBLE_CTRLC_WINDOW`] triggers
     /// exit; after that the pending state resets automatically.
     pending_exit_at: Option<std::time::Instant>,
-    /// Shared image map populated by the `ImagePasteHandler`.
-    images: ImageMap,
     /// How many turns are waiting to run at the next prompt.
     waiting_turns: Arc<AtomicUsize>,
+    background_printer: Option<BackgroundPrinter>,
+    // Keep this after `editor`: dropping the editor first disconnects its
+    // external-printer queue, so shutdown can join even an in-flight print.
+    stderr: Option<stderr::StderrOutput>,
 }
 
 impl LineEditor {
@@ -331,20 +338,22 @@ impl LineEditor {
             EventHandler::Conditional(Box::new(DownArrowHandler)),
         );
 
-        let images: ImageMap = Arc::new(Mutex::new(HashMap::new()));
-
-        let handler = ImagePasteHandler {
-            images: Arc::clone(&images),
-        };
-        // Cmd+V on macOS triggers the terminal's paste action which sends a
-        // bracketed paste sequence.  When the clipboard has only image data
-        // the paste content is empty (`ESC[200~ ESC[201~`).  We intercept
-        // BracketedPasteStart to check for image data; if no image (i.e. the
-        // clipboard has text), we return None so the default paste path runs.
-        editor.bind_sequence(
-            KeyEvent(KeyCode::BracketedPasteStart, Modifiers::NONE),
-            EventHandler::Conditional(Box::new(handler)),
-        );
+        // Image paste: an empty bracketed paste (Cmd+V on macOS with an image
+        // on the clipboard), Ctrl+V where the terminal passes it through, and
+        // Alt+V everywhere. A paste with clipboard text runs the default path.
+        for (key, trigger) in [
+            (
+                KeyEvent(KeyCode::BracketedPasteStart, Modifiers::NONE),
+                ImagePasteTrigger::Paste,
+            ),
+            (KeyEvent::ctrl('V'), ImagePasteTrigger::CtrlV),
+            (KeyEvent::alt('v'), ImagePasteTrigger::AltV),
+        ] {
+            editor.bind_sequence(
+                key,
+                EventHandler::Conditional(Box::new(ImagePasteHandler { trigger })),
+            );
+        }
         // Consume the trailing BracketedPasteEnd that remains in the buffer
         // after we handle an image paste (the default handler would have
         // consumed it inside read_pasted_text, but we bypassed that path).
@@ -353,13 +362,25 @@ impl LineEditor {
             Cmd::Noop,
         );
 
+        let stderr = editor
+            .create_external_printer()
+            .ok()
+            .and_then(stderr::StderrOutput::activate);
+        let background_printer = stderr.as_ref().map(stderr::StderrOutput::printer);
+
         Self {
             prompt: prompt.into(),
             editor,
             pending_exit_at: None,
-            images,
             waiting_turns,
+            background_printer,
+            stderr,
         }
+    }
+
+    #[inline]
+    pub(crate) fn background_printer(&self) -> Option<BackgroundPrinter> {
+        self.background_printer.clone()
     }
 
     pub fn push_history(&mut self, entry: impl Into<String>) {
@@ -375,13 +396,6 @@ impl LineEditor {
         if let Some(helper) = self.editor.helper_mut() {
             helper.set_completions(completions);
         }
-    }
-
-    /// Drain all images that were pasted during the current input session.
-    /// Returns a map of full SHA-256 hash -> (base64_data, mime_type).
-    pub fn take_images(&mut self) -> HashMap<String, (String, String)> {
-        let mut map = self.images.lock().expect("image map lock");
-        std::mem::take(&mut *map)
     }
 
     /// Read a single choice line for a mid-turn dialog (e.g. the write_plan
@@ -406,7 +420,7 @@ impl LineEditor {
         if let Some(helper) = self.editor.helper_mut() {
             helper.set_completions(Vec::new());
         }
-        match self.editor.readline(prompt) {
+        match self.read_prompt(prompt) {
             Ok(line) => Ok(line.trim().to_string()),
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -425,8 +439,9 @@ impl LineEditor {
             helper.reset_current_line();
         }
 
+        let prompt = self.prompt.clone();
         loop {
-            match self.editor.readline(&self.prompt) {
+            match self.read_prompt(&prompt) {
                 Ok(line) => {
                     self.pending_exit_at = None;
                     self.push_history(&line);
@@ -453,10 +468,11 @@ impl LineEditor {
                         return Ok(ReadOutcome::Exit);
                     } else {
                         self.pending_exit_at = Some(std::time::Instant::now());
-                        // Show exit hint in the footer area (2 lines below prompt).
-                        write!(
+                        // Keep the next editor's region empty, as with peer
+                        // notices: the editor alone owns rows below its prompt.
+                        writeln!(
                             stdout,
-                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F",
+                            "  {DIM}Press Ctrl-C again to exit{RESET}",
                             DIM = DIM,
                             RESET = RESET
                         )?;
@@ -481,6 +497,19 @@ impl LineEditor {
         self.editor
             .helper()
             .map_or_else(String::new, SlashCommandHelper::current_line)
+    }
+
+    /// The sole raw-mode boundary for both ordinary input and choice dialogs.
+    #[inline]
+    fn read_prompt(&mut self, prompt: &str) -> rustyline::Result<String> {
+        if let Some(stderr) = &self.stderr {
+            stderr.set_active(true)?;
+        }
+        let read = self.editor.readline(prompt);
+        if let Some(stderr) = &self.stderr {
+            stderr.set_active(false)?;
+        }
+        read
     }
 
     fn finish_interrupted_read(&mut self) {

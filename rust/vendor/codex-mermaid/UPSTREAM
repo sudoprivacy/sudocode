@@ -1,0 +1,7 @@
+OpenAI Codex codex-rs/mermaid
+https://github.com/openai/codex
+Commit: 970111f6cb62cc02fe36a82ea7d71b37a2889c97
+License: Apache-2.0; LICENSE and root NOTICE included.
+Production source, tests, snapshots, examples and README are unmodified.
+Local change: standalone Cargo metadata replaces upstream workspace metadata.
+The terminal integration and model guidance live outside this vendored engine.

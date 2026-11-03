@@ -19,7 +19,7 @@
 //!    Wall-clock assertion catches a "silently no-op" regression (a
 //!    refactor that drops the wait loop or clamps to 0).
 //!
-//! 2. **Over-max rejection** — duration_ms > 300_000 must return
+//! 2. **Over-max rejection** — `duration_ms` > `300_000` must return
 //!    `Err(...)` immediately. Regression pattern: a change that
 //!    forgets the guard or moves it below the sleep loop would burn
 //!    hours in production (or eat a whole CI minute).
@@ -113,7 +113,7 @@ fn sleep_actually_waits_and_exits_zero() {
 /// hang the CLI for 5+ minutes.
 ///
 /// Structural invariant: the whole turn (including the follow-up mock
-/// response after the error tool_result) must complete in seconds, not
+/// response after the error `tool_result`) must complete in seconds, not
 /// minutes. If elapsed > 60s the guard has regressed.
 ///
 /// Mock-only: live mode won't reliably pick an over-max value.

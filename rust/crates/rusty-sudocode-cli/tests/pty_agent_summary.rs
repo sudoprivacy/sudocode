@@ -1,4 +1,4 @@
-//! PTY live e2e — AgentSummary auto-summarize on long sub-agent output.
+//! PTY live e2e — `AgentSummary` auto-summarize on long sub-agent output.
 //!
 //! Roadmap coverage: sub-agent CC-fork parity §4.4 Commit 11.
 //!
@@ -10,8 +10,7 @@
 //!    `full_text.chars().count() > threshold` and:
 //!    a. writes the FULL output to `<agent_id>.full.md` sibling;
 //!    b. updates the manifest with `resultFullPath`;
-//!    c. spawns a summarizer sub-turn against sudorouter that
-//!       condenses the output to ≤500 words.
+//!    c. spawns a summarizer sub-turn against sudorouter that condenses the output to ≤500 words.
 //! 3. Parent's `pid_output(agent_id)` returns the SHORT summary.
 //! 4. Parent reports the summary AND the full-result path back.
 //!
@@ -22,7 +21,7 @@
 //!
 //! ## Local-only per plan §6.4
 //!
-//! Requires SCODE_TEST_BACKEND=live (mock harness has scenario-
+//! Requires `SCODE_TEST_BACKEND=live` (mock harness has scenario-
 //! inheritance gap on sub-agent /v1/messages calls).
 
 mod common;
@@ -92,7 +91,7 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
     //      summarization happened; we can't easily count from
     //      the outside, but we look for the FULL_PATH sentinel).
     sess.expect(r"\.full\.md").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "expected `.full.md` sidecar path to surface: {e}\ntail:\n{tail}",
             tail = screen

@@ -2,6 +2,8 @@
 //! The canvas owns terminal writes; control sequences are never replayed.
 //! Foregrounds, backgrounds and attributes use the same spans as scrollback.
 
+use std::sync::Arc;
+
 use crate::render::styled_text::StyledText;
 use crossterm::style::{Attribute, Color as TerminalColor, ContentStyle};
 use iocraft::prelude::*;
@@ -16,42 +18,61 @@ pub(in crate::repl_ui) struct AnsiTextProps {
 #[component]
 pub(in crate::repl_ui) fn AnsiText(props: &AnsiTextProps) -> impl Into<AnyElement<'static>> {
     let text = StyledText::from_ansi_with_style(&props.content, props.initial_style);
-    text_element(contents(&text), TextWrap::Wrap, props.width)
+    text_element(
+        TextSource::Mixed(contents(&text)),
+        TextWrap::Wrap,
+        props.width,
+    )
 }
 
 #[derive(Default, Props)]
 pub(in crate::repl_ui) struct RichTextProps {
-    pub content: std::sync::Arc<StyledText>,
+    pub content: Arc<StyledText>,
     pub wrap: TextWrap,
     pub width: Size,
 }
 
 #[component]
 pub(in crate::repl_ui) fn RichText(props: &RichTextProps) -> impl Into<AnyElement<'static>> {
-    text_element(contents(&props.content), props.wrap, props.width)
+    text_element(
+        TextSource::Styled(Arc::clone(&props.content)),
+        props.wrap,
+        props.width,
+    )
 }
 
-fn text_element(
-    contents: Vec<MixedTextContent>,
-    wrap: TextWrap,
-    width: Size,
-) -> AnyElement<'static> {
-    match width {
-        Size::Length(width) => element! { WidthText(contents, wrap, width) }.into(),
-        _ => element! { MixedText(contents, wrap) }.into(),
+// Structured sources are immutable and already shared by their layout owner.
+// Keep their identity through the adapter instead of cloning every span on input.
+enum TextSource {
+    Mixed(Vec<MixedTextContent>),
+    Styled(Arc<StyledText>),
+}
+
+impl Default for TextSource {
+    fn default() -> Self {
+        Self::Mixed(Vec::new())
     }
+}
+
+fn text_element(source: TextSource, wrap: TextWrap, width: Size) -> AnyElement<'static> {
+    element! { WidthText(source, wrap, width) }.into()
 }
 
 #[derive(Default, Props)]
 struct WidthTextProps {
-    contents: Vec<MixedTextContent>,
+    source: TextSource,
     wrap: TextWrap,
-    width: u32,
+    width: Size,
 }
 
-/// Give the text leaf its actual width before Taffy measures its height.
+/// Give the text leaf its width before measurement and retain unchanged layout.
 #[derive(Default)]
-struct WidthText(MixedText);
+struct WidthText {
+    text: MixedText,
+    source: Option<Arc<StyledText>>,
+    width: Option<u32>,
+    wrap: TextWrap,
+}
 
 impl Component for WidthText {
     type Props<'a> = WidthTextProps;
@@ -66,17 +87,49 @@ impl Component for WidthText {
         hooks: Hooks,
         updater: &mut ComponentUpdater,
     ) {
-        let mut style = LayoutStyle::default();
-        style.width = Size::Length(props.width);
-        updater.set_layout_style(style.into());
+        let width = match props.width {
+            Size::Length(width) => Some(width),
+            _ => None,
+        };
+        if self.width != width {
+            let mut style = LayoutStyle::default();
+            if let Some(width) = width {
+                style.width = Size::Length(width);
+            }
+            updater.set_layout_style(style.into());
+            self.width = width;
+        }
+        let unchanged = match &props.source {
+            TextSource::Styled(source) => self
+                .source
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, source)),
+            TextSource::Mixed(_) => false,
+        };
+        if unchanged && self.wrap == props.wrap {
+            // Replacing a measure function or even assigning an identical Taffy
+            // style marks the leaf dirty and rewraps the body on every keystroke.
+            // Width changes above still invalidate layout with the existing text.
+            return;
+        }
         let mut text_props = MixedTextProps::default();
-        text_props.contents = std::mem::take(&mut props.contents);
+        text_props.contents = match &mut props.source {
+            TextSource::Styled(source) => {
+                self.source = Some(Arc::clone(source));
+                contents(source)
+            }
+            TextSource::Mixed(spans) => {
+                self.source = None;
+                std::mem::take(spans)
+            }
+        };
         text_props.wrap = props.wrap;
-        Component::update(&mut self.0, &mut text_props, hooks, updater);
+        self.wrap = props.wrap;
+        Component::update(&mut self.text, &mut text_props, hooks, updater);
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
-        Component::draw(&mut self.0, drawer);
+        Component::draw(&mut self.text, drawer);
     }
 }
 

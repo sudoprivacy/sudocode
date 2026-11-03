@@ -185,6 +185,70 @@ pub fn resolve_git_branch_for(cwd: &Path) -> Option<String> {
     }
 }
 
+/// Where the workspace is, tightly: `repo ⎇ branch`. A detached HEAD names a
+/// branch tip it sits on, `repo ⎇ origin/main@4d3c4ad4`, else just the commit.
+/// The repo is named by its shared git directory, so every worktree of one
+/// repository reports the same name. `None` outside a repository.
+#[must_use]
+pub fn resolve_git_position_for(cwd: &Path) -> Option<String> {
+    let common = run_git_capture_in(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let common = Path::new(common.trim());
+    let repo = if common.file_name().is_some_and(|name| name == ".git") {
+        common.parent()
+    } else {
+        Some(common)
+    }
+    .and_then(Path::file_name)
+    .map(|name| name.to_string_lossy().trim_end_matches(".git").to_string())
+    .filter(|name| !name.is_empty());
+    let head = resolve_git_head_for(cwd)?;
+    Some(match repo {
+        Some(repo) => format!("{repo} ⎇ {head}"),
+        None => format!("⎇ {head}"),
+    })
+}
+
+/// The branch, or for a detached HEAD the first branch tip it sits on plus
+/// the short commit; just the commit when no branch points at it.
+fn resolve_git_head_for(cwd: &Path) -> Option<String> {
+    let branch = run_git_capture_in(cwd, &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if !branch.is_empty() {
+        return Some(branch.to_string());
+    }
+    let commit = run_git_capture_in(cwd, &["rev-parse", "--short", "HEAD"])?;
+    let commit = commit.trim().to_string();
+    // Full names, so a symbolic `refs/remotes/origin/HEAD` is recognisable.
+    let tip = run_git_capture_in(
+        cwd,
+        &[
+            "for-each-ref",
+            "--points-at",
+            "HEAD",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .and_then(|refs| {
+        refs.lines()
+            .map(str::trim)
+            .filter(|name| !name.ends_with("/HEAD"))
+            .find_map(|name| {
+                name.strip_prefix("refs/heads/")
+                    .or_else(|| name.strip_prefix("refs/remotes/"))
+            })
+            .map(str::to_string)
+    });
+    Some(match tip {
+        Some(tip) => format!("{tip}@{commit}"),
+        None => commit,
+    })
+}
+
 #[must_use]
 pub fn run_git_capture_in(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -195,7 +259,7 @@ pub fn run_git_capture_in(cwd: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout).ok()
+    Some(process_text::decode_process_output(&output.stdout).text)
 }
 
 /// # Errors
@@ -208,7 +272,10 @@ pub fn find_git_root_in(cwd: &Path) -> Result<PathBuf, Box<dyn std::error::Error
     if !output.status.success() {
         return Err("not a git repository".into());
     }
-    let path = String::from_utf8(output.stdout)?.trim().to_string();
+    let path = process_text::decode_process_output(&output.stdout)
+        .text
+        .trim()
+        .to_string();
     if path.is_empty() {
         return Err("empty git root".into());
     }
@@ -368,7 +435,7 @@ fn discover_tmux_panes() -> Vec<TmuxPaneSnapshot> {
     if !output.status.success() {
         return Vec::new();
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = process_text::decode_process_output(&output.stdout).text;
     parse_tmux_pane_snapshots(&stdout)
 }
 
@@ -597,9 +664,19 @@ pub fn format_status_report(
 }
 
 fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
+    use std::fmt::Write as _;
     let namespace = match (peer.namespace, &peer.endpoint, &peer.error) {
-        (Some("node"), Some(endpoint), _) => format!("node {endpoint}"),
-        (Some(_), _, _) => "same-machine pair root".to_string(),
+        (Some("node"), endpoint, error) => {
+            let selected = endpoint
+                .as_ref()
+                .map_or_else(|| "node".to_string(), |endpoint| format!("node {endpoint}"));
+            match error {
+                Some(error) => format!("{selected} (unavailable: {error})"),
+                None => selected,
+            }
+        }
+        (Some("disk"), _, _) => "same-machine pair root".to_string(),
+        (Some(namespace), _, _) => namespace.to_string(),
         (None, _, Some(error)) => format!("unavailable: {error}"),
         (None, _, None) => "unavailable".to_string(),
     };
@@ -608,16 +685,58 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
             "receiving; waiting messages run at the next prompt (press Enter)"
         }
         ("receiving", _) => "receiving",
-        ("standby", _) => "standing by: another instance of this agent is receiving",
+        ("standby", _) => "standing by: waiting for the receiver seat",
+        ("unavailable", _) => "unavailable; ordinary session remains usable",
         _ => "not running in this process",
     };
-    format!(
+    let cursor = match peer.cursor {
+        "fenced" => "fenced: the lock excludes a frozen holder until it exits",
+        "fenced_cas" => "fenced: every read position is a conditional write",
+        "at_least_once" => {
+            "at-least-once: a holder frozen past its lease may replay or move a read position back"
+        }
+        _ => "decided when this process first claims a conversation",
+    };
+    let health = &peer.health;
+    let failing = match health.failing.as_slice() {
+        [] => None,
+        scopes => Some(
+            scopes
+                .iter()
+                .map(|(scope, _)| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    };
+    let age = health
+        .outage_secs
+        .map_or_else(String::new, |secs| format!(" for {secs}s"));
+    let health_line = match (health.level, failing) {
+        ("fail", _) => "failing: the node binding above cannot be used".to_string(),
+        ("warn", Some(failing)) => format!("degraded: {failing} failing{age}"),
+        ("warn", None) => format!("degraded: receiving not yet recovered{age}"),
+        (_, Some(failing)) => format!("ok; retrying {failing}{age}"),
+        _ => "ok".to_string(),
+    };
+    let mut report = format!(
         "Peers
   Agent            {}
   Namespace        {namespace}
-  Receiver         {receiver}",
+  Receiver         {receiver}
+  Health           {health_line}
+  Cursor           {cursor}",
         peer.agent
-    )
+    );
+    // A failed binding is already explained on the Namespace line.
+    if health.level != "fail" {
+        for (scope, detail) in &health.failing {
+            let _ = write!(report, "\n    {scope}: {detail}");
+        }
+    }
+    if let Some(error) = &peer.last_receiver_error {
+        let _ = write!(report, "\n  Last RX error    (history) {error}");
+    }
+    report
 }
 
 // ===========================================================================
@@ -1220,7 +1339,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
     if config
         .auth_modes
         .get("proxy")
-        .is_none_or(|accounts| accounts.is_empty())
+        .is_none_or(std::collections::BTreeMap::is_empty)
     {
         return DiagnosticCheck::new(
             "Account",
@@ -1254,11 +1373,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
 
 #[allow(clippy::too_many_lines)]
 fn check_auth_health() -> DiagnosticCheck {
-    let env_present = |key: &str| {
-        env::var(key)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    };
+    let env_present = |key: &str| env::var(key).is_ok_and(|value| !value.trim().is_empty());
     let anthropic_api_key_present = env_present("ANTHROPIC_API_KEY");
     let anthropic_auth_token_present = env_present("ANTHROPIC_AUTH_TOKEN");
     let api_key_present = anthropic_api_key_present || anthropic_auth_token_present;

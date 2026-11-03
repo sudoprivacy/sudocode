@@ -11,6 +11,7 @@ publish.workspace = true
 # `engine-acp` depend on it to build a session; neither the wire types nor the
 # renderer live here. Dependencies are added as the engine code moves in.
 [dependencies]
+process-text = { path = "../process-text" }
 # `SudoCodeConfig` (the config SSOT, re-exported by engine-core) for model/alias
 # resolution.
 engine-core = { path = "../engine-core" }
@@ -48,6 +49,7 @@ nexus-vfs-client = { path = "../nexus-vfs-client" }
 # `SessionTracer` — the `BuiltRuntime` / `SessionEngine` expose the runtime's
 # session tracer to the renderer for `/status`-style reads.
 telemetry = { path = "../telemetry" }
+tracing = "0.1"
 # `render_skills_prompt_section` — the runtime build path advertises available
 # skills (incl. plugin-provided roots) in the system prompt.
 commands = { path = "../commands" }

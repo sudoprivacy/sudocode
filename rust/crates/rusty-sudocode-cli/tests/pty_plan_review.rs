@@ -1,5 +1,5 @@
 //! Exercise saved-plan integrity, bounded controls and feedback through a PTY.
-//! Native document traversal is covered by the pinned pty_review_scrollback host.
+//! Native document traversal is covered by the pinned `pty_review_scrollback` host.
 //! CI uses a deterministic 64-line `write_plan` tool call; the same workflow can
 //! run with `SCODE_TEST_BACKEND=live` (no mock-only renderer entry point).
 mod common;

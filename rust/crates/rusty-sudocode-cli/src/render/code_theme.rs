@@ -2,7 +2,9 @@
 //! tui/src/render/highlight.rs and tui/src/markdown_render.rs. Both renderers
 //! use the same two-face grammar/theme bundle; only the terminal adapter differs.
 //! This is an internal syntax adapter and asset cache, not another UI theme.
-//! Semantic UI color selection belongs to `ColorTheme`.
+//! Semantic UI color selection belongs to `ColorTheme`. Metadata scope selection
+//! and softening follow Codex a09812981d, tui/src/bottom_pane/status_line_style.rs.
+//! See third_party/codex for the upstream Apache-2.0 license.
 
 use std::sync::OnceLock;
 
@@ -21,35 +23,60 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
-pub(super) fn theme(light: bool) -> &'static Theme {
-    static THEMES: OnceLock<two_face::theme::EmbeddedLazyThemeSet> = OnceLock::new();
-    THEMES.get_or_init(two_face::theme::extra).get(if light {
+fn with_theme<T>(light: bool, read: impl FnOnce(&Theme) -> T) -> T {
+    let themes = two_face::theme::extra();
+    read(themes.get(if light {
         EmbeddedThemeName::CatppuccinLatte
     } else {
         EmbeddedThemeName::CatppuccinMocha
-    })
+    }))
 }
 
-/// Inline code uses the Markdown scope from the same theme as fenced code.
-pub(super) fn inline_color(light: bool, support: ColorSupport) -> Color {
-    static DARK: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    static LIGHT: OnceLock<Option<syntect::highlighting::Color>> = OnceLock::new();
-    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
-        return Color::Reset;
-    }
-    let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
-        let highlighter = Highlighter::new(theme(light));
-        [
-            "markup.inline.raw.string.markdown",
-            "markup.raw.inline.markdown",
-        ]
-        .iter()
-        .find_map(|name| {
-            let scope = Scope::new(name).ok()?;
-            highlighter.style_mod_for_stack(&[scope]).foreground
+pub(super) fn theme(light: bool) -> &'static Theme {
+    // Keep the selected syntax asset, not every unused serialized theme.
+    static DARK: OnceLock<Theme> = OnceLock::new();
+    static LIGHT: OnceLock<Theme> = OnceLock::new();
+    let selected = if light { &LIGHT } else { &DARK };
+    selected.get_or_init(|| with_theme(light, Clone::clone))
+}
+
+/// Raw syntax assets; UI roles and terminal fallbacks belong to ColorTheme.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(super) enum SyntaxAccent {
+    Inline,
+    Type,
+    String,
+    Number,
+    Function,
+}
+
+pub(super) fn accent(kind: SyntaxAccent, light: bool) -> Option<(u8, u8, u8)> {
+    type Accents = [Option<syntect::highlighting::Color>; 5];
+    static DARK: OnceLock<Accents> = OnceLock::new();
+    static LIGHT: OnceLock<Accents> = OnceLock::new();
+    let colors = if light { &LIGHT } else { &DARK }.get_or_init(|| {
+        with_theme(light, |theme| {
+            let highlighter = Highlighter::new(theme);
+            let scopes: [&[&str]; 5] = [
+                &[
+                    "markup.inline.raw.string.markdown",
+                    "markup.raw.inline.markdown",
+                ],
+                &["entity.name.type", "support.type", "variable"],
+                &["string", "markup.underline.link"],
+                &["constant.numeric", "constant"],
+                &["entity.name.function", "entity.name.tag"],
+            ];
+            scopes.map(|scopes| {
+                scopes.iter().find_map(|name| {
+                    let scope = Scope::new(name).ok()?;
+                    highlighter.style_mod_for_stack(&[scope]).foreground
+                })
+            })
         })
     });
-    color.map_or(Color::Reset, |color| foreground(color, support))
+    colors[kind as usize].map(|color| (color.r, color.g, color.b))
 }
 
 fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Color {
@@ -94,13 +121,26 @@ pub(super) fn highlight(
 ) -> Option<StyledText> {
     if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16)
         || code.is_empty()
-        || code.len() > 512 * 1024
-        || code.lines().count() > 10_000
-        || code.lines().any(|line| line.len() > 4 * 1024)
+        || !within_limits(code)
     {
         return None;
     }
     let mut highlighter = HighlightLines::new(syntax(language)?, theme(light));
+    highlight_chunk(&mut highlighter, code, support)
+}
+
+pub(super) fn within_limits(code: &str) -> bool {
+    code.len() <= 512 * 1024
+        && code.lines().count() <= 10_000
+        && code.lines().all(|line| line.len() <= 4 * 1024)
+}
+
+/// Shared conversion for finalized blocks and append-only live code previews.
+fn highlight_chunk(
+    highlighter: &mut HighlightLines<'_>,
+    code: &str,
+    support: ColorSupport,
+) -> Option<StyledText> {
     let mut output = StyledText::default();
     for line in LinesWithEndings::from(code) {
         for (style, text) in highlighter.highlight_line(line, syntax_set()).ok()? {
@@ -108,8 +148,6 @@ pub(super) fn highlight(
                 foreground_color: Some(foreground(style.foreground, support)),
                 ..ContentStyle::default()
             };
-            // Codex retains bold, but deliberately omits syntax italics,
-            // underlines and the theme background in terminal code blocks.
             if style.font_style.contains(FontStyle::BOLD) {
                 content_style.attributes.set(Attribute::Bold);
             }
@@ -117,4 +155,73 @@ pub(super) fn highlight(
         }
     }
     Some(output)
+}
+
+/// A Send handle to one bounded parser cache on the painting thread.
+/// Oniguruma's capture region is not Send. Keep it where it is used rather
+/// than moving parser internals through the shared UI context or using unsafe.
+pub(super) struct StreamingCodeHighlighter {
+    id: u64,
+    language: String,
+    light: bool,
+    support: ColorSupport,
+}
+
+struct CachedParser {
+    id: u64,
+    bytes: usize,
+    parser: HighlightLines<'static>,
+}
+thread_local! {
+    static STREAM_PARSER: std::cell::RefCell<Option<CachedParser>> = const { std::cell::RefCell::new(None) };
+}
+
+impl StreamingCodeHighlighter {
+    pub(super) fn new(language: &str, light: bool, support: ColorSupport) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            language: language.to_string(),
+            light,
+            support,
+        }
+    }
+
+    pub(super) fn append(&mut self, prefix: &str, added: &str) -> Option<StyledText> {
+        if matches!(self.support, ColorSupport::NoColor | ColorSupport::Ansi16) {
+            return None;
+        }
+        STREAM_PARSER.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache
+                .as_ref()
+                .is_none_or(|cache| cache.id != self.id || cache.bytes != prefix.len())
+            {
+                let mut parser = HighlightLines::new(syntax(&self.language)?, theme(self.light));
+                // Reconstruct only after another context/thread owned the one cache slot.
+                for line in LinesWithEndings::from(prefix) {
+                    parser.highlight_line(line, syntax_set()).ok()?;
+                }
+                *cache = Some(CachedParser {
+                    id: self.id,
+                    bytes: prefix.len(),
+                    parser,
+                });
+            }
+            let cache = cache.as_mut()?;
+            let output = highlight_chunk(&mut cache.parser, added, self.support)?;
+            cache.bytes += added.len();
+            Some(output)
+        })
+    }
+}
+impl Drop for StreamingCodeHighlighter {
+    fn drop(&mut self) {
+        let _ = STREAM_PARSER.try_with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.as_ref().is_some_and(|cache| cache.id == self.id) {
+                *cache = None;
+            }
+        });
+    }
 }

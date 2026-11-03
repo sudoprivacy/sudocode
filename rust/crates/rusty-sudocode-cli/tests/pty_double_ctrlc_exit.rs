@@ -25,7 +25,7 @@ fn double_ctrlc_exits_sync_repl() {
     // First Ctrl-C — clears prompt, shows "Press Ctrl-C again to exit".
     sess.send("\x03").expect("send first Ctrl-C");
     sess.expect("Press Ctrl-C again").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should see exit hint after first Ctrl-C: {e}\nPTY screen:\n{screen}");
     });
 
@@ -37,7 +37,7 @@ fn double_ctrlc_exits_sync_repl() {
 
     sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("double Ctrl-C should exit (sync): {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "sync REPL should exit cleanly on double Ctrl-C");
@@ -59,7 +59,7 @@ fn double_ctrlc_exits_async_repl() {
     // First Ctrl-C — cancels (no-op since no turn), records timestamp.
     sess.send("\x03").expect("send first Ctrl-C");
     sess.expect("Press Ctrl-C again").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should see exit hint after first Ctrl-C: {e}\nPTY screen:\n{screen}");
     });
 
@@ -73,7 +73,7 @@ fn double_ctrlc_exits_async_repl() {
 
     sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("double Ctrl-C should exit (async): {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "async REPL should exit cleanly on double Ctrl-C");

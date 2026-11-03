@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fmt::Write as FmtWrite;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -42,7 +42,7 @@ pub enum HookProgressEvent {
         event: HookEvent,
         tool_name: String,
         command: String,
-        /// Plugin id when this hook was contributed by a SudoCode plugin, so
+        /// Plugin id when this hook was contributed by a `SudoCode` plugin, so
         /// the CLI can attribute live progress to the originating plugin.
         plugin_source: Option<String>,
     },
@@ -56,7 +56,7 @@ pub enum HookProgressEvent {
     },
     /// Hook returned exit-code 2 (deny). The CLI surfaces this distinct from
     /// `Completed` so users see *why* a tool was blocked — including the
-    /// owning plugin id when it came from a SudoCode plugin.
+    /// owning plugin id when it came from a `SudoCode` plugin.
     Denied {
         event: HookEvent,
         tool_name: String,
@@ -545,10 +545,31 @@ impl HookRunner {
             child.env("HOOK_TOOL_OUTPUT", tool_output);
         }
 
-        match child.output_with_stdin(payload.as_bytes(), abort_signal) {
+        // The tool input and output also reach the hook through its environment.
+        // Linux refuses any single environment string over 128 KiB and macOS caps
+        // the total near 1 MiB, so a large tool call would stop the hook from
+        // starting at all. When that happens the hook never ran, so retry once
+        // without those two variables: stdin still carries the complete payload.
+        let mut execution = child.output_with_stdin(payload.as_bytes(), abort_signal);
+        if execution
+            .as_ref()
+            .is_err_and(|error| error.kind() == ErrorKind::ArgumentListTooLong)
+        {
+            child
+                .env_remove("HOOK_TOOL_INPUT")
+                .env_remove("HOOK_TOOL_OUTPUT");
+            execution = child.output_with_stdin(payload.as_bytes(), abort_signal);
+        }
+        match execution {
             Ok(CommandExecution::Finished(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = process_text::decode_process_output(&output.stdout)
+                    .text
+                    .trim()
+                    .to_string();
+                let stderr = process_text::decode_process_output(&output.stderr)
+                    .text
+                    .trim()
+                    .to_string();
                 let parsed = parse_hook_output(event, tool_name, command, &stdout, &stderr);
                 let primary_message = parsed.primary_message().map(ToOwned::to_owned);
                 match output.status.code() {
@@ -985,6 +1006,11 @@ impl CommandWithStdin {
         self
     }
 
+    fn env_remove(&mut self, key: &str) -> &mut Self {
+        self.command.env_remove(key);
+        self
+    }
+
     fn output_with_stdin(
         &mut self,
         stdin: &[u8],
@@ -992,7 +1018,18 @@ impl CommandWithStdin {
     ) -> std::io::Result<CommandExecution> {
         let mut child = self.command.spawn()?;
         if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin.write_all(stdin)?;
+            // Hooks can ignore their input and finish before it is written; a
+            // broken pipe still leaves their exit status and output to decide
+            // allow, deny or failure. Any other write error is fatal, and the
+            // child is reaped first: `Child` does not kill on drop, so returning
+            // without it would leave the hook process running.
+            if let Err(error) = child_stdin.write_all(stdin) {
+                if error.kind() != ErrorKind::BrokenPipe {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
         }
 
         loop {
@@ -1017,14 +1054,16 @@ enum CommandExecution {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::thread;
+    #[cfg(unix)]
     use std::time::Duration;
 
-    use super::{
-        HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult,
-        HookRunner,
-    };
+    #[cfg(unix)]
+    use super::HookAbortSignal;
+    use super::{HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner};
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
+    #[cfg(unix)]
     use crate::permissions::PermissionOverride;
 
     struct RecordingReporter {

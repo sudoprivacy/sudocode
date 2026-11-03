@@ -33,7 +33,7 @@ fn run_bang_command(engine: &SessionEngine, command: &str) -> Result<String, Str
                 command,
                 &output.stdout,
                 &output.stderr,
-                output.return_code_interpretation.as_deref(),
+                output.return_code_interpretation.as_ref(),
             ),
             commands::bash_mode::history_blocks(command, &output.stdout, &output.stderr),
         ),
@@ -158,7 +158,7 @@ fn git_diff_report(cwd: &Path) -> Result<String, String> {
             .current_dir(cwd)
             .output()
             .map_err(|e| e.to_string())?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(process_text::decode_process_output(&output.stdout).text)
     };
     let cached = run(&["diff", "--cached", "--no-color"])?;
     let unstaged = run(&["diff", "--no-color"])?;
@@ -189,7 +189,7 @@ fn status_report(engine: &SessionEngine, cwd: &Path) -> Result<String, String> {
     Ok(format_status_report(
         &engine.current_model(),
         StatusUsage {
-            message_count: snapshot.messages.len(),
+            message_count: snapshot.messages().len(),
             turns: tracker.turns(),
             latest: tracker.current_turn_usage(),
             cumulative: tracker.cumulative_usage(),
@@ -216,7 +216,7 @@ fn model_report(engine: &SessionEngine, cwd: &Path, model: Option<&str>) -> Resu
             let snapshot = engine.session_snapshot();
             format_model_report(
                 &engine.current_model(),
-                snapshot.messages.len(),
+                snapshot.messages().len(),
                 engine.usage_snapshot().turns(),
                 &load_sudocode_config_for_current_dir(),
             )

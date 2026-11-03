@@ -870,8 +870,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "cache",
         aliases: &[],
-        summary: "Show prompt cache statistics",
-        argument_hint: None,
+        summary: "Show prompt cache statistics, or choose the prompt cache TTL",
+        argument_hint: Some("[ttl [1h|5m|auto] [--now]]"),
         resume_supported: true,
     },
     SlashCommandSpec {
@@ -1291,6 +1291,11 @@ pub enum SlashCommand {
     Vim,
     Upgrade,
     Stats,
+    /// `/cache ttl [1h|5m|auto] [--now]`: show or choose the prompt-cache TTL.
+    CacheTtl {
+        value: Option<String>,
+        now: bool,
+    },
     Share,
     Feedback,
     Files,
@@ -1549,7 +1554,7 @@ pub fn validate_slash_command_input(
             SlashCommand::Cost
         }
         "resume" => SlashCommand::Resume {
-            session_path: remainder.map(|s| s.to_string()),
+            session_path: remainder,
         },
         "config" => {
             if args.first().map(|s| s.to_ascii_lowercase()) == Some("set".into()) {
@@ -1620,10 +1625,21 @@ pub fn validate_slash_command_input(
             validate_no_args(command, &args)?;
             SlashCommand::Upgrade
         }
-        "stats" | "tokens" | "cache" => {
+        "stats" | "tokens" => {
             validate_no_args(command, &args)?;
             SlashCommand::Stats
         }
+        "cache" => match args.first().map(|arg| arg.to_ascii_lowercase()).as_deref() {
+            None => SlashCommand::Stats,
+            Some("ttl") => parse_cache_ttl(&args[1..])?,
+            Some(_) => {
+                return Err(command_error(
+                    "Unexpected arguments for /cache.",
+                    "cache",
+                    CACHE_USAGE,
+                ))
+            }
+        },
         "share" => {
             validate_no_args(command, &args)?;
             SlashCommand::Share
@@ -1711,6 +1727,36 @@ pub fn validate_slash_command_input(
         other => SlashCommand::Unknown(other.to_string()),
     }))
 }
+const CACHE_USAGE: &str = "/cache [ttl [1h|5m|auto] [--now]]";
+
+/// `[1h|5m|auto] [--now]` after `/cache ttl`. No value shows the current TTL.
+fn parse_cache_ttl(args: &[&str]) -> Result<SlashCommand, SlashCommandParseError> {
+    let mut value = None;
+    let mut now = false;
+    for arg in args {
+        let arg = arg.to_ascii_lowercase();
+        match arg.as_str() {
+            "--now" if !now => now = true,
+            "1h" | "5m" | "auto" if value.is_none() => value = Some(arg),
+            _ => {
+                return Err(command_error(
+                    &format!("Unexpected argument for /cache ttl: {arg}"),
+                    "cache",
+                    CACHE_USAGE,
+                ))
+            }
+        }
+    }
+    if now && value.is_none() {
+        return Err(command_error(
+            "/cache ttl --now needs a TTL to apply.",
+            "cache",
+            CACHE_USAGE,
+        ));
+    }
+    Ok(SlashCommand::CacheTtl { value, now })
+}
+
 fn validate_no_args(command: &str, args: &[&str]) -> Result<(), SlashCommandParseError> {
     if args.is_empty() {
         return Ok(());
@@ -1990,7 +2036,7 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             target: None,
         }),
         ["list", ..] => Err(usage_error("plugin list", "")),
-        ["available"] | ["marketplace"] | ["marketplace", "available"] => {
+        ["available" | "marketplace"] | ["marketplace", "available"] => {
             Ok(SlashCommand::Plugins {
                 action: Some("available".to_string()),
                 target: None,
@@ -2732,7 +2778,7 @@ pub fn handle_mcp_slash_command_json_with_plugins(
 /// into the runtime-config servers, returning the merged map plus a provenance
 /// map keyed by server name. User/global runtime servers always win on name
 /// collision (matches `cli::mcp::merged_mcp_servers`). Plugin servers also
-/// carry their plugin id so `scode mcp` can attribute them to a SudoCode
+/// carry their plugin id so `scode mcp` can attribute them to a `SudoCode`
 /// plugin in both text and JSON output.
 fn merge_plugin_mcp_servers(
     runtime_servers: &BTreeMap<String, ScopedMcpServerConfig>,
@@ -2758,12 +2804,14 @@ fn merge_plugin_mcp_servers(
                 continue;
             };
             for (server_name, server_config) in plugin_servers {
-                if !servers.contains_key(&server_name) {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    servers.entry(server_name)
+                {
                     provenance.insert(
-                        server_name.clone(),
+                        entry.key().clone(),
                         plugin.capability_summary.plugin_id.clone(),
                     );
-                    servers.insert(server_name, server_config);
+                    entry.insert(server_config);
                 }
             }
         }
@@ -3149,6 +3197,38 @@ fn render_mcp_report_for(
     }
 }
 
+fn render_mcp_list_json(
+    loader: &ConfigLoader,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Value {
+    match loader.load() {
+        Ok(runtime_config) => {
+            let (servers, provenance) =
+                merge_plugin_mcp_servers(runtime_config.mcp().servers(), plugin_load_outcome);
+            let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("status".to_string(), Value::String("ok".to_string()));
+                map.insert("config_load_error".to_string(), Value::Null);
+            }
+            value
+        }
+        Err(err) => {
+            let empty = std::collections::BTreeMap::new();
+            let (servers, provenance) = merge_plugin_mcp_servers(&empty, plugin_load_outcome);
+            let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("status".to_string(), Value::String("degraded".to_string()));
+                map.insert(
+                    "config_load_error".to_string(),
+                    Value::String(err.to_string()),
+                );
+            }
+            value
+        }
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn render_mcp_report_json_for(
     loader: &ConfigLoader,
@@ -3167,40 +3247,7 @@ fn render_mcp_report_json_for(
     }
 
     match normalize_optional_args(args) {
-        None | Some("list") => {
-            // #144: match #143's degraded envelope contract. On config parse
-            // failure, emit top-level `status: "degraded"` with
-            // `config_load_error`, empty servers[], and exit 0. On clean
-            // runs, the existing serializer adds `status: "ok"` below.
-            match loader.load() {
-                Ok(runtime_config) => {
-                    let (servers, provenance) = merge_plugin_mcp_servers(
-                        runtime_config.mcp().servers(),
-                        plugin_load_outcome,
-                    );
-                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
-                    if let Some(map) = value.as_object_mut() {
-                        map.insert("status".to_string(), Value::String("ok".to_string()));
-                        map.insert("config_load_error".to_string(), Value::Null);
-                    }
-                    Ok(value)
-                }
-                Err(err) => {
-                    let empty = std::collections::BTreeMap::new();
-                    let (servers, provenance) =
-                        merge_plugin_mcp_servers(&empty, plugin_load_outcome);
-                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
-                    if let Some(map) = value.as_object_mut() {
-                        map.insert("status".to_string(), Value::String("degraded".to_string()));
-                        map.insert(
-                            "config_load_error".to_string(),
-                            Value::String(err.to_string()),
-                        );
-                    }
-                    Ok(value)
-                }
-            }
-        }
+        None | Some("list") => Ok(render_mcp_list_json(loader, cwd, plugin_load_outcome)),
         Some(args) if is_help_arg(args) => Ok(render_mcp_usage_json(None)),
         Some("show") => Ok(render_mcp_usage_json(Some("show"))),
         Some(args) if args.split_whitespace().next() == Some("show") => {
@@ -5026,6 +5073,7 @@ pub fn handle_slash_command(
         | SlashCommand::Vim
         | SlashCommand::Upgrade
         | SlashCommand::Stats
+        | SlashCommand::CacheTtl { .. }
         | SlashCommand::Share
         | SlashCommand::Feedback
         | SlashCommand::Files
@@ -5757,7 +5805,7 @@ mod tests {
     #[test]
     fn unbound_compact_preserves_history() {
         let mut session = Session::new();
-        session.messages = vec![
+        session = session.with_messages(vec![
             ConversationMessage::user_text("a ".repeat(200)),
             ConversationMessage::assistant(vec![ContentBlock::Text {
                 text: "b ".repeat(200),
@@ -5766,7 +5814,7 @@ mod tests {
             ConversationMessage::assistant(vec![ContentBlock::Text {
                 text: "recent".to_string(),
             }]),
-        ];
+        ]);
 
         let result = handle_slash_command(
             "/compact",
@@ -5779,7 +5827,7 @@ mod tests {
         .expect("slash command should be handled");
 
         assert!(result.message.contains("history preserved"));
-        assert_eq!(result.session.messages, session.messages);
+        assert_eq!(result.session.messages(), session.messages());
     }
 
     #[test]
@@ -6559,7 +6607,10 @@ mod tests {
             "config_load_error should name the malformed field path: {err}"
         );
         assert_eq!(list["configured_servers"], 0);
-        assert!(list["servers"].as_array().unwrap().is_empty());
+        assert_eq!(
+            list["servers"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
 
         // show action: should also degrade (not hard-fail).
         let show = render_mcp_report_json_for(&loader, &workspace, Some("show everything"), None)

@@ -87,41 +87,83 @@ fn assert_ordered_response(screen: &str) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn captured_diagnostics_preserve_utf8_across_pipe_reads() {
-    let env = TestEnv::new_mock("render-stderr-framing");
-    let mut sess = start(
-        &env,
-        "queue",
-        &["--permission-mode", "read-only"],
-        (140, 120),
-    );
-    // The rejected key produces one diagnostic longer than the capture pipe's
-    // read buffer, with a multibyte character spanning that read boundary.
-    let key = format!("x{}DIAGNOSTIC-END", "界".repeat(1500));
-    sess.send(&format!("\x1b[200~/config set {key} value\x1b[201~"))
-        .expect("paste invalid config command");
-    common::expect_screen(
-        &sess,
-        |s| s.contains("Pasted") || s.contains("/config set"),
-        common::DEFAULT_TIMEOUT,
-        "config input",
-    );
-    sess.send("\r").expect("submit config command");
-    let screen = common::expect_screen_settled(
-        &sess,
-        |s| s.contains("Error: Unknown setting:") && s.contains("DIAGNOSTIC-END"),
-        common::DEFAULT_TIMEOUT,
-        "captured diagnostic",
-    );
-    assert!(
-        common::screen_contains(&screen, &format!("Unknown setting: \"{key}\"")),
-        "diagnostic was split or decoded before its bytes were complete: {screen}"
-    );
-    assert!(!screen.contains('�'), "corrupted UTF-8: {screen}");
-    assert_eq!(env.captured_message_count(), 0);
-    finish(&mut sess);
+    const CHILD: &str = "SCODE_DIAGNOSTIC_CLIPBOARD_CHILD";
+    const COMPLETED: &str = "CLIPBOARD_DIAGNOSTIC_COMPLETED";
+    if std::env::var_os(CHILD).is_none() {
+        // Exercise inherited clipboard state without changing the user's
+        // clipboard or this parallel test runner's process environment.
+        let files = tempfile::tempdir().unwrap();
+        let registry = runtime::ImageRegistry::new(
+            files.path().to_path_buf(),
+            std::sync::Arc::new(runtime::fs_backend::StdFsBackend),
+        )
+        .unwrap();
+        let image = registry.register_rgba(1, 1, &[0, 0, 0, 255]).unwrap();
+        // libtest supplies the qualified name for standalone and grouped targets.
+        let test = std::thread::current().name().unwrap().to_owned();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(90),
+                    tokio::process::Command::new(std::env::current_exe().unwrap())
+                        .args(["--exact", &test, "--nocapture"])
+                        .env(CHILD, "1")
+                        .env("SUDOCODE_CLIPBOARD_IMAGE", &image.path)
+                        .kill_on_drop(true)
+                        .output(),
+                )
+                .await
+            })
+            .expect("clipboard fixture child must exit")
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains(COMPLETED),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("render-stderr-framing");
+        let mut sess = start(&env, mode, &["--permission-mode", "read-only"], (140, 120));
+        // The rejected key produces one diagnostic longer than the capture pipe's
+        // read buffer, with a multibyte character spanning that read boundary.
+        let key = format!("x{}DIAGNOSTIC-END", "界".repeat(1500));
+        sess.send(&format!("\x1b[200~/config set {key} value\x1b[201~"))
+            .expect("paste invalid config command");
+        common::expect_screen(
+            &sess,
+            |s| s.contains("Pasted") || s.contains("/config set"),
+            common::DEFAULT_TIMEOUT,
+            "config input",
+        );
+        sess.send("\r").expect("submit config command");
+        let screen = common::expect_screen_settled(
+            &sess,
+            |s| s.contains("Error: Unknown setting:") && s.contains("DIAGNOSTIC-END"),
+            common::DEFAULT_TIMEOUT,
+            "captured diagnostic",
+        );
+        assert!(
+            common::screen_contains(&screen, &format!("Unknown setting: \"{key}\"")),
+            "diagnostic was split or decoded before its bytes were complete: {screen}"
+        );
+        assert!(!screen.contains('�'), "corrupted UTF-8: {screen}");
+        common::expect_input_line_cleared(
+            &sess,
+            common::DEFAULT_TIMEOUT,
+            "input after captured diagnostic",
+        );
+        assert_eq!(env.captured_message_count(), 0);
+        finish(&mut sess);
+    }
+    println!("{COMPLETED}");
 }
 
 #[cfg(unix)]
@@ -181,7 +223,7 @@ fn bash_progress_is_live_then_clears_without_entering_history() {
                     && line.contains("s)")
             })
         },
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         "live tool progress",
     );
     std::fs::write(env.workspace_root().join("release-progress"), "release").expect("release tool");
@@ -334,30 +376,7 @@ fn asynchronous_tool_result_does_not_close_a_streaming_code_fence() {
             "{screen}"
         );
     }
-    let colors = sess.render(|screen| {
-        let raw = screen.raw();
-        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
-        [
-            "let FENCE_FIRST = \"START\";",
-            "let FENCE_SECOND = \"END\";",
-        ]
-        .iter()
-        .map(|content| {
-            let row = rows.iter().rposition(|row| row.trim() == *content).unwrap();
-            let column = rows[row].find('"').unwrap() + 1;
-            let column = rows[row][..column].chars().count();
-            format!(
-                "{:?}",
-                raw.cell(row as u16, column as u16).unwrap().fgcolor()
-            )
-        })
-        .collect::<Vec<_>>()
-    });
-    assert_ne!(colors[0], "Default", "code must be highlighted");
-    assert_eq!(
-        colors[0], colors[1],
-        "code fence lost its parser context: {screen}"
-    );
+    assert_interleaved_code_colors(&sess, &screen);
     finish(&mut sess);
 }
 
@@ -381,4 +400,37 @@ impl Drop for ReleaseFiles {
             Duration::from_millis(50),
         );
     }
+}
+
+#[cfg(unix)]
+fn assert_interleaved_code_colors(sess: &pty_expect::PtySession, screen: &str) {
+    let colors = sess.render(|screen| {
+        let raw = screen.raw();
+        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+        [
+            "let FENCE_FIRST = \"START\";",
+            "let FENCE_SECOND = \"END\";",
+        ]
+        .iter()
+        .map(|content| {
+            let row = rows.iter().rposition(|row| row.trim() == *content).unwrap();
+            let column = rows[row].find('"').unwrap() + 1;
+            let column = rows[row][..column].chars().count();
+            format!(
+                "{:?}",
+                raw.cell(
+                    u16::try_from(row).expect("terminal row fits u16"),
+                    u16::try_from(column).expect("terminal column fits u16")
+                )
+                .unwrap()
+                .fgcolor()
+            )
+        })
+        .collect::<Vec<_>>()
+    });
+    assert_ne!(colors[0], "Default", "code must be highlighted");
+    assert_eq!(
+        colors[0], colors[1],
+        "code fence lost its parser context: {screen}"
+    );
 }

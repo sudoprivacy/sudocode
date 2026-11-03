@@ -42,6 +42,7 @@ pub(crate) fn select_session(
     Some(show_slash_selection(
         ui,
         QuestionPromptView {
+            presentation: runtime::QuestionPresentation::Question,
             title: Some("Sessions".into()),
             description: Some("Type to filter; Enter to switch; Esc to cancel".into()),
             index: 0,
@@ -106,6 +107,7 @@ pub(crate) fn confirm_delete(
     Some(show_slash_selection(
         ui,
         QuestionPromptView {
+            presentation: runtime::QuestionPresentation::Question,
             title: Some("Delete session".into()),
             description: Some("This cannot be undone.".into()),
             index: 0,

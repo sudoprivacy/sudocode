@@ -10,6 +10,8 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
+codex-mermaid.workspace = true
+process-text = { path = "../process-text" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
 base64 = "0.22"
@@ -25,10 +27,11 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "a43bc2a9dfc30e636bdadc9582da9e39f91f5018" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "5be9d43867dc7c1cf0da89330e6aa04a3cb94e77" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
-rustyline = "15"
+# v19 fixes buffered-input stalls when the external printer is enabled (#977).
+rustyline = "=19.0.0"
 runtime = { path = "../runtime" }
 # ACP renderer (server + stdio/ws transports) moved out of `runtime`.
 engine-acp = { path = "../engine-acp" }
@@ -44,9 +47,12 @@ service-host = { path = "../service-host" }
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
+tempfile = "3"
 syntect = "5"
 # Match the grammar/theme bundle in the Codex reference revision.
 two-face = { version = "=0.5.1", default-features = false, features = ["syntect-onig"] }
+# Codex's Unicode word breaking; the table path explicitly selects FirstFit.
+textwrap = { version = "=0.16.2", default-features = false, features = ["unicode-linebreak", "unicode-width"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "time"] }
 tools = { path = "../tools" }
 unicode-width = "0.2"
@@ -63,17 +69,59 @@ mock-anthropic-service = { path = "../mock-anthropic-service" }
 pty-expect.workspace = true
 rcgen = "0.14"
 serde_json.workspace = true
+socket2 = "0.6"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-tungstenite = "0.29"
 
 [target.'cfg(windows)'.dependencies]
+# Safe process stderr capture for the inline renderer (already in Cargo.lock).
+filedescriptor = "=0.8.3"
 # The one crate allowed to contain `unsafe` — see its docs for why the
 # workspace's `unsafe_code = "forbid"` is kept absolute everywhere else.
 stdin-peek = { path = "../stdin-peek" }
 self-replace = "1.5"
-tempfile = "3"
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["term", "poll", "signal", "fs"] }
+
+[[test]]
+name = "acceptance_cli_01"
+path = "tests/acceptance_groups/acceptance_cli_01.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_02"
+path = "tests/acceptance_groups/acceptance_cli_02.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_03"
+path = "tests/acceptance_groups/acceptance_cli_03.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_04"
+path = "tests/acceptance_groups/acceptance_cli_04.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_05"
+path = "tests/acceptance_groups/acceptance_cli_05.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_06"
+path = "tests/acceptance_groups/acceptance_cli_06.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_07"
+path = "tests/acceptance_groups/acceptance_cli_07.rs"
+test = false
+
+[[test]]
+name = "acceptance_cli_08"
+path = "tests/acceptance_groups/acceptance_cli_08.rs"
+test = false

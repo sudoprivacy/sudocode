@@ -31,6 +31,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   build-linux-x64:
@@ -61,6 +63,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
 
       - name: Build static musl release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode --target x86_64-unknown-linux-musl
@@ -89,6 +94,7 @@ jobs:
           mkdir -p "dist/scode-linux-x64"
           cp "target/x86_64-unknown-linux-musl/release/scode" "dist/scode-linux-x64/scode"
           cp "../README.md" "dist/scode-linux-x64/README.md"
+          cp "../THIRD_PARTY_NOTICES.txt" "dist/scode-linux-x64/THIRD_PARTY_NOTICES.txt"
           chmod +x "dist/scode-linux-x64/scode"
 
       - name: Archive release payload (tar.gz)
@@ -163,6 +169,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
 
       - name: Build release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
@@ -174,6 +183,7 @@ jobs:
           mkdir -p "dist/${{ matrix.package_dir }}"
           cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
           cp "../README.md" "dist/${{ matrix.package_dir }}/README.md"
+          cp "../THIRD_PARTY_NOTICES.txt" "dist/${{ matrix.package_dir }}/THIRD_PARTY_NOTICES.txt"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
           fi

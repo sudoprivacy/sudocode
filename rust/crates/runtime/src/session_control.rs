@@ -29,7 +29,7 @@ pub struct SessionStore {
     fs: Arc<dyn FsBackend>,
     /// The owning agent's name, when known (co-hosted / managed agents). When
     /// set, creating a session also plants the `/agents/{name}/sessions/<sid>`
-    /// DT_LINK enum-index via [`FsBackend::link`]. `None` for standalone
+    /// `DT_LINK` enum-index via [`FsBackend::link`]. `None` for standalone
     /// (single implicit profile, no agent namespace). Left unset, the link
     /// step is skipped.
     agent_name: Option<String>,
@@ -56,8 +56,7 @@ impl SessionStore {
         // fails (e.g. the directory doesn't exist yet).
         let canonical_cwd = fs
             .canonicalize(&cwd.to_string_lossy())
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| cwd.to_path_buf());
+            .map_or_else(|_| cwd.to_path_buf(), PathBuf::from);
         // The session root swaps WITH the backend: nexus imposes a flat
         // `/sessions/` namespace (no workspace_hash); host backends use the
         // workspace-fingerprinted local partition. Asking the backend (rather
@@ -65,12 +64,10 @@ impl SessionStore {
         // not a code change to remember here.
         let sessions_root = match fs.managed_root(crate::fs_backend::ManagedRoot::Sessions) {
             Some(root) => PathBuf::from(root),
-            None => canonical_cwd
-                .join(".scode")
-                .join("sessions")
-                .join(workspace_fingerprint(&canonical_cwd)),
+            None => default_sessions_root(&canonical_cwd),
         };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
+        crate::session_cleanup::discover(Arc::clone(&fs), &sessions_root);
         Ok(Self {
             sessions_root,
             workspace_root: canonical_cwd,
@@ -102,8 +99,7 @@ impl SessionStore {
         // across equivalent path representations.
         let canonical_workspace = fs
             .canonicalize(&workspace_root.to_string_lossy())
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| workspace_root.to_path_buf());
+            .map_or_else(|_| workspace_root.to_path_buf(), PathBuf::from);
         // Backend-imposed session namespace (nexus /sessions/) wins; else the
         // data-dir's workspace-fingerprinted partition.
         let sessions_root = match fs.managed_root(crate::fs_backend::ManagedRoot::Sessions) {
@@ -114,6 +110,7 @@ impl SessionStore {
                 .join(workspace_fingerprint(&canonical_workspace)),
         };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
+        crate::session_cleanup::discover(Arc::clone(&fs), &sessions_root);
         Ok(Self {
             sessions_root,
             workspace_root: canonical_workspace,
@@ -124,7 +121,7 @@ impl SessionStore {
     }
 
     /// Bind this store to an owning agent name. New sessions then plant the
-    /// `/agents/{name}/sessions/<sid>` DT_LINK enum-index (via
+    /// `/agents/{name}/sessions/<sid>` `DT_LINK` enum-index (via
     /// [`FsBackend::link`]) so a nexus-backed co-host gets cross-agent
     /// enumeration automatically — no separate wiring to remember when the
     /// backend is swapped. No-op effect on host backends (`link` is a no-op).
@@ -274,9 +271,31 @@ impl SessionStore {
     }
 
     pub fn latest_session(&self) -> Result<ManagedSessionSummary, SessionControlError> {
-        self.list_sessions()?.into_iter().next().ok_or_else(|| {
-            SessionControlError::Format(format_no_managed_sessions(&self.sessions_root))
-        })
+        let mut sessions = self.list_sessions()?;
+        let Some(candidate) = sessions.first() else {
+            return Err(SessionControlError::Format(format_no_managed_sessions(
+                &self.sessions_root,
+            )));
+        };
+        // An unreadable transcript lists as an empty session, so it sorts last.
+        // If it is newer than the session `latest` would pick, the user's most
+        // recent work is probably in it (written by a newer scode, or damaged):
+        // resuming another session would silently drop that context.
+        let newest_unreadable = sessions
+            .iter()
+            .filter(|session| session.load_error.is_some())
+            .max_by_key(|session| session.modified_epoch_millis);
+        if let Some(unreadable) = newest_unreadable {
+            if candidate.load_error.is_some()
+                || unreadable.modified_epoch_millis > candidate.modified_epoch_millis
+            {
+                return Err(SessionControlError::Format(format_unreadable_latest(
+                    &unreadable.path,
+                    unreadable.load_error.as_deref().unwrap_or_default(),
+                )));
+            }
+        }
+        Ok(sessions.swap_remove(0))
     }
 
     pub fn load_session(
@@ -285,7 +304,8 @@ impl SessionStore {
     ) -> Result<LoadedManagedSession, SessionControlError> {
         let handle = self.resolve_reference(reference)?;
         let session = Session::load_from_path_with(&*self.fs, &handle.path)?
-            .with_fs_backend(Arc::clone(&self.fs));
+            .with_fs_backend(Arc::clone(&self.fs))
+            .with_session_store_root(&self.sessions_root);
         self.validate_loaded_session(&handle.path, &session)?;
         Ok(LoadedManagedSession {
             handle: SessionHandle {
@@ -294,6 +314,34 @@ impl SessionStore {
             },
             session,
         })
+    }
+
+    /// Delete the resolved Session through its own backend. The runtime keeps
+    /// the durable tombstone and resumes any cleanup waiting for live clients.
+    pub fn delete_session(&self, path: &Path) -> Result<(), SessionControlError> {
+        let (session_id, cwd) =
+            crate::subagent_completion::CompletionJournal::storage_identity(self.fs.as_ref(), path)
+                .map_err(SessionControlError::Format)?;
+        let binding = crate::subagent_completion::CompletionJournal::probe(
+            self.fs.as_ref(),
+            path,
+            &session_id,
+            &cwd,
+        )
+        .map_err(SessionControlError::Format)?;
+        crate::subagent_completion::CompletionJournal::purge_stored(
+            Arc::clone(&self.fs),
+            path,
+            &session_id,
+            &cwd,
+            binding["storageRef"].as_str().ok_or_else(|| {
+                SessionControlError::Format("missing completion storage identity".into())
+            })?,
+            "native-session-delete",
+            Some(&self.sessions_root),
+        )
+        .map_err(SessionControlError::Format)?;
+        Ok(())
     }
 
     pub fn fork_session(
@@ -312,8 +360,9 @@ impl SessionStore {
             .and_then(|fork| fork.branch_name.clone());
         let forked = forked
             .with_persistence_path(handle.path.clone())
-            .with_fs_backend(Arc::clone(&self.fs));
-        forked.save_to_path(&handle.path)?;
+            .with_fs_backend(Arc::clone(&self.fs))
+            .with_session_store_root(&self.sessions_root);
+        forked.save_fork_to_path(session, &handle.path)?;
         Ok(ForkedManagedSession {
             parent_session_id,
             handle,
@@ -328,11 +377,17 @@ impl SessionStore {
         session: &Session,
     ) -> Result<(), SessionControlError> {
         if let Some(expected) = &self.identity {
-            return if session.identity.as_ref() == Some(expected) {
+            let is_bound = session.identity.as_ref().is_some_and(|actual| {
+                actual.matches_storage_binding(expected)
+                    && (actual.agent_name == expected.agent_name
+                        || self.has_session_link(&expected.agent_name, session_path, session))
+            });
+            return if is_bound {
                 Ok(())
             } else {
                 Err(SessionControlError::Format(
-                    "session ownership or repository bindings do not match (legacy sessions without identity cannot be restored by this host)".into(),
+                    "session ownership, repository bindings or Agent association do not match"
+                        .into(),
                 ))
             };
         }
@@ -350,6 +405,19 @@ impl SessionStore {
         Err(SessionControlError::WorkspaceMismatch {
             expected: self.workspace_root.clone(),
             actual: actual.to_path_buf(),
+        })
+    }
+
+    fn has_session_link(&self, agent_name: &str, transcript: &Path, session: &Session) -> bool {
+        let alias = format!("/agents/{agent_name}/sessions/{}", session.session_id);
+        let target = if transcript.file_name() == Some(std::ffi::OsStr::new(TRANSCRIPT_FILE)) {
+            transcript.parent().unwrap_or(transcript)
+        } else {
+            transcript
+        };
+        self.fs.read_link(&alias).is_ok_and(|linked| {
+            canonicalize_for_compare(Path::new(&linked), self.fs.as_ref())
+                == canonicalize_for_compare(target, self.fs.as_ref())
         })
     }
 
@@ -384,6 +452,17 @@ impl SessionStore {
             } else {
                 continue;
             };
+            // An unreadable binding belongs to this entry's existing load-error
+            // path, so one damaged Session cannot prevent listing healthy ones.
+            if matches!(
+                crate::subagent_completion::deleted_storage(self.fs.as_ref(), &path),
+                Ok(true)
+            ) {
+                if let Err(error) = crate::session_cleanup::resume(Arc::clone(&self.fs), &path) {
+                    tracing::warn!(%error, "Deleted Session remains queued for cleanup");
+                }
+                continue;
+            }
             let modified_epoch_millis = self
                 .fs
                 .stat(&path.to_string_lossy())
@@ -418,14 +497,11 @@ impl SessionStore {
                             .as_ref()
                             .and_then(|fork| fork.branch_name.clone()),
                         interactive: session.mode == SessionMode::Interactive,
+                        load_error: None,
                     }
                 }
-                Err(_) => ManagedSessionSummary {
-                    id: path
-                        .file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
+                Err(error) => ManagedSessionSummary {
+                    id: session_id_from_path(&path).unwrap_or_else(|| "unknown".into()),
                     path,
                     updated_at_ms: 0,
                     modified_epoch_millis,
@@ -434,6 +510,7 @@ impl SessionStore {
                     parent_session_id: None,
                     branch_name: None,
                     interactive: false,
+                    load_error: Some(error.to_string()),
                 },
             };
             sessions.push(summary);
@@ -463,6 +540,13 @@ pub const LATEST_SESSION_REFERENCE: &str = "latest";
 
 /// Fixed transcript member name inside a per-session directory.
 pub const TRANSCRIPT_FILE: &str = "transcript.jsonl";
+
+pub(crate) fn default_sessions_root(workspace: &Path) -> PathBuf {
+    workspace
+        .join(".scode")
+        .join("sessions")
+        .join(workspace_fingerprint(workspace))
+}
 
 /// Join the LEGACY flat on-disk name `<sessions_root>/<session_id>.<ext>`.
 /// Retained only for backward-compatible reads of sessions created before the
@@ -507,6 +591,8 @@ pub struct ManagedSessionSummary {
     pub parent_session_id: Option<String>,
     pub branch_name: Option<String>,
     interactive: bool,
+    /// Why the transcript could not be read, when it could not.
+    load_error: Option<String>,
 }
 
 fn sort_managed_sessions(sessions: &mut [ManagedSessionSummary]) {
@@ -545,7 +631,7 @@ fn session_summary(session: &Session) -> Option<String> {
                 _ => None,
             })
         })
-        .map(|text| text.to_string())
+        .cloned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +737,9 @@ pub fn resolve_managed_session_path_for(
 
 #[must_use]
 pub fn is_managed_session_file(path: &Path) -> bool {
+    if crate::subagent_completion::is_completion_binding_file(path) {
+        return false;
+    }
     // Rotation snapshots (`<id>.rot-<ts>.jsonl`) share the .jsonl extension but
     // are NOT resumable sessions: each carries the same internal session_id as
     // its parent, so listing them yields duplicate entries for one session.
@@ -756,6 +845,13 @@ fn format_missing_session_reference(reference: &str, sessions_root: &Path) -> St
     )
 }
 
+fn format_unreadable_latest(path: &Path, error: &str) -> String {
+    format!(
+        "the most recent session {} could not be read: {error}\nIt may have been written by a newer scode. Update scode, or resume another session explicitly with `--resume <session id or path>` (`--resume list` shows them).",
+        path.display()
+    )
+}
+
 fn format_no_managed_sessions(sessions_root: &Path) -> String {
     // #80: show the actual workspace-fingerprint directory instead of a generic path
     let fingerprint_dir = sessions_root
@@ -781,8 +877,7 @@ fn workspace_roots_match(left: &Path, right: &Path, fs: &dyn FsBackend) -> bool 
 
 fn canonicalize_for_compare(path: &Path, fs: &dyn FsBackend) -> PathBuf {
     fs.canonicalize(&path.to_string_lossy())
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| path.to_path_buf())
+        .map_or_else(|_| path.to_path_buf(), PathBuf::from)
 }
 
 fn path_is_within_workspace(path: &Path, workspace_root: &Path, fs: &dyn FsBackend) -> bool {
@@ -878,7 +973,7 @@ mod tests {
         let real = persist_session(&root, "real work");
         // An empty (0-message) shell created *afterwards* — newer updated_at —
         // must still sink below the real session so "latest" is never empty.
-        let empty = Session::new().with_workspace_root(root.to_path_buf());
+        let empty = Session::new().with_workspace_root(root.clone());
         let handle = create_managed_session_handle_for(&root, &empty.session_id)
             .expect("handle should build");
         let empty = empty.with_persistence_path(handle.path.clone());
@@ -957,6 +1052,7 @@ mod tests {
                 parent_session_id: None,
                 branch_name: None,
                 interactive: true,
+                load_error: None,
             },
             ManagedSessionSummary {
                 id: "newer-file-older-session".to_string(),
@@ -968,6 +1064,7 @@ mod tests {
                 parent_session_id: None,
                 branch_name: None,
                 interactive: true,
+                load_error: None,
             },
         ];
 

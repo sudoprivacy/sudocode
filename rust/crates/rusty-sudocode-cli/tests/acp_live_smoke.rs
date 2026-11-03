@@ -3,7 +3,7 @@
 //! These tests are gated on the `PROXY_AUTH_TOKEN` environment variable (a
 //! sudorouter API key; `PROXY_BASE_URL` selects the endpoint). When the token
 //! is absent or empty the tests silently pass (return early). On CI they run
-//! only on main merges / workflow_dispatch where the GitHub secret is available.
+//! only on main merges / `workflow_dispatch` where the GitHub secret is available.
 //! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
 //! defaults to `sonnet` for compatibility with existing live runs.
 //!
@@ -33,7 +33,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-const RECV_TIMEOUT: Duration = Duration::from_secs(120);
+const RECV_TIMEOUT: Duration = Duration::from_mins(2);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fail with the real cause when the provider answered with a credential rejection
@@ -58,14 +58,13 @@ fn fail_clearly_if_the_credential_was_rejected(text: &str) {
         "unauthorized",
     ];
     let lowered = text.to_lowercase();
-    if MARKERS.iter().any(|m| lowered.contains(m)) {
-        panic!(
-            "the provider rejected this run's credential — it answered with an \
-             authentication failure instead of a model reply, so this is NOT a \
-             model-behaviour failure. Rotate the live API credential this job uses. \
-             The provider said: {text:?}"
-        );
-    }
+    assert!(
+        !MARKERS.iter().any(|m| lowered.contains(m)),
+        "the provider rejected this run's credential — it answered with an \
+         authentication failure instead of a model reply, so this is NOT a \
+         model-behaviour failure. Rotate the live API credential this job uses. \
+         The provider said: {text:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +275,7 @@ fn base_command_with_mode(
     token: &str,
     permission_mode: &str,
 ) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    let mut cmd = Command::new(common::scode_bin());
     cmd.current_dir(&workspace.root)
         .env_clear()
         .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
@@ -537,29 +536,13 @@ async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
 }
 
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
-    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+    let prompt = subagent_calculation_prompt();
     let (notifs, resp) = client
         .send_request(
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{ "type": "text", "text": concat!(
-                    "CRITICAL INSTRUCTION — you MUST use the Agent tool exactly 3 times.\n",
-                    "Do NOT answer the questions yourself. Do NOT skip the Agent tool.\n",
-                    "The entire purpose of this request is to test the Agent tool.\n\n",
-                    "For each calculation below, call Agent with:\n",
-                    "  model: <LIVE_MODEL>\n",
-                    "  description: \"calc <N>\"\n",
-                    "  prompt: \"What is <expr>? Reply with ONLY the number.\"\n\n",
-                    "Omit auth_mode entirely: all child agents must inherit this session's current credential path.\n",
-                    "No switch to subscription or api-key authentication is requested.\n\n",
-                    "Calculations:\n",
-                    "1. 101 + 102\n",
-                    "2. 201 + 202\n",
-                    "3. 301 + 302\n\n",
-                    "After all 3 agents return, output exactly this JSON and nothing else:\n",
-                    "{\"results\": [<agent1_answer>, <agent2_answer>, <agent3_answer>]}"
-                ).replace("<LIVE_MODEL>", &model)}]
+                "prompt": [{ "type": "text", "text": prompt }]
             }),
         )
         .await;
@@ -616,32 +599,13 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         })
         .collect();
 
-    // Log all notifications for diagnostics on CI failures.
-    eprintln!(
-        "subagent test: {} notifications, {} Agent starts, {} completed updates, {} failed updates, results: {:?}",
-        notifs.len(),
-        agent_starts.len(),
-        completed_updates.len(),
-        failed_updates.len(),
-        spawn_manifests,
+    report_subagent_notifications(
+        &notifs,
+        &agent_starts,
+        &completed_updates,
+        &failed_updates,
+        &spawn_manifests,
     );
-    for (i, n) in notifs.iter().enumerate() {
-        let update = &n["params"]["update"];
-        let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
-        eprintln!(
-            "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
-            update["title"], update["status"]
-        );
-    }
-    for (i, u) in completed_updates.iter().enumerate() {
-        eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
-    }
-    for (i, u) in failed_updates.iter().enumerate() {
-        eprintln!(
-            "  failed[{i}]: rawOutput={}",
-            u["params"]["update"]["rawOutput"]
-        );
-    }
 
     // Collect the model's text output for fallback verification.
     let text_output: String = notifs
@@ -710,18 +674,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
     // some other way" and for "the turn failed and told us why" alike. The first
     // time this assertion ever ran it reported `left: Null`, which narrowed
     // nothing.
-    let result = &resp["result"];
-    assert_eq!(
-        result["stopReason"],
-        "end_turn",
-        "subagent prompt stopReason should be end_turn; full response: {}",
-        serde_json::to_string(&resp).unwrap_or_default()
-    );
-    assert!(
-        result.get("usage").is_some(),
-        "subagent prompt response should include usage; full response: {}",
-        serde_json::to_string(&resp).unwrap_or_default()
-    );
+    assert_subagent_turn_response(&resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -768,8 +721,7 @@ fn verify_session_model_in_jsonl(workspace: &TestWorkspace) {
         assert!(
             model.is_some_and(|m| !m.is_empty()),
             "assistant message in session JSONL should have a non-empty model field, \
-             but got: {:?}",
-            model
+             but got: {model:?}"
         );
         eprintln!(
             "session JSONL: assistant message model = {:?}",
@@ -792,7 +744,11 @@ async fn run_subagent_scenarios(client: &mut AcpTestClient, workspace: &TestWork
         .expect("subagent test must persist its transcript")
         .session;
     let mut spawns = 0;
-    for block in session.messages.iter().flat_map(|message| &message.blocks) {
+    for block in session
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+    {
         if let runtime::ContentBlock::ToolUse { name, input, .. } = block {
             if matches!(name.as_str(), "Agent" | "agent_spawn") {
                 let args: Value = serde_json::from_str(input).expect("agent tool arguments");
@@ -824,6 +780,113 @@ async fn live_anthropic_smoke_stdio() {
 
     let mut client = spawn_stdio_client(&workspace, &token);
     run_live_scenarios(&mut client, &workspace).await;
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// A real model must read the summary, send it back, and preserve its record.
+#[tokio::test]
+async fn live_peer_summary_reaches_model_client_and_saved_session() {
+    const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
+    const PEER: &str = "acp-summary-peer";
+    // Keep the sentinel only in envelope metadata, while naming exactly which
+    // received field belongs in the tool argument rather than asking for prose.
+    const BODY: &str = concat!(
+        "Read the summary attribute in this message's opening XML tag. ",
+        "Use send to reply to this message's sender. Set the message argument ",
+        "to exactly that attribute's value, without quotes, instructions, ",
+        "extra whitespace, or any other text. Then say ACP-SUMMARY-COMPLETE. ",
+        "Do not write files or run shell commands."
+    );
+    let Some(token) = proxy_token() else {
+        return;
+    };
+    let workspace = TestWorkspace::new("live-peer-summary");
+    workspace.create();
+    workspace.write_sudocode_json();
+    let mut client = spawn_stdio_client_with_mode(&workspace, &token, "danger-full-access");
+    scenario_initialize(&mut client).await;
+    let (_, created) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(), "mcpServers": []
+            }),
+        )
+        .await;
+    let session_id = created["result"]["sessionId"]
+        .as_str()
+        .expect("session created");
+    let agent = created["result"]["_meta"]["sudocode"]["peer"]["agent"]
+        .as_str()
+        .expect("session exposes its peer identity");
+    let peer = runtime::mailbox::Mailbox::workspace_local(
+        &runtime::mailbox::local_pair_root_in(&workspace.config_home),
+        PEER.into(),
+    );
+    peer.ensure_presence().unwrap();
+    peer.send(runtime::agent_mailbox::MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: PEER.into(),
+        to: agent.into(),
+        body: BODY.into(),
+        summary: Some(SUMMARY.into()),
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    })
+    .unwrap();
+    timeout(RECV_TIMEOUT, async {
+        let mut saw_summary = false;
+        let mut answer = String::new();
+        loop {
+            let message = client.recv().await;
+            if message["params"]["sessionId"] != session_id {
+                continue;
+            }
+            let update = &message["params"]["update"];
+            if update["sessionUpdate"] == "user_message_chunk" {
+                assert_eq!(
+                    message["params"]["_meta"]["sudocode"]["a2a"]["summary"],
+                    SUMMARY
+                );
+                assert!(update["content"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("summary=\"{SUMMARY}\"")));
+                saw_summary = true;
+            }
+            if update["sessionUpdate"] == "agent_message_chunk" {
+                answer.push_str(update["content"]["text"].as_str().unwrap_or_default());
+            }
+            if saw_summary && answer.contains("ACP-SUMMARY-COMPLETE") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("live peer summary turn completes");
+    let conversations = peer.list_conversations().unwrap();
+    assert_eq!(conversations.len(), 1);
+    let (replies, _) = peer.poll_conversation(&conversations[0], 0, 0).unwrap();
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply.body == SUMMARY && reply.from == agent && reply.to == PEER),
+        "the model must read the summary and actually send it: {replies:?}"
+    );
+    let saved = runtime::SessionStore::from_cwd(&workspace.root)
+        .unwrap()
+        .load_session("latest")
+        .unwrap()
+        .session;
+    assert!(saved
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .any(|block| matches!(block, runtime::ContentBlock::Text { text }
+            if text.contains(&format!("summary=\"{SUMMARY}\"")))));
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -993,4 +1056,84 @@ fn find_jsonl_file(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn subagent_calculation_prompt() -> String {
+    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+    let tasks: Vec<_> = ["101 + 102", "201 + 202", "301 + 302"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            json!({
+                "model": model,
+                "description": format!("calc {}", index + 1),
+                "prompt": format!("What is {expression}? Reply with ONLY the number."),
+            })
+        })
+        .collect();
+    format!(
+        "Use the Agent tool exactly three times, once for each complete argument object below.\n\
+         Do not answer the calculations yourself or reuse a different task's prompt.\n\
+         Omit auth_mode: every child must inherit this session's current credential path.\n\
+         No switch to subscription or api-key authentication is requested.\n\n{}\n\n\
+         After all three agents return, output only JSON with a results array in task order.",
+        serde_json::to_string_pretty(&tasks).unwrap()
+    )
+}
+
+fn report_subagent_notifications(
+    notifs: &[Value],
+    agent_starts: &[&Value],
+    completed_updates: &[&Value],
+    failed_updates: &[&Value],
+    spawn_manifests: &[String],
+) {
+    // Log all notifications for diagnostics on CI failures.
+    eprintln!(
+        "subagent test: {} notifications, {} Agent starts, {} completed updates, {} failed updates, results: {:?}",
+        notifs.len(),
+        agent_starts.len(),
+        completed_updates.len(),
+        failed_updates.len(),
+        spawn_manifests,
+    );
+    for (i, n) in notifs.iter().enumerate() {
+        let update = &n["params"]["update"];
+        let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
+        eprintln!(
+            "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
+            update["title"], update["status"]
+        );
+    }
+    for start in agent_starts {
+        let update = &start["params"]["update"];
+        eprintln!(
+            "  delegated[{}]: {}",
+            update["toolCallId"], update["rawInput"]
+        );
+    }
+    for (i, u) in completed_updates.iter().enumerate() {
+        eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
+    }
+    for (i, u) in failed_updates.iter().enumerate() {
+        eprintln!(
+            "  failed[{i}]: rawOutput={}",
+            u["params"]["update"]["rawOutput"]
+        );
+    }
+}
+
+fn assert_subagent_turn_response(resp: &Value) {
+    let result = &resp["result"];
+    assert_eq!(
+        result["stopReason"],
+        "end_turn",
+        "subagent prompt stopReason should be end_turn; full response: {}",
+        serde_json::to_string(resp).unwrap_or_default()
+    );
+    assert!(
+        result.get("usage").is_some(),
+        "subagent prompt response should include usage; full response: {}",
+        serde_json::to_string(resp).unwrap_or_default()
+    );
 }

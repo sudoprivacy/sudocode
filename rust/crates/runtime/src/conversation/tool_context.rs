@@ -41,9 +41,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     fn restart_from_current_exchange(&mut self, exchange_start: usize) -> Result<(), RuntimeError> {
         let mut continuation = String::from(
             "Exploration context was cleared after the user approved the implementation plan \
-             in the following tool result.",
+             in the following write_plan call.",
         );
-        if let Some(todos) = crate::render_todo_continuity_block(self.session.fs_handle()) {
+        if let Some(todos) = crate::render_todo_continuity_block(&self.session.fs_handle()) {
             continuation.push_str("\n\n");
             continuation.push_str(&todos);
         }

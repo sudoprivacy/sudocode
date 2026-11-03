@@ -41,6 +41,7 @@ const GENERIC_FATAL_WRAPPER_MARKERS: &[&str] = &[
 
 const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
     "maximum context length",
+    "maximum prompt length",
     "context window",
     "context length",
     "too many tokens",
@@ -128,7 +129,8 @@ pub enum ApiError {
         request_id: Option<String>,
     },
     /// Once events have escaped, automatic replay could repeat user-visible
-    /// output, usage or tool execution. Preserve the underlying failure.
+    /// output, usage or tool execution. Preserve the underlying failure; the
+    /// conversation continues from its saved partial state instead.
     PartialStream {
         source: Box<ApiError>,
         request_id: Option<String>,
@@ -216,6 +218,32 @@ pub enum ErrorAction {
     Fatal,
 }
 
+/// Body decoding can wrap a lost connection without being a malformed payload.
+fn is_retryable_http_failure(error: &reqwest::Error) -> bool {
+    if error.is_connect() || error.is_timeout() || error.is_request() {
+        return true;
+    }
+    let mut cause = std::error::Error::source(error);
+    while let Some(error) = cause {
+        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        }) || error
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_incomplete_message)
+        {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
 impl ApiError {
     /// The behavior axis — **who can act** on this error. Single source of
     /// truth for retry-vs-revisit-vs-surface-vs-abort decisions.
@@ -232,9 +260,7 @@ impl ApiError {
                 ErrorAction::Human
             }
             // Transport: the shared retry loop can recover these.
-            Self::Http(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
-                ErrorAction::Transport
-            }
+            Self::Http(error) if is_retryable_http_failure(error) => ErrorAction::Transport,
             Self::IncompleteStream { .. }
             | Self::StreamStalled { .. }
             | Self::RequestAttemptsExhausted { .. } => ErrorAction::Transport,
@@ -435,11 +461,10 @@ impl ApiError {
             // ApiError variant only requires updating categorize().
             _ => match self.categorize() {
                 ErrorCategory::Transport => "provider_transport",
-                ErrorCategory::Auth => "provider_auth",
+                ErrorCategory::Auth | ErrorCategory::Configuration => "provider_auth",
                 ErrorCategory::ContextWindow => "context_window",
                 ErrorCategory::RequestSize => "request_size",
                 ErrorCategory::RuntimeIo => "runtime_io",
-                ErrorCategory::Configuration => "provider_auth",
                 // Structured (Http/Api/RetriesExhausted) already handled above.
                 ErrorCategory::Structured => "provider_error",
             },
@@ -479,6 +504,12 @@ impl ApiError {
             Self::RetriesExhausted { last_error, .. } => last_error.is_context_window_failure(),
             _ => false,
         }
+    }
+
+    /// A transport failure after provider events had already been delivered.
+    #[must_use]
+    pub fn is_interrupted_stream(&self) -> bool {
+        matches!(self, Self::PartialStream { .. })
     }
 
     /// Only explicit pre-stream signature failures permit discarding thinking.

@@ -5,7 +5,7 @@
 //! / `grep_search` against a real in-memory `Kernel` (not a mock) so the
 //! backend-aware path normalisation and the `readdir`-composed traversal
 //! are validated end to end. The paths used (`/ws/…`) do not exist on the
-//! host, so a host-`std::fs` regression would surface as a NotFound
+//! host, so a host-`std::fs` regression would surface as a `NotFound`
 //! rather than silently passing.
 //!
 //! One test here is deliberately NOT about the VFS: `link` is a contract both
@@ -13,16 +13,17 @@
 //! in a comment while nothing exercised it. The two live next to each other so
 //! the claim is checked rather than asserted.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
+use kernel::abc::object_store::ObjectStore;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
 use kernel::{Permission, PermissionProvider};
+use runtime::fs_backend::RecordLogMode;
 use runtime::zone_context::{
     ContextSource, HostZoneContext, ResourceAccessKind, RuntimeResourceAuthorizer,
     ENV_NEXUS_DELEGATION_REF, ENV_NEXUS_RESOURCE_SCOPE,
@@ -32,14 +33,6 @@ use runtime::{
     KernelFsBackend, NexusVfsFsBackend, Session, SessionStore,
 };
 use sudo_contracts::ResourceRef;
-
-/// Minimal in-memory content backend so a fresh `Kernel` can round-trip
-/// regular-file bytes (dirents fall through to the global metastore; only
-/// content needs a store). Mirrors the kernel's own `TestObjectStore`.
-#[derive(Default)]
-struct MemStore {
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
-}
 
 struct CountingAllow(Arc<AtomicUsize>);
 
@@ -53,65 +46,6 @@ impl PermissionProvider for CountingAllow {
     ) -> Result<(), KernelError> {
         self.0.fetch_add(1, Ordering::Relaxed);
         Ok(())
-    }
-}
-
-impl ObjectStore for MemStore {
-    fn name(&self) -> &str {
-        "mem"
-    }
-
-    fn write_content(
-        &self,
-        content: &[u8],
-        content_id: &str,
-        _ctx: &OperationContext,
-        offset: u64,
-    ) -> Result<WriteResult, StorageError> {
-        let mut b = self.blobs.lock().unwrap();
-        let mut data = if offset > 0 {
-            b.get(content_id).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let start = offset as usize;
-        if start > data.len() {
-            data.resize(start, 0);
-        }
-        let end = start + content.len();
-        if end > data.len() {
-            data.resize(end, 0);
-        }
-        data[start..end].copy_from_slice(content);
-        let size = data.len() as u64;
-        b.insert(content_id.to_string(), data);
-        Ok(WriteResult {
-            content_id: content_id.to_string(),
-            version: content_id.to_string(),
-            size,
-        })
-    }
-
-    fn read_content(
-        &self,
-        content_id: &str,
-        _ctx: &OperationContext,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-
-    fn get_content_size(&self, content_id: &str) -> Result<u64, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .map(|d| d.len() as u64)
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
     }
 }
 
@@ -130,7 +64,7 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
 }
 
 /// A planted descriptor for `name` in `zone` — the test-side stand-in for
-/// what the ManagedAgentService plants for a real managed agent, so backends
+/// what the `ManagedAgentService` plants for a real managed agent, so backends
 /// built from it carry the trusted-local zone source a planted descriptor
 /// grants.
 fn desc_for(name: &str, zone: &str) -> AgentDescriptor {
@@ -329,6 +263,7 @@ fn every_remote_backend_constructor_fails_before_rpc() {
 
     let mailbox = runtime::mailbox::Mailbox::over_nexus(shared, "sender", "any-token");
     let delivery = mailbox.send(runtime::agent_mailbox::MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: "sender".to_string(),
         to: "receiver".to_string(),
         body: "must not reach RPC".to_string(),
@@ -381,6 +316,21 @@ fn write_then_read_round_trips_through_the_vfs() {
         !std::path::Path::new(path).exists(),
         "co-hosted write must not touch the host filesystem"
     );
+}
+
+#[test]
+fn record_log_requires_wal_and_preserves_regular_files() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    let path = "/ws/atomic-records";
+    // This real kernel has no Raft coordinator. An explicit WAL request must
+    // fail, with neither a memory stream nor a regular-file fallback.
+    assert!(fs.record_log(path, RecordLogMode::CreateNew).is_err());
+    assert!(kernel.sys_stat(path, "root").is_none());
+    fs.write(path, b"original regular file").unwrap();
+    assert!(fs.record_log(path, RecordLogMode::CreateNew).is_err());
+    assert!(fs.record_log(path, RecordLogMode::Existing).is_err());
+    assert_eq!(fs.read(path).unwrap(), b"original regular file");
 }
 
 #[test]
@@ -486,18 +436,16 @@ fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     fs.write("secret.txt", b"private").unwrap();
     policy.deny("/ws/secret.txt");
-    let mounts = vec![mount.to_string_lossy().into_owned()];
+    let native_mount = mount.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let mounts = [native_mount];
     #[cfg(windows)]
     let mounts = {
-        let ordinary = mounts[0]
+        let ordinary = native_mount
             .strip_prefix(r"\\?\")
             .expect("canonicalized Windows workspace")
             .to_string();
-        vec![
-            mounts[0].clone(),
-            ordinary.clone(),
-            ordinary.replace('\\', "/"),
-        ]
+        [native_mount, ordinary.clone(), ordinary.replace('\\', "/")]
     };
     for native_mount in mounts {
         let secret = format!("{native_mount}/secret.txt");
@@ -544,6 +492,9 @@ fn oversized_tool_output_offloads_onto_the_vfs() {
     // The VFS root (where sessions/offload live) is chosen here on the
     // sudocode side — nexus only stores what it is told.
     let kernel = kernel_with_root_backend();
+    kernel
+        .create_stream("/ws/sessions/sid-1.jsonl", 64 * 1024)
+        .expect("explicit atomic stream in the non-federated fixture");
     let fs: Arc<dyn FsBackend> = Arc::new(vfs_backend(&kernel));
 
     let session = Session::new()
@@ -664,6 +615,90 @@ fn rename_replaces_a_file_in_one_step_and_refuses_a_stream() {
 }
 
 #[test]
+fn stream_links_preserve_complete_reads_and_append_payloads() {
+    let kernel = kernel_with_root_backend();
+    let target = "/ws/linked-stream.jsonl";
+    let alias = "/ws/stream-alias";
+    kernel.create_stream(target, 64 * 1024).unwrap();
+    let fs = vfs_backend(&kernel);
+    fs.append(target, b"first\n").unwrap();
+    fs.append(target, b"second\n").unwrap();
+    fs.link(alias, target).unwrap();
+    fs.link("/ws/stream-directory", "/ws").unwrap();
+    let directory_alias = "/ws/stream-directory/linked-stream.jsonl";
+    for path in [alias, directory_alias] {
+        assert!(fs.is_append_stream(path).unwrap());
+        assert_eq!(fs.read(path).unwrap(), b"first\nsecond\n");
+    }
+    fs.append(alias, b"third\n").unwrap();
+    fs.append(directory_alias, b"fourth\n").unwrap();
+    assert_eq!(fs.read(target).unwrap(), b"first\nsecond\nthird\nfourth\n");
+}
+
+#[test]
+fn regular_file_aliases_retain_byte_tail_cursors() {
+    let kernel = kernel_with_root_backend();
+    assert_regular_alias_tails(&vfs_backend(&kernel));
+}
+
+fn assert_regular_alias_tails(fs: &dyn FsBackend) {
+    let target = "/ws/tail-file";
+    let paths = [target, "/ws/tail-alias", "/ws/tail-directory/tail-file"];
+    fs.write(target, b"first\n").unwrap();
+    fs.link(paths[1], target).unwrap();
+    fs.link("/ws/tail-directory", "/ws").unwrap();
+    for path in paths {
+        assert_eq!(
+            fs.tail_read(path, 0, 0).unwrap(),
+            (b"first\n".to_vec(), 6, false),
+            "{path}"
+        );
+    }
+    fs.append(target, b"second\n").unwrap();
+    for path in paths {
+        assert_eq!(
+            fs.tail_read(path, 6, 0).unwrap(),
+            (b"second\n".to_vec(), 13, false),
+            "{path}"
+        );
+        assert_eq!(
+            fs.tail_read(path, 13, 0).unwrap(),
+            (Vec::new(), 13, true),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn stream_link_append_needs_no_read_grant_and_rechecks_the_target() {
+    let kernel = kernel_with_root_backend();
+    let target = "/ws/write-only-stream";
+    let alias = "/ws/write-only-alias";
+    kernel.create_stream(target, 4096).unwrap();
+    let fs = vfs_backend(&kernel);
+    fs.link(alias, target).unwrap();
+    let policy = install_file_policy(&kernel);
+    policy
+        .read_denied
+        .lock()
+        .unwrap()
+        .extend([target.into(), alias.into()]);
+    fs.append(alias, b"accepted\n").unwrap();
+    assert_eq!(
+        fs.read(alias).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    policy.deny(target);
+    assert_eq!(
+        fs.append(alias, b"denied\n").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    policy.denied.lock().unwrap().clear();
+    policy.read_denied.lock().unwrap().clear();
+    assert_eq!(fs.read(target).unwrap(), b"accepted\n");
+}
+
+#[test]
 fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
     let kernel = kernel_with_root_backend();
     let fs = vfs_backend(&kernel);
@@ -694,7 +729,7 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
 /// The host backend answers `link` with a REAL OS link, needing no privilege.
 ///
 /// The other half of the parity the test above claims. It is asserted here
-/// because the kernel half cannot show it: `KernelFsBackend` plants a DT_LINK,
+/// because the kernel half cannot show it: `KernelFsBackend` plants a `DT_LINK`,
 /// which says nothing about what `StdFsBackend` does on a host filesystem, and
 /// the co-host and a plain `scode` have to behave the same way — the chat-list
 /// index is a pointer at a conversation root on both.
@@ -946,7 +981,7 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
         "each agent's list is keyed by the agent, not by a directory they share"
     );
 
-    TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
+    let _ = TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
         content: String::from("Run the tests"),
         status: TodoStatus::InProgress,
         active_form: String::from("Running the tests"),
@@ -1278,6 +1313,8 @@ fn trusted_for_in_process_kernel_maps_host_env_fail_closed_or_scoped() {
 // constructor now fails closed before any RPC by design).
 // ─────────────────────────────────────────────────────────────────────────────
 
+type PermissionCall = (String, Permission, OperationContext, Option<String>);
+
 #[derive(Default)]
 struct FilePolicy {
     denied: Mutex<HashSet<String>>,
@@ -1285,7 +1322,7 @@ struct FilePolicy {
     read_denied: Mutex<HashSet<String>>,
     agent: Mutex<Option<String>>,
     broken: Mutex<Option<String>>,
-    calls: Mutex<Vec<(String, Permission, OperationContext, Option<String>)>>,
+    calls: Mutex<Vec<PermissionCall>>,
 }
 
 impl FilePolicy {
@@ -1527,10 +1564,10 @@ fn glob_drops_a_path_revoked_after_directory_discovery() {
         .lock()
         .unwrap()
         .insert("/ws/revoked.txt".into());
-    assert!(glob_search(&fs, "**/*.txt", None)
-        .unwrap()
-        .filenames
-        .is_empty());
+    assert_eq!(
+        glob_search(&fs, "**/*.txt", None).unwrap().filenames,
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -1706,7 +1743,7 @@ fn remote_backend(
         match fs.stat("/ws/ready.txt") {
             Ok(_) => break,
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("VFS host did not become ready: {error}"),
         }
@@ -1733,9 +1770,8 @@ fn remote_existence_preserves_admission_and_policy_errors() {
     // remote_append and remote_stat below through the same transport.
     for key in ["invalid-key", "denied-key", "unavailable-key"] {
         let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
-        assert_eq!(
-            fs.exists("/ws/ready.txt").unwrap(),
-            false,
+        assert!(
+            !fs.exists("/ws/ready.txt").unwrap(),
             "{key}: an authentication refusal must read as absence, not leak existence"
         );
     }
@@ -1917,6 +1953,8 @@ fn metadata_and_lock_share_scope_with_positive_lifecycle_controls() {
     permission_denied(restricted.stat("/private/alias"));
     permission_denied(restricted.read_link("/private/alias"));
     permission_denied(restricted.try_lock("/private/lease", 1000));
+    permission_denied(restricted.record_log("/private/history", RecordLogMode::CreateNew));
+    permission_denied(restricted.record_log("/private/target", RecordLogMode::Existing));
     assert_eq!(restricted.read_link("/ws/alias").unwrap(), "/ws/target");
     assert!(restricted.stat("/ws/alias").unwrap().is_symlink);
     let lease = restricted.try_lock("/ws/lease", 1000).unwrap().unwrap();
@@ -1948,6 +1986,7 @@ fn links_cannot_redirect_scoped_io_or_rename_to_private_content() {
     permission_denied(restricted.write("/ws/escape", b"changed"));
     permission_denied(restricted.append("/ws/escape", b"changed"));
     permission_denied(restricted.tail_read("/ws/escape", 0, 0));
+    permission_denied(restricted.record_log("/ws/escape", RecordLogMode::Existing));
     permission_denied(restricted.rename("/ws/escape", "/ws/copy"));
     permission_denied(restricted.rename("/ws/file", "/private/copy"));
     // The follow guard admits links as a whole: reading even the METADATA of
@@ -2092,9 +2131,12 @@ fn scoped_mtls_transport_early_denies_out_of_scope_targets() {
     permission_denied(remote.read("/private/target"));
     permission_denied(remote.read_link("/private/alias"));
     permission_denied(remote.try_lock("/private/lease", 1000));
+    permission_denied(remote.record_log("/private/history", RecordLogMode::CreateNew));
+    permission_denied(remote.record_log("/private/target", RecordLogMode::Existing));
     // A link whose ALIAS is in scope but whose TARGET is not is refused whole
     // by the follow guard — metadata included.
     permission_denied(remote.read("/ws/escape"));
+    permission_denied(remote.record_log("/ws/escape", RecordLogMode::Existing));
     permission_denied(remote.write("/ws/escape", b"changed"));
     permission_denied(remote.read_link("/ws/escape"));
     permission_denied(remote.rename("/ws/escape", "/ws/copy"));
@@ -2116,4 +2158,76 @@ fn scoped_mtls_transport_early_denies_out_of_scope_targets() {
     assert_eq!(local.read("/private/target").unwrap(), b"private");
     assert!(!local.exists("/ws/copy").unwrap());
     assert!(!local.exists("/private/lease").unwrap());
+    assert_directory_alias_scope(&local, &remote);
+}
+
+#[test]
+fn scoped_directory_aliases_cannot_read_or_create_outside_their_resource_scope() {
+    let kernel = kernel_with_root_backend();
+    let owner = vfs_backend(&kernel);
+    let scoped = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &scoped_descriptor("/ws", true),
+        "/ws",
+    );
+    assert_directory_alias_scope(&owner, &scoped);
+}
+
+fn assert_directory_alias_scope(owner: &dyn FsBackend, scoped: &dyn FsBackend) {
+    owner.write("/private/secret", b"private fixture").unwrap();
+    owner.link("/ws/directory-escape", "/private").unwrap();
+    permission_denied(scoped.read("/ws/directory-escape/secret"));
+    permission_denied(scoped.stat("/ws/directory-escape/secret"));
+    permission_denied(scoped.tail_read("/ws/directory-escape/secret", 0, 0));
+    permission_denied(scoped.write("/ws/directory-escape/new", b"must be denied"));
+    permission_denied(scoped.append("/ws/directory-escape/new", b"must be denied"));
+    assert!(!owner.exists("/private/new").unwrap());
+    assert_eq!(owner.read("/private/secret").unwrap(), b"private fixture");
+    owner.create_dir_all("/ws/inside").unwrap();
+    owner.link("/ws/shortcut", "/ws/inside").unwrap();
+    scoped.write("/ws/shortcut/new", b"allowed").unwrap();
+    assert_eq!(scoped.read("/ws/shortcut/new").unwrap(), b"allowed");
+    assert_eq!(owner.read("/ws/inside/new").unwrap(), b"allowed");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn remote_stream_aliases_preserve_payloads_with_write_only_append() {
+    let kernel = kernel_with_root_backend();
+    let local = vfs_backend(&kernel);
+    local.write("/ws/ready.txt", b"ready").unwrap();
+    kernel.create_stream("/ws/stream", 65536).unwrap();
+    local.link("/ws/stream-alias", "/ws/stream").unwrap();
+    local.link("/ws/stream-directory", "/ws").unwrap();
+    let policy = install_file_policy(&kernel);
+    let (remote, _host, client) = remote_backend(&kernel);
+    assert_regular_alias_tails(&remote);
+    for path in ["/ws/stream-alias", "/ws/stream-directory/stream"] {
+        assert!(remote.is_append_stream(path).unwrap());
+        remote.append(path, b"frame\n").unwrap();
+    }
+    assert_eq!(remote.read("/ws/stream-alias").unwrap(), b"frame\nframe\n");
+    let scope = scoped_descriptor("/ws", false)
+        .labels
+        .remove(ENV_NEXUS_RESOURCE_SCOPE)
+        .unwrap();
+    let write_only =
+        NexusVfsFsBackend::from_arc_mtls_with_scope(client, "agent-key".into(), "root", &scope);
+    policy
+        .read_denied
+        .lock()
+        .unwrap()
+        .extend(["/ws/stream".into(), "/ws/stream-alias".into()]);
+    write_only
+        .append("/ws/stream-alias", b"write only\n")
+        .unwrap();
+    permission_denied(write_only.read("/ws/stream-alias"));
+    policy.deny("/ws/stream");
+    permission_denied(write_only.append("/ws/stream-alias", b"denied\n"));
+    policy.denied.lock().unwrap().clear();
+    policy.read_denied.lock().unwrap().clear();
+    assert_eq!(
+        remote.read("/ws/stream-directory/stream").unwrap(),
+        b"frame\nframe\nwrite only\n"
+    );
 }

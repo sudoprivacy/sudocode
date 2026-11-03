@@ -67,6 +67,7 @@ pub struct TurnFileTracker {
 
 impl TurnFileTracker {
     /// Create a new tracker.
+    #[must_use]
     pub fn new(workspace_root: PathBuf) -> Self {
         Self {
             current_turn_id: None,
@@ -93,16 +94,19 @@ impl TurnFileTracker {
     }
 
     /// Get file operations for a specific turn.
+    #[must_use]
     pub fn get_turn_files(&self, turn_id: &str) -> Option<&Vec<FileOp>> {
         self.turn_files.get(turn_id)
     }
 
     /// Get current turn ID.
+    #[must_use]
     pub fn current_turn(&self) -> Option<&str> {
         self.current_turn_id.as_deref()
     }
 
     /// Get current turn's file operations.
+    #[must_use]
     pub fn get_current_turn_ops(&self) -> Vec<FileOp> {
         if let Some(turn_id) = &self.current_turn_id {
             self.turn_files.get(turn_id).cloned().unwrap_or_default()
@@ -147,7 +151,7 @@ impl TurnFileTracker {
                     FileOpKind::Create => {
                         // Delete created file
                         if let Err(e) = fs.delete(&op.path.to_string_lossy()) {
-                            errors.push(format!("Failed to delete {:?}: {}", op.path, e));
+                            errors.push(format!("Failed to delete {}: {e}", op.path.display()));
                         }
                     }
                     FileOpKind::Edit => {
@@ -156,7 +160,8 @@ impl TurnFileTracker {
                             if let Err(e) =
                                 fs.write(&op.path.to_string_lossy(), original.as_bytes())
                             {
-                                errors.push(format!("Failed to restore {:?}: {}", op.path, e));
+                                errors
+                                    .push(format!("Failed to restore {}: {e}", op.path.display()));
                             }
                         }
                     }
@@ -198,16 +203,19 @@ impl TurnFileTracker {
     }
 
     /// Get workspace root.
+    #[must_use]
     pub fn workspace_root(&self) -> &PathBuf {
         &self.workspace_root
     }
 
     /// Get total file count for current turn.
+    #[must_use]
     pub fn current_turn_file_count(&self) -> usize {
         self.get_current_turn_ops().len()
     }
 
     /// Get draft file count for current turn.
+    #[must_use]
     pub fn current_turn_draft_count(&self) -> usize {
         self.get_current_turn_ops()
             .iter()
@@ -228,11 +236,21 @@ mod tests {
     use std::fs;
 
     fn create_test_tracker() -> TurnFileTracker {
+        // These tests run on parallel threads of one process, and a clock with
+        // microsecond resolution (macOS) can give two of them the same time.
+        // A shared directory then fails one test's cleanup with
+        // DirectoryNotEmpty, so each tracker also takes the next counter value.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir_name = format!("scode-tracker-test-{}-{}", std::process::id(), unique_id);
+        let dir_name = format!(
+            "scode-tracker-test-{}-{}-{}",
+            std::process::id(),
+            unique_id,
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let tmp_dir = std::env::temp_dir().join(dir_name);
 
         // Ensure clean state

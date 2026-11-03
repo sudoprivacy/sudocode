@@ -102,24 +102,17 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
                 || (env.is_live() && rows[combining + 1].starts_with("  éEND")),
             "combining sequence must stay attached: {contents}"
         );
-        let table: Vec<_> = rows[first..]
-            .iter()
-            .filter(|r| {
-                r.contains('│') && (r.contains("Key") || r.contains("中文") || r.contains("ASCII"))
-            })
-            .collect();
-        assert_eq!(table.len(), 3, "table rows: {contents}");
-        let borders: Vec<Vec<usize>> = table
-            .iter()
-            .map(|row| {
-                row.match_indices('│')
-                    .map(|(index, _)| row[..index].width())
-                    .collect()
-            })
-            .collect();
+        let value_columns =
+            [("Key", "Value"), ("中文", "通过"), ("ASCII", "ok")].map(|(key, value)| {
+                let row = rows[first..]
+                    .iter()
+                    .find(|row| row.contains(key) && row.contains(value))
+                    .unwrap_or_else(|| panic!("missing table row {key}: {contents}"));
+                row[..row.find(value).unwrap()].width()
+            });
         assert!(
-            borders.windows(2).all(|pair| pair[0] == pair[1]),
-            "table borders must align in columns: {borders:?}"
+            value_columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "Codex table columns must align for CJK and ASCII: {value_columns:?}"
         );
         for (label, color) in [("LINK", link_color), ("CODE", code_color)] {
             let (row, text) = rows

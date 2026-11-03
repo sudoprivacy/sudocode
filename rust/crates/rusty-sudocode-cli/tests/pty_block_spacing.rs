@@ -79,7 +79,7 @@ fn expected_file_frames(env: &TestEnv) -> BTreeMap<&'static str, usize> {
     let saved = store.load_session("latest").unwrap().session;
     let mut calls = BTreeMap::new();
     let mut successful = BTreeSet::new();
-    for message in &saved.messages {
+    for message in saved.messages() {
         for block in &message.blocks {
             match block {
                 ContentBlock::ToolUse {
@@ -102,7 +102,10 @@ fn expected_file_frames(env: &TestEnv) -> BTreeMap<&'static str, usize> {
                     output,
                     ..
                 } => {
-                    assert!(!is_error, "spacing workflow contains a failed tool result");
+                    assert!(
+                        !is_error,
+                        "spacing workflow contains a failed tool result {tool_use_id}: {output}"
+                    );
                     if let Some(marker) = calls.get(tool_use_id.as_str()) {
                         let result: serde_json::Value = serde_json::from_str(output).unwrap();
                         let stdout = result["stdout"]
@@ -286,15 +289,15 @@ fn roundtrip(queue: bool, width: u16) {
             "complete multiline prompt pasted",
         );
     } else {
-        let instructions = env.workspace_root().join("spacing-instructions.md");
+        let instructions_file = "spacing-instructions.md";
+        let instructions = env.workspace_root().join(instructions_file);
         std::fs::write(&instructions, &prompt).unwrap();
         let input = if env.is_mock() {
             "PARITY_SCENARIO:transcript_spacing".to_string()
         } else {
-            let path = instructions.to_string_lossy().replace('\\', "/");
-            format!("Read the local file at {path:?} with read_file and follow its instructions.")
+            format!("Use read_file with the exact relative path `{instructions_file}` in the current working directory, then follow the file's instructions.")
         };
-        // Anchor the file instead of letting the provider guess a workspace.
+        // A workspace-relative name avoids copying a randomized temporary path.
         // Keep the input assertion on one row, then restore the tested width
         // before checking the live transcript and its replay.
         let input_width = u16::try_from(input.chars().count() + 8).unwrap().max(width);
@@ -350,7 +353,7 @@ fn roundtrip(queue: bool, width: u16) {
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let saved = store.load_session("latest").unwrap().session;
     let results: Vec<_> = saved
-        .messages
+        .messages()
         .iter()
         .flat_map(|message| &message.blocks)
         .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
@@ -393,9 +396,10 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     let config = env.workspace_root().join(".nexus/sudocode");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
+    let gate = env.workspace_root().join("finish-file-batch");
     let batch = serde_json::json!([
-        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_chunks":["Spacing intro.\n\n"]},
-        {"id":"spacing_two", "name":"bash", "input":{"command":"cat spacing-two.txt"}},
+        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_prelude":"Spacing intro.\n\n"},
+        {"id":"spacing_two", "name":"bash", "input":{"command":"cat spacing-two.txt"}, "stream_wait_for":gate},
         {"id":"spacing_one_again", "name":"bash", "input":{"command":"cat spacing-one.txt"}},
     ]);
     let prompt = env.prompt(
@@ -412,6 +416,15 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     );
     let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
+    // Complete two real reads while the provider is paused. A postlude used as
+    // an intro would now deterministically follow their frames.
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("ONE_END") && screen.contains("TWO_END"),
+        common::DEFAULT_TIMEOUT,
+        "two file results render before the provider finishes its batch",
+    );
+    std::fs::write(gate, "continue").unwrap();
     common::expect_turn_complete_after(
         &sess,
         &marker,

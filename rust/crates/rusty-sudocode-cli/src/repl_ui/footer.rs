@@ -1,18 +1,39 @@
 //! One bounded footer: permission, background work, and one contextual tip.
 use super::tasks::{TaskBrowser, TaskFocus};
+use crate::render::TextRole;
 use crate::render::{
     styled_text::StyledText,
     text_layout::{display_width, truncate_to_width},
     theme, ColorSupport,
 };
-use crossterm::style::ContentStyle;
 use engine_core::{Tip, TipPriority};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Hash)]
+pub(super) struct FooterHints<'a> {
+    pub transient: Option<&'a str>,
+    /// The keys for the current turn and queue state, after the position.
+    pub keys: &'a str,
+}
+
+/// Who owns a persistent footer tip. Unlike the model's tips these outlive a
+/// turn; each source replaces or clears only its own. A later source wins a
+/// priority tie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum StatusSource {
+    /// Prompt-cache advice; the only tip the footer can focus and act on.
+    Cache,
+    /// Peer-messaging health: shown only while degraded, gone once it recovers.
+    A2a,
+}
+
+#[derive(Clone, Default, Hash)]
 pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
-    cache: Option<Tip>,
+    status: BTreeMap<StatusSource, Tip>,
+    /// Where the workspace is, `repo ⎇ branch`. State rather than advice, so it
+    /// is not a `Tip`: it leads the filler and yields to every tip.
+    position: Option<String>,
 }
 
 impl FooterTips {
@@ -26,8 +47,14 @@ impl FooterTips {
             self.model.insert(tip.priority, tip);
         }
     }
-    pub fn cache(&mut self, tip: Option<Tip>) {
-        self.cache = tip;
+    pub fn status(&mut self, source: StatusSource, tip: Option<Tip>) {
+        match tip {
+            Some(tip) => self.status.insert(source, tip),
+            None => self.status.remove(&source),
+        };
+    }
+    pub fn position(&mut self, label: Option<String>) {
+        self.position = label;
     }
     pub fn begin_turn(&mut self) {
         self.model.clear();
@@ -37,38 +64,51 @@ impl FooterTips {
         &self,
         permission: &str,
         tasks: &TaskBrowser,
-        submitted: bool,
         active: bool,
-        native_hint: Option<&str>,
+        hints: FooterHints<'_>,
         width: usize,
     ) -> StyledText {
-        let native = native_hint.map(|message| Tip {
+        let native = hints.transient.map(|message| Tip {
             priority: TipPriority::Urgent,
             message: StyledText::from_ansi(message)
                 .text
                 .replace(['\n', '\r', '\t'], " "),
         });
-        let ordinary = Tip {
+        // Where the workspace is, then the keys for the current state. The
+        // position leads so truncation trims the keys first.
+        let filler = Tip {
             priority: TipPriority::Normal,
-            message: if submitted {
-                "/help · /exit".into()
-            } else {
-                "Type /help for commands · Tab completes /commands".into()
+            message: match &self.position {
+                Some(position) => format!("{position} · {}", hints.keys),
+                None => hints.keys.into(),
             },
         };
+        // A focused cache tip is the footer's selection and says how to act on it.
+        let tip_focused = tasks.focus == TaskFocus::Tip;
+        let cache = self.status.get(&StatusSource::Cache);
+        let focused = cache.filter(|_| tip_focused).map(|tip| Tip {
+            priority: TipPriority::Important,
+            message: format!("{} · Enter to review", tip.message),
+        });
         let selected = native
             .as_ref()
             .or_else(|| {
                 let model = self.model.values().next_back();
-                match (model, self.cache.as_ref()) {
-                    (Some(m), Some(c)) if c.priority > m.priority => Some(c),
+                let status = self
+                    .status
+                    .iter()
+                    .max_by_key(|(source, tip)| (tip.priority, **source))
+                    .map(|(_, tip)| tip);
+                match (model, status) {
+                    (Some(m), Some(s)) if s.priority > m.priority => Some(s),
                     (Some(m), _) => Some(m),
-                    (_, cache) => cache,
+                    (_, status) => status,
                 }
             })
-            .or((!active).then_some(&ordinary))
             .filter(|tip| !active || tip.priority == TipPriority::Urgent)
+            .or(Some(&filler))
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
+        let selected = focused.as_ref().or(selected);
 
         let mut base = truncate_to_width(&format!("  ⏵⏵ {permission}"), width);
         let mut task = tasks.footer_label(false);
@@ -109,13 +149,8 @@ impl FooterTips {
             .filter(|_| remaining >= 8)
             .map(|tip| (tip, truncate_to_width(&tip.message, remaining)));
         let support = ColorSupport::detect();
-        let colors = support != ColorSupport::NoColor;
         let palette = theme();
-        let style = |color| ContentStyle {
-            foreground_color: colors.then_some(color),
-            ..ContentStyle::default()
-        };
-        let muted = style(palette.muted);
+        let muted = palette.style_for(TextRole::Secondary, support);
         let mut result = StyledText::default();
         result.push(muted, &base);
         if !task.is_empty() {
@@ -129,13 +164,41 @@ impl FooterTips {
         }
         if let Some((tip, text)) = tip {
             result.push(muted, sep);
-            let color = match tip.priority {
-                TipPriority::Urgent => palette.warning,
-                TipPriority::Important => palette.primary,
-                TipPriority::Normal => palette.muted,
+            let role = match tip.priority {
+                TipPriority::Urgent => TextRole::Warning,
+                TipPriority::Important => TextRole::Notice,
+                TipPriority::Normal => TextRole::Secondary,
             };
-            result.push(style(color), &text);
+            if tip_focused {
+                result.push(palette.selection_style(support), &text);
+            } else if std::ptr::eq(tip, &raw const filler) {
+                self.append_position(&mut result, &text);
+            } else {
+                result.push(palette.style(role), &text);
+            }
         }
+
         result
+    }
+    /// Style only the locally owned workspace prefix; advice is never parsed.
+    fn append_position(&self, result: &mut StyledText, text: &str) {
+        let palette = theme();
+        let Some(position) = &self.position else {
+            result.push(palette.style(TextRole::Secondary), text);
+            return;
+        };
+        let mut end = position.len().min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let prefix = &text[..end];
+        if let Some((path, branch)) = prefix.split_once(" ⎇ ") {
+            result.push(palette.style(TextRole::Path), path);
+            result.push(palette.style(TextRole::Secondary), " ⎇ ");
+            result.push(palette.style(TextRole::Branch), branch);
+        } else {
+            result.push(palette.style(TextRole::Path), prefix);
+        }
+        result.push(palette.style(TextRole::Secondary), &text[end..]);
     }
 }

@@ -1,4 +1,4 @@
-//! Durable session selection and the co-host's active-writer lease.
+//! Durable session selection and serialized co-host initialization.
 
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -9,10 +9,8 @@ use runtime::spawn_task::{AgentDescriptor, KernelConvenience};
 use runtime::HostedSessionIdentity;
 use runtime::{FsBackend, HookAbortSignal, Session};
 
-/// Held by the worker, so cancel cannot release a transcript while a turn is
-/// still writing it. Crashed processes leave a bounded lease, not a permanent
-/// lock. This advisory lock does not provide storage-level fencing during a
-/// network partition; recovery is an explicit stop-and-resume operation.
+/// Serialize initialization. Legacy transcripts retain this admission guard
+/// for their lifetime; committed record contexts release it after activation.
 pub(crate) struct SessionLease {
     stop: mpsc::Sender<()>,
     renewal: Option<thread::JoinHandle<()>>,
@@ -78,7 +76,7 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
     resume_id: Option<&str>,
     model: &str,
     abort: HookAbortSignal,
-) -> Result<(Session, SessionLease), String> {
+) -> Result<(Session, Option<SessionLease>), String> {
     let workspace = fs
         .working_root()
         .map_err(|error| format!("co-host: resolve session workspace: {error}"))?;
@@ -120,7 +118,9 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
             return Err("co-host: transcript ID does not match requested session".into());
         }
     }
-    session.identity = Some(identity);
+    if session.identity.is_none() {
+        session.identity = Some(identity);
+    }
     if session.model.is_none() {
         session.model = Some(model.to_string());
     }
@@ -140,8 +140,20 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
             .map_err(|e| format!("co-host: persist session: {e}"))?;
     } else {
         session
+            .activate_persistence()
+            .map_err(|error| format!("co-host: activate restored context: {error}"))?;
+        session
             .repair_orphan_tool_uses()
             .map_err(|error| format!("co-host: persist interrupted tool recovery: {error}"))?;
     }
+    let concurrent = session
+        .supports_concurrent_resume()
+        .map_err(|error| error.to_string())?;
+    let lease = if concurrent {
+        drop(lease);
+        None
+    } else {
+        Some(lease)
+    };
     Ok((session, lease))
 }

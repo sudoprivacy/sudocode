@@ -30,7 +30,7 @@ use std::sync::OnceLock;
 /// Registry of every experimental feature flag. Adding an experiment
 /// means adding a variant here plus its entry in [`Experiment::ALL`],
 /// [`Experiment::key`], and [`Experiment::env_suffix`] — the
-/// `config_schema` EXPERIMENTAL_CHILDREN table mirrors `key()` so
+/// `config_schema` `EXPERIMENTAL_CHILDREN` table mirrors `key()` so
 /// unknown keys in `settings.json` warn at load time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Experiment {
@@ -41,15 +41,24 @@ pub enum Experiment {
     /// `mcp__*` tools to the model. (ACP session-injected MCP servers
     /// are an explicit per-session request and are NOT gated by this.)
     McpConfigServers,
+    /// Independent runtime continuations over a durable session record log.
+    SharedSessionHistory,
     /// Local TTL recommendations; never changes a request's cache policy.
     CacheTtlAdvisor,
+    /// Publish short persistent peer descriptions with existing compaction calls.
+    PeerDescriptions,
+    /// Bounded transcript viewport with a pinned composer and prompt context.
+    PromptViewport,
 }
 
 impl Experiment {
     pub const ALL: &'static [Experiment] = &[
         Experiment::CoordinatorMode,
         Experiment::McpConfigServers,
+        Experiment::SharedSessionHistory,
         Experiment::CacheTtlAdvisor,
+        Experiment::PeerDescriptions,
+        Experiment::PromptViewport,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -59,7 +68,10 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => "coordinatorMode",
             Experiment::McpConfigServers => "mcpConfigServers",
+            Experiment::SharedSessionHistory => "sharedSessionHistory",
             Experiment::CacheTtlAdvisor => "cacheTtlAdvisor",
+            Experiment::PeerDescriptions => "peerDescriptions",
+            Experiment::PromptViewport => "promptViewport",
         }
     }
 
@@ -69,7 +81,10 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => "COORDINATOR_MODE",
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
+            Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
             Experiment::CacheTtlAdvisor => "CACHE_TTL_ADVISOR",
+            Experiment::PeerDescriptions => "PEER_DESCRIPTIONS",
+            Experiment::PromptViewport => "PROMPT_VIEWPORT",
         }
     }
 
@@ -81,7 +96,10 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
-            Experiment::CacheTtlAdvisor => None,
+            Experiment::SharedSessionHistory
+            | Experiment::CacheTtlAdvisor
+            | Experiment::PeerDescriptions
+            | Experiment::PromptViewport => None,
         }
     }
 }

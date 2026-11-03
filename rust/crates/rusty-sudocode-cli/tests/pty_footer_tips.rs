@@ -134,7 +134,9 @@ fn footer_tip_tool_priorities_clear_and_schema_are_visible_end_to_end() {
         &[tip("highest", "INVALID_PRIORITY", "bad")],
     );
     assert!(!footer(&session).contains("INVALID_PRIORITY"));
-    assert!(session.render(|s| s.contents()).contains("unknown variant"));
+    assert!(session
+        .render(common::screen_contents)
+        .contains("unknown variant"));
     turn(
         &env,
         &mut session,
@@ -153,8 +155,8 @@ fn footer_tip_tool_priorities_clear_and_schema_are_visible_end_to_end() {
 #[test]
 fn footer_tips_preserve_theme_and_unicode_and_draft_across_resize() {
     for (background, no_color, expected) in [
-        ("15;0", false, "Idx(214)"),
-        ("0;15", false, "Idx(94)"),
+        ("15;0", false, "Rgb(196, 167, 103)"),
+        ("0;15", false, "Rgb(139, 98, 20)"),
         ("15;0", true, "Default"),
     ] {
         let env = TestEnv::new_mock("footer-tip-colors");
@@ -211,4 +213,154 @@ fn footer_tips_preserve_theme_and_unicode_and_draft_across_resize() {
         common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "clear draft");
         exit(&mut session);
     }
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Rows of the per-turn status line, which carries `turn N` and a token count.
+fn status_rows(session: &PtySession) -> Vec<String> {
+    session.render(|screen| {
+        let raw = screen.raw();
+        raw.rows(0, raw.size().1)
+            .filter(|row| row.contains("turn ") && row.contains("tokens"))
+            .collect()
+    })
+}
+
+#[test]
+fn footer_names_the_workspace_branch_and_yields_it_to_any_tip() {
+    let env = TestEnv::new_mock("footer-branch");
+    let root = env.workspace_root();
+    git(root, &["init", "-q", "-b", "feat/footer-branch"]);
+    git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let repo = root.file_name().unwrap().to_string_lossy().into_owned();
+    let mut session = spawn(&env, "15;0", false);
+    // Idle, not typing: the position, `repo ⎇ branch`, leads the filler.
+    wait_footer(
+        &session,
+        &format!("{repo} ⎇ feat/footer-branch · Type /help for commands"),
+    );
+
+    // A real tip takes the slot; the branch is state, not advice, and yields.
+    turn(
+        &env,
+        &mut session,
+        &[tip("important", "BRANCH_YIELDS", "i")],
+    );
+    wait_footer(&session, "BRANCH_YIELDS");
+    assert!(
+        !footer(&session).contains("feat/footer-branch"),
+        "a tip must win the slot: {}",
+        footer(&session)
+    );
+    // The per-turn line no longer repeats the branch.
+    let rows = status_rows(&session);
+    assert!(!rows.is_empty(), "the turn status line is on screen");
+    assert!(
+        rows.iter().all(|row| !row.contains("feat/footer-branch")),
+        "branch left the per-turn line: {rows:?}"
+    );
+
+    // Detached on a branch tip, the footer names that tip and the commit,
+    // refreshed when the turn ends.
+    git(root, &["checkout", "-q", "--detach"]);
+    let commit = git(root, &["rev-parse", "--short", "HEAD"]);
+    turn(&env, &mut session, &[]);
+    wait_footer(&session, &format!("⎇ feat/footer-branch@{commit} · /help"));
+    assert!(!footer(&session).contains("detached HEAD"));
+    exit(&mut session);
+}
+
+/// The position and the keys for the current state; typing never changes it,
+/// so keystrokes never redraw the footer. It changes when a turn starts and
+/// ends, as the rest of the screen does.
+#[test]
+fn footer_keeps_position_and_state_keys_while_typing_and_switches_with_the_turn() {
+    let env = TestEnv::new_mock("footer-turn-state");
+    let root = env.workspace_root();
+    git(root, &["init", "-q", "-b", "feat/turn-state"]);
+    git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    std::fs::write(
+        root.join("wait.sh"),
+        "printf started > tool-started; while test ! -f release-tool; do sleep 0.1; done",
+    )
+    .unwrap();
+    let mut session = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    session.resize(30, 180).unwrap();
+    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "initial input");
+    let idle = "⎇ feat/turn-state · Type /help for commands";
+    wait_footer(&session, idle);
+
+    // Typing a message or a command leaves the footer as it was.
+    for draft in ["draft", "/he"] {
+        session.send(draft).unwrap();
+        common::expect_input_line(&session, draft, common::DEFAULT_TIMEOUT, "draft shown");
+        assert!(
+            footer(&session).contains(idle),
+            "typing redrew the footer: {}",
+            footer(&session)
+        );
+        session.send("\x15").unwrap();
+        common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "cleared");
+    }
+
+    // A turn held open by a real shell: the position stays, with the steering keys.
+    let call =
+        json!({"id":"hold","name":"Bash","input":{"command":"sh wait.sh","timeout":120_000}});
+    let prompt = format!(
+        "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
+        json!([call])
+    );
+    session
+        .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+        .unwrap();
+    common::expect_screen(
+        &session,
+        |s| !common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "prompt typed",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |_| root.join("tool-started").exists(),
+        common::DEFAULT_TIMEOUT,
+        "turn running",
+    );
+    let running = "⎇ feat/turn-state · Enter steer · Tab queue · Esc/Ctrl+C cancel";
+    wait_footer(&session, running);
+    session.send("steer").unwrap();
+    common::expect_input_line(
+        &session,
+        "steer",
+        common::DEFAULT_TIMEOUT,
+        "typed during turn",
+    );
+    assert!(
+        footer(&session).contains(running),
+        "typing redrew the footer: {}",
+        footer(&session)
+    );
+    session.send("\x15").unwrap();
+
+    std::fs::write(root.join("release-tool"), "release").unwrap();
+    wait_footer(&session, "⎇ feat/turn-state · /help");
+    exit(&mut session);
 }

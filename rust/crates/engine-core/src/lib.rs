@@ -86,12 +86,16 @@ mod attachment;
 pub mod cache_advisor;
 pub mod cache_metrics;
 pub mod cache_report;
+pub mod cache_ttl;
 mod engine_client;
-pub use attachment::EngineAttachment;
+pub use attachment::{CompletionRetirement, EngineAttachment};
+pub mod background_completion;
+pub mod input_queue;
 mod session;
+mod session_inputs;
 pub mod subagent_completion;
 pub use engine_client::EngineApiClient;
-pub use session::{EngineDelegate, EngineHandle, EngineSession};
+pub use session::{DirectToolError, EngineDelegate, EngineHandle, EngineSession};
 
 // Re-export the seam data types so a renderer / engine gets the WHOLE seam from
 // `engine_core` alone (`use engine_core::{EngineEvent, EngineCommand,

@@ -17,6 +17,8 @@
 mod common;
 #[path = "support/node_home.rs"]
 mod node_home;
+#[path = "support/sync_input.rs"]
+mod sync_input;
 
 use std::time::{Duration, Instant};
 
@@ -31,7 +33,7 @@ const BUDGET: Duration = Duration::from_secs(30);
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if screen.contains(needle) {
             return;
         }
@@ -57,6 +59,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
             body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),
@@ -97,6 +100,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         .expect("\u{276f}")
         .expect("the second REPL should start");
     expect_on_screen(&mut second, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line_cleared(&second, BUDGET, "redelivery prompt ready");
     assert_eq!(
         position(),
         0,
@@ -105,6 +109,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
 
     // The redelivered message is live, not a stale notice: Enter runs it and the
     // position finally advances.
+    let turn_marker = common::turn_status_marker(&second);
     second
         .send("\r")
         .expect("press Enter on the second instance");
@@ -120,37 +125,50 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // The position moves as the turn finishes, before the REPL is back at an
-    // idle prompt, and input typed in that window can be consumed by the turn.
-    // Ask for /status until it answers: that proves the prompt is idle (so
-    // /exit will land) and that the second instance now holds the receiver.
-    assert!(
-        status_shows(
-            &mut second,
-            "receiving; waiting messages run at the next prompt"
-        ),
-        "the second instance never reported itself as the receiver:\n{}",
-        second.render(|s| s.contents())
+    let ready_deadline = Instant::now() + BUDGET;
+    sync_input::expect_prompt_after_turn(
+        &second,
+        &turn_marker,
+        ready_deadline.saturating_duration_since(Instant::now()),
+        "status at the rearmed prompt",
+    );
+    submit_line(&mut second, "/status", ready_deadline);
+    common::expect_screen_settled(
+        &second,
+        |screen| {
+            common::screen_contains(screen, "receiving; waiting messages run at the next prompt")
+                && common::input_line_of(screen).is_empty()
+        },
+        ready_deadline.saturating_duration_since(Instant::now()),
+        "the new receiver reports ownership and restores its input row",
     );
 
-    second.send("/exit\r").expect("exit the REPL");
-    assert_eq!(second.expect_eof().expect("the REPL exits"), 0);
+    submit_line(&mut second, "/exit", ready_deadline);
+    let exit = second.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "the REPL did not exit: {error:?}\nPTY:\n{}",
+            second.render(common::screen_contents)
+        );
+    });
+    assert_eq!(exit, 0);
 }
 
-/// Ask `/status` until `needle` shows, retrying in case an earlier `/status` was
-/// typed while the previous turn was still winding down.
-fn status_shows(sess: &mut pty_expect::PtySession, needle: &str) -> bool {
-    for _ in 0..8 {
-        sess.send("/status\r").expect("send /status");
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline {
-            if sess.render(|s| s.contents()).contains(needle) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    false
+/// Observe the command in the live editor before Enter: a status block can
+/// appear before raw input is rearmed, discarding a batched submit key.
+fn submit_line(sess: &mut pty_expect::PtySession, line: &str, deadline: Instant) {
+    common::expect_input_line_cleared(
+        sess,
+        deadline.saturating_duration_since(Instant::now()),
+        "ready for the next command",
+    );
+    sess.send(line).expect("type command");
+    common::expect_screen_settled(
+        sess,
+        |screen| common::input_line_of(screen) == line,
+        deadline.saturating_duration_since(Instant::now()),
+        "command reached the live editor",
+    );
+    sess.send("\r").expect("submit the rendered command");
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {

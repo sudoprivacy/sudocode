@@ -17,12 +17,15 @@ The peer store depends on one durable fact: whether the machine publishes a node
 | Machine state | Peer store | When the store is unusable |
 |---|---|---|
 | No node record | Same-machine pair root on disk (`local_pair_root()`) | n/a |
-| Node record present | The machine's node | Error. Never falls back to disk. |
+| Node record present | The machine's node | A2A reports the actual cause while ordinary standalone work remains usable. Never falls back to disk. |
 
-`engine_host::peer::attach` is the only place this decision is made. The session build uses it for three things:
+`engine_host::peer::attach` is the only place this decision is made. The session build uses it for:
 - the system-prompt identity section;
 - the tool scope, so that `send` and `agent_list` see one mailbox;
 - the host shell's single receiver.
+- the authenticated filesystem for Nexus model mounts. A `nexus:///mount`
+  provider route sends model writes through the node's existing
+  hooks. Local workspace files and history keep their local filesystem.
 
 A co-hosted agent never calls it, because its daemon injects the mailbox it lives in.
 
@@ -39,15 +42,33 @@ The node owner's bring-up publishes `<home>/.nexus/run/node.json` atomically onc
 | `agents_dir` | Absolute directory holding one credential bundle per agent name. |
 | `role`, `zone` | The node's deployment role and zone; `scode` does not read them. |
 
-A session attaches as its own resolved agent name (the `agentName` setting, else the name derived from its workspace):
+A session selects its namespace as its own resolved agent name (the `agentName`
+setting, else the name derived from its workspace). A present record retains a
+node binding even when configuration or credentials cannot yet be loaded:
 
-1. It loads `<agents_dir>/<name>/credential.json`. The manifest's `agent` must equal `<name>`.
-2. It dials `endpoint` with that credential. The server certificate is checked against the bundle's `server_name` and CA, not against the dial address.
-3. It reads `/agents` once. The client connects lazily, so without this probe an unreachable node, a failed handshake or a missing mount would only surface on the session's first message.
+1. The binding resolves `<agents_dir>/<name>/credential.json`. Its manifest,
+   certificate and key must match that Agent and the configured node trust.
+2. Tools, the original receiver and configured Nexus model mounts obtain the
+   same actual authenticated backend. Client construction is lazy; startup does
+   not probe `/agents` or require a network handshake.
+3. The existing receiver retries presence, local binding resolution and node IO.
+   Preparing a previously missing bundle can make that same receiver usable.
+   An ordinary HTTP model and workspace work do not depend on those attempts.
 
-Every failure names its cause and stops the session: an unreadable or malformed record, another version, an endpoint with a scheme, a relative `agents_dir`, no credential for this agent, a credential minted for another agent, or a failed probe. None of them falls back to disk. Credentials are minted by the node owner; `scode` never mints one.
+Failures retain their specific cause in status and tool results. A malformed
+record, unsupported version, invalid endpoint/directory, missing bundle or
+identity mismatch leaves the selected node unavailable rather than stopping an
+ordinary standalone session or selecting disk. Credentials are minted by the
+node owner; `scode` never mints one. An explicitly Nexus-mounted model still
+needs that node's authenticated filesystem.
 
-The attach decision is cached per agent name for the life of the process, so the session build and its receiver cannot disagree, and a host running sessions under several identities dials each with its own credential.
+Namespace selection, including the pending binding, is cached per Agent for the
+process lifetime. Tools and receiver therefore cannot select different stores.
+Local configuration can be retried, but a constructed client's credentials stay
+fixed; rotation or client replacement is a separate operation. A process that
+selected disk requires an explicit handoff/restart to select node. The
+[standalone session contract](../usage.md#standalone-sessions-and-the-local-nexus-node)
+documents these limits and receiver status. Cohost keeps its injected services.
 
 ## Rename (S1)
 
@@ -78,11 +99,12 @@ Every receive path uses one loop: `runtime::mailbox::spawn_inbox_poller`. Delive
 
 ## Cursor fencing (S6)
 
-The contract is fixed now. The node implementation waits on N2, a storage-level conditional write.
+The contract and the consumer side are in place (`runtime/src/cursor_fence.rs`). The node implementation waits on N2, a storage-level conditional write.
 
 ```
-write_if_version(path, expected: Option<Token>, data) -> Result<Outcome, io::Error>
-Outcome = Committed(Token) | Conflict { current: Option<Token> } | Unknown
+FsBackend::read_versioned(path) -> io::Result<Option<(Vec<u8>, VersionToken)>>
+FsBackend::write_if_version(path, expected: Option<&VersionToken>, data) -> io::Result<WriteOutcome>
+WriteOutcome = Committed(VersionToken) | Conflict { current: Option<VersionToken> } | Unknown
 ```
 
 - **Token.** The storage returns an opaque token. sudocode never interprets it as a content generation or a metadata version.
@@ -91,7 +113,7 @@ Outcome = Committed(Token) | Conflict { current: Option<Token> } | Unknown
 - **Unknown** means the request was sent but the commit result is not known.
 - **No conditional write.** A backend without an atomic conditional write returns `ErrorKind::Unsupported`.
 
-Which path a reader uses is decided once, when it acquires the reader, by `FsLock::fences_writes()`:
+Which path a reader uses is decided once, when it acquires the reader, by `FsBackend::fenced_locks()` and then by whether `read_versioned` is supported:
 
 1. **`true` (disk).** The holder's plain store is already isolated, so it stays a plain store.
 2. **`false`, conditional write supported.** The new owner claims the cursor first:
@@ -102,6 +124,19 @@ Which path a reader uses is decided once, when it acquires the reader, by `FsLoc
    - `Conflict` means the same thing to every actor, whether a new claimer or a holder that resumed after a freeze: this attempt failed and nothing visible changed. The actor stops delivering, leaves the message unacknowledged, and goes back through acquire and claim. No actor ever gets to force a write.
    - It never falls back to an unconditional write.
 3. **`false`, no conditional write (the node until N2).** The reader keeps the plain store, and status states the weaker guarantee: "at-least-once only; the cursor may move backwards after a freeze longer than the lease". This is a declared capability gap, not a retry after a failed conditional write.
+
+The decision is reported as `PeerStatus.cursor` (the `/status` Cursor line and ACP `_meta.sudocode.peer.cursor`): `fenced`, `fenced_cas` or `at_least_once`, or `none` until this process has claimed one of the agent's conversations. On the conditional path the register carries the claim's `epoch`; the plain store writes the register exactly as before.
+
+`fenced_cas` holds only while every writer of a conversation's register fences. A build without S6, or a claim that found the backend answering `Unsupported` (for example a server not yet upgraded), writes unconditionally, so a deployment must not mix those with fencing writers and count on the guarantee. A register's stored epoch is input, not proof: a claim whose next epoch would overflow fails without writing.
+
+**Node adaptation (S6b, after N2).** The node needs a new RPC, not new fields on `Write`: an older server ignores unknown proto3 fields and would turn the write into an unconditional one. Its minimal contract:
+- `WriteIfVersion(path, content, precondition: if_gen | if_absent)` answers `Committed{gen}` or `Conflict{current_gen?}`. An older server answers UNIMPLEMENTED, which maps to `Unsupported`.
+- The compare and the commit are one linearizable step in the zone. Content and `gen` become visible together, and a conflict changes nothing.
+- `gen` increases strictly on every committed write and is never reused, even across delete and recreate.
+- `Read` returns content and `gen` from the same committed version.
+- A timeout after the request was sent is `Unknown` on the client, which settles it by reading back.
+
+`NexusVfsFsBackend` then implements the two methods, and the receivers switch to `fenced_cas` without other changes.
 
 ## Disk → node switch (S3)
 

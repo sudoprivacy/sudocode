@@ -89,6 +89,8 @@ impl TaskCompletion {
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct TerminalSource {
     task_id: String,
+    #[serde(default)]
+    parent_tool_call_id: Option<String>,
     shell: ShellKind,
     pub(super) owner_instance: String,
     pub(super) state: String,
@@ -101,6 +103,7 @@ pub(super) struct TerminalSource {
 impl CompletionJournal {
     pub fn register_terminal(
         &self,
+        assistant: Option<&str>,
         tool: &str,
         task: &str,
         shell: ShellKind,
@@ -116,7 +119,8 @@ impl CompletionJournal {
             if tool.is_empty() || tool.len() > 512 || task.is_empty() || task.len() > 512 {
                 return Err("invalid terminal identity".into());
             }
-            if state.sources.contains_key(tool)
+            let key = crate::session_history::tool_source_key(assistant, tool);
+            if state.sources.contains_key(&key)
                 || state.sources.values().any(|s| {
                     s.terminal.as_ref().is_some_and(|t| t.task_id == task)
                         || s.lifecycle
@@ -130,7 +134,7 @@ impl CompletionJournal {
                 return Err("completion_journal_capacity".into());
             }
             state.sources.insert(
-                tool.to_owned(),
+                key,
                 Source {
                     ordinal: 0,
                     lifecycle: None,
@@ -144,6 +148,7 @@ impl CompletionJournal {
                     suppressed: false,
                     terminal: Some(TerminalSource {
                         task_id: task.to_owned(),
+                        parent_tool_call_id: Some(tool.to_owned()),
                         shell,
                         owner_instance: self.instance.clone(),
                         state: "prepared".into(),
@@ -342,7 +347,10 @@ impl CompletionJournal {
                 completion_id: id,
                 kind: "terminal".into(),
                 task_id: terminal.task_id.clone(),
-                parent_tool_call_id: tool.clone(),
+                parent_tool_call_id: terminal
+                    .parent_tool_call_id
+                    .clone()
+                    .unwrap_or_else(|| tool.clone()),
                 origin_trace_id: source.trace_id.clone(),
                 status: terminal_status(snapshot).into(),
                 terminal: TerminalMetadata {

@@ -10,7 +10,7 @@ use std::sync::Arc as StdArc;
 use std::sync::{Arc, Mutex};
 
 use commands::AcpSlashCommandSpec;
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 
 use agent_client_protocol::role::acp::{Agent, Client};
 // NOTE: `ConnectTo` and `ConnectionTo` are different SDK concepts:
@@ -18,7 +18,7 @@ use agent_client_protocol::role::acp::{Agent, Client};
 //   - `ConnectionTo<R>`: runtime handle passed to handlers for sending messages
 use agent_client_protocol::{
     on_receive_dispatch, on_receive_notification, on_receive_request, ConnectTo, ConnectionTo,
-    Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
+    Dispatch, Error, Handled, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
@@ -34,7 +34,7 @@ use agent_client_protocol_schema::{
     UnstructuredCommandInput, Usage,
 };
 use engine_core::engine_events::CompletionAction;
-use engine_core::{AuthMode, EngineDelegate, EngineEvent};
+use engine_core::{AuthMode, DirectToolError, EngineDelegate, EngineEvent};
 use engine_host::config::AllowedToolSet;
 use engine_host::{SessionEngine, SessionLifecycle};
 use runtime::config::{
@@ -181,7 +181,7 @@ impl AcpError {
                 raw_message.chars().take(100).collect::<String>()
             )
         } else {
-            format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message)
+            format!("发生错误：{raw_message}\n\n请尝试简化输入或稍后重试。")
         }
     }
 }
@@ -279,6 +279,61 @@ pub(crate) struct ResumeToolsRequest {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct ResumeToolsResponse {}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeStatusRequest {
+    pub session_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Custom extension: _sudocode/a2a/* (direct A2A requests)
+// ---------------------------------------------------------------------------
+
+// Served from the catch-all dispatch rather than as typed handlers: every typed
+// handler nests the server's type one level deeper, and the chain is already at
+// the depth the compiler lays out by default in every crate that runs it.
+const RUNTIME_STATUS_METHOD: &str = "_sudocode/session/status";
+const DIRECT_SEND_METHOD: &str = "_sudocode/a2a/send";
+const DIRECT_AGENT_LIST_METHOD: &str = "_sudocode/a2a/agent_list";
+
+/// Run the session's own `send` tool for the client, without a model turn.
+/// Plain text only, and no `sender`: the session's agent is the sender. The
+/// `send` tool requires a summary with a text message, so a request without
+/// one is refused here rather than admitted to fail.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DirectSendRequest {
+    session_id: String,
+    to: String,
+    message: String,
+    summary: String,
+    /// ACP lets any request carry `_meta`; it is accepted and ignored.
+    #[serde(rename = "_meta", default)]
+    _meta: Option<serde::de::IgnoredAny>,
+}
+
+/// Run the session's own `agent_list` tool for the client.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DirectAgentListRequest {
+    session_id: String,
+    #[serde(default)]
+    active_only: Option<bool>,
+    #[serde(rename = "_meta", default)]
+    _meta: Option<serde::de::IgnoredAny>,
+}
+
+/// The tool's own result, verbatim. `isError` reports a failed call; it does
+/// not prove that nothing was sent.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectA2aResponse {
+    content: String,
+    is_error: bool,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    meta: Option<serde_json::Value>,
+}
 
 /// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
 /// echoes in the `initialize` result) to opt into sub-agent events.
@@ -514,8 +569,23 @@ fn available_command_from_spec(spec: &AcpSlashCommandSpec) -> AvailableCommand {
     )
 }
 
-/// One turn driver for controller requests and A2A messages. All notifications,
-/// permission requests, questions and cancellation use the bound ACP connection.
+/// Extension routing stays on the existing dispatch lane, outside session execution locks.
+async fn drive_input(
+    req: crate::input_control::InputRequest,
+    registry: SharedSessionRegistry,
+    connection: ConnectionTo<Client>,
+) -> Result<serde_json::Value, AcpError> {
+    let driver = registry
+        .driver(&req.session_id)
+        .ok_or_else(|| AcpError::invalid_params("Unknown session"))?;
+    let action = req.action.into_engine()?;
+    driver
+        .input(action, connection)
+        .await
+        .map_err(AcpError::internal)
+}
+
+/// Ordinary controller turns use the same session-bound notification and control routes.
 async fn drive_prompt(
     req: PromptRequest,
     registry: SharedSessionRegistry,
@@ -523,10 +593,7 @@ async fn drive_prompt(
     cx: ConnectionTo<Client>,
 ) -> Result<(PromptResponse, String), AcpError> {
     let (prompt_text, images) = extract_content_from_blocks(&req.prompt)?;
-    let trace_id = req
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("traceId").and_then(|v| v.as_str().map(String::from)));
+    let trace_id = prompt_trace_id(&req);
     let sid = req.session_id.to_string();
     let admitted_engine = registry
         .engine(&sid)
@@ -538,10 +605,19 @@ async fn drive_prompt(
         ));
     }
     let cx_inner = cx.clone();
-    let cx_perm = cx;
+    let _ = cx;
     // Same-session ordering: wait (asynchronously) for this
     // session's lane; other sessions are unaffected.
     let _lane = registry.enter_lane(&sid).await;
+    let _lifecycle = registry
+        .driver(&sid)
+        .ok_or_else(|| AcpError::invalid_params("Unknown session"))?
+        .lifecycle(
+            !prompt_text.starts_with('/')
+                && commands::bash_mode::parse_bang_prompt(&prompt_text).is_none(),
+        )
+        .await
+        .map_err(AcpError::invalid_params)?;
     let Some(engine) = registry.engine(&sid) else {
         return Err(AcpError::invalid_params(format!(
             "unknown sessionId: {sid}"
@@ -553,24 +629,13 @@ async fn drive_prompt(
             "Session control changed while the prompt was queued",
         ));
     }
-    registry.report_state(engine_core::EngineState::Running, None);
-    let _turn_state = HostedTurnState(Arc::clone(&registry));
     let session_cwd = registry.cwd(&sid);
     let cwd_lease = registry.cwd_lease();
     let subagents = registry.subagents(&sid);
     if let Some(subagents) = &subagents {
         subagents.set_connection(cx_inner.clone());
     }
-    let expected = req
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("sudocode"))
-        .and_then(|m| m.get("expectedContext"))
-        .map(|value| {
-            serde_json::from_value::<engine_core::engine_events::ContextRef>(value.clone())
-        })
-        .transpose()
-        .map_err(|e| AcpError::invalid_params(e.to_string()))?;
+    let expected = expected_prompt_context(&req)?;
     let is_slash_command = prompt_text.starts_with('/');
     let holds_cwd_lease =
         is_slash_command && session_ops::slash_command_holds_cwd_lease(&prompt_text);
@@ -585,9 +650,6 @@ async fn drive_prompt(
         .driver(&sid)
         .ok_or_else(|| AcpError::internal("missing engine session driver"))?;
     let (_listener, mut events) = driver.listen(cx_inner.clone());
-    let mut assistant_text = String::new();
-    let mut committed_context = None;
-    let result: Result<(StopReason, Option<PromptUsage>), AcpError>;
     let _cwd_guard = if holds_cwd_lease {
         let cwd = session_cwd.clone().unwrap_or_else(|| PathBuf::from("."));
         Some(
@@ -599,173 +661,25 @@ async fn drive_prompt(
     } else {
         None
     };
-    {
-        let mut blocks: Vec<_> = images
-            .into_iter()
-            .map(
-                |(data, mime_type)| engine_core::engine_events::ContentBlock::Image {
-                    data,
-                    mime_type,
-                },
-            )
-            .collect();
-        let prompt_text_for_management = prompt_text.clone();
-        blocks.push(engine_core::engine_events::ContentBlock::Text { text: prompt_text });
+    let progress = {
         let context = Some(engine_core::PromptContext {
             trace_id: trace_id.clone().unwrap_or_default(),
             expected_context: expected,
             image_policy: engine_core::engine_events::ImageInputPolicy::DescribeUnsupported,
+            input_views: Vec::new(),
         });
-        let command = if is_management {
-            engine_core::EngineCommand::Management {
-                line: prompt_text_for_management,
-                context,
-                build: engine_core::engine_events::ManagementContext {
-                    agent_version: config.agent_version.clone(),
-                    git_sha: config.git_sha.clone(),
-                    build_target: config.build_target.clone(),
-                },
-            }
-        } else {
-            engine_core::EngineCommand::Prompt { blocks, context }
-        };
+        let command = prompt_engine_command(prompt_text, images, context, is_management, &config);
         driver.send(command).map_err(AcpError::internal)?;
-        let mut replies =
-            futures::stream::FuturesUnordered::<futures::future::BoxFuture<'_, ()>>::new();
-        result = loop {
-            tokio::select! {
-                biased;
-                _ = replies.next(), if !replies.is_empty() => {}
-                event = events.recv() => match event {
-                    Some(EngineEvent::TextDelta { text }) => assistant_text.push_str(&text),
-                    Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
-                    Some(EngineEvent::State(state)) => registry.report_state(state, None),
-                    Some(EngineEvent::PermissionRequest { id, request }) => {
-                        let request = build_acp_permission_request(sid.clone(), &request);
-                        let driver = Arc::clone(&driver);
-                        let abort = registry.abort_signal(&sid).expect("registered session abort signal");
-                        let cx_reply = cx_perm.clone();
-                        replies.push(async move {
-                            let answer = tokio::select! {
-                                biased;
-                                () = abort.cancelled() => None,
-                                answer = cx_reply.send_request(request).block_task() => Some(answer),
-                            };
-                            let decision = match answer {
-                                Some(Ok(response)) => map_permission_response(response),
-                                _ => PermissionPromptDecision::Deny { reason: "ACP permission request cancelled or failed".into() },
-                            };
-                            let _ = driver.send(engine_core::EngineCommand::PermissionAnswer { id, decision });
-                        }.boxed());
-                    }
-                    Some(EngineEvent::QuestionRequest { id, request: question_req }) => {
-                    let payload = AcpAskUserQuestionRequestPayload {
-                        session_id: sid.clone(),
-                        tool_call_id: format!("ask-{}", uuid_v4()),
-                        title: question_req.title.clone(),
-                        description: question_req.description.as_ref().map(|text| text.as_str().to_owned()),
-                                            description_format: question_req.description.as_ref().map(|text| text.format_name().to_owned()),
-                        questions: question_req
-                            .fields
-                            .iter()
-                            .map(|field| AcpQuestionFieldPayload {
-                                id: field.id.clone(),
-                                prompt: field.prompt.clone(),
-                                kind: field.kind.as_str().to_string(),
-                                required: field.required,
-                                allow_custom_input: field.allow_custom_input,
-                                custom_input_hint: field.custom_input_hint.clone(),
-                                options: field
-                                    .options
-                                    .iter()
-                                    .map(|option| AcpQuestionOptionPayload {
-                                        label: option.label.clone(),
-                                        value: option.value.clone(),
-                                        description: option.description.clone(),
-                                        recommended: option.recommended,
-                                    })
-                                    .collect(),
-                            })
-                            .collect(),
-                    };
-                    let cx_reply = cx_perm.clone();
-                    let abort = registry.abort_signal(&sid).expect("registered session abort signal");
-                    let driver = Arc::clone(&driver);
-                    replies.push(async move {
-                        let outcome = match serde_json::value::to_raw_value(&payload) {
-                            Ok(raw) => {
-                                let answer = tokio::select! {
-                                    biased;
-                                    () = abort.cancelled() => None,
-                                    answer = cx_reply.send_request(ClientRequest::ExtMethodRequest(
-                                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
-                                    )).block_task() => Some(answer),
-                                };
-                                match answer {
-                                    None => Err("turn cancelled".into()),
-                                    Some(Ok(resp)) => {
-                                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
-                                            .map_err(|error| format!("deserialize: {error}"))
-                                            .map(|payload| {
-                                                payload
-                                                    .answers
-                                                    .into_iter()
-                                                    .map(|answer| QuestionPromptAnswer {
-                                                        id: answer.id,
-                                                        value: answer.value,
-                                                        label: answer.label,
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                            })
-                                    }
-                                    Some(Err(error)) => Err(error.to_string()),
-                                }
-                            }
-                            Err(error) => Err(error.to_string()),
-                        };
-                        let _ = driver.send(engine_core::EngineCommand::QuestionAnswer { id, answers: outcome });
-                    }.boxed());
-                    }
-                    Some(EngineEvent::TurnComplete(complete)) => {
-                        let auto_compacted = complete.auto_compaction.as_ref().is_some_and(|event| event.removed_message_count > 0 || event.report.as_ref().is_none_or(|report| report.outcome == runtime::CompactionOutcome::TargetMet));
-                        if !is_management { session_ops::record_turn_usage(&engine, &complete); }
-                        let usage = if is_management { None } else { session_ops::build_prompt_usage(&engine, &complete, auto_compacted) };
-                        break Ok((if complete.cancelled { StopReason::Cancelled } else { StopReason::EndTurn }, usage));
-                    }
-                    Some(EngineEvent::PromptRejected { message }) => break Err(AcpError::invalid_params(message)),
-                    Some(EngineEvent::TurnFailed { message, context_window }) => break Err(AcpError::Turn { message, context_window }),
-                    Some(EngineEvent::Error { message }) => break Err(AcpError::internal(message)),
-                    Some(_) => {}
-                    None => break Err(AcpError::internal("engine session closed before turn completion")),
-                }
-            }
-        };
-        drop(replies);
-    }
-
-    let context = committed_context;
+        collect_prompt_events(&mut events, &engine, is_management).await
+    };
+    let PromptEventResult {
+        result,
+        assistant_text,
+        context,
+    } = progress;
     match result {
         Ok((stop_reason, prompt_usage)) => {
-            let mut response = PromptResponse::new(stop_reason);
-            if let Some(u) = prompt_usage {
-                let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
-                let mut meta = Map::new();
-                meta.insert("sudocode".to_string(), json!(sudocode_meta));
-                response = response
-                    .usage(
-                        Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
-                            .cached_read_tokens(u.cache_read_tokens)
-                            .cached_write_tokens(u.cache_write_tokens),
-                    )
-                    .meta(Some(meta));
-            }
-            if let Some(context) = context {
-                let meta = response.meta.get_or_insert_with(Map::new);
-                let ns = meta
-                    .entry("sudocode".to_string())
-                    .or_insert_with(|| json!({}));
-                ns["contextRef"] = json!(context);
-            }
+            let response = complete_prompt_response(stop_reason, prompt_usage, context);
             Ok((response, assistant_text))
         }
         Err(error) => {
@@ -785,18 +699,136 @@ async fn drive_prompt(
     }
 }
 
-/// Normalize peer text into the same driver used by `session/prompt`.
-/// The durable conversation cursor advances after the turn returns. The bound
+fn prompt_trace_id(req: &PromptRequest) -> Option<String> {
+    req.meta
+        .as_ref()
+        .and_then(|m| m.get("traceId").and_then(|v| v.as_str().map(String::from)))
+}
+
+fn expected_prompt_context(
+    req: &PromptRequest,
+) -> Result<Option<engine_core::engine_events::ContextRef>, AcpError> {
+    req.meta
+        .as_ref()
+        .and_then(|m| m.get("sudocode"))
+        .and_then(|m| m.get("expectedContext"))
+        .map(|value| {
+            serde_json::from_value::<engine_core::engine_events::ContextRef>(value.clone())
+        })
+        .transpose()
+        .map_err(|e| AcpError::invalid_params(e.to_string()))
+}
+
+fn prompt_engine_command(
+    prompt_text: String,
+    images: Vec<(String, String)>,
+    context: Option<engine_core::PromptContext>,
+    is_management: bool,
+    config: &SdkAcpConfig,
+) -> engine_core::EngineCommand {
+    let mut blocks: Vec<_> = images
+        .into_iter()
+        .map(
+            |(data, mime_type)| engine_core::engine_events::ContentBlock::Image { data, mime_type },
+        )
+        .collect();
+    let prompt_text_for_management = prompt_text.clone();
+    blocks.push(engine_core::engine_events::ContentBlock::Text { text: prompt_text });
+    if is_management {
+        engine_core::EngineCommand::Management {
+            line: prompt_text_for_management,
+            context,
+            build: engine_core::engine_events::ManagementContext {
+                agent_version: config.agent_version.clone(),
+                git_sha: config.git_sha.clone(),
+                build_target: config.build_target.clone(),
+            },
+        }
+    } else {
+        engine_core::EngineCommand::Prompt { blocks, context }
+    }
+}
+
+struct PromptEventResult {
+    result: Result<(StopReason, Option<PromptUsage>), AcpError>,
+    assistant_text: String,
+    context: Option<engine_core::engine_events::ContextRef>,
+}
+
+async fn collect_prompt_events(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
+    engine: &SessionEngine,
+    is_management: bool,
+) -> PromptEventResult {
+    let mut assistant_text = String::new();
+    let mut committed_context = None;
+    let result = loop {
+        tokio::select! {
+            biased;
+            event = events.recv() => match event {
+                Some(EngineEvent::TextDelta { text }) => assistant_text.push_str(&text),
+                Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
+                Some(EngineEvent::TurnComplete(complete)) => {
+                    let auto_compacted = complete.auto_compaction.as_ref().is_some_and(|event| event.removed_message_count > 0 || event.report.as_ref().is_none_or(|report| report.outcome == runtime::CompactionOutcome::TargetMet));
+                    if !is_management { session_ops::record_turn_usage(engine, &complete); }
+                    let usage = if is_management { None } else { session_ops::build_prompt_usage(engine, &complete, auto_compacted) };
+                    break Ok((if complete.cancelled { StopReason::Cancelled } else { StopReason::EndTurn }, usage));
+                }
+                Some(EngineEvent::PromptRejected { message }) => break Err(AcpError::invalid_params(message)),
+                Some(EngineEvent::TurnFailed { message, context_window }) => break Err(AcpError::Turn { message, context_window }),
+                Some(EngineEvent::Error { message }) => break Err(AcpError::internal(message)),
+                Some(_) => {}
+                None => break Err(AcpError::internal("engine session closed before turn completion")),
+            }
+        }
+    };
+    PromptEventResult {
+        result,
+        assistant_text,
+        context: committed_context,
+    }
+}
+
+fn complete_prompt_response(
+    stop_reason: StopReason,
+    prompt_usage: Option<PromptUsage>,
+    context: Option<engine_core::engine_events::ContextRef>,
+) -> PromptResponse {
+    let mut response = PromptResponse::new(stop_reason);
+    if let Some(u) = prompt_usage {
+        let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
+        let mut meta = Map::new();
+        meta.insert("sudocode".to_string(), json!(sudocode_meta));
+        response = response
+            .usage(
+                Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
+                    .cached_read_tokens(u.cache_read_tokens)
+                    .cached_write_tokens(u.cache_write_tokens),
+            )
+            .meta(Some(meta));
+    }
+    if let Some(context) = context {
+        let meta = response.meta.get_or_insert_with(Map::new);
+        let ns = meta
+            .entry("sudocode".to_string())
+            .or_insert_with(|| json!({}));
+        ns["contextRef"] = json!(context);
+    }
+    response
+}
+
+/// Deliver peer input through the same engine queue as human input.
+/// The mailbox cursor advances at the durable input-commit boundary. The bound
 /// controller receives streaming output, approval requests and questions.
 ///
 /// One receiver per agent this process serves, not one per process: sessions
 /// in different workspaces are different agents, and each hears only its own
 /// peers. A message goes to a session of the agent it was sent to, never to a
 /// session that merely happens to share the process.
-fn ensure_a2a_receiver(
+async fn ensure_a2a_receiver(
     registry: &SharedSessionRegistry,
     cx: &ConnectionTo<Client>,
-    config: &SdkAcpConfig,
+    _config: &SdkAcpConfig,
     session_id: &str,
 ) {
     let Some(agent) = registry.agent_of(session_id) else {
@@ -806,139 +838,242 @@ fn ensure_a2a_receiver(
     // the peer namespace the session build attached this agent to.
     let mailbox = match &registry.hosted_factory {
         Some(factory) => factory.mailbox(),
-        None => engine_host::peer::attach(&agent)
-            .ok()
-            .map(|peer| peer.mailbox()),
+        None => Some(engine_host::peer::attach(&agent).mailbox()),
     };
     let Some(mailbox) = mailbox else {
         return;
     };
-    let stop = HookAbortSignal::new();
-    {
-        let mut receivers = registry.lock_peer_receivers();
-        if receivers
-            .get(&agent)
-            .is_some_and(|running| !running.is_aborted())
-        {
-            return;
-        }
-        receivers.insert(agent.clone(), stop.clone());
-    }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
-        runtime::agent_mailbox::MailboxEnvelope,
-        std::sync::mpsc::SyncSender<bool>,
-    )>();
-    let callback_stop = stop.clone();
-    let receiver = runtime::mailbox::spawn_inbox_poller(
-        Arc::clone(&mailbox),
-        200,
-        "acp-peer",
-        stop.clone(),
-        move |message| {
-            if message.body.trim().is_empty() {
-                return true;
+    let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
+    else {
+        return;
+    };
+    tokio::spawn(run_peer_receiver(
+        receiver,
+        rx,
+        Arc::clone(registry),
+        cx.clone(),
+        agent,
+        session_id.to_owned(),
+    ));
+}
+
+type PeerDelivery = (
+    runtime::agent_mailbox::MailboxEnvelope,
+    std::sync::mpsc::SyncSender<bool>,
+);
+type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
+
+async fn admit_peer_receiver(
+    registry: &SharedSessionRegistry,
+    agent: &str,
+    mailbox: &Arc<runtime::mailbox::Mailbox>,
+    session_id: &str,
+) -> Option<(Arc<PeerReceiver>, PeerInbox)> {
+    loop {
+        let admission = {
+            // Closing the last session and admitting its replacement use this
+            // same lock order. A stopped receiver stays registered until its
+            // real worker has dropped its locks and finished its remote
+            // unlock attempts. A failed unlock still relies on backend TTL.
+            let sessions = registry.lock_sessions();
+            if !sessions.contains_key(session_id) {
+                return None;
             }
-            let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-            if tx.send((message.clone(), ack_tx)).is_err() {
-                return false;
-            }
-            while !callback_stop.is_aborted() {
-                match ack_rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                    Ok(handled) => return handled,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            let mut receivers = registry.lock_peer_receivers();
+            if let Some(previous) = receivers.get(agent) {
+                if !previous.stop.is_aborted() {
+                    return None;
                 }
+                Err(Arc::clone(previous))
+            } else {
+                let stop = HookAbortSignal::new();
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
+                let callback_stop = stop.clone();
+                let worker = runtime::mailbox::spawn_inbox_poller(
+                    Arc::clone(mailbox),
+                    200,
+                    "acp-peer",
+                    stop.clone(),
+                    move |message| deliver_peer_envelope(message, &tx, &callback_stop),
+                );
+                let receiver = Arc::new(PeerReceiver {
+                    stop,
+                    worker: Mutex::new(PeerReceiverWorker::Running(worker)),
+                });
+                receivers.insert(agent.to_owned(), Arc::clone(&receiver));
+                Ok((receiver, rx))
             }
-            false
-        },
-    );
-    let registry = Arc::clone(registry);
-    let cx = cx.clone();
-    let config = config.clone();
-    let mut bound = session_id.to_string();
-    tokio::spawn(async move {
-        loop {
-            let inbound = tokio::select! {
-                () = stop.cancelled() => break,
-                inbound = rx.recv() => inbound,
-            };
-            let Some((message, ack)) = inbound else {
-                break;
-            };
-            // The session this agent's messages go to: the one bound so far
-            // while it lives, else another session of the same agent.
-            let Some(session_id) = registry.session_of_agent(&agent, &bound) else {
-                let _ = ack.send(false);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                continue;
-            };
-            bound.clone_from(&session_id);
-            if registry
-                .engine(&session_id)
-                .is_some_and(|engine| engine.tool_control().1)
-            {
-                let _ = ack.send(false);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                continue;
-            }
-            let body = runtime::agent_mailbox::neutralize_untrusted_markup(&message.body);
-            let text = format!("[message from {}]\n\n{body}", message.from);
-            let mut meta = Map::new();
-            meta.insert(
-                "sudocode".into(),
-                json!({"a2a":{"from":message.from,"kind":message.kind}}),
-            );
-            let notification = SessionNotification::new(
-                session_id.clone(),
-                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(&text),
-                ))),
-            )
-            .meta(meta);
-            if cx.send_notification(notification).is_err() {
-                break;
-            }
-            let sends_before = mailbox.sends_so_far();
-            let request = PromptRequest::new(
-                session_id.clone(),
-                vec![ContentBlock::Text(TextContent::new(text))],
-            );
-            let result =
-                drive_prompt(request, Arc::clone(&registry), config.clone(), cx.clone()).await;
-            if let Ok((response, text)) = &result {
-                if response.stop_reason != StopReason::Cancelled {
-                    if let Some(body) = runtime::spawn_task::auto_reply_body(
-                        &message.kind,
-                        text,
-                        sends_before,
-                        mailbox.sends_so_far(),
-                    ) {
-                        let reply = runtime::agent_mailbox::MailboxEnvelope {
-                            from: mailbox.self_id().to_string(),
-                            to: message.from.clone(),
-                            body,
-                            summary: None,
-                            timestamp: 0,
-                            color: None,
-                            kind: runtime::agent_mailbox::kinds::AUTO_REPLY.to_string(),
-                            request_id: message.request_id.clone(),
-                        };
-                        let sender = Arc::clone(&mailbox);
-                        if let Ok(Err(error)) =
-                            tokio::task::spawn_blocking(move || sender.send(reply)).await
-                        {
-                            eprintln!("[acp-peer] deliver reply: {error}");
-                        }
+        };
+        match admission {
+            Ok(started) => return Some(started),
+            Err(previous) => {
+                let joining = Arc::clone(&previous);
+                match tokio::task::spawn_blocking(move || joining.stop_and_join()).await {
+                    Ok(Ok(())) => {}
+                    error => {
+                        eprintln!("[acp-peer] previous receiver teardown failed: {error:?}");
+                        return None;
                     }
                 }
+                let mut receivers = registry.lock_peer_receivers();
+                if receivers
+                    .get(agent)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &previous))
+                {
+                    receivers.remove(agent);
+                }
             }
-            // Only a completed, persisted turn (including explicit cancellation)
-            // acknowledges delivery. Provider errors and shutdown stay unread.
-            let _ = ack.send(result.is_ok() && !stop.is_aborted());
         }
-        stop.abort();
-        let _ = tokio::task::spawn_blocking(move || receiver.join()).await;
-    });
+    }
+}
+
+fn deliver_peer_envelope(
+    message: &runtime::agent_mailbox::MailboxEnvelope,
+    tx: &tokio::sync::mpsc::UnboundedSender<PeerDelivery>,
+    callback_stop: &HookAbortSignal,
+) -> bool {
+    if message.body.trim().is_empty() {
+        return true;
+    }
+    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+    if tx.send((message.clone(), ack_tx)).is_err() {
+        return false;
+    }
+    while !callback_stop.is_aborted() {
+        match ack_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(handled) => return handled,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+    false
+}
+
+async fn run_peer_receiver(
+    receiver: Arc<PeerReceiver>,
+    mut rx: PeerInbox,
+    registry: SharedSessionRegistry,
+    cx: ConnectionTo<Client>,
+    agent: String,
+    mut bound: String,
+) {
+    let stop = receiver.stop.clone();
+    loop {
+        // A retried mailbox cursor must refer to the same still-pending input.
+
+        let inbound = tokio::select! {
+            () = stop.cancelled() => break,
+            inbound = rx.recv() => inbound,
+        };
+        let Some((message, ack)) = inbound else {
+            break;
+        };
+        // The session this agent's messages go to: the one bound so far
+        // while it lives, else another session of the same agent.
+        let Some(session_id) = registry.session_of_agent(&agent, &bound) else {
+            let _ = ack.send(false);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        };
+        bound.clone_from(&session_id);
+        if registry
+            .engine(&session_id)
+            .is_some_and(|engine| engine.tool_control().1)
+        {
+            let _ = ack.send(false);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
+        let Some(driver) = registry.driver(&session_id) else {
+            let _ = ack.send(false);
+            continue;
+        };
+        let text = message.to_prompt();
+        let mut states = driver.input_changes();
+        let action = peer_input_action(&message, &text);
+        let receipt = tokio::select! {
+            () = stop.cancelled() => { let _ = ack.send(false); break; },
+            receipt = driver.input(action, cx.clone()) => receipt,
+        };
+        let Ok(receipt) = receipt else {
+            let _ = ack.send(false);
+            continue;
+        };
+        let Some(id) = receipt["id"].as_u64() else {
+            let _ = ack.send(false);
+            continue;
+        };
+        let committed = wait_peer_input_commit(&mut states, id, &stop).await;
+        let _ = ack.send(committed);
+        if !committed {
+            break;
+        }
+        let mut a2a = json!({"from":message.from,"kind":message.kind});
+        if let Some(summary) = &message.summary {
+            a2a["summary"] = json!(summary);
+        }
+        let notification = SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(&text),
+            ))),
+        )
+        .meta(Map::from_iter([(
+            String::from("sudocode"),
+            json!({"a2a":a2a}),
+        )]));
+        let _ = cx.send_notification(notification);
+    }
+    stop.abort();
+    match tokio::task::spawn_blocking(move || receiver.stop_and_join()).await {
+        Ok(Ok(())) => {}
+        error => eprintln!("[acp-peer] receiver teardown failed: {error:?}"),
+    }
+}
+
+async fn wait_peer_input_commit(
+    states: &mut tokio::sync::watch::Receiver<Option<engine_core::engine_events::InputState>>,
+    id: u64,
+    stop: &HookAbortSignal,
+) -> bool {
+    loop {
+        let consumed = states
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| !state.pending.iter().any(|input| input.id == id));
+        if consumed {
+            return true;
+        }
+        tokio::select! {
+            () = stop.cancelled() => return false,
+            changed = states.changed() => { if changed.is_err() { return false; } },
+        }
+    }
+}
+
+fn peer_input_action(
+    message: &runtime::agent_mailbox::MailboxEnvelope,
+    text: &str,
+) -> engine_core::engine_events::InputAction {
+    use std::hash::{Hash, Hasher};
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&message)
+        .unwrap_or_default()
+        .hash(&mut digest);
+    let client_id = format!("peer:{:016x}", digest.finish());
+    engine_core::engine_events::InputAction::Submit {
+        client_id,
+        draft: None,
+        input: engine_core::engine_events::TurnInput {
+            id: 0,
+            text: text.to_owned(),
+            display: text.to_owned(),
+            source: engine_core::engine_events::InputSource::Peer,
+            attachments: Vec::new(),
+        },
+        delivery: message.delivery,
+        context: None,
+    }
 }
 
 /// The `session/update` notification advertising `specs` to the client
@@ -981,6 +1116,15 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptOverride".to_string(), json!(true));
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
+    // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
+    sudocode_ns.insert(
+        "directA2a".to_string(),
+        json!({
+            "version": 1, "errorOutcomes": 1, "hostAudit": 1,
+        }),
+    );
     // `session/new` accepts `_meta.sudocode.forkFrom` (see
     // `fork_source_from_meta`): a client that forks a conversation into a
     // new directory gates on this instead of probing.
@@ -1397,12 +1541,43 @@ pub fn new_session_registry() -> SharedSessionRegistry {
 #[derive(Default)]
 pub struct SessionRegistry {
     sessions: Mutex<HashMap<String, SessionEntry>>,
-    completion_routes: Mutex<HashMap<String, std::sync::Weak<Delivery>>>,
+    completion_routes: Mutex<HashMap<String, CompletionRoute>>,
     cwd_lease: Arc<WorkspaceCwdLease>,
     hosted_factory: Option<Arc<dyn HostedSessionFactory>>,
-    /// The peer receiver running for each agent this process serves, by the
-    /// signal that stops it.
-    peer_receivers: Mutex<HashMap<String, HookAbortSignal>>,
+    /// Own the worker until it has stopped; an abort signal alone does not
+    /// release its remote receiver seat.
+    peer_receivers: Mutex<HashMap<String, Arc<PeerReceiver>>>,
+}
+
+struct PeerReceiver {
+    stop: HookAbortSignal,
+    worker: Mutex<PeerReceiverWorker>,
+}
+
+enum PeerReceiverWorker {
+    Running(std::thread::JoinHandle<()>),
+    Joined(Result<(), String>),
+}
+
+impl PeerReceiver {
+    /// Called on a blocking worker, never on the async executor. Keep the
+    /// mutex until join completes so concurrent close/replacement callers
+    /// cannot mistake a taken handle for a completed retirement.
+    fn stop_and_join(&self) -> Result<(), String> {
+        self.stop.abort();
+        let mut worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = match std::mem::replace(&mut *worker, PeerReceiverWorker::Joined(Ok(()))) {
+            PeerReceiverWorker::Running(handle) => handle
+                .join()
+                .map_err(|_| "peer receiver worker panicked".to_string()),
+            PeerReceiverWorker::Joined(result) => result,
+        };
+        *worker = PeerReceiverWorker::Joined(result.clone());
+        result
+    }
 }
 
 /// The host chooses where a session lives; the ACP handlers and turn driver are
@@ -1412,7 +1587,7 @@ pub trait HostedSessionFactory: Send + Sync {
         None
     }
     fn close(&self) {}
-    fn state_changed(&self, _state: engine_core::EngineState, _reason: Option<String>) {}
+    fn state_changed(&self, _state: engine_core::EngineState) {}
     fn open(
         &self,
         requested_id: Option<&str>,
@@ -1442,18 +1617,76 @@ struct SessionEntry {
     subagents: Option<Arc<SessionSubagents>>,
 }
 
-struct HostedTurnState(SharedSessionRegistry);
-impl Drop for HostedTurnState {
-    fn drop(&mut self) {
-        self.0.report_state(engine_core::EngineState::Idle, None);
-    }
-}
-
 /// Async guard for a session lane; drop it to let the next request on the
 /// same session proceed.
 pub type SessionLaneGuard = tokio::sync::OwnedMutexGuard<()>;
 
+struct CompletionRoute {
+    driver: std::sync::Weak<Delivery>,
+    retirement: engine_core::CompletionRetirement,
+}
+
+struct CompletionRouteSlot<'a> {
+    routes: std::sync::MutexGuard<'a, HashMap<String, CompletionRoute>>,
+    driver: Option<Arc<Delivery>>,
+}
+
+impl CompletionRoute {
+    fn new(driver: &Arc<Delivery>) -> Self {
+        Self {
+            driver: Arc::downgrade(driver),
+            retirement: driver.completion_retirement(),
+        }
+    }
+
+    fn retained(&self) -> bool {
+        self.driver.strong_count() > 0 || !self.retirement.wait(std::time::Duration::ZERO)
+    }
+}
+
+/// Resources retained until close telemetry and receiver shutdown finish.
+type ClosedSession = (
+    Arc<SessionEngine>,
+    std::time::Instant,
+    Arc<crate::session_driver::SessionDriver>,
+    Option<Arc<PeerReceiver>>,
+);
+
 impl SessionRegistry {
+    fn completion_route_slot(&self, session_id: &str) -> Result<CompletionRouteSlot<'_>, AcpError> {
+        loop {
+            let mut routes = self
+                .completion_routes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            routes.retain(|_, route| route.retained());
+            let Some(route) = routes.get(session_id) else {
+                return Ok(CompletionRouteSlot {
+                    routes,
+                    driver: None,
+                });
+            };
+            if let Some(driver) = route.driver.upgrade() {
+                return Ok(CompletionRouteSlot {
+                    routes,
+                    driver: Some(driver),
+                });
+            }
+            // Weak::upgrade can fail before the detached engine drops its
+            // journal/native writer. Await that exact lifetime outside the
+            // registry lock, so other sessions can still be admitted.
+            let retirement = route.retirement.clone();
+            drop(routes);
+            if !retirement.wait(std::time::Duration::from_secs(30)) {
+                return Err(AcpError::internal(
+                    "completion engine teardown is not finished",
+                ));
+            }
+            // Another caller may have installed the successor while we waited.
+            // Recheck under the same lock rather than replace its ownership.
+        }
+    }
+
     pub fn with_hosted_factory(factory: Arc<dyn HostedSessionFactory>) -> Self {
         Self {
             hosted_factory: Some(factory),
@@ -1467,22 +1700,16 @@ impl SessionRegistry {
         cwd: &std::path::Path,
         create: bool,
     ) -> Result<Arc<Delivery>, AcpError> {
-        let mut routes = self
-            .completion_routes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        routes.retain(|_, route| route.strong_count() > 0);
-        if let Some(route) = routes
-            .get(&session.session_id)
-            .and_then(std::sync::Weak::upgrade)
-        {
+        let CompletionRouteSlot { mut routes, driver } =
+            self.completion_route_slot(&session.session_id)?;
+        if let Some(route) = driver {
             route
                 .attach_session(session, cwd)
                 .map_err(AcpError::internal)?;
             return Ok(route);
         }
         let route = Delivery::open(session, cwd, create).map_err(AcpError::internal)?;
-        routes.insert(session.session_id.clone(), Arc::downgrade(&route));
+        routes.insert(session.session_id.clone(), CompletionRoute::new(&route));
         Ok(route)
     }
 
@@ -1491,13 +1718,11 @@ impl SessionRegistry {
         session: &runtime::Session,
         cwd: &std::path::Path,
     ) -> Result<(), AcpError> {
-        if let Some(route) = self
-            .completion_routes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&session.session_id)
-            .and_then(std::sync::Weak::upgrade)
-        {
+        let CompletionRouteSlot {
+            routes: _routes,
+            driver,
+        } = self.completion_route_slot(&session.session_id)?;
+        if let Some(route) = driver {
             route
                 .attach_session(session, cwd)
                 .map_err(AcpError::internal)?;
@@ -1510,12 +1735,8 @@ impl SessionRegistry {
         session_id: &str,
         cwd: &std::path::Path,
     ) -> Result<Arc<Delivery>, AcpError> {
-        let mut routes = self
-            .completion_routes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        routes.retain(|_, route| route.strong_count() > 0);
-        if let Some(route) = routes.get(session_id).and_then(std::sync::Weak::upgrade) {
+        let CompletionRouteSlot { mut routes, driver } = self.completion_route_slot(session_id)?;
+        if let Some(route) = driver {
             route
                 .control(CompletionAction::CheckBinding {
                     session_id: session_id.into(),
@@ -1525,7 +1746,7 @@ impl SessionRegistry {
             return Ok(route);
         }
         let route = Delivery::stored(session_id, cwd).map_err(AcpError::invalid_params)?;
-        routes.insert(session_id.into(), Arc::downgrade(&route));
+        routes.insert(session_id.into(), CompletionRoute::new(&route));
         Ok(route)
     }
 
@@ -1592,8 +1813,19 @@ impl SessionRegistry {
             let _ = entry.driver.send(engine_core::EngineCommand::Cancel);
             entry.abort.abort();
             drop(entry.engine);
+            drop(entry.subagents);
             if !entry.driver.shutdown() {
                 eprintln!("ACP session teardown timed out");
+            }
+        }
+        let receivers: Vec<_> = self
+            .lock_peer_receivers()
+            .drain()
+            .map(|(_, receiver)| receiver)
+            .collect();
+        for receiver in receivers {
+            if let Err(error) = receiver.stop_and_join() {
+                eprintln!("ACP peer receiver teardown failed: {error}");
             }
         }
         if let Some(factory) = &self.hosted_factory {
@@ -1601,42 +1833,37 @@ impl SessionRegistry {
         }
     }
 
-    fn report_state(&self, state: engine_core::EngineState, reason: Option<String>) {
-        if let Some(factory) = &self.hosted_factory {
-            factory.state_changed(state, reason);
-        }
-    }
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
         self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn lock_peer_receivers(&self) -> std::sync::MutexGuard<'_, HashMap<String, HookAbortSignal>> {
+    fn lock_peer_receivers(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<PeerReceiver>>> {
         self.peer_receivers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn stop_peer_receivers(&self) {
-        for (_, stop) in self.lock_peer_receivers().drain() {
-            stop.abort();
+        for receiver in self.lock_peer_receivers().values() {
+            receiver.stop.abort();
         }
     }
 
     /// Stop `agent`'s receiver once no session of that agent is left, so its
     /// receiver seat passes to another instance instead of being held by a
     /// process that has nowhere to deliver.
-    fn stop_unused_peer_receiver(&self, agent: &str) {
-        let in_use = self
-            .lock_sessions()
-            .values()
-            .any(|entry| entry.agent == agent);
+    fn stop_unused_peer_receiver(&self, agent: &str) -> Option<Arc<PeerReceiver>> {
+        let sessions = self.lock_sessions();
+        let in_use = sessions.values().any(|entry| entry.agent == agent);
         if !in_use {
-            if let Some(stop) = self.lock_peer_receivers().remove(agent) {
-                stop.abort();
+            if let Some(receiver) = self.lock_peer_receivers().get(agent) {
+                receiver.stop.abort();
+                return Some(Arc::clone(receiver));
             }
         }
+        None
     }
 
     /// The agent `session_id` answers as.
@@ -1703,6 +1930,7 @@ impl SessionRegistry {
             existing,
         )
         .map_err(AcpError::internal)?;
+        driver.bind_hosted_factory(self.hosted_factory.as_ref());
         self.lock_sessions().insert(
             session_id,
             SessionEntry {
@@ -1758,17 +1986,10 @@ impl SessionRegistry {
     /// Remove a session after `session/close`, returning its engine + the time
     /// it was registered so the caller can record the close telemetry before the
     /// last `Arc` drops.
-    fn take(
-        &self,
-        session_id: &str,
-    ) -> Option<(
-        Arc<SessionEngine>,
-        std::time::Instant,
-        Arc<crate::session_driver::SessionDriver>,
-    )> {
+    fn take(&self, session_id: &str) -> Option<ClosedSession> {
         let taken = self.lock_sessions().remove(session_id)?;
-        self.stop_unused_peer_receiver(&taken.agent);
-        Some((taken.engine, taken.started_at, taken.driver))
+        let receiver = self.stop_unused_peer_receiver(&taken.agent);
+        Some((taken.engine, taken.started_at, taken.driver, receiver))
     }
 
     /// All live sessions as `(id, cwd)` — the `session/list` response.
@@ -1805,6 +2026,17 @@ impl SessionRegistry {
             .get(session_id)
             .map(|e| Arc::clone(&e.lane))?;
         Some(lane.lock_owned().await)
+    }
+
+    /// The session's lane if nothing holds it now. `None` for unknown sessions
+    /// and for sessions busy with a turn or another request.
+    #[must_use]
+    pub fn try_enter_lane(&self, session_id: &str) -> Option<SessionLaneGuard> {
+        let lane = self
+            .lock_sessions()
+            .get(session_id)
+            .map(|e| Arc::clone(&e.lane))?;
+        lane.try_lock_owned().ok()
     }
 
     /// The process-wide working-directory lease.
@@ -1956,6 +2188,243 @@ struct AcpAskUserQuestionAnswerPayload {
 #[serde(rename_all = "camelCase")]
 struct AcpAskUserQuestionResponsePayload {
     answers: Vec<AcpAskUserQuestionAnswerPayload>,
+}
+
+/// Ask the client to decide one engine permission request, then hand the
+/// decision back to the engine. Cancelling the session denies it.
+pub(crate) fn answer_question(
+    session_id: &str,
+    id: engine_core::RequestId,
+    question_req: &runtime::QuestionPromptRequest,
+    driver: &Arc<crate::session_driver::SessionDriver>,
+    abort: HookAbortSignal,
+    cx_reply: ConnectionTo<Client>,
+) -> futures::future::BoxFuture<'static, ()> {
+    let payload = AcpAskUserQuestionRequestPayload {
+        session_id: session_id.to_owned(),
+        tool_call_id: format!("ask-{}", uuid_v4()),
+        title: question_req.title.clone(),
+        description: question_req
+            .description
+            .as_ref()
+            .map(|text| text.as_str().to_owned()),
+        description_format: question_req
+            .description
+            .as_ref()
+            .map(|text| text.format_name().to_owned()),
+        questions: question_req
+            .fields
+            .iter()
+            .map(|field| AcpQuestionFieldPayload {
+                id: field.id.clone(),
+                prompt: field.prompt.clone(),
+                kind: field.kind.as_str().to_string(),
+                required: field.required,
+                allow_custom_input: field.allow_custom_input,
+                custom_input_hint: field.custom_input_hint.clone(),
+                options: field
+                    .options
+                    .iter()
+                    .map(|option| AcpQuestionOptionPayload {
+                        label: option.label.clone(),
+                        value: option.value.clone(),
+                        description: option.description.clone(),
+                        recommended: option.recommended,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    let driver = Arc::clone(driver);
+    async move {
+        let outcome = match serde_json::value::to_raw_value(&payload) {
+            Ok(raw) => {
+                let answer = tokio::select! {
+                    biased;
+                    () = abort.cancelled() => None,
+                    answer = cx_reply.send_request(ClientRequest::ExtMethodRequest(
+                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
+                    )).block_task() => Some(answer),
+                };
+                match answer {
+                    None => Err("turn cancelled".into()),
+                    Some(Ok(resp)) => {
+                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
+                            .map_err(|error| format!("deserialize: {error}"))
+                            .map(|payload| {
+                                payload
+                                    .answers
+                                    .into_iter()
+                                    .map(|answer| QuestionPromptAnswer {
+                                        id: answer.id,
+                                        value: answer.value,
+                                        label: answer.label,
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                    }
+                    Some(Err(error)) => Err(error.to_string()),
+                }
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        let _ = driver.send(engine_core::EngineCommand::QuestionAnswer {
+            id,
+            answers: outcome,
+        });
+    }
+    .boxed()
+}
+
+pub(crate) fn answer_permission(
+    session_id: &str,
+    id: engine_core::RequestId,
+    request: &PermissionRequest,
+    driver: &Arc<crate::session_driver::SessionDriver>,
+    abort: HookAbortSignal,
+    cx: ConnectionTo<Client>,
+) -> futures::future::BoxFuture<'static, ()> {
+    let request = build_acp_permission_request(session_id.to_string(), request);
+    let driver = Arc::clone(driver);
+    async move {
+        let answer = tokio::select! {
+            biased;
+            () = abort.cancelled() => None,
+            answer = cx.send_request(request).block_task() => Some(answer),
+        };
+        let decision = match answer {
+            Some(Ok(response)) => map_permission_response(response),
+            _ => PermissionPromptDecision::Deny {
+                reason: "ACP permission request cancelled or failed".into(),
+            },
+        };
+        let _ = driver.send(engine_core::EngineCommand::PermissionAnswer { id, decision });
+    }
+    .boxed()
+}
+
+/// The session, tool and tool input a direct A2A request asks for.
+/// Observe one engine through its command lane without acquiring a turn
+/// listener or the session lock, including while input or tools are pending.
+async fn read_runtime_status(
+    registry: Arc<SessionRegistry>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    let request: RuntimeStatusRequest = serde_json::from_value(params)
+        .map_err(|error| Error::invalid_params().data(error.to_string()))?;
+    let driver = registry
+        .driver(&request.session_id)
+        .ok_or_else(|| Error::invalid_params().data("Unknown session"))?;
+    driver
+        .runtime_status()
+        .await
+        .map_err(|error| Error::internal_error().data(error))
+}
+
+fn direct_a2a_call(
+    message: agent_client_protocol::UntypedMessage,
+) -> Result<(String, &'static str, serde_json::Value), DirectToolError> {
+    let (method, params) = message.into_parts();
+    let invalid = |error: serde_json::Error| DirectToolError::Refused(error.to_string());
+    if method == DIRECT_SEND_METHOD {
+        let request: DirectSendRequest = serde_json::from_value(params).map_err(invalid)?;
+        let input = json!({
+            "to": request.to,
+            "message": request.message,
+            "summary": request.summary,
+        });
+        Ok((request.session_id, "send", input))
+    } else {
+        let request: DirectAgentListRequest = serde_json::from_value(params).map_err(invalid)?;
+        let input = request.active_only.map_or_else(
+            || json!({}),
+            |active_only| json!({ "active_only": active_only }),
+        );
+        Ok((request.session_id, "agent_list", input))
+    }
+}
+
+/// A direct A2A failure on the wire, typed as `initialize` advertises with
+/// `errorOutcomes: 1`. A refusal is invalid params whose outcome is
+/// `not_submitted`: nothing ran, so the client may correct the request and
+/// send it again. Anything after admission is an internal error whose outcome
+/// is `unknown`: the message may have been sent, so the client must not resend
+/// it blindly.
+fn direct_a2a_error(error: &DirectToolError) -> Error {
+    let typed = |outcome: &str| json!({ "directA2a": { "version": 1, "outcome": outcome } });
+    match error {
+        DirectToolError::Refused(reason) => Error::invalid_params().data(json!({
+            "detail": reason,
+            "sudocode": typed("not_submitted"),
+        })),
+        DirectToolError::Unknown(detail) => {
+            let mut error = Error::internal_error().data(json!({
+                "outcome": "unknown",
+                "detail": detail,
+                "sudocode": typed("unknown"),
+            }));
+            error.message = "The call may have run; its outcome is unknown".into();
+            error
+        }
+    }
+}
+
+/// Run one of the session's own A2A tools for the client, outside any turn,
+/// through the hooks and permission policy a model's call passes.
+///
+/// A direct call never waits behind a turn: a busy session is a definite
+/// refusal before anything runs, so the caller never has to guess whether a
+/// queued send went out after it stopped waiting.
+async fn drive_direct_tool(
+    registry: SharedSessionRegistry,
+    session_id: String,
+    name: &'static str,
+    input: serde_json::Value,
+    cx: ConnectionTo<Client>,
+) -> Result<DirectA2aResponse, DirectToolError> {
+    let refuse = |reason: &str| DirectToolError::Refused(reason.to_string());
+    let admitted = registry
+        .engine(&session_id)
+        .ok_or_else(|| DirectToolError::Refused(format!("unknown sessionId: {session_id}")))?;
+    let (admitted_epoch, is_paused) = admitted.tool_control();
+    if is_paused {
+        return Err(refuse("Tool execution is paused by the user"));
+    }
+    let Some(_lane) = registry.try_enter_lane(&session_id) else {
+        return Err(refuse("The session is busy; nothing was sent"));
+    };
+    let unchanged = registry.engine(&session_id).is_some_and(|engine| {
+        let (epoch, is_paused) = engine.tool_control();
+        !is_paused && epoch == admitted_epoch && Arc::ptr_eq(&engine, &admitted)
+    });
+    if !unchanged {
+        return Err(refuse(
+            "Session control changed while the request was admitted",
+        ));
+    }
+    let Some(driver) = registry.driver(&session_id) else {
+        return Err(refuse("Unknown session"));
+    };
+    let (_listener, mut events) = driver.listen(cx.clone());
+    let reply = driver.direct_tool(name, input.to_string());
+    tokio::pin!(reply);
+    let value = loop {
+        tokio::select! {
+            biased;
+            value = &mut reply => break value,
+            event = events.recv() => match event {
+                Some(_) => {}
+                None => break Err(DirectToolError::Unknown(
+                    "the engine session closed before replying".into(),
+                )),
+            },
+        }
+    };
+    let value = value?;
+    if let Some(reason) = value.get("refused").and_then(serde_json::Value::as_str) {
+        return Err(refuse(reason));
+    }
+    serde_json::from_value(value).map_err(|e| DirectToolError::Unknown(e.to_string()))
 }
 
 /// Build an ACP `RequestPermissionRequest` from a runtime `PermissionRequest`.
@@ -2185,15 +2654,15 @@ pub(crate) async fn run_acp_on_transport(
                                     &config,
                                     &source,
                                     &build_registry,
-                                    req.cwd,
-                                    mcp_servers,
+                                    &req.cwd,
+                                    &mcp_servers,
                                     prompt_overrides,
                                     memory,
                                 )?,
                                 None => session_ops::build_new_session(
                                     &config,
-                                    req.cwd,
-                                    mcp_servers,
+                                    &req.cwd,
+                                    &mcp_servers,
                                     prompt_overrides,
                                     memory,
                                 )?,
@@ -2268,7 +2737,8 @@ pub(crate) async fn run_acp_on_transport(
                                     &cx_notify,
                                     &peer_config,
                                     &session_id,
-                                );
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;
@@ -2331,12 +2801,14 @@ pub(crate) async fn run_acp_on_transport(
                         let _lane = registry.enter_lane(&sid).await;
                         let taken = registry.take(&sid);
                         let closed = tokio::task::spawn_blocking(move || {
-                            if let Some((engine, started_at, driver)) = taken {
+                            if let Some((engine, started_at, driver, receiver)) = taken {
                                 // Session-ended telemetry, then persist + drop.
                                 if let Some(tracer) = engine.session_tracer() {
                                     let usage = engine.usage_snapshot();
                                     let cumulative = usage.cumulative_usage();
-                                    let duration_ms = started_at.elapsed().as_millis() as u64;
+                                    let duration_ms =
+                                        u64::try_from(started_at.elapsed().as_millis())
+                                            .unwrap_or(u64::MAX);
                                     tracer.record_usage(
                                         "session_summary".to_string(),
                                         cumulative.input_tokens,
@@ -2352,9 +2824,13 @@ pub(crate) async fn run_acp_on_transport(
                                     );
                                 }
                                 drop(engine);
-                                if !driver.shutdown() {
+                                let driver_stopped = driver.shutdown();
+                                let receiver_stopped =
+                                    receiver.map_or(Ok(()), |receiver| receiver.stop_and_join());
+                                if !driver_stopped {
                                     return Err(AcpError::internal("session teardown timed out"));
                                 }
+                                receiver_stopped.map_err(AcpError::internal)?;
                             }
                             Ok(())
                         })
@@ -2405,6 +2881,18 @@ pub(crate) async fn run_acp_on_transport(
                     let model_id: String = req.model_id.0.to_string();
                     cx.spawn(async move {
                         let _lane = registry.enter_lane(&sid).await;
+                        let _lifecycle = match registry.driver(&sid) {
+                            Some(driver) => match driver.lifecycle(false).await {
+                                Ok(guard) => Some(guard),
+                                Err(error) => {
+                                    responder.respond_with_error(acp_error_to_sdk(
+                                        &AcpError::invalid_params(error),
+                                    ))?;
+                                    return Ok(());
+                                }
+                            },
+                            None => None,
+                        };
                         let session_cwd = registry.cwd(&sid);
                         let lease = registry.cwd_lease();
                         let Some(engine) = registry.engine(&sid) else {
@@ -2478,6 +2966,18 @@ pub(crate) async fn run_acp_on_transport(
                         subagent_events.load(Ordering::SeqCst) || completions_enabled;
                     cx.spawn(async move {
                         let _lane = registry.enter_lane(&sid).await;
+                        let _lifecycle = match registry.driver(&sid) {
+                            Some(driver) => match driver.lifecycle(false).await {
+                                Ok(guard) => Some(guard),
+                                Err(error) => {
+                                    responder.respond_with_error(acp_error_to_sdk(
+                                        &AcpError::invalid_params(error),
+                                    ))?;
+                                    return Ok(());
+                                }
+                            },
+                            None => None,
+                        };
                         let lease = registry.cwd_lease();
                         let factory = registry.hosted_factory.clone();
                         let live = if completions_enabled {
@@ -2518,7 +3018,7 @@ pub(crate) async fn run_acp_on_transport(
                                 &config,
                                 &load_registry,
                                 &sid,
-                                cwd,
+                                &cwd,
                                 mcp_servers,
                                 prompt_overrides,
                                 memory,
@@ -2612,7 +3112,8 @@ pub(crate) async fn run_acp_on_transport(
                                     &cx_notify,
                                     &peer_config,
                                     &session_id,
-                                );
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;
@@ -2801,6 +3302,18 @@ pub(crate) async fn run_acp_on_transport(
                     let registry = Arc::clone(&registry);
                     cx.spawn(async move {
                         let _lane = registry.enter_lane(&req.session_id).await;
+                        let _lifecycle = match registry.driver(&req.session_id) {
+                            Some(driver) => match driver.lifecycle(false).await {
+                                Ok(guard) => Some(guard),
+                                Err(error) => {
+                                    responder.respond_with_error(acp_error_to_sdk(
+                                        &AcpError::invalid_params(error),
+                                    ))?;
+                                    return Ok(());
+                                }
+                            },
+                            None => None,
+                        };
                         let Some(engine) = registry.engine(&req.session_id) else {
                             responder.respond_with_error(acp_error_to_sdk(
                                 &AcpError::invalid_params(format!(
@@ -2936,7 +3449,7 @@ pub(crate) async fn run_acp_on_transport(
                 let registry = Arc::clone(&registry);
                 async move |req: CancelSubagentRequest,
                             responder: Responder<CancelSubagentResponse>,
-                            _cx: ConnectionTo<Client>| {
+                            cx: ConnectionTo<Client>| {
                     let Some(_subagents) = registry.subagents(&req.session_id) else {
                         responder.respond_with_error(acp_error_to_sdk(
                             &AcpError::invalid_params(format!(
@@ -2952,10 +3465,10 @@ pub(crate) async fn run_acp_on_transport(
                         ))?;
                         return Ok(());
                     };
-                    _cx.spawn(async move {
+                    cx.spawn(async move {
                         match driver.cancel_subagent(req.agent_id).await {
                             Ok(cancelled) => {
-                                responder.respond(CancelSubagentResponse { cancelled })?
+                                responder.respond(CancelSubagentResponse { cancelled })?;
                             }
                             Err(error) => responder.respond_with_error(acp_error_to_sdk(
                                 &AcpError::invalid_params(error),
@@ -2968,19 +3481,82 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
-        // --- catch-all for unhandled methods ---
+        // Extensions share the existing dispatch to keep the SDK handler type bounded.
         .on_receive_dispatch(
-            async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
-                message @ (Dispatch::Request(_, _) | Dispatch::Notification(_)) => {
-                    message.respond_with_error(Error::method_not_found(), cx)?;
-                    Ok(Handled::Yes)
-                }
-                Dispatch::Response(result, router) => {
-                    // A cancelled turn drops its wire waiter. The SDK's default
-                    // router treats a late reply to that waiter as a connection
-                    // error; consume it without closing unrelated live turns.
-                    let _ = router.respond_with_result(result);
-                    Ok(Handled::Yes)
+            {
+                let registry = Arc::clone(&registry);
+                async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
+                    Dispatch::Request(message, responder)
+                        if message.method() == RUNTIME_STATUS_METHOD =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let (_, params) = message.into_parts();
+                        cx.spawn(async move {
+                            responder
+                                .respond_with_result(read_runtime_status(registry, params).await)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if crate::input_control::InputRequest::matches_method(message.method()) =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let connection = cx.clone();
+                        cx.spawn(async move {
+                            let (method, params) = message.into_parts();
+                            let result = match crate::input_control::InputRequest::parse_message(
+                                &method, &params,
+                            ) {
+                                Ok(request) => drive_input(request, registry, connection)
+                                    .await
+                                    .map_err(|error| acp_error_to_sdk(&error)),
+                                Err(error) => Err(error),
+                            };
+                            responder.respond_with_result(result)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if matches!(
+                            message.method(),
+                            DIRECT_SEND_METHOD | DIRECT_AGENT_LIST_METHOD
+                        ) =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let connection = cx.clone();
+                        cx.spawn(async move {
+                            let result = match direct_a2a_call(message) {
+                                Ok((session_id, name, input)) => {
+                                    drive_direct_tool(registry, session_id, name, input, connection)
+                                        .await
+                                }
+                                Err(error) => Err(error),
+                            };
+                            responder.respond_with_result(
+                                result
+                                    .and_then(|response| {
+                                        serde_json::to_value(response)
+                                            .map_err(|e| DirectToolError::Unknown(e.to_string()))
+                                    })
+                                    .map_err(|error| direct_a2a_error(&error)),
+                            )?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
+                    message @ (Dispatch::Request(_, _) | Dispatch::Notification(_)) => {
+                        message.respond_with_error(Error::method_not_found(), cx)?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Response(result, router) => {
+                        // A cancelled turn drops its wire waiter. The SDK's default
+                        // router treats a late reply to that waiter as a connection
+                        // error; consume it without closing unrelated live turns.
+                        let _ = router.respond_with_result(result);
+                        Ok(Handled::Yes)
+                    }
                 }
             },
             on_receive_dispatch!(),

@@ -5,9 +5,6 @@
 
 mod common;
 
-#[path = "support/terminal_palette.rs"]
-mod terminal_palette;
-
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -67,7 +64,7 @@ fn exit_with_context(sess: &mut PtySession, context: &str) {
     let code = sess.expect_eof().unwrap_or_else(|error| {
         // The method item cannot satisfy render's higher-ranked Screen lifetime.
         #[allow(clippy::redundant_closure_for_method_calls)]
-        let screen = sess.render(|screen| screen.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
     assert_eq!(code, 0, "{context} should exit successfully");
@@ -104,7 +101,7 @@ fn queued_session(label: &str, messages: &[&str]) -> (TestEnv, PtySession) {
     sess.send(&format!("{prompt}\r")).expect("start long turn");
     sess.expect("interrupt-start").expect("tool started");
     for message in messages {
-        sess.send(&format!("{message}\r"))
+        sess.send(&format!("{message}\t"))
             .expect("queue human message");
         wait_for_screen(
             &sess,
@@ -158,14 +155,26 @@ fn inject(env: &TestEnv, receiver: &str, from: &str, body: &str) {
 }
 
 fn inject_with_kind(env: &TestEnv, receiver: &str, from: &str, body: &str, kind: &str) {
+    inject_with_summary(env, receiver, from, body, kind, Some("mock a2a"));
+}
+
+fn inject_with_summary(
+    env: &TestEnv,
+    receiver: &str,
+    from: &str,
+    body: &str,
+    kind: &str,
+    summary: Option<&str>,
+) {
     let mailbox =
         Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
     mailbox
         .send(MailboxEnvelope {
+            delivery: engine_events::InputDelivery::Queue,
             from: from.to_string(),
             to: receiver.to_string(),
             body: body.to_string(),
-            summary: Some("mock a2a".to_string()),
+            summary: summary.map(str::to_owned),
             timestamp: 0,
             color: None,
             kind: kind.to_string(),
@@ -442,7 +451,10 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let colors = if no_color {
         ["Default".to_owned(), "Default".to_owned()]
     } else {
-        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
+        [
+            "Rgb(118, 118, 118)".to_owned(),
+            "Rgb(158, 158, 158)".to_owned(),
+        ]
     };
     let muted = &colors[usize::from(background == "15;0")];
     let vars = [
@@ -468,12 +480,19 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     inject(&env, &receiver, "mac-ai", &body);
     wait_for_screen(&sess, "complete received block", complete_received_block);
     let live = received_block(&sess, sender_color, muted);
-    common::expect_turn_complete_after(
+    // This fresh receiver has no earlier turn. A live model/account label can
+    // wrap the status delimiter at 52 columns, so rejoin rows for the shared
+    // identity parser before checking the input's separate readiness contract.
+    common::expect_screen_settled(
         &sess,
-        &marker,
+        |screen| {
+            let identity = common::turn_status_identity(&screen.replace('\n', " "));
+            !identity.is_empty() && identity != marker
+        },
         common::LIVE_TURN_BUDGET,
         "received message handled",
     );
+    common::expect_input_line_cleared(&sess, BUDGET, "receiver ready after peer turn");
     exit(&mut sess);
 
     let mut resumed = env.spawn_with_env(
@@ -515,6 +534,7 @@ fn received_block(sess: &PtySession, sender_color: &str, muted: &str) -> Vec<Str
         );
         assert!(!rows.join("\n").contains("<mailbox-message"));
         let rendered = rows[start..=end].join("\n");
+        assert!(rendered.contains("│ Summary: mock a2a"), "{rendered}");
         assert!(
             rendered.contains("Strong and code."),
             "inline Markdown: {rendered}"
@@ -623,7 +643,7 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
 
     // Queue a HUMAN message during the turn. Its overlay chip renders as
     // `↳ queued: HUMAN-EDIT-MARKER` (no `❯` in the chip display).
-    sess.send(&format!("{HUMAN_MARKER}\r"))
+    sess.send(&format!("{HUMAN_MARKER}\t"))
         .expect("queue human marker during turn");
     wait_for_screen(
         &sess,
@@ -670,9 +690,20 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
         "{body}\n\n{}",
         env.prompt("Reply only with A2A-ACK.", "single_turn_text")
     );
-    inject(&env, &receiver, "mac-ai", &body);
+    let summary = "结果 \"ready\" & <checked> &#10;\n第二行摘要";
+    inject_with_summary(
+        &env,
+        &receiver,
+        "mac-ai",
+        &body,
+        agent_mailbox::kinds::MESSAGE,
+        Some(summary),
+    );
     wait_for_screen(&sess, "peer preview queued", |s| {
-        has_chip(s, "Message from mac-ai")
+        has_chip(s, "Message from mac-ai") && has_chip(s, "结果 \"ready\"")
+    });
+    sess.render(|screen| {
+        assert!(!screen.raw().contents().contains("A2A-BUSY-MARKER"));
     });
     sess.send("draft-中文").unwrap();
     common::expect_input_line(&sess, "draft-中文", BUDGET, "typing with peer queued");
@@ -682,7 +713,12 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     wait_for_screen(&sess, "draft cleared", |screen| {
         screen.contains('❯') && input_text(screen).is_empty()
     });
-    sess.send("\x1b").unwrap(); // Cancel Bash; the queued peer now runs.
+    sess.send("\x03").unwrap(); // Hard-cancel while preserving the explicit queue.
+    wait_for_screen(&sess, "foreground task cancelled", |s| {
+        s.contains("Cancelled")
+    });
+    let marker = common::turn_status_marker(&sess);
+    sess.send("\x1b").unwrap(); // Flush the retained queue while idle.
     wait_for_screen(&sess, "complete peer body flushed", |s| {
         s.contains("│ QUEUED-BODY-END") && !has_chip(s, "Message from mac-ai")
     });
@@ -695,8 +731,36 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
             1
         );
         assert!(!text.contains("<mailbox-message"));
+        assert!(text.contains("│ Summary: 结果 \"ready\" & <checked> &#10;"));
+        assert!(text.contains("│ 第二行摘要"));
     });
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "summary and complete body are consumed",
+    );
+    if env.is_mock() {
+        let requests = env.captured_message_bodies().join("\n");
+        assert!(requests.contains(
+            "summary=\\\"结果 &quot;ready&quot; &amp; &lt;checked&gt; &amp;#10;&#10;第二行摘要\\\""
+        ));
+        assert!(requests.contains("QUEUED-BODY-END"));
+    }
     exit(&mut sess);
+
+    let mut replay = env.spawn_with_env(
+        &["--resume", "latest", "--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    replay.resize(80, 100).unwrap();
+    wait_for_screen(&replay, "summary survives persisted replay", |s| {
+        s.contains("│ Summary: 结果 \"ready\" & <checked> &#10;")
+            && s.contains("│ 第二行摘要")
+            && s.contains("│ QUEUED-BODY-END")
+    });
+    expect_replay_input_ready(&mut replay);
+    exit(&mut replay);
 }
 
 /// Legacy sessions may mix humans and multiple peer envelopes in one queued
@@ -711,7 +775,7 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "HUMAN-BEFORE\n\n",
             "<mailbox-message from=\"peer-one\">\nFIRST-PEER\n</mailbox-message>\n\n",
             "HUMAN-BETWEEN\n\n",
-            "<mailbox-message from=\"peer-two&amp;three\">\nSECOND-PEER\n</mailbox-message>\n\n",
+            "<mailbox-message from=\"peer-two&amp;three\" request-id=\"legacy-42\" summary=\"Legacy &quot;summary&quot; &amp; &#10;more\">\nSECOND-PEER\n</mailbox-message>\n\n",
             "HUMAN-AFTER"
         ))
         .unwrap();
@@ -719,6 +783,8 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
         .push_user_text(concat!(
             "Keep this example literal:\n\n```xml\n\n",
             "<mailbox-message from=\"code-example\">\nEXAMPLE-BODY\n</mailbox-message>\n\n```\n\n",
+            "Unknown attribute:\n\n<mailbox-message from=\"unknown\" extra=\"value\">\nLITERAL-UNKNOWN\n</mailbox-message>\n\n",
+            "Duplicate summary:\n\n<mailbox-message from=\"duplicate\" summary=\"one\" summary=\"two\">\nLITERAL-DUPLICATE\n</mailbox-message>\n\n",
             "Malformed wrapper:\n\n<mailbox-message from=\"incomplete\">\nKEEP-THIS-TEXT"
         ))
         .unwrap();
@@ -745,6 +811,8 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "│ FIRST-PEER",
             "❯ HUMAN-BETWEEN",
             "Message from peer-two&three",
+            "│ Summary: Legacy \"summary\" &",
+            "│ more",
             "│ SECOND-PEER",
             "❯ HUMAN-AFTER",
             "ASSISTANT-REPLY",
@@ -766,6 +834,10 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "{text}"
         );
         assert!(!text.contains("Message from code-example"));
+        assert!(!text.contains("Message from unknown"));
+        assert!(!text.contains("Message from duplicate"));
+        assert!(text.contains("LITERAL-UNKNOWN"));
+        assert!(text.contains("LITERAL-DUPLICATE"));
         assert!(!text.contains("Message from incomplete"));
     });
     expect_replay_input_ready(&mut sess);
@@ -811,7 +883,7 @@ fn up_arrow_recalls_all_queued_humans_in_submit_order() {
     });
     // Resubmit the edited multiline block and recall it again: proves the
     // composed text round-trips through the real queue without losing a line.
-    sess.send("\r").expect("resubmit stack");
+    sess.send("\t").expect("resubmit stack");
     wait_for_screen(&sess, "edited stack re-queued", |screen| {
         input_text(screen).is_empty() && has_chip(screen, FIRST)
     });
@@ -924,7 +996,7 @@ fn pending_batch_and_two_runtimes_share_one_durable_reader() {
                 .load_session(&summary.id)
                 .unwrap()
                 .session
-                .messages
+                .messages()
                 .iter()
                 .filter(|message| {
                     message.role == runtime::MessageRole::User

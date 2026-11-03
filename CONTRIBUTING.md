@@ -839,7 +839,9 @@ current attempt still own the result, including failures; required jobs and
 SSH signatures remain verified. Publisher output explains an ignored event
 on the mandatory execution path. Real child-process/HTTP/Git/SSH controls cover
 both event orders, queued drafts, failed ready runs, signature corruption and
-raw UTF-8 event metadata. The gate and publisher share one event-file decoder;
+raw UTF-8 event metadata with UTF-8 mode disabled and the POSIX C locale. The
+controls record the child process's actual default file encoding. The gate
+and publisher share one event-file decoder;
 PR text and workflow metadata do not depend on the runner's locale.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after either Clippy or real daemon acceptance fails. Each caller

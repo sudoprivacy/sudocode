@@ -277,3 +277,5 @@ guide owns its detailed configuration and behavior.
 ## License
 
 [MIT](LICENSE). Contributors retain their copyright.
+
+<!-- Temporary GitHub event decoder acceptance probe; close without merging. -->

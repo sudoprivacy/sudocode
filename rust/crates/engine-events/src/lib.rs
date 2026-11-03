@@ -87,6 +87,10 @@ pub use runtime::{
 pub enum BackgroundTaskAction {
     /// Subscribe to the current session tasks and subsequent changes.
     Watch,
+    /// The user opened task details; retain the result more recently.
+    Inspect {
+        id: String,
+    },
     Stop {
         id: String,
     },

@@ -229,58 +229,81 @@ pub fn normalize_task_notification_status(status: &str) -> &'static str {
 /// contract.
 #[must_use]
 pub fn render_task_notification(view: &TaskNotificationView<'_>) -> String {
-    let mut out = String::with_capacity(256);
-    out.push_str("<task-notification>\n");
-
-    out.push_str("<task-id>");
-    push_xml_escaped(&mut out, view.agent_id);
-    out.push_str("</task-id>\n");
-
-    out.push_str("<status>");
-    push_xml_escaped(&mut out, view.status);
-    out.push_str("</status>\n");
-
-    out.push_str("<summary>");
-    push_xml_escaped(&mut out, view.summary);
-    out.push_str("</summary>\n");
+    let mut notification = TaskNotificationWriter::new(view.agent_id, view.status);
+    notification.element("summary", view.summary);
 
     if let Some(result) = view.result {
-        out.push_str("<result>");
-        push_xml_escaped(&mut out, result);
-        out.push_str("</result>\n");
+        notification.element("result", result);
     }
 
     if let Some(color) = view.color {
-        out.push_str("<color>");
-        push_xml_escaped(&mut out, color);
-        out.push_str("</color>\n");
+        notification.element("color", color);
     }
 
     let has_usage =
         view.duration_ms.is_some() || view.tool_uses.is_some() || view.total_tokens.is_some();
     if has_usage {
+        let out = &mut notification.output;
         out.push_str("<usage>");
         if let Some(n) = view.total_tokens {
-            let _ = std::fmt::Write::write_fmt(
-                &mut out,
-                format_args!("<total_tokens>{n}</total_tokens>"),
-            );
+            let _ =
+                std::fmt::Write::write_fmt(out, format_args!("<total_tokens>{n}</total_tokens>"));
         }
         if let Some(n) = view.tool_uses {
-            let _ =
-                std::fmt::Write::write_fmt(&mut out, format_args!("<tool_uses>{n}</tool_uses>"));
+            let _ = std::fmt::Write::write_fmt(out, format_args!("<tool_uses>{n}</tool_uses>"));
         }
         if let Some(n) = view.duration_ms {
-            let _ = std::fmt::Write::write_fmt(
-                &mut out,
-                format_args!("<duration_ms>{n}</duration_ms>"),
-            );
+            let _ = std::fmt::Write::write_fmt(out, format_args!("<duration_ms>{n}</duration_ms>"));
         }
         out.push_str("</usage>\n");
     }
 
-    out.push_str("</task-notification>");
-    out
+    notification.finish()
+}
+
+/// Render terminal facts through the same XML owner as agent notifications.
+/// `metadata` is the serialized terminal metadata from the completion envelope.
+#[must_use]
+pub fn render_terminal_task_notification(
+    task_id: &str,
+    status: &str,
+    metadata: &str,
+    output: &str,
+) -> String {
+    let mut notification = TaskNotificationWriter::new(task_id, status);
+    notification.element("terminal", metadata);
+    notification.element("result", output);
+    notification.finish()
+}
+
+struct TaskNotificationWriter {
+    output: String,
+}
+
+impl TaskNotificationWriter {
+    fn new(task_id: &str, status: &str) -> Self {
+        let mut output = String::with_capacity(256);
+        output.push_str("<task-notification>\n");
+        let mut notification = Self { output };
+        notification.element("task-id", task_id);
+        notification.element("status", status);
+        notification
+    }
+
+    fn element(&mut self, name: &str, value: &str) {
+        self.output.push('<');
+        self.output.push_str(name);
+        self.output.push('>');
+        push_xml_escaped(&mut self.output, value);
+        self.output.push_str("</");
+        self.output.push_str(name);
+        self.output.push_str(">\n");
+    }
+
+    fn finish(mut self) -> String {
+        self.output.push_str("</task-notification>");
+        self.output
+    }
 }
 
 /// Coord-mode-gated variant of [`render_task_notification`]. Returns

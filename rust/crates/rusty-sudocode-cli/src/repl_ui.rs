@@ -936,7 +936,7 @@ pub enum InputEvent {
     QuestionAnswer(String),
     /// Inspect the frozen review without answering it.
     InspectDocument(String),
-    StopBackgroundTask(String),
+    BackgroundTask(engine_events::BackgroundTaskAction),
     /// A prompt-cache TTL chosen in the TTL panel.
     SetCacheTtl {
         choice: engine_core::cache_ttl::TtlChoice,
@@ -1455,14 +1455,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             (TaskFocus::Footer, KeyCode::Esc | KeyCode::Up) => browser.close(),
                             (TaskFocus::List, KeyCode::Down) => browser.move_selection(true),
                             (TaskFocus::List, KeyCode::Up) => browser.move_selection(false),
-                            (TaskFocus::List, KeyCode::Enter) => browser.detail(),
+                            (TaskFocus::List, KeyCode::Enter) => {
+                                if let Some(id) = browser.detail() {
+                                    let _ = input_tx_for_events.send(InputEvent::BackgroundTask(engine_events::BackgroundTaskAction::Inspect { id }));
+                                }
+                            }
                             (TaskFocus::List, KeyCode::Esc) => browser.close(),
                             (TaskFocus::Detail, KeyCode::Esc) if modifiers.contains(KeyModifiers::ALT) => browser.close(),
                             (TaskFocus::Detail, KeyCode::Esc) => browser.open(),
                             (TaskFocus::Detail, KeyCode::Up | KeyCode::PageUp) => browser.scroll(true, if code == KeyCode::PageUp { 10 } else { 1 }),
                             (TaskFocus::Detail, KeyCode::Down | KeyCode::PageDown) => browser.scroll(false, if code == KeyCode::PageDown { 10 } else { 1 }),
                             (TaskFocus::List | TaskFocus::Detail, KeyCode::Char('k')) => {
-                                if let Some(id) = browser.stop_id() { let _ = input_tx_for_events.send(InputEvent::StopBackgroundTask(id)); }
+                                if let Some(id) = browser.stop_id() { let _ = input_tx_for_events.send(InputEvent::BackgroundTask(engine_events::BackgroundTaskAction::Stop { id })); }
                             }
                             (TaskFocus::Footer, KeyCode::Char(_)) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                                 browser.close();

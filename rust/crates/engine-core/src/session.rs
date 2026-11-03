@@ -575,6 +575,7 @@ fn handle_background_task(
                 let _ = tx.send(EngineEvent::BackgroundTaskError { id, message });
             }
         }
+        engine_events::BackgroundTaskAction::Inspect { id } => tasks.inspect(&id),
     }
 }
 

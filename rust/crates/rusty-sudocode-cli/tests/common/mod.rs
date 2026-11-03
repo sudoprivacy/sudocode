@@ -902,42 +902,26 @@ impl TestEnv {
 
     /// Like [`spawn`] but with additional environment variables.
     pub fn spawn_with_env(&self, extra_args: &[&str], env_vars: &[(&str, &str)]) -> PtySession {
-        match &self.backend {
-            Backend::Mock { workspace, .. } => spawn_with_workspace(
-                workspace,
-                None,
-                &["--auth", "api-key", "--model", "sonnet"],
-                extra_args,
-                DEFAULT_TIMEOUT,
-                env_vars,
+        let args = self.backend_args();
+        let args = args.each_ref().map(String::as_str);
+        let workspace = match &self.backend {
+            Backend::Mock { workspace, .. } | Backend::Live { workspace } => workspace,
+        };
+        spawn_with_workspace(workspace, None, &args, extra_args, self.timeout(), env_vars)
+    }
+
+    /// Share provider selection with wrappers that must run before the CLI.
+    /// Mock mode pins sonnet and the isolated API key. Live mode retains the
+    /// selected developer model/auth overrides without rewriting credentials.
+    pub fn backend_args(&self) -> [String; 4] {
+        let (auth, model) = match &self.backend {
+            Backend::Mock { .. } => ("api-key".to_owned(), "sonnet".to_owned()),
+            Backend::Live { .. } => (
+                std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".to_owned()),
+                live_model(),
             ),
-            // `--model`, not `--model auto`: `auto` resolves through the copied
-            // settings.json to whatever model the developer happens to have
-            // selected, so the same assertions would be graded against a
-            // different model on every machine. Mock mode pins `sonnet`; live
-            // pins the same name by default and the two stay comparable.
-            //
-            // `SCODE_LIVE_MODEL` overrides it because the pin is only worth
-            // having while the gateway can serve it. A routing group that has no
-            // channel for the pinned model answers `500 … 可用渠道不存在` on
-            // every attempt, which fails every live test in the suite for a
-            // reason that is nothing to do with the code under test.
-            // Allow API-key accounts too; keep the selected auth local to this
-            // test process instead of modifying the developer's credentials.
-            Backend::Live { workspace } => spawn_with_workspace(
-                workspace,
-                None,
-                &[
-                    "--auth",
-                    &std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".to_string()),
-                    "--model",
-                    &live_model(),
-                ],
-                extra_args,
-                LIVE_TIMEOUT,
-                env_vars,
-            ),
-        }
+        };
+        ["--auth".to_owned(), auth, "--model".to_owned(), model]
     }
 
     /// Launch a selected executable with exact arguments and the same workspace isolation.

@@ -4382,24 +4382,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
     }
 }
 
-/// Measure visible string width by stripping ANSI escape sequences.
-fn strip_ansi_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c == 'm' {
-                in_escape = false;
-            }
-        } else {
-            width += 1;
-        }
-    }
-    width
-}
-
 /// The renderer-side capture of one turn: the `TurnComplete` aggregate plus the
 /// JSON-output fields re-derived from the event stream (the old paths read these
 /// off `TurnSummary`, which `TurnComplete` no longer carries — message vecs were
@@ -4744,20 +4726,7 @@ impl LiveCli {
                 .map(|r| r.base_url)
                 .unwrap_or_default();
 
-        let t = theme();
-        let logo_fg = t.fg_seq(TextRole::Brand);
-        let accent_fg = t.fg_seq(TextRole::Accent);
-        let logo = format!(
-            "{logo_fg}\
-███████╗██╗   ██╗██████╗  ██████╗ \n\
-██╔════╝██║   ██║██╔══██╗██╔═══██╗\n\
-███████╗██║   ██║██║  ██║██║   ██║\n\
-╚════██║██║   ██║██║  ██║██║   ██║\n\
-███████║╚██████╔╝██████╔╝╚██████╔╝\n\
-╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝{RESET} {accent_fg}Code{RESET}"
-        );
-
-        let lines = [
+        render::startup::banner(&[
             format!("  {DIM}Model{RESET}            {}", model),
             format!("  {DIM}Auth mode{RESET}        {}", auth_mode_str),
             format!("  {DIM}Endpoint{RESET}         {}", endpoint),
@@ -4770,37 +4739,7 @@ impl LiveCli {
             format!("  {DIM}Directory{RESET}        {}", cwd),
             format!("  {DIM}Session{RESET}          {}", handle.id),
             format!("  {DIM}Auto-save{RESET}        {}", session_path),
-        ];
-
-        let max_width = lines.iter().map(|l| strip_ansi_width(l)).max().unwrap_or(0);
-        let box_width = max_width + 2; // 1 space padding on each side
-
-        let grey = t.fg_seq(TextRole::Border);
-        let reset = RESET;
-
-        let top = format!("{grey}╭{}╮{reset}", "─".repeat(box_width));
-        let bottom = format!("{grey}╰{}╯{reset}", "─".repeat(box_width));
-
-        let boxed_lines: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                let visible_width = strip_ansi_width(line);
-                let padding = max_width - visible_width;
-                format!(
-                    "{grey}│{reset} {}{} {grey}│{reset}",
-                    line,
-                    " ".repeat(padding)
-                )
-            })
-            .collect();
-
-        format!(
-            "{}\n\n{}\n{}\n{}",
-            logo,
-            top,
-            boxed_lines.join("\n"),
-            bottom,
-        )
+        ])
     }
 
     /// Render the restored conversation history to a scrollback string, or an

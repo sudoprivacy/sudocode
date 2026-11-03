@@ -42,6 +42,14 @@ from the immutable sibling `vX.Y.Z` directory. A versioned mirror directory pins
 its own version. The publisher verifies the complete mirror before promoting the
 pointer; the client verifies the downloaded archive's SHA-256 before installation.
 
+## Terminal startup information
+
+The startup information frame fits the terminal's current column width. Long
+paths, endpoints and other values wrap without truncation. ANSI styles and
+Unicode graphemes use the same terminal-cell layout as conversation scrollback.
+Narrow terminals show a compact wordmark instead of wrapping the large logo;
+when there is no room for a frame and its padding, information appears unboxed.
+
 ## Persistent peer descriptions
 
 Enable `experimental.peerDescriptions` in settings to let model-backed

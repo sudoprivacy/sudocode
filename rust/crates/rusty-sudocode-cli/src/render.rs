@@ -19,6 +19,7 @@ pub(crate) mod left_frame;
 mod mermaid;
 pub(crate) mod output;
 pub(crate) mod spinner_progress;
+pub(crate) mod startup;
 use spinner_progress::SpinnerProgress;
 pub(crate) mod terminal_palette;
 pub use color_theme::{theme, ColorTheme, TextRole};

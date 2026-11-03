@@ -1,16 +1,12 @@
 use std::fmt::Write as _;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use commands::{
-    classify_skills_slash_command, resolve_skill_invocation, resolve_skill_invocation_with_plugins,
-    slash_command_specs, SkillSlashDispatch, SlashCommand,
+    classify_skills_slash_command, slash_command_specs, SkillSlashDispatch, SlashCommand,
 };
 use engine_core::AuthMode;
-use plugins::PluginLoadOutcome;
 use runtime::{ConfigLoader, PermissionMode};
 use tools::GlobalToolRegistry;
 
@@ -22,10 +18,9 @@ use crate::{normalize_permission_mode, DEFAULT_MODEL};
 // through `cli::args::` (and the ones this module still calls) from there, so
 // the move is invisible at every existing call site.
 pub(crate) use engine_host::config::{
-    config_model_for_current_dir, default_permission_mode, load_sudocode_config_for_current_dir,
-    load_sudocode_config_for_cwd, permission_mode_from_label, require_sudocode_config_for_cwd,
-    resolve_config_model_alias, resolve_model_alias, resolve_model_alias_with_config,
-    resolve_repl_model, set_cli_account_override, AllowedToolSet,
+    default_permission_mode, load_sudocode_config_for_current_dir, permission_mode_from_label,
+    require_sudocode_config_for_cwd, resolve_model_alias_with_config, resolve_repl_model,
+    set_cli_account_override, AllowedToolSet,
 };
 
 // ---------------------------------------------------------------------------
@@ -488,26 +483,7 @@ pub(crate) enum CliAction {
     },
 }
 
-impl CliAction {
-    /// Returns `true` for commands that report local state or usage information
-    /// and must never require authentication to run. These variants are
-    /// dispatched before any credential check so they work even when the user
-    /// has not logged in yet.
-    pub(crate) fn is_informational(&self) -> bool {
-        matches!(
-            self,
-            CliAction::Help { .. }
-                | CliAction::Version { .. }
-                | CliAction::HelpTopic { .. }
-                | CliAction::Config { .. }
-                | CliAction::Login
-                | CliAction::Logout
-                | CliAction::Update { .. }
-                | CliAction::Service { .. }
-                | CliAction::Setup { .. }
-        )
-    }
-}
+impl CliAction {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalHelpTopic {
@@ -1411,6 +1387,7 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_host::config::resolve_config_model_alias;
     use std::collections::BTreeMap;
 
     fn parse_words(words: &[&str]) -> CliAction {
@@ -1460,51 +1437,6 @@ mod tests {
             resolve_config_model_alias("custom-openai/gpt-5.4", &config).as_deref(),
             Some("custom-openai/gpt-5.4")
         );
-    }
-
-    #[test]
-    fn informational_variants_are_whitelisted() {
-        assert!(CliAction::Help {
-            output_format: CliOutputFormat::Text
-        }
-        .is_informational());
-        assert!(CliAction::Version {
-            output_format: CliOutputFormat::Json
-        }
-        .is_informational());
-        assert!(CliAction::HelpTopic {
-            topic: LocalHelpTopic::Status,
-            output_format: CliOutputFormat::Text,
-        }
-        .is_informational());
-        assert!(CliAction::Config {
-            section: None,
-            value: None,
-            global: false,
-            output_format: CliOutputFormat::Text
-        }
-        .is_informational());
-        assert!(CliAction::Login.is_informational());
-        assert!(CliAction::Logout.is_informational());
-    }
-
-    #[test]
-    fn non_informational_variants_are_not_whitelisted() {
-        assert!(!CliAction::Doctor {
-            fix: false,
-            output_format: CliOutputFormat::Text
-        }
-        .is_informational());
-        assert!(!CliAction::Repl {
-            model: "opus".to_string(),
-            allowed_tools: None,
-            permission_mode: PermissionMode::DangerFullAccess,
-            base_commit: None,
-            reasoning_effort: None,
-            allow_broad_cwd: false,
-            auth_mode: None,
-        }
-        .is_informational());
     }
 
     #[test]

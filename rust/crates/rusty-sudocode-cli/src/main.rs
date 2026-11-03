@@ -1,7 +1,4 @@
 #![allow(
-    dead_code,
-    unused_imports,
-    unused_variables,
     clippy::doc_markdown,
     clippy::manual_string_new,
     clippy::match_same_arms,
@@ -27,60 +24,44 @@ mod stderr_capture;
 mod windows_console;
 
 use crate::render::TextRole;
-use engine_acp::AcpError;
 use engine_core::{
-    EngineApiClient, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
-    TurnComplete,
+    EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession, TurnComplete,
 };
 use render_engine::{EngineEventRenderer, RenderOutcome};
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
-use std::net::TcpListener;
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use engine_core::{
-    base_url_for_mode, resolve_startup_auth_source, AuthMode, AuthSource, ProviderKind,
-};
+use engine_core::AuthMode;
 
 use cli::args::{
-    config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
-    load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
+    default_permission_mode, format_unknown_slash_command, load_sudocode_config_for_current_dir,
     parse_args_with_prompt_overrides, permission_mode_from_label, require_sudocode_config_for_cwd,
-    resolve_model_alias, resolve_model_alias_with_config, AllowedToolSet, CliAction,
-    CliOutputFormat, LocalHelpTopic,
+    AllowedToolSet, CliAction, CliOutputFormat, LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
     render_prompt_history_report, resolve_export_path, run_export, truncate_for_prompt,
 };
 use cli::format::{
-    describe_tool_progress, first_visible_line, format_account_report,
-    format_account_switch_report, format_acp_compact_report, format_auth_report,
+    format_account_report, format_account_switch_report, format_auth_report,
     format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
     format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
-    format_compaction_notice, format_context_report, format_cost_report,
-    format_internal_prompt_progress_line, format_issue_report, format_model_report,
-    format_model_switch_report, format_permission_prompt_box, format_permissions_report,
-    format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_call_start, format_tool_result, format_ultraplan_report,
-    render_messages, render_resume_usage, render_version_report, truncate_for_summary,
-    turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
+    format_compaction_notice, format_context_report, format_cost_report, format_issue_report,
+    format_model_report, format_model_switch_report, format_permission_prompt_box,
+    format_permissions_report, format_permissions_switch_report, format_pr_report,
+    format_resume_report, format_sandbox_report, format_ultraplan_report, render_messages,
+    render_version_report, turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
 };
 use cli::git::{
-    enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
-    parse_git_workspace_summary, resolve_git_branch_for, resolve_git_position_for,
-    GitWorkspaceSummary,
+    enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_workspace_summary,
+    resolve_git_branch_for, resolve_git_position_for, GitWorkspaceSummary,
 };
 use cli::help::{
     print_help, print_help_topic, render_config_json, render_config_report, render_diff_json_for,
@@ -90,43 +71,29 @@ use cli::help::{
 use cli::pager::print_with_pager;
 use cli::session::{
     confirm_session_deletion, format_session_picker_entry, list_managed_sessions,
-    render_session_list, LATEST_SESSION_REFERENCE,
+    render_session_list,
 };
 use cli::status::{
     format_status_report, print_sandbox_status_snapshot, print_status_snapshot, print_version,
-    sandbox_json_value, status_context, status_json_value, version_json_value, StatusContext,
-    StatusUsage,
+    sandbox_json_value, status_context, status_json_value, version_json_value, StatusUsage,
 };
 use commands::{
-    acp_slash_commands, classify_skills_slash_command, cwd_prompt_sections,
-    format_acp_unsupported_slash_command, handle_agents_slash_command,
+    classify_skills_slash_command, cwd_prompt_sections, handle_agents_slash_command,
     handle_agents_slash_command_json, handle_mcp_slash_command_json_with_plugins,
     handle_mcp_slash_command_with_plugins, handle_plugins_slash_command,
-    handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    render_acp_slash_command_help, render_slash_command_help, render_slash_command_help_filtered,
-    resolve_skill_invocation, resolve_skill_invocation_with_plugins,
-    resume_supported_slash_commands, slash_command_specs, validate_slash_command_input,
-    SkillSlashDispatch, SlashCommand,
+    resolve_skill_invocation_with_plugins, SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
-use engine_host::config::{resolve_auth_mode, resolve_model_switch_auth_mode};
-use engine_host::mcp::{
-    build_runtime_mcp_state, session_mcp_tool_names, shutdown_mcp_state_best_effort,
-    RuntimeMcpState,
-};
+use engine_host::config::resolve_auth_mode;
 use engine_host::prompt::{
-    apply_cli_prompt_overrides, build_acp_system_prompt, build_system_prompt_for,
-    set_cli_prompt_overrides,
+    apply_cli_prompt_overrides, build_system_prompt_for, set_cli_prompt_overrides,
 };
 use engine_host::session::{
-    canonical_session_cwd, context_overflow_user_message, create_managed_session_handle,
-    create_managed_session_handle_for, delete_managed_session, load_session_reference,
-    new_cli_session, new_cli_session_for, resolve_session_reference, write_session_clear_backup,
-    SessionHandle,
+    create_managed_session_handle, delete_managed_session, load_session_reference, new_cli_session,
+    resolve_session_reference, write_session_clear_backup, SessionHandle,
 };
-use engine_host::tool_executor::{permission_policy, CliToolExecutor};
 // The engine CORE cluster now lives below the seam in `engine-host`
 // (`runtime_build` + `session_engine`, re-exported at the crate root). The
 // renderer names these to build a session (`SessionEngine`), drive its non-turn
@@ -135,28 +102,19 @@ use engine_host::tool_executor::{permission_policy, CliToolExecutor};
 // `build_*` helpers). `RuntimeConfig` is the engine-side config struct; it does
 // not shadow `runtime::RuntimeConfig` (always named fully-qualified).
 use engine_host::{
-    build_engine_runtime, build_plugin_manager, build_runtime_plugin_state_with_loader,
-    plugin_load_outcome_for_cwd, AcpCliSession, BuiltRuntime, ModelSwitchReport, RuntimeConfig,
-    RuntimePluginState, SessionEngine, SessionLifecycle,
+    build_plugin_manager, plugin_load_outcome_for_cwd, SessionEngine, SessionLifecycle,
 };
 use init::initialize_repo;
-use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
-use render::{theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET};
+use plugins::PluginLoadOutcome;
+use render::{theme, SpinnerHandle, TerminalRenderer, DIM, RESET};
 use runtime::{
-    check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
-    format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
-    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
-    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigScope, ConfigSource,
-    ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
-    McpServerSpec, McpTool, MessageRole, MigrationScope, ModelPricing, PermissionMode,
-    PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
-    Session, SystemPrompt, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    check_base_commit, format_stale_base_warning, format_usd, load_system_prompt,
+    pricing_for_model, resolve_expected_base, resolve_sandbox_status, ConfigLoader, ConfigScope,
+    McpServer, McpServerSpec, McpTool, MigrationScope, PermissionMode, ProjectContext, Session,
+    SystemPrompt, UsageTracker,
 };
-use serde::Deserialize;
-use serde_json::{json, Map, Value};
-use tools::{
-    execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
-};
+use serde_json::{json, Value};
+use tools::{execute_tool, mvp_tool_specs};
 
 // The config / model / permission web moved below the seam into
 // `engine_host::config`. Re-export the handful the CLI names by their bare
@@ -182,14 +140,6 @@ impl ModelProvenance {
             resolved: DEFAULT_MODEL.to_string(),
             raw: None,
             source: ModelSource::Default,
-        }
-    }
-
-    fn from_flag(raw: &str) -> Self {
-        Self {
-            resolved: resolve_model_alias_with_config(raw),
-            raw: Some(raw.to_string()),
-            source: ModelSource::Flag,
         }
     }
 
@@ -223,12 +173,9 @@ pub(crate) const DEFAULT_DATE: &str = match option_env!("BUILD_DATE") {
     Some(d) => d,
     None => "unknown",
 };
-const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 pub(crate) const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
-const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
-const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Where REPL turns auto-save, as the help texts name it.
 pub(crate) const SESSION_AUTO_SAVE_PATH: &str =
     ".scode/sessions/<workspace>/<session-id>/transcript.jsonl";
@@ -5181,9 +5128,7 @@ impl LiveCli {
 
         let mut permission_prompter: Box<dyn runtime::PermissionPrompter> =
             if io::stdin().is_terminal() {
-                Box::new(CliPermissionPrompter::new(
-                    self.lifecycle.current_permission_mode(),
-                ))
+                Box::new(CliPermissionPrompter)
             } else {
                 Box::new(AutoDenyPermissionPrompter)
             };
@@ -5426,9 +5371,7 @@ impl LiveCli {
     /// `run_prompt_compact*` selection.
     fn compact_permission_prompter(&self) -> Box<dyn runtime::PermissionPrompter> {
         if io::stdin().is_terminal() {
-            Box::new(CliPermissionPrompter::new(
-                self.lifecycle.current_permission_mode(),
-            ))
+            Box::new(CliPermissionPrompter)
         } else {
             Box::new(AutoDenyPermissionPrompter)
         }
@@ -5475,8 +5418,7 @@ impl LiveCli {
         // prompter, even off a pipe — it prints the permission box and reads
         // the y/N approval from stdin (the mock parity harness feeds "y\n" and
         // asserts "Permission required" / "Approve this tool call?" on stdout).
-        let mut permission_prompter =
-            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
+        let mut permission_prompter = CliPermissionPrompter;
         let outcome = self.run_noninteractive_turn(input, &mut permission_prompter)?;
         let tc = outcome
             .complete
@@ -6818,238 +6760,8 @@ fn build_system_prompt() -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     build_system_prompt_for(&env::current_dir()?)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InternalPromptProgressState {
-    pub(crate) command_label: &'static str,
-    pub(crate) task_label: String,
-    pub(crate) step: usize,
-    pub(crate) phase: String,
-    pub(crate) detail: Option<String>,
-    pub(crate) saw_final_text: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InternalPromptProgressEvent {
-    Started,
-    Update,
-    Heartbeat,
-    Complete,
-    Failed,
-}
-
-#[derive(Debug)]
-struct InternalPromptProgressShared {
-    state: Mutex<InternalPromptProgressState>,
-    output_lock: Mutex<()>,
-    started_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-struct InternalPromptProgressReporter {
-    shared: Arc<InternalPromptProgressShared>,
-}
-
-#[derive(Debug)]
-struct InternalPromptProgressRun {
-    reporter: InternalPromptProgressReporter,
-    heartbeat_stop: Option<mpsc::Sender<()>>,
-    heartbeat_handle: Option<thread::JoinHandle<()>>,
-}
-
-impl InternalPromptProgressReporter {
-    fn ultraplan(task: &str) -> Self {
-        Self {
-            shared: Arc::new(InternalPromptProgressShared {
-                state: Mutex::new(InternalPromptProgressState {
-                    command_label: "Ultraplan",
-                    task_label: task.to_string(),
-                    step: 0,
-                    phase: "planning started".to_string(),
-                    detail: Some(format!("task: {task}")),
-                    saw_final_text: false,
-                }),
-                output_lock: Mutex::new(()),
-                started_at: Instant::now(),
-            }),
-        }
-    }
-
-    fn emit(&self, event: InternalPromptProgressEvent, error: Option<&str>) {
-        let snapshot = self.snapshot();
-        let line = format_internal_prompt_progress_line(event, &snapshot, self.elapsed(), error);
-        self.write_line(&line);
-    }
-
-    fn mark_model_phase(&self) {
-        let snapshot = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("internal prompt progress state poisoned");
-            state.step += 1;
-            state.phase = if state.step == 1 {
-                "analyzing request".to_string()
-            } else {
-                "reviewing findings".to_string()
-            };
-            state.detail = Some(format!("task: {}", state.task_label));
-            state.clone()
-        };
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Update,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn mark_tool_phase(&self, name: &str, input: &str) {
-        let detail = describe_tool_progress(name, input);
-        let snapshot = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("internal prompt progress state poisoned");
-            state.step += 1;
-            state.phase = format!("running {name}");
-            state.detail = Some(detail);
-            state.clone()
-        };
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Update,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn mark_text_phase(&self, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let detail = truncate_for_summary(first_visible_line(trimmed), 120);
-        let snapshot = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("internal prompt progress state poisoned");
-            if state.saw_final_text {
-                return;
-            }
-            state.saw_final_text = true;
-            state.step += 1;
-            state.phase = "drafting final plan".to_string();
-            state.detail = (!detail.is_empty()).then_some(detail);
-            state.clone()
-        };
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Update,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn emit_heartbeat(&self) {
-        let snapshot = self.snapshot();
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Heartbeat,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn snapshot(&self) -> InternalPromptProgressState {
-        self.shared
-            .state
-            .lock()
-            .expect("internal prompt progress state poisoned")
-            .clone()
-    }
-
-    fn elapsed(&self) -> Duration {
-        self.shared.started_at.elapsed()
-    }
-
-    fn write_line(&self, line: &str) {
-        let _guard = self
-            .shared
-            .output_lock
-            .lock()
-            .expect("internal prompt progress output lock poisoned");
-        let mut stdout = io::stdout();
-        let _ = writeln!(stdout, "{line}");
-        let _ = stdout.flush();
-    }
-}
-
-impl InternalPromptProgressRun {
-    fn start_ultraplan(task: &str) -> Self {
-        let reporter = InternalPromptProgressReporter::ultraplan(task);
-        reporter.emit(InternalPromptProgressEvent::Started, None);
-
-        let (heartbeat_stop, heartbeat_rx) = mpsc::channel();
-        let heartbeat_reporter = reporter.clone();
-        let heartbeat_handle = thread::spawn(move || loop {
-            match heartbeat_rx.recv_timeout(INTERNAL_PROGRESS_HEARTBEAT_INTERVAL) {
-                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => heartbeat_reporter.emit_heartbeat(),
-            }
-        });
-
-        Self {
-            reporter,
-            heartbeat_stop: Some(heartbeat_stop),
-            heartbeat_handle: Some(heartbeat_handle),
-        }
-    }
-
-    fn reporter(&self) -> InternalPromptProgressReporter {
-        self.reporter.clone()
-    }
-
-    fn finish_success(&mut self) {
-        self.stop_heartbeat();
-        self.reporter
-            .emit(InternalPromptProgressEvent::Complete, None);
-    }
-
-    fn finish_failure(&mut self, error: &str) {
-        self.stop_heartbeat();
-        self.reporter
-            .emit(InternalPromptProgressEvent::Failed, Some(error));
-    }
-
-    fn stop_heartbeat(&mut self) {
-        if let Some(sender) = self.heartbeat_stop.take() {
-            let _ = sender.send(());
-        }
-        if let Some(handle) = self.heartbeat_handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for InternalPromptProgressRun {
-    fn drop(&mut self) {
-        self.stop_heartbeat();
-    }
-}
-
-struct CliPermissionPrompter {
-    current_mode: PermissionMode,
-}
-
-impl CliPermissionPrompter {
-    fn new(current_mode: PermissionMode) -> Self {
-        Self { current_mode }
-    }
-}
+/// Asks the person at the terminal; the request carries the current mode.
+struct CliPermissionPrompter;
 
 impl runtime::PermissionPrompter for CliPermissionPrompter {
     fn decide(
@@ -7347,6 +7059,7 @@ mod wait_notice_tests {
 #[cfg(test)]
 mod auth_mode_tests {
     use super::*;
+    use engine_host::config::resolve_model_switch_auth_mode;
     use std::collections::BTreeMap;
 
     fn connection(base_url: &str) -> engine_core::ProviderConnectionConfig {

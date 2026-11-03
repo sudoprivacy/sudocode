@@ -415,7 +415,7 @@ impl EngineEventRenderer {
                 }
                 RenderOutcome::Continue
             }
-            EngineEvent::ToolCall { id, name, input } => {
+            EngineEvent::ToolCall { id, name: _, input } => {
                 self.finish_response();
                 // Remember the arguments so the completed card can show what was
                 // requested — the ToolResult event/payload does not echo the
@@ -718,7 +718,6 @@ fn render_thinking_line(line: &str) -> StyledText {
 #[cfg(test)]
 mod tests {
     use super::{format_hook_progress, render_thinking_line};
-    use crate::render::{DIM, RESET};
     use engine_events::HookProgressEvent;
     use runtime::HookEvent;
 

@@ -1,4 +1,3 @@
-use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -176,20 +175,17 @@ pub const DIM: &str = "\x1b[2m";
 /// ANSI bold.
 pub const BOLD: &str = "\x1b[1m";
 
-/// The REPL prompt glyph (`❯`). Single source of truth: the live input line,
-/// the resumed-history echo, and any other prompt reprint all reference this so
+/// The REPL prompt glyph (`❯`) and the space after it — the exact prefix a
+/// prompt line starts with. Single source of truth: the live input line, the
+/// resumed-history echo, and any other prompt reprint all reference this so
 /// they can never drift (a past bug rendered resumed messages with `›` while
 /// the live prompt used `❯`).
-pub const PROMPT_GLYPH: &str = "\u{276f}";
-/// The prompt glyph followed by one space — the exact prefix a prompt line
-/// starts with.
 pub const PROMPT_PREFIX: &str = "\u{276f} ";
 
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
 #[derive(Clone)]
 pub struct SpinnerRef {
-    pb: ProgressBar,
     progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -202,7 +198,6 @@ impl SpinnerRef {
     /// for the iocraft REPL path, sharing the same activity clock.
     pub fn from_activity_state(state: &activity::ActivityState) -> Self {
         Self {
-            pb: ProgressBar::hidden(),
             progress: Arc::clone(&state.progress),
             is_thinking: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
@@ -307,7 +302,6 @@ impl SpinnerHandle {
     #[must_use]
     pub fn spinner_ref(&self) -> SpinnerRef {
         SpinnerRef {
-            pb: self.pb.clone(),
             progress: Arc::clone(&self.progress),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
@@ -374,13 +368,6 @@ impl SpinnerHandle {
     pub fn clear(&mut self) {
         self.stop_updater();
         self.pb.finish_and_clear();
-    }
-
-    pub fn finish(&mut self, label: &str) {
-        self.stop_updater();
-        self.pb.finish_and_clear();
-        let success = theme().fg_seq(TextRole::Success);
-        println!("{success}✔ {label}{RESET}");
     }
 
     pub fn fail(&mut self, label: &str) {
@@ -637,11 +624,6 @@ impl TerminalRenderer {
     pub(crate) fn with_color_support(mut self, support: ColorSupport) -> Self {
         self.color_support = support;
         self
-    }
-
-    #[must_use]
-    pub fn render_markdown(&self, markdown: &str) -> String {
-        self.render_markdown_with_width(markdown, query_terminal_width())
     }
 
     /// Adapt prompt content through the same Markdown engine as answers,

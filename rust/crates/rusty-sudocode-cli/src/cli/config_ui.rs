@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use runtime::config_schema::{self, ConfigInputKind, FieldSchema, FieldType};
 
 use crate::render::{theme, DIM, RESET};
-use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
+use crate::repl_ui::{OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::{LiveCli, SlashSelectionHandler};
 
 // ── public entry point ──────────────────────────────────────────────

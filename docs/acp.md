@@ -400,10 +400,13 @@ while waiting for the machine response; only human prompts claim `awaiting_input
 An answer for a cancelled request cannot satisfy a later turn's request.
 The question bridge is installed after context and image preparation, so runtime
 rebuilding preserves interactive questions and their human-input status.
-CLI and managed cohost sessions use this same execution boundary. The cohost
-mailbox acceptance reloads a live session with the provider enabled, resolves two
-different contexts, answers a question after each refresh, and checks both the
-Nexus process state and ACP status against the captured model requests.
+CLI and managed cohost sessions use this same execution boundary. A managed
+runtime opens once through its controller; restoration uses
+`managed_agent.start_session_v1` with its durable session ID. Context refresh does
+not require reopening the runtime.
+The cohost mailbox acceptance enables the provider when opening a fresh managed
+instance, resolves two different contexts, answers a question after each refresh,
+and checks both Nexus process state and ACP status against captured model requests.
 Context stays fixed during a turn, including in-turn steering. The following
 turn resolves anew. The provider mode is transport state, so controllers must
 negotiate it again when restoring a session.

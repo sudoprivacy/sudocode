@@ -306,6 +306,7 @@ fn iocraft_repl_thinking_activity_renders() {
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
+    let marker = common::turn_status_marker(&sess);
     sess.send("What is 2+2? Answer only the number.\r")
         .expect("send prompt");
 
@@ -317,10 +318,12 @@ fn iocraft_repl_thinking_activity_renders() {
         });
 
     // Wait for response and reprompt.
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("should return to prompt: {e}\nPTY:\n{screen}");
-    });
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "should return to prompt",
+    );
 
     // Clean exit.
     sess.send("/exit\r").expect("send /exit");
@@ -444,23 +447,16 @@ fn iocraft_repl_openai_format_gpt_works() {
     });
 
     sess.send("/model gpt-4.1-mini\r").expect("send /model");
-    sess.expect("❯").unwrap_or_else(|e| {
+    sess.expect("Model updated").unwrap_or_else(|e| {
         let screen = sess.render(common::screen_contents);
-        panic!("prompt after /model: {e}\nPTY:\n{screen}");
+        panic!("model switch report: {e}\nPTY:\n{screen}");
     });
 
-    sess.send("Say exactly: GPT_ENDPOINT_OK\r")
-        .expect("send prompt");
-
-    sess.expect("GPT_ENDPOINT_OK").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("GPT should respond with marker: {e}\nPTY:\n{screen}");
-    });
-
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("should return to prompt: {e}\nPTY:\n{screen}");
-    });
+    expect_marker_reply(
+        &mut sess,
+        "GPT_ENDPOINT_OK",
+        "GPT should respond with marker",
+    );
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
@@ -501,23 +497,16 @@ fn iocraft_repl_gemini_format_works() {
     });
 
     sess.send("/model gemini-2.5-flash\r").expect("send /model");
-    sess.expect("❯").unwrap_or_else(|e| {
+    sess.expect("Model updated").unwrap_or_else(|e| {
         let screen = sess.render(common::screen_contents);
-        panic!("prompt after /model: {e}\nPTY:\n{screen}");
+        panic!("model switch report: {e}\nPTY:\n{screen}");
     });
 
-    sess.send("Say exactly: GEMINI_ENDPOINT_OK\r")
-        .expect("send prompt");
-
-    sess.expect("GEMINI_ENDPOINT_OK").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("Gemini should respond with marker: {e}\nPTY:\n{screen}");
-    });
-
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("should return to prompt: {e}\nPTY:\n{screen}");
-    });
+    expect_marker_reply(
+        &mut sess,
+        "GEMINI_ENDPOINT_OK",
+        "Gemini should respond with marker",
+    );
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
@@ -596,10 +585,11 @@ fn iocraft_repl_streaming_code_block_not_corrupted() {
     });
 
     // Clean exit via /exit in the REPL.
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("REPL prompt not seen after response: {e}\nPTY:\n{screen}");
-    });
+    common::expect_input_line_cleared(
+        &sess,
+        common::LIVE_TURN_BUDGET,
+        "REPL prompt not seen after response",
+    );
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(common::screen_contents);
@@ -735,23 +725,26 @@ fn config_tree_navigate_back_and_toggle() {
     });
 
     // 13. ESC cancels out of tree entirely.
-    sess.send("\x1b").expect("ESC to cancel");
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("back to prompt after ESC: {e}\nPTY:\n{screen}");
-    });
-
-    // 14. Clean exit.
     //
-    // The `❯` matched above is ambiguous: the config-tree overlay also renders
-    // `❯` as its row selector, so on a slow render (loaded macOS CI) `expect`
-    // can match an intermediate tree frame while ESC is still tearing the
-    // overlay down. If `/exit` is sent then, it lands on the closing overlay
-    // instead of the REPL command line and the child never exits (10s eof
-    // timeout — the macOS-only flake). Settle the render loop first — the same
-    // input-slot pause the steps above use — so `/exit` reaches the command
-    // parser, and give teardown extra headroom for a loaded runner.
-    std::thread::sleep(Duration::from_millis(400));
+    // The prompt glyph cannot prove the tree closed: the config-tree overlay
+    // also renders `❯` as its row selector. If `/exit` were sent while ESC is
+    // still tearing the overlay down, it would land on the closing overlay
+    // instead of the REPL command line and the child would never exit. Wait
+    // for the tree to leave the screen and the editor to settle empty.
+    sess.send("\x1b").expect("ESC to cancel");
+    common::expect_screen(
+        &sess,
+        |screen| !screen.contains("web_search"),
+        common::at_least(Duration::from_secs(20)),
+        "ESC should close the config tree",
+    );
+    common::expect_input_line_cleared(
+        &sess,
+        common::at_least(Duration::from_secs(20)),
+        "back to prompt after ESC",
+    );
+
+    // 14. Clean exit. Give teardown extra headroom for a loaded runner.
     sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
@@ -884,4 +877,18 @@ fn seed_config_tree_settings(settings_path: &std::path::Path) {
         serde_json::to_string_pretty(&settings).expect("settings.json should serialize"),
     )
     .expect("seed settings.json");
+}
+
+/// Run a live turn asking for `marker` and require it in the reply. The
+/// echoed prompt carries the marker too, so only text below it counts.
+fn expect_marker_reply(sess: &mut pty_expect::PtySession, marker: &str, context: &str) {
+    let prompt = format!("Say exactly: {marker}");
+    common::run_turn(sess, &prompt, common::LIVE_TURN_BUDGET, context);
+    let screen = sess.render(common::screen_contents);
+    assert!(
+        screen
+            .rsplit_once(&prompt)
+            .is_some_and(|(_, reply)| reply.contains(marker)),
+        "{context}\nPTY:\n{screen}"
+    );
 }

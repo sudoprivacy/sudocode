@@ -680,13 +680,10 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         (None, _, Some(error)) => format!("unavailable: {error}"),
         (None, _, None) => "unavailable".to_string(),
     };
-    let receiver = match (peer.receiver, peer.delivery) {
-        ("receiving", "next_prompt") => {
-            "receiving; waiting messages run at the next prompt (press Enter)"
-        }
-        ("receiving", _) => "receiving",
-        ("standby", _) => "standing by: waiting for the receiver seat",
-        ("unavailable", _) => "unavailable; ordinary session remains usable",
+    let receiver = match peer.receiver {
+        "receiving" => "receiving",
+        "standby" => "standing by: waiting for the receiver seat",
+        "unavailable" => "unavailable; ordinary session remains usable",
         _ => "not running in this process",
     };
     let cursor = match peer.cursor {

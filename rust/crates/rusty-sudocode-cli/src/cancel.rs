@@ -1,9 +1,8 @@
 //! Single source of truth for the double Ctrl-C exit mechanism.
 //!
-//! Both the sync REPL (via `HookAbortMonitor` in `main.rs`) and the async REPL
-//! (via `LineEditor` in `input.rs`) need to track "was the last Ctrl-C recent
-//! enough that a second one means exit?". This module owns the shared constant,
-//! the cross-turn timestamp, and the helpers that read/write it.
+//! The REPL's Ctrl-C handling needs to know "was the last Ctrl-C recent enough
+//! that a second one means exit?". This module owns the shared constant, the
+//! cross-turn timestamp, and the helpers that read/write it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

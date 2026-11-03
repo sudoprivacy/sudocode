@@ -408,8 +408,7 @@ fn queued_and_offline_messages_survive_receiver_restart() {
         }
     }
     exit_with_context(&mut resumed, "recovered receiver");
-    // TestEnv defaults to the synchronous REPL, where Ctrl-D edits a nonempty
-    // draft. Keep the A2A receiver's queue mode across this second restart.
+    // Keep the A2A receiver's queue mode across this second restart.
     let mut replay = env.spawn_with_env(
         &["--resume", "latest", "--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],

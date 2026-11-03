@@ -35,6 +35,7 @@ fn thinking_content_is_rendered_before_the_answer() {
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
+    let marker = common::turn_status_marker(&sess);
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
     // The header marks the dim block as reasoning. Without it dim text reads as
@@ -71,10 +72,12 @@ fn thinking_content_is_rendered_before_the_answer() {
             panic!("the answer must still render after thinking: {e}\nPTY:\n{screen}");
         });
 
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("should return to prompt: {e}\nPTY:\n{screen}");
-    });
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::at_least(Duration::from_secs(30)),
+        "should return to prompt",
+    );
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {

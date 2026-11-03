@@ -18,8 +18,32 @@ use std::time::Duration;
 
 use common::{screen_tail, TestEnv};
 
+/// Wait until the rendered screen shows every `needle`. The REPL redraws its
+/// rows in place, so a report is read from the screen, not the byte stream;
+/// a tall report's title may already have scrolled above it.
+fn expect_report(sess: &pty_expect::PtySession, needles: &[&str], context: &str) -> String {
+    common::expect_screen(
+        sess,
+        |screen| needles.iter().all(|needle| screen.contains(needle)),
+        common::DEFAULT_TIMEOUT,
+        context,
+    )
+}
+
+/// Run `/context` on a screen tall enough for the whole report, so its
+/// headline estimate marker stays visible.
+fn show_full_context(sess: &mut pty_expect::PtySession) {
+    sess.resize(60, 120).unwrap();
+    sess.send("/context\r").unwrap();
+    expect_report(
+        sess,
+        &["Messages:", "Auto-compact threshold"],
+        "full context report",
+    );
+}
+
 fn exit_repl(sess: &mut pty_expect::PtySession) {
-    sess.expect("❯").expect("prompt before exit");
+    common::expect_input_line_cleared(sess, common::DEFAULT_TIMEOUT, "prompt before exit");
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
     assert_eq!(sess.expect_eof().expect("REPL exits after /context"), 0);
@@ -61,7 +85,7 @@ fn context_renders_grid_and_legend_on_fresh_session() {
         .expect("expand hint on the compact form");
 
     // No turn yet, so nothing is in the transcript.
-    sess.expect("❯").expect("prompt after report");
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after report");
     let screen = screen_tail(&sess, 4000);
     eprintln!("--- /context screen ---\n{screen}\n---");
     assert!(
@@ -99,7 +123,7 @@ fn context_all_lists_tools_and_agent_types() {
         .expect("built-in agent type listed with its source");
 
     // Let the report finish drawing before reading the screen.
-    sess.expect("❯").expect("prompt after report");
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after report");
     let screen = screen_tail(&sess, 6000);
     assert!(
         !screen.contains("/context all to expand"),
@@ -122,19 +146,29 @@ fn context_all_lists_tools_and_agent_types() {
 fn context_counts_messages_after_a_turn() {
     let env = TestEnv::new("context-after-turn");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "REPL input ready");
 
     let prompt = env.prompt("What is 2+2? Answer briefly.", "single_turn_text");
+    let before = common::turn_status_marker(&sess);
     sess.send(&format!("{prompt}\r")).expect("send prompt");
-    sess.expect("4").expect("response should contain '4'");
-    sess.expect("❯").expect("prompt after the turn");
+    common::expect_turn_complete_after(
+        &sess,
+        &before,
+        common::DEFAULT_TIMEOUT,
+        "the turn completes",
+    );
+    common::expect_input_line_cleared(
+        &sess,
+        common::DEFAULT_TIMEOUT,
+        "input restored after the turn",
+    );
 
     sess.send("/context\r").expect("send /context");
-    sess.expect("Context Usage").expect("report title");
-    sess.expect("Messages:")
-        .expect("messages category after a turn");
-    sess.expect("/context all to expand")
-        .expect("compact form hint");
+    expect_report(
+        &sess,
+        &["Messages:", "/context all to expand"],
+        "messages category and compact form hint after a turn",
+    );
 
     exit_repl(&mut sess);
 }
@@ -167,7 +201,7 @@ fn context_lists_workspace_instruction_files_as_memory() {
             screen_tail(&sess, 10000)
         );
     });
-    sess.expect("❯").expect("prompt after compact report");
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after compact report");
 
     sess.send("/context all\r").expect("send /context all");
     // ConPTY may insert cursor/line-wrap sequences inside the long absolute
@@ -295,9 +329,7 @@ fn compaction_clears_the_context_anchor_and_resumes_critical_facts() {
     ]);
     sess.set_default_timeout(compaction_timeout(&env));
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "resumed context ready");
-    sess.send("/context\r").unwrap();
-    sess.expect("Context Usage").unwrap();
-    sess.expect("Messages:").unwrap();
+    show_full_context(&mut sess);
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "context report complete");
     let screen = screen_tail(&sess, 10_000);
     assert!(

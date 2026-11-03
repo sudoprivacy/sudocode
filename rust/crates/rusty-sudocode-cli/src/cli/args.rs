@@ -1316,30 +1316,6 @@ pub(crate) fn join_optional_args(args: &[String]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-pub(crate) fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option<String> {
-    try_resolve_bare_skill_prompt_with_plugins(cwd, trimmed, None)
-}
-
-pub(crate) fn try_resolve_bare_skill_prompt_with_plugins(
-    cwd: &Path,
-    trimmed: &str,
-    plugin_load_outcome: Option<&PluginLoadOutcome>,
-) -> Option<String> {
-    let bare = trimmed.split_whitespace().next().unwrap_or_default();
-    let looks_like_skill = !bare.is_empty()
-        && !bare.starts_with('/')
-        && bare
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-    if !looks_like_skill {
-        return None;
-    }
-    match resolve_skill_invocation_with_plugins(cwd, Some(trimmed), plugin_load_outcome) {
-        Ok(SkillSlashDispatch::Invoke(prompt)) => Some(prompt),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Model / alias resolution
 // ---------------------------------------------------------------------------

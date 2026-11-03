@@ -173,6 +173,9 @@ pub struct SessionEngine {
     /// Whether this runtime can select a different durable transcript.
     allows_session_replacement: bool,
     lifetime_guard: std::sync::Mutex<Option<Box<dyn Send>>>,
+    /// The final save made when the engine closed, reported by later saves
+    /// instead of the closed writer's refusal.
+    closing_save: std::sync::Mutex<Option<Result<(), String>>>,
 }
 
 impl SessionEngine {
@@ -230,6 +233,7 @@ impl SessionEngine {
             host_prompt_sections,
             allows_session_replacement,
             lifetime_guard: std::sync::Mutex::default(),
+            closing_save: std::sync::Mutex::default(),
         })
     }
 
@@ -1348,10 +1352,22 @@ impl engine_core::EngineDelegate for SessionEngine {
         let session = self.lock_session();
         session.runtime.api_client().flush_response_captures();
         let path = session.handle.path.clone();
-        if session.runtime.ensure_session_persistence_allowed().is_ok() {
-            let _ = session.runtime.session().save_to_path(&path);
-        }
+        let saved = session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                session
+                    .runtime
+                    .session()
+                    .save_to_path(&path)
+                    .map_err(|error| error.to_string())
+            });
         session.runtime.session().close_persistence();
+        *self
+            .closing_save
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(saved);
         drop(session);
         self.lifetime_guard
             .lock()
@@ -1595,6 +1611,15 @@ impl SessionLifecycle for SessionEngine {
 
     fn persist(&self) -> Result<(), String> {
         let session = self.lock_session();
+        // After close, the writer is released: report the close's own save.
+        if let Some(saved) = self
+            .closing_save
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return saved;
+        }
         session
             .runtime
             .ensure_session_persistence_allowed()

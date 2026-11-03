@@ -1700,8 +1700,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Send a message to an agent by name or pid. ",
                 "Delivery is chosen by the host, not by you: on an agent-to-agent ",
                 "network the message is delivered to the peer over the network and the ",
-                "result reads `message delivered to <name>`; otherwise it lands in the ",
-                "recipient's workspace mailbox (.sudocode-inbox/<name>.jsonl). ",
+                "result reads `message delivered to <name>`; otherwise it is appended to ",
+                "your conversation with the recipient in this workspace's mailbox. ",
                 "When `to` is a pid it is routed to the running process. ",
                 "A pid that has already exited is an error — its message cannot be \
                  delivered, so use `agent_list` to find a live agent (or a name, \

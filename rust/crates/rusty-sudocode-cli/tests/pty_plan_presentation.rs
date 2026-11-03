@@ -8,31 +8,18 @@ use serde_json::{json, Value};
 
 const FEEDBACK: &str = "Reuse the existing reader. Preserve ReaderReuseMarker.";
 
-fn choose(sess: &mut PtySession, queue: bool, value: &str, budget: std::time::Duration) {
-    if !queue {
-        common::expect_screen(
-            sess,
-            |screen| screen.contains("Your choice:"),
-            budget,
-            "choice editor ready",
-        );
-    }
-    if queue && value == FEEDBACK {
-        sess.send("\x1b[B\x1b[B\x1b[B\x1b[B").unwrap();
-    }
-    sess.send(value).unwrap();
-    if queue && value != FEEDBACK {
+/// A digit answers the choice panel directly; feedback goes through its
+/// `[+]` free-text row, below the four options.
+fn choose(sess: &mut PtySession, value: &str, budget: std::time::Duration) {
+    if value != FEEDBACK {
+        sess.send(value).unwrap();
         return;
     }
+    sess.send("\x1b[B\x1b[B\x1b[B\x1b[B").unwrap();
+    sess.send(value).unwrap();
     common::expect_screen(
         sess,
-        |screen| {
-            screen.contains(&if queue {
-                format!("> [+] {value}")
-            } else {
-                format!("Your choice: {value}")
-            })
-        },
+        |screen| screen.contains(&format!("> [+] {value}")),
         budget,
         "review answer entered",
     );
@@ -41,18 +28,13 @@ fn choose(sess: &mut PtySession, queue: bool, value: &str, budget: std::time::Du
 
 // PTY screen callbacks are higher-ranked borrows; method pointers cannot replace them.
 #[allow(clippy::redundant_closure_for_method_calls)]
-fn roundtrip(queue: bool) {
+fn roundtrip() {
     let env = TestEnv::new("plan-presentation");
     let path = env.workspace_root().join("reviewed-plan.md");
     let path_text = path.to_str().unwrap();
-    let mut sess = start(&env, queue, &path);
+    let mut sess = start(&env, &path);
     let prompt = review_prompt(&env);
-    // Classic Windows input is native console input; avoid multiline pastes.
-    if queue {
-        sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
-    } else {
-        sess.send(&prompt).unwrap();
-    }
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
         |s| !common::input_line_of(s).is_empty(),
@@ -89,7 +71,7 @@ fn roundtrip(queue: bool) {
     }
     let original = std::fs::read_to_string(&path).unwrap();
     assert!(original.contains("PresentationStageA"));
-    choose(&mut sess, queue, FEEDBACK, env.timeout());
+    choose(&mut sess, FEEDBACK, env.timeout());
     common::expect_screen_settled(
         &sess,
         |s| {
@@ -112,7 +94,7 @@ fn roundtrip(queue: bool) {
     let revised = std::fs::read_to_string(&path).unwrap();
     assert!(revised.contains("PresentationStageB") && revised.contains("ReaderReuseMarker"));
     let marker = common::turn_status_marker(&sess);
-    choose(&mut sess, queue, "4", env.timeout());
+    choose(&mut sess, "4", env.timeout());
     common::expect_turn_complete_after(
         &sess,
         &marker,
@@ -135,7 +117,7 @@ fn roundtrip(queue: bool) {
     common::expect_input_line(&sess, "/exit", env.timeout(), "exit entered");
     sess.send("\r").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);
-    verify_resume(&env, queue, &path);
+    verify_resume(&env, &path);
 }
 
 fn review_prompt(env: &TestEnv) -> String {
@@ -157,7 +139,7 @@ fn review_prompt(env: &TestEnv) -> String {
     }
 }
 
-fn start(env: &TestEnv, queue: bool, path: &std::path::Path) -> PtySession {
+fn start(env: &TestEnv, path: &std::path::Path) -> PtySession {
     let mut sess = env.spawn_with_env(
         &[
             "--permission-mode",
@@ -166,10 +148,6 @@ fn start(env: &TestEnv, queue: bool, path: &std::path::Path) -> PtySession {
             "write_plan",
         ],
         &[
-            (
-                "SUDOCODE_INTERRUPT_QUEUE_MODE",
-                if queue { "queue" } else { "off" },
-            ),
             ("SUDOCODE_MAX_TOOL_USE_CONCURRENCY", "1"),
             ("SUDOCODE_PLAN_FILE", path.to_str().unwrap()),
             ("NO_COLOR", ""),
@@ -218,19 +196,13 @@ fn assert_mock_decisions(env: &TestEnv, path_text: &str) {
 }
 
 #[allow(clippy::redundant_closure_for_method_calls)]
-fn verify_resume(env: &TestEnv, queue: bool, path: &std::path::Path) {
+fn verify_resume(env: &TestEnv, path: &std::path::Path) {
     let replacement = "# A newer unreviewed draft\n";
     std::fs::write(path, replacement).unwrap();
     let requests_before = env.is_mock().then(|| env.captured_message_bodies().len());
     let mut resumed = env.spawn_with_env(
         &["--resume", "latest", "--permission-mode", "workspace-write"],
-        &[
-            (
-                "SUDOCODE_INTERRUPT_QUEUE_MODE",
-                if queue { "queue" } else { "off" },
-            ),
-            ("NO_COLOR", ""),
-        ],
+        &[("NO_COLOR", "")],
     );
     resumed.resize(100, 100).unwrap();
     common::expect_screen_settled(
@@ -268,13 +240,8 @@ fn verify_resume(env: &TestEnv, queue: bool, path: &std::path::Path) {
 }
 
 #[test]
-fn async_review_separates_thinking_plan_and_revision() {
-    roundtrip(true);
-}
-
-#[test]
-fn classic_review_shares_plan_and_decision_formatting() {
-    roundtrip(false);
+fn review_separates_thinking_plan_and_revision() {
+    roundtrip();
 }
 
 #[test]

@@ -12,7 +12,7 @@ import re
 import subprocess
 import symtable
 
-from local_acceptance import POLICY, SIGNERS, production_build_paths
+from local_acceptance import POLICY, SIGNERS, production_build_paths, selected
 
 
 def git(*args):
@@ -171,12 +171,19 @@ def main():
             live = any(fnmatch.fnmatchcase(path, rule)
                        for path in relevant if path not in {POLICY, SIGNERS}
                        for rule in live_inputs)
+            # Public specs can be compiled into Rust just like source files.
+            # The native policy owns their scope and its metadata exclusions;
+            # reuse that decision for the actual integrated queue tree.
+            spec_paths = [path for path in relevant if path.startswith("spec/")]
+            policy = json.loads(git("show", f"{head}:{POLICY}")) if spec_paths else None
+            native_specs = [path for path in spec_paths
+                            if "native-workspace" in selected(policy, [path])]
             # Test modules remain part of all-feature linting even
             # when they do not rebuild or exercise the daemon binary.
             # Exercise a changed queue entry on the real workspace/platforms,
             # in addition to its small compiler controls in PR preflight.
-            clippy = any(path.startswith("rust/") or path == ".github/scripts/ci_clippy.py"
-                         for path in relevant)
+            clippy = bool(native_specs) or any(
+                path.startswith("rust/") or path == ".github/scripts/ci_clippy.py" for path in relevant)
             # CLI integration modules are not inputs to the daemon/cohost
             # binaries or shell journeys. Native PTYs and live model scope
             # remain unchanged; manifests, src and moved source still qualify.
@@ -184,7 +191,8 @@ def main():
             ignored_product_inputs = [path for path in relevant if path not in normal_inputs]
             daemon_paths = [path for path in normal_inputs
                             if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
-                            and any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs)]
+                            and (path in native_specs
+                                 or any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs))]
             executor_path = ".github/local-acceptance/checks.py"
             if executor_path in normal_inputs and mailbox_executor_changed(base, head):
                 daemon_paths.append(executor_path)

@@ -40,7 +40,8 @@
     "native-workspace": {
       "include": [
         "rust/**",
-        "e2e/**"
+        "e2e/**",
+        "spec/**"
       ],
       "exclude": [
         "e2e/local-acceptance/**",
@@ -51,7 +52,8 @@
         "e2e/terminal-resize/gui-smoke.py",
         "e2e/terminal-resize/gui-benchmark.py",
         "e2e/terminal-resize/gui-policy.json",
-        "**/README.md"
+        "**/README.md",
+        "spec/local_acceptance*.json"
       ]
     },
     "native-examples": {

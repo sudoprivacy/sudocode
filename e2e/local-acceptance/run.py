@@ -51,6 +51,9 @@ def scope_acceptance(directory):
     assert Path(command("git", "rev-parse", "--show-toplevel", cwd=repository)).resolve() == repository.resolve()
     command("git", "config", "user.name", "Scope E2E", cwd=repository)
     command("git", "config", "user.email", "scope@example.invalid", cwd=repository)
+    policy_path = repository / "spec/local_acceptance.json"
+    policy_path.parent.mkdir()
+    shutil.copyfile(SOURCE / "spec/local_acceptance.json", policy_path)
     (repository / "README.md").write_text("base\n")
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "base", cwd=repository)
@@ -97,10 +100,12 @@ def scope_acceptance(directory):
 
     cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, False, False),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
-             ("spec/cache_metrics.json", True, False, False), ("rust/crates/runtime/src/prompt.md", True, True, True),
+             ("spec/cache_metrics.json", True, True, True), ("rust/crates/runtime/src/prompt.md", True, True, True),
              ("spec/local_acceptance.json", False, False, False),
              ("spec/local_acceptance_signers.json", False, False, False),
-             ("spec/cache_ttl_prices.json", True, False, False),
+             ("spec/cache_ttl_prices.json", True, True, True),
+             ("spec/prompt_cache_observations.json", True, True, True),
+             ("spec/cache_usage_fixtures.json", True, True, True),
              ("rust/crates/engine-acp/src/ui.html", True, True, True), ("rust/crates/runtime/README.md", False, False, False),
              ("rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs", True, False, True),
              ("rust/crates/rusty-sudocode-cli/tests/common/mod.rs", True, False, True),
@@ -129,11 +134,20 @@ def scope_acceptance(directory):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text("new fixture input\n")
+        if path == "spec/local_acceptance.json":
+            policy = json.loads(file.read_text())
+            policy["repository"] = "scope/fixture"
+            file.write_text(json.dumps(policy))
+        else:
+            file.write_text("new fixture input\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"input {index}", cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
         expect_native_targets(base, ["pty_file_operations"] if path.endswith("/tests/pty_file_operations.rs") else None)
+        if path.startswith("spec/"):
+            product_spec = not Path(path).name.startswith("local_acceptance")
+            assert ("native-workspace" in selected_checks(base)) == product_spec, (
+                "Public embedded contracts require native execution; acceptance metadata keeps its own guards", path)
         if path == "rust/crates/pty-harness/src/lib.rs":
             # The helper implementation may move out of tests/common. Its new
             # path must still select real native terminal acceptance.
@@ -216,6 +230,24 @@ def scope_acceptance(directory):
     head = command("git", "rev-parse", "HEAD", cwd=repository)
     expect_native_targets(base, None)
     expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True)
+    # Public contracts remain queue inputs alongside metadata and when moved
+    # outside spec/. The same native policy must see the removed source path.
+    base = head
+    (repository / "spec/cache_usage_fixtures.json").write_text("changed public fixture\n")
+    policy = json.loads(policy_path.read_text())
+    policy["repository"] = "scope/mixed-fixture"
+    policy_path.write_text(json.dumps(policy))
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "mixed public spec and acceptance metadata", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True)
+    assert "native-workspace" in selected_checks(base)
+    base = head
+    command("git", "mv", "spec/cache_usage_fixtures.json", "docs/moved-fixture.json", cwd=repository)
+    command("git", "commit", "-m", "move public fixture outside spec", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True)
+    assert "native-workspace" in selected_checks(base)
     expect_scope("workflow_dispatch", {}, True, True, True)
     expect_scope("push", {"before": "0" * 40, "after": head}, True, True, True)
     base = head

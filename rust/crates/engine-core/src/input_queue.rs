@@ -18,8 +18,8 @@ pub enum QueueMode {
 impl QueueMode {
     /// Resolve from `SUDOCODE_INTERRUPT_QUEUE_MODE`. Case-insensitive.
     /// Default is `Queue` — message queue ON, matching Claude Code parity.
-    /// In the async REPL, Enter steers independently of the queue setting.
-    /// Startup `off` instead selects the legacy synchronous REPL.
+    /// Enter steers independently of the queue setting; `off` starts the REPL
+    /// with the queue disabled, as `/config set queue off` does.
     /// Esc flushes pending input;
     /// Ctrl+C always cancels through the engine control channel.
     #[must_use]

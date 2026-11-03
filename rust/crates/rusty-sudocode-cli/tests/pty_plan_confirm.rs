@@ -30,7 +30,7 @@ const EXIT_BUDGET: Duration = Duration::from_secs(30);
 /// confirmation dialog. Choosing "keep context & execute" completes the turn.
 //
 // Runs on Windows too: the confirmation crosses the engine↔renderer seam as a
-// QuestionRequest answered above the seam by CliQuestionPrompter (rustyline).
+// QuestionRequest answered by the REPL's choice panel.
 #[test]
 fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
     choose_plan_action("plan-confirm", "2", "The user APPROVED the plan", false);
@@ -67,32 +67,15 @@ fn choose_plan_action(name: &str, choice: &str, expected: &str, is_error: bool) 
     );
     sess.send("\r").expect("submit prompt");
 
-    // The title prints before rustyline enters readline. Sending a choice at
-    // that point races terminal setup: CI echoed the digit above the options
-    // and left the dialog waiting at `Your choice: 2`, having lost Enter.
+    // The panel's key hints render once it accepts a quick-select digit.
     common::expect_screen(
         &sess,
-        |screen| screen.contains("Choose an action") && screen.contains("Your choice:"),
+        |screen| screen.contains("Choose an action") && screen.contains("1-4 quick select"),
         budget,
-        "plan choice editor ready",
+        "plan choice panel ready",
     );
     let marker = turn_status_marker(&sess);
-    sess.send(choice).expect("type choice");
-    common::expect_screen(
-        &sess,
-        |screen| screen.contains(&format!("Your choice: {choice}")),
-        budget,
-        "plan choice entered",
-    );
-    // A user can pause before Enter. Span several spinner ticks: background
-    // progress must not erase the choice editor while it owns the terminal.
-    std::thread::sleep(Duration::from_millis(300));
-    let screen = sess.render(common::screen_contents);
-    assert!(
-        screen.contains(&format!("Your choice: {choice}")),
-        "the pending choice must remain visible: {screen}"
-    );
-    sess.send("\r").expect("submit choice");
+    sess.send(choice).expect("quick-select the choice");
     expect_turn_complete_after(&sess, &marker, budget, "chosen plan action completes");
 
     common::expect_input_line_cleared(&sess, budget, "plan REPL rearmed");
@@ -157,7 +140,7 @@ fn write_plan_comment_row_is_reachable_and_revises() {
         "--allowedTools",
         "write_plan",
     ]);
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, LIVE_TURN_BUDGET, "plan REPL ready");
 
     let prompt = env.prompt(
         "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",

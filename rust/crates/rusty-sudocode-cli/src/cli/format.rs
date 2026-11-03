@@ -21,7 +21,7 @@ use crate::render::{styled_text::StyledText, StyledLine};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
-    PRIMARY_SESSION_EXTENSION, VERSION,
+    SESSION_AUTO_SAVE_PATH, VERSION,
 };
 use crossterm::style::Color;
 
@@ -225,7 +225,7 @@ pub(crate) fn is_system_reminder_text(text: &str) -> bool {
 /// Extract concatenated text content from a message's blocks, skipping
 /// runtime-injected `<system-reminder>` blocks (see
 /// [`is_system_reminder_text`]).
-fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
+pub(crate) fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|b| match b {
@@ -544,7 +544,7 @@ pub(crate) fn render_resume_usage() -> String {
     format!(
         "Resume
   Usage            /resume <session-path|session-id|{LATEST_SESSION_REFERENCE}>
-  Auto-save        .scode/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}
+  Auto-save        {SESSION_AUTO_SAVE_PATH}
   Tip              use /session list to inspect saved sessions"
     )
 }

@@ -340,7 +340,6 @@ fn spawn_acp_from_binary(
         .current_dir(workspace.path())
         .env("SUDO_CODE_CONFIG_HOME", config_home.path())
         .envs(node_home.env())
-        .env("SUDOCODE_INTERRUPT_QUEUE_MODE", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

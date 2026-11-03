@@ -1,24 +1,20 @@
-//! A sync-REPL message that is still waiting when its receiver dies is not lost:
-//! the next instance of the same agent receives it again.
+//! A peer message whose turn is still running when its receiver dies is not
+//! lost: the next instance of the same agent receives and runs it again.
 //!
-//! `pty_sync_repl_receive` proves one session announces a waiting peer message
-//! and runs it on Enter, and that its read position only moves once the turn
-//! has run. Its doc notes that "a session that exits first leaves it for the
-//! next instance" — but a single-session test cannot show the next instance
-//! actually getting it. This does: a peer writes, the receiver announces the
-//! message but is killed before Enter (so no turn runs and the position never
-//! advances), and a second instance of the same agent, started fresh, announces
-//! the very same message. That is at-least-once delivery across a crash — the
-//! unacknowledged message survives the receiver's death.
+//! The receiver moves a conversation's read position only after the turn the
+//! message started has finished. A peer writes, the first instance starts the
+//! message's turn and is killed while the model is still answering, so the
+//! position never advances; a second instance of the same agent, started
+//! fresh, runs the very same message to completion. That is at-least-once
+//! delivery across a crash.
 //!
-//! Unix only, like the other PTY journeys here (this harness does not reliably
-//! drive a child through Windows `ConPTY`); it compiles everywhere.
+//! Mock only: the mock holds its answer long enough to kill the receiver
+//! mid-turn. Unix only, like the other PTY journeys here (this harness does not
+//! reliably drive a child through Windows `ConPTY`); it compiles everywhere.
 
 mod common;
 #[path = "support/node_home.rs"]
 mod node_home;
-#[path = "support/sync_input.rs"]
-mod sync_input;
 
 use std::time::{Duration, Instant};
 
@@ -46,23 +42,23 @@ fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
 }
 
 #[test]
-fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
-    if !cfg!(unix) {
-        eprintln!("skipped: the PTY runtime journey is Unix-only in this harness");
+fn the_next_instance_runs_a_message_the_crashed_one_left_unfinished() {
+    let env = TestEnv::new("peer-crash-redeliver");
+    if !cfg!(unix) || !env.is_mock() {
+        eprintln!("skipped: needs the mock's held answer and a Unix PTY");
         return;
     }
-
-    let env = TestEnv::new("sync-crash-redeliver");
     node_home::pin_agent_name(env.workspace_root(), AGENT);
 
-    // A peer writes one message to the agent's pair-root inbox.
+    // A peer writes one message to the agent's pair-root inbox. The mock holds
+    // its answer for a few seconds, so the receiver can die mid-turn.
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(MailboxEnvelope {
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
-            body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),
+            body: "for the crashed receiver PARITY_SCENARIO:delayed_text".to_string(),
             summary: None,
             timestamp: 0,
             color: None,
@@ -78,44 +74,27 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
             .unwrap_or(0)
     };
 
-    // The first instance announces the waiting message, but is killed before
-    // Enter: no turn runs, so the message is never acknowledged.
+    // The first instance starts the message's turn on its own and is killed
+    // while the model is still answering: the message is never acknowledged.
     let mut first = spawn_instance(&env);
-    first
-        .expect("\u{276f}")
-        .expect("the first REPL should start");
-    expect_on_screen(&mut first, &format!("Message from {PEER} is waiting"));
-    assert_eq!(position(), 0, "the announced message must still be unread");
-    drop(first); // the receiver dies with the message still pending
-    std::thread::sleep(Duration::from_secs(2));
+    expect_on_screen(&mut first, &format!("Message from {PEER}"));
     assert_eq!(
         position(),
         0,
-        "a receiver that died before Enter must not have advanced the position"
+        "a running turn must not acknowledge its message"
+    );
+    drop(first); // the receiver dies with the turn unfinished
+    std::thread::sleep(mock_anthropic_service::DELAYED_TEXT_LATENCY + Duration::from_secs(1));
+    assert_eq!(
+        position(),
+        0,
+        "a receiver that died mid-turn must not have advanced the position"
     );
 
-    // A second instance of the same agent, started fresh, receives it again.
+    // A second instance of the same agent, started fresh, runs it to completion.
     let mut second = spawn_instance(&env);
-    second
-        .expect("\u{276f}")
-        .expect("the second REPL should start");
-    expect_on_screen(&mut second, &format!("Message from {PEER} is waiting"));
-    common::expect_input_line_cleared(&second, BUDGET, "redelivery prompt ready");
-    assert_eq!(
-        position(),
-        0,
-        "redelivery must not have advanced the position before the message runs"
-    );
-
-    // The redelivered message is live, not a stale notice: Enter runs it and the
-    // position finally advances.
-    let turn_marker = common::turn_status_marker(&second);
-    second
-        .send("\r")
-        .expect("press Enter on the second instance");
-    if env.is_mock() {
-        expect_on_screen(&mut second, "The answer is 4");
-    }
+    expect_on_screen(&mut second, &format!("Message from {PEER}"));
+    expect_on_screen(&mut second, "Mock streaming says hello");
     let deadline = Instant::now() + BUDGET;
     while position() == 0 {
         assert!(
@@ -126,18 +105,11 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     }
 
     let ready_deadline = Instant::now() + BUDGET;
-    sync_input::expect_prompt_after_turn(
-        &second,
-        &turn_marker,
-        ready_deadline.saturating_duration_since(Instant::now()),
-        "status at the rearmed prompt",
-    );
     submit_line(&mut second, "/status", ready_deadline);
     common::expect_screen_settled(
         &second,
         |screen| {
-            common::screen_contains(screen, "receiving; waiting messages run at the next prompt")
-                && common::input_line_of(screen).is_empty()
+            common::screen_contains(screen, "receiving") && common::input_line_of(screen).is_empty()
         },
         ready_deadline.saturating_duration_since(Instant::now()),
         "the new receiver reports ownership and restores its input row",
@@ -172,10 +144,7 @@ fn submit_line(sess: &mut pty_expect::PtySession, line: &str, deadline: Instant)
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "read-only"],
-        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "off"), ("PAGER", "")],
-    );
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("PAGER", "")]);
     sess.set_default_timeout(BUDGET);
     sess
 }

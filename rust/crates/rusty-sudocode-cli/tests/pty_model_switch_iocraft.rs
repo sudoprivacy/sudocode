@@ -50,25 +50,33 @@ fn model_switch_changes_active_model() {
         return;
     }
 
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("prompt after switch: {e}\nPTY:\n{screen}");
-    });
-
     // Ask the model what it is
-    sess.send("What model are you? Reply with only your model ID, nothing else.\r")
-        .expect("send question");
+    let question = "What model are you? Reply with only your model ID, nothing else.";
+    common::run_turn(
+        &mut sess,
+        question,
+        common::LIVE_TURN_BUDGET,
+        "model identity turn",
+    );
 
-    // The response should mention sonnet-4, not opus
-    sess.expect("(?i)sonnet").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("model should identify as sonnet after switch: {e}\nPTY:\n{screen}");
-    });
-
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("prompt after response: {e}\nPTY:\n{screen}");
-    });
+    // The response should mention sonnet-4, not opus. The turn status line
+    // names the model too, so only the reply between the question and that
+    // line counts.
+    let screen = sess.render(common::screen_contents);
+    let reply = screen
+        .rsplit_once("nothing else.")
+        .map(|(_, below)| {
+            below
+                .lines()
+                .take_while(|line| !line.contains("· turn "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    assert!(
+        reply.to_lowercase().contains("sonnet"),
+        "model should identify as sonnet after switch\nPTY:\n{screen}"
+    );
 
     // Switch back to auto
     sess.send("/model auto\r").expect("send /model auto");

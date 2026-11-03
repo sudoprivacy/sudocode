@@ -119,26 +119,31 @@ fn resume_seeds_history_for_up_arrow() {
     );
     sess2.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
-    // Wait for the resumed REPL prompt.
-    sess2.expect("❯").unwrap_or_else(|e| {
-        let screen = sess2.render(common::screen_contents);
-        panic!("should see prompt after resume: {e}\nPTY screen:\n{screen}");
-    });
+    // Wait for the resumed REPL prompt. The replayed history echoes the
+    // earlier prompt with `❯` too, so only the live input line counts.
+    common::expect_input_line_cleared(
+        &sess2,
+        common::at_least(Duration::from_secs(15)),
+        "should see prompt after resume",
+    );
 
-    // Press ↑ on empty prompt — should show the previous user prompt from history.
+    // Press ↑ on empty prompt — should show the previous user prompt from
+    // history in the editor, not just in the replayed transcript.
     sess2.send("\x1b[A").expect("send Up arrow");
-    std::thread::sleep(Duration::from_millis(500));
-
-    let screen = sess2.render(common::screen_contents);
-    assert!(
-        screen.contains("say hello world") || screen.contains("single_turn_text"),
-        "↑ after resume should recall the previous prompt from history.\n\
-         PTY screen:\n{screen}",
+    common::expect_input_line(
+        &sess2,
+        "say hello world",
+        common::at_least(Duration::from_secs(15)),
+        "↑ after resume should recall the previous prompt from history",
     );
 
     // Clean exit.
     sess2.send("\x15").expect("Ctrl-U clear");
-    std::thread::sleep(Duration::from_millis(100));
+    common::expect_input_line_cleared(
+        &sess2,
+        common::at_least(Duration::from_secs(15)),
+        "Ctrl-U should clear the recalled prompt",
+    );
     sess2.send("/exit\r").expect("send exit");
     let exit = sess2.expect_eof().unwrap_or_else(|e| {
         let screen = sess2.render(common::screen_contents);

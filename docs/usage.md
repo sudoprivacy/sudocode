@@ -97,9 +97,9 @@ human messages before history, leaving inbound peer messages queued.
 
 ## Steering, queueing and cancellation
 
-These controls apply to the default asynchronous REPL. Starting with
-`SUDOCODE_INTERRUPT_QUEUE_MODE=off` selects the legacy synchronous REPL,
-which retains turn-boundary delivery.
+These controls apply to the REPL. Starting with
+`SUDOCODE_INTERRUPT_QUEUE_MODE=off`, like `/config set queue off`, disables
+the queue: a message that would wait for the next turn is refused instead.
 
 While the model or tools are working:
 
@@ -512,8 +512,7 @@ does not send OSC 10/11 color queries: some console hosts deliver replies as
 input, so startup uses `COLORFGBG` instead (dark if absent or invalid). This
 also avoids treating ConPTY's backing-console colors as the visible theme.
 Unsupported Unix queries use the same fallback. `NO_COLOR` skips the query and
-colors; noninteractive commands do not query the terminal. The legacy REPL
-uses `COLORFGBG`. Running tool previews cache syntax highlighting; repainting
+colors; noninteractive commands do not query the terminal. Running tool previews cache syntax highlighting; repainting
 or editing input does not reparse their code. Output stays in native terminal
 scrollback, with no alternate screen. Terminal theme changes take effect on
 the next launch.
@@ -1047,9 +1046,8 @@ scode --model <vision-model> 'Describe @"screenshots/home page.png"'
 In the REPL, paste a clipboard image with **Alt+V**, with **Ctrl+V** where the
 terminal passes it through, or with the terminal's own paste (Cmd+V on macOS)
 when the clipboard holds only an image. On Windows Terminal, Ctrl+V is the
-terminal's text paste, so use Alt+V there. The image shows as `[Image #N]` in
-the default REPL and as its `@"path"` reference in the classic synchronous REPL,
-and it is attached on submit exactly like a typed reference: a copied image file
+terminal's text paste, so use Alt+V there. The image shows as `[Image #N]`, and
+it is attached on submit exactly like a typed reference: a copied image file
 is referenced where it is, and pasted image data is stored in the image cache
 first. For scripts and tests, `SUDOCODE_CLIPBOARD_IMAGE=<file>` stands in for
 the system clipboard, which is then never read: the clipboard holds only the

@@ -1,5 +1,4 @@
-//! Clipboard image paste in both REPLs, exercised through the real CLI in a
-//! PTY. The clipboard is the documented `SUDOCODE_CLIPBOARD_IMAGE` source, so
+//! Clipboard image paste, exercised through the real CLI in a PTY. The clipboard is the documented `SUDOCODE_CLIPBOARD_IMAGE` source, so
 //! these tests never read or replace the developer's clipboard. A pasted image
 //! must reach the provider as the fixture's exact bytes, through the same `@`
 //! reference a user can type.
@@ -7,8 +6,6 @@
 mod common;
 #[path = "support/image_fixture.rs"]
 mod image_fixture;
-#[path = "support/sync_input.rs"]
-mod sync_input;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,26 +22,13 @@ const CTRL_V: &str = "\x16";
 /// clipboard holds only an image.
 const EMPTY_PASTE: &str = "\x1b[200~\x1b[201~";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Repl {
-    Default,
-    Classic,
-}
-
 /// Spawn scode with `clipboard` as its clipboard image. The PTY is wide enough
 /// that a pasted `@"path"` reference stays on one input row.
-fn start(env: &TestEnv, repl: Repl, clipboard: &Path) -> PtySession {
-    let mode = match repl {
-        Repl::Default => "queue",
-        Repl::Classic => "off",
-    };
+fn start(env: &TestEnv, clipboard: &Path) -> PtySession {
     let clipboard = clipboard.display().to_string();
     let mut session = env.spawn_with_env(
         &["--permission-mode", "read-only"],
-        &[
-            ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
-            ("SUDOCODE_CLIPBOARD_IMAGE", clipboard.as_str()),
-        ],
+        &[("SUDOCODE_CLIPBOARD_IMAGE", clipboard.as_str())],
     );
     session.resize(40, 400).unwrap();
     common::expect_input_line_cleared(&session, env.timeout(), "prompt ready");
@@ -77,7 +61,6 @@ fn last_user_content(env: &TestEnv) -> Vec<serde_json::Value> {
 fn paste_and_submit(
     env: &TestEnv,
     session: &mut PtySession,
-    repl: Repl,
     image: &Path,
     (trigger, submit): (&str, &str),
 ) {
@@ -88,23 +71,15 @@ fn paste_and_submit(
     session.send(&prompt).unwrap();
     common::expect_input_line(session, &prompt, env.timeout(), "prompt typed");
     session.send(trigger).unwrap();
-    let shown = match repl {
-        Repl::Default => "[Image #1]",
-        Repl::Classic => "board.png\"",
-    };
     common::expect_input_line(
         session,
-        shown,
+        "[Image #1]",
         env.timeout(),
         &format!("image pasted with {trigger:?}"),
     );
     let marker = common::turn_status_marker(session);
     session.send(submit).unwrap();
-    if repl == Repl::Classic {
-        sync_input::expect_prompt_after_turn(session, &marker, env.timeout(), "pasted image turn");
-    } else {
-        common::expect_turn_complete_after(session, &marker, env.timeout(), "pasted image turn");
-    }
+    common::expect_turn_complete_after(session, &marker, env.timeout(), "pasted image turn");
 
     assert_eq!(
         env.captured_message_count(),
@@ -146,57 +121,36 @@ fn paste_and_submit(
     );
 }
 
-fn every_trigger_attaches_the_clipboard_image(repl: Repl, steps: &[(&str, &str)]) {
-    let env = TestEnv::new(match repl {
-        Repl::Default => "image-paste-default",
-        Repl::Classic => "image-paste-classic",
-    });
+fn every_trigger_attaches_the_clipboard_image(steps: &[(&str, &str)]) {
+    let env = TestEnv::new("image-paste");
     if !env.is_mock() {
         return; // The assertions read the deterministic provider's captured requests.
     }
     let image = clipboard_image(&env);
-    let mut session = start(&env, repl, &image);
+    let mut session = start(&env, &image);
     for &step in steps {
-        paste_and_submit(&env, &mut session, repl, &image, step);
+        paste_and_submit(&env, &mut session, &image, step);
     }
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
 
 #[test]
-fn default_repl_attaches_the_clipboard_image_on_alt_v_ctrl_v_and_empty_paste() {
+fn repl_attaches_the_clipboard_image_on_alt_v_ctrl_v_and_empty_paste() {
     every_trigger_attaches_the_clipboard_image(
-        Repl::Default,
         // Tab queues the turn: the placeholder expands on that path too.
         &[(HELD_ALT_V, "\r"), (CTRL_V, "\t"), (EMPTY_PASTE, "\r")],
     );
 }
 
-#[test]
-fn classic_repl_attaches_the_clipboard_image_on_alt_v_ctrl_v_and_empty_paste() {
-    every_trigger_attaches_the_clipboard_image(
-        Repl::Classic,
-        &[
-            (HELD_ALT_V, "\r"),
-            (CTRL_V, "\r"),
-            // The Windows console delivers a paste to rustyline as plain
-            // keystrokes, so an empty paste reaches it as nothing.
-            #[cfg(unix)]
-            (EMPTY_PASTE, "\r"),
-        ],
-    );
-}
-
 /// Without a clipboard image, Alt+V leaves the draft unchanged and says so,
 /// and a text paste still inserts its text.
-fn no_clipboard_image(repl: Repl) {
-    let env = TestEnv::new(match repl {
-        Repl::Default => "image-paste-none-default",
-        Repl::Classic => "image-paste-none-classic",
-    });
+#[test]
+fn repl_without_a_clipboard_image_keeps_the_draft() {
+    let env = TestEnv::new("image-paste-none");
     let not_an_image = env.workspace_root().join("clipboard.txt");
     fs::write(&not_an_image, "plain text").unwrap();
-    let mut session = start(&env, repl, &not_an_image);
+    let mut session = start(&env, &not_an_image);
     session.send("hello").unwrap();
     common::expect_input_line(&session, "hello", env.timeout(), "draft typed");
     session.send(ALT_V).unwrap();
@@ -221,16 +175,6 @@ fn no_clipboard_image(repl: Repl) {
 }
 
 #[test]
-fn default_repl_without_a_clipboard_image_keeps_the_draft() {
-    no_clipboard_image(Repl::Default);
-}
-
-#[test]
-fn classic_repl_without_a_clipboard_image_keeps_the_draft() {
-    no_clipboard_image(Repl::Classic);
-}
-
-#[test]
 fn pasted_image_for_a_text_only_model_fails_before_any_request() {
     let env = TestEnv::new("image-paste-text-only");
     if !env.is_mock() {
@@ -238,7 +182,7 @@ fn pasted_image_for_a_text_only_model_fails_before_any_request() {
     }
     mark_model_text_only(&env);
     let image = clipboard_image(&env);
-    let mut session = start(&env, Repl::Default, &image);
+    let mut session = start(&env, &image);
     session.send("Describe").unwrap();
     common::expect_input_line(&session, "Describe", env.timeout(), "draft typed");
     session.send(ALT_V).unwrap();

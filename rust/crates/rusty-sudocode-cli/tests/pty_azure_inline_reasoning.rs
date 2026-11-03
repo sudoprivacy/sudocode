@@ -282,7 +282,8 @@ fn openai_reasoning_fields_reach_the_terminal_and_session() {
         std::fs::write(path, config.to_string()).unwrap();
 
         let mut cli = env.spawn(&["--permission-mode", "read-only"]);
-        cli.expect("❯").unwrap();
+        common::expect_input_line_cleared(&cli, common::DEFAULT_TIMEOUT, case);
+        let before = common::turn_status_marker(&cli);
         cli.send("Read fixture.txt and report its contents.\r")
             .unwrap();
         let has_thinking = !matches!(case, "none" | "empty");
@@ -292,7 +293,9 @@ fn openai_reasoning_fields_reach_the_terminal_and_session() {
             cli.expect("最后一步").unwrap();
         }
         cli.expect(&nonce).unwrap();
-        cli.expect("❯").unwrap();
+        // `/exit` during the turn would interrupt it; wait for the turn to finish.
+        common::expect_turn_complete_after(&cli, &before, common::DEFAULT_TIMEOUT, case);
+        common::expect_input_line_cleared(&cli, common::DEFAULT_TIMEOUT, case);
         cli.send("/exit\r").unwrap();
         assert_eq!(cli.expect_eof().unwrap(), 0, "{case}: CLI exit");
 

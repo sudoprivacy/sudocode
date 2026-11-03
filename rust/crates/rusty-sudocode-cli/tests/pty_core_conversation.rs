@@ -51,18 +51,22 @@ fn multi_turn_references_prior() {
     let env = TestEnv::new("multi-turn");
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.expect("❯").expect("should see REPL prompt");
+    let budget = if env.is_live() {
+        LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
+    expect_input_line_cleared(&sess, env.timeout(), "should see REPL prompt");
 
-    // First turn: introduce a name.
+    // First turn: introduce a name. The prompt itself says "Alice", so the
+    // turn's completion, not the name, gates the second turn.
     let first = env.prompt(
         "My name is Alice. Please greet me by name.",
         "multi_turn_context",
     );
+    let first_marker = turn_status_marker(&sess);
     sess.send(&format!("{first}\r")).expect("send first msg");
-    sess.expect("Alice")
-        .expect("first response should mention Alice");
-
-    expect_input_line_cleared(&sess, env.timeout(), "first turn should re-arm input");
+    expect_turn_complete_after(&sess, &first_marker, budget, "first turn should complete");
 
     // Second turn: ask for the name back.
     let second = env.prompt(
@@ -71,18 +75,20 @@ fn multi_turn_references_prior() {
     );
     let second_marker = turn_status_marker(&sess);
     sess.send(&format!("{second}\r")).expect("send second msg");
-    sess.expect("Alice")
-        .expect("second response should recall Alice");
-
     expect_turn_complete_after(
         &sess,
         &second_marker,
-        if env.is_live() {
-            LIVE_TURN_BUDGET
-        } else {
-            env.timeout()
-        },
+        budget,
         "second turn should complete before exiting",
+    );
+    // Only the reply below the second prompt counts; the first prompt and
+    // its reply say "Alice" too.
+    let screen = sess.render(common::screen_contents);
+    assert!(
+        screen
+            .rsplit_once("What is my name?")
+            .is_some_and(|(_, reply)| reply.contains("Alice")),
+        "second response should recall Alice\nPTY screen:\n{screen}"
     );
     sess.send("/exit\r").expect("send /exit");
 

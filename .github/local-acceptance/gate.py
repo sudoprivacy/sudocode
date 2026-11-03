@@ -49,8 +49,13 @@ def fetch_head(pull):
     return head
 
 
+def github_event():
+    """Decode the UTF-8 event file supplied by GitHub Actions."""
+    return json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+
+
 def main():
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+    event = github_event()
     repository = os.environ["GITHUB_REPOSITORY"]
     policy_ref = acceptance.value("rev-parse", "HEAD")
     execution_ref = policy_ref

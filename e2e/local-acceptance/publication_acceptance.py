@@ -2,6 +2,7 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -91,7 +92,9 @@ def verify_publication(directory, work, clean_environment):
     thread.start()
     bootstrap = output / "publisher-child.py"
     bootstrap.write_text(
-        'import runpy,sys,urllib.request\n'
+        'import json,os,runpy,sys,urllib.request\n'
+        'with open(os.devnull) as probe:\n'
+        ' print("PUBLICATION_FILE_ENCODING="+json.dumps({"encoding":probe.encoding,"utf8_mode":sys.flags.utf8_mode}),flush=True)\n'
         'original=urllib.request.urlopen\n'
         'def loopback(request,*args,**kwargs):\n'
         ' assert request.full_url.startswith("https://api.github.com/")\n'
@@ -112,15 +115,25 @@ def verify_publication(directory, work, clean_environment):
                gate_only=False, verified_base=None):
         state.update(runs={item["id"]: item for item in runs}, posts=[], proof=proof)
         event = output / (label + ".json")
-        event.write_text(json.dumps({"pull_request": pull} if gate_only else
-                                    {"workflow_run": {"id": source, "run_attempt": attempt}}))
+        payload = ({"pull_request": pull} if gate_only else
+                   {"workflow_run": {"id": source, "run_attempt": attempt}})
+        payload["repository"] = {"full_name": "acceptance/fixture", "description": "Metadata ❯ 中文"}
+        event.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run([sys.executable, str(bootstrap), f"http://127.0.0.1:{server.server_port}",
                                  str(verifier / ".github/local-acceptance" / ("gate.py" if gate_only else "publish.py"))], cwd=verifier,
             env={**clean_environment, "GITHUB_REPOSITORY": "acceptance/fixture", "GITHUB_EVENT_PATH": str(event),
                  "GITHUB_OUTPUT": str(output / (label + ".outputs")), "GITHUB_RUN_ID": "300",
+                 "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "LC_ALL": "C", "LANG": "C",
                  "GH_TOKEN": "fixture-no-real-token"}, capture_output=True)
         (output / (label + ".stdout.log")).write_bytes(result.stdout)
         (output / (label + ".stderr.log")).write_bytes(result.stderr)
+        encodings = [json.loads(line.split("=", 1)[1]) for line in result.stdout.decode().splitlines()
+                     if line.startswith("PUBLICATION_FILE_ENCODING=")]
+        assert len(encodings) == 1 and encodings[0]["utf8_mode"] == 0, encodings
+        if os.name != "nt":
+            # POSIX C supplies a real non-UTF-8 default; Windows uses its ANSI codepage.
+            assert encodings[0]["encoding"].lower().replace("-", "") not in {"utf8", "cp65001"}, encodings
+        print("PUBLICATION_ENV_CASE=" + json.dumps({"case": label, **encodings[0]}), flush=True)
         assert (result.returncode == 0) == success, result.stdout.decode() + result.stderr.decode()
         assert [item["state"] for item in state["posts"]] == ([] if expected is None else [expected]), state
         if verified_base is not None:

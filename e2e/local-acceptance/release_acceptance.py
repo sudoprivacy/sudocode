@@ -306,8 +306,27 @@ a.directory.mkdir(parents=True)
     except RuntimeError as error:
         assert "Required compiler context acceptance driver is missing" in str(error), error
         assert not (output / "compiler-missing/003.log").exists()
+    execute(["git", "add", "-u", "e2e/compiler-context/run.py"], root, output / "compiler-delete-add.log")
+    execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-m", "Remove introduced compiler journey"],
+            root, output / "compiler-delete-commit.log")
+    shallow = output / "shallow-source"
+    execute(["git", "clone", "--depth=1", root.resolve().as_uri(), str(shallow)],
+            root, output / "compiler-shallow-clone.log")
+    previous_target = os.environ["CARGO_TARGET_DIR"]
+    os.environ["CARGO_TARGET_DIR"] = str(output / "shallow-target")
+    try:
+        try:
+            profiles.run("native-release", shallow, output / "compiler-shallow", "fixture-base", execute)
+            raise AssertionError("Shallow history falsely proved a source predates the required journey")
+        except RuntimeError as error:
+            assert "shallow Git history" in str(error), error
+            assert not (output / "compiler-shallow/003.log").exists()
+    finally:
+        os.environ["CARGO_TARGET_DIR"] = previous_target
     return {"commands": records, "failed_compiler_exit": failed["exit_code"],
             "introduced_driver_removal_refused": True,
+            "shallow_history_absence_not_treated_as_proof": True,
             "scope": "Native executor/CLI artifact boundary only; not product compiler coverage"}
 
 

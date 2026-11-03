@@ -133,6 +133,8 @@ def compiler_context_driver_present(root):
     relative = "e2e/compiler-context/run.py"
     if (root / relative).is_file():
         return True
+    if committed_git(root, "rev-parse", "--is-shallow-repository").strip() != b"false":
+        raise RuntimeError("Cannot prove historical compiler-driver absence from shallow Git history")
     if committed_git(root, "log", "-1", "--format=%H", "HEAD", "--", relative).strip():
         raise RuntimeError("Required compiler context acceptance driver is missing from this source")
     return False
@@ -651,7 +653,7 @@ def native_guard_files():
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/publication_acceptance.py": "5667fdfa6197ff362299d6f7ee59fc6930ec28e88aabec4d15eeba641aa03f5e",
-        "e2e/local-acceptance/release_acceptance.py": "3618d4f4c1cc5dff493990dc7e4984840a8dea770211fe99731207989df4dc99",
+        "e2e/local-acceptance/release_acceptance.py": "4b4cdfafb9971ee30c5945acff8effd332eb9ef144f77fd919f976bb4873333e",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/run.py": "1e79dbcb72bd62bc4b7e60863e7f2fb225de7649cb419d701d4146cdb0ca740a",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
@@ -710,7 +712,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "a996e4e33e9d628ca414f3cd3df2ef3fe52b59c92ef4ce55a902c99c2470a8fb"
+    expected = "7bf79728e2ec8d1115fb357ead698f0b24ab9bbb8bda6c3972fce89d188bafbf"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

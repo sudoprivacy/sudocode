@@ -122,7 +122,7 @@ Run these commands from the repository you want to work on:
 | Resume the most recent interactive session | `scode --resume` |
 | List saved sessions | `scode --resume list` |
 | Resume a specific session | `scode --resume <session-id-or-path>` |
-| Connect an ACP client over stdio | `scode acp` |
+| Start the ACP server over stdio | `scode acp` |
 | Start the browser UI and ACP WebSocket server | `scode acp serve --port 8080` |
 | Inspect configuration | `scode config` |
 | Inspect recorded prompt-cache behavior | `scode cache stats` |
@@ -168,7 +168,7 @@ tool execution, and session behavior live behind it.
 ```mermaid
 flowchart TB
     Terminal["Terminal and shell scripts"] --> CLI["scode CLI"]
-    Clients["Editors and Sudowork"] --> ACP["ACP: stdio / WebSocket"]
+    Clients["Editors and Sudowork"] --> ACP["ACP server: stdio / WebSocket"]
     Browser["Embedded browser UI"] --> ACP
     CLI --> Boundary["engine-core: commands and events"]
     ACP --> Boundary

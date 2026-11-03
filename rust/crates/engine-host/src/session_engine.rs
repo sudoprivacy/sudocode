@@ -201,6 +201,35 @@ impl SessionEngine {
             .map_err(|error| format!("failed to create engine tokio runtime: {error}"))
     }
 
+    /// Initialize engine-owned state after the host has prepared its session.
+    /// Auth overrides and transcript replacement remain explicit host policy.
+    #[inline]
+    fn from_session(
+        session: AcpCliSession,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+        reasoning_effort: Option<String>,
+        auth_mode: Option<AuthMode>,
+        host_prompt_sections: Vec<String>,
+        allows_session_replacement: bool,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
+            compaction_abort_signal: session.abort_signal.clone(),
+            session: std::sync::Mutex::new(session),
+            tokio_runtime: Some(Self::build_async_runtime()?),
+            allowed_tools,
+            permission_mode: std::sync::Mutex::new(permission_mode),
+            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
+            auth_mode: std::sync::Mutex::new(auth_mode),
+            host_prompt_sections,
+            allows_session_replacement,
+            lifetime_guard: std::sync::Mutex::default(),
+            closing_save: std::sync::Mutex::default(),
+        })
+    }
+
     /// Adopt a session prepared by a host, retaining its filesystem and writer
     /// lease. This is the same engine used by the CLI and every ACP transport.
     #[allow(clippy::too_many_arguments)]
@@ -239,31 +268,26 @@ impl SessionEngine {
         )
         .map_err(|e| format!("build hosted session engine: {e}"))?;
         let cwd = host.shell_root.clone();
-        Ok(Self {
-            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
-            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
-            compaction_abort_signal: abort_signal.clone(),
-            session: std::sync::Mutex::new(AcpCliSession {
-                cwd,
-                host,
-                handle,
-                runtime,
-                abort_signal,
-                started_at: Instant::now(),
-                session_mcp_servers: mcp_servers,
-                prompt_overrides,
-                memory,
-            }),
-            tokio_runtime: Some(Self::build_async_runtime()?),
+        let session = AcpCliSession {
+            cwd,
+            host,
+            handle,
+            runtime,
+            abort_signal,
+            started_at: Instant::now(),
+            session_mcp_servers: mcp_servers,
+            prompt_overrides,
+            memory,
+        };
+        Self::from_session(
+            session,
             allowed_tools,
-            permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: std::sync::Mutex::new(None),
-            auth_mode: std::sync::Mutex::new(Some(auth_mode)),
+            permission_mode,
+            None,
+            Some(auth_mode),
             host_prompt_sections,
-            allows_session_replacement: false,
-            lifetime_guard: std::sync::Mutex::default(),
-            closing_save: std::sync::Mutex::default(),
-        })
+            false,
+        )
     }
 
     /// Build a single-session engine for `cwd`. Ports `AcpCliAgent::build_session`.
@@ -338,21 +362,15 @@ impl SessionEngine {
             prompt_overrides,
             memory,
         };
-        Ok(Self {
-            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
-            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
-            compaction_abort_signal: session.abort_signal.clone(),
-            session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(Self::build_async_runtime()?),
+        Self::from_session(
+            session,
             allowed_tools,
-            permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
-            auth_mode: std::sync::Mutex::new(auth_mode),
-            host_prompt_sections: Vec::new(),
-            allows_session_replacement: true,
-            lifetime_guard: std::sync::Mutex::default(),
-            closing_save: std::sync::Mutex::default(),
-        })
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+            Vec::new(),
+            true,
+        )
     }
 
     /// Build a single-session engine wrapping an **already-persisted**
@@ -425,21 +443,15 @@ impl SessionEngine {
             prompt_overrides,
             memory,
         };
-        Ok(Self {
-            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
-            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
-            compaction_abort_signal: session.abort_signal.clone(),
-            session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(Self::build_async_runtime()?),
+        Self::from_session(
+            session,
             allowed_tools,
-            permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
-            auth_mode: std::sync::Mutex::new(auth_mode),
-            host_prompt_sections: Vec::new(),
-            allows_session_replacement: true,
-            lifetime_guard: std::sync::Mutex::default(),
-            closing_save: std::sync::Mutex::default(),
-        })
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+            Vec::new(),
+            true,
+        )
     }
 
     /// Apply session/load options to this live context without acquiring a

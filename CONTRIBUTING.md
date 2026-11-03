@@ -718,6 +718,11 @@ keep full workspace acceptance. All other selected native/local profiles remain.
 Shared PTY helper sources also select native terminal resize acceptance, whether
 they live under CLI `tests/common` or the test-only `rust/crates/pty-harness` path.
 
+Public `spec/` inputs selected by the native workspace policy also select the
+queue's all-feature Clippy and real CLI/co-host daemon journeys. The CI selector
+reads that same committed policy, including its acceptance-metadata exclusions;
+mixed changes and moves retain both paths. Paid model calls remain on demand.
+
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider
 probe checks. Its first failing step blocks its daemon/provider dependents.
@@ -1090,6 +1095,22 @@ that reuse a correlation ID. Reuse these public fixtures when adding scanner
 or runtime adapters, rather than maintaining another copy of the observations.
 Validate the schema with `python scripts/check_cache_usage_fixtures.py`
 (`jsonschema==4.26.0`); Rust CI runs this check, including invalid variants.
+
+The contract also defines endpoint input-accounting paths and synthetic usage
+vectors: Anthropic input excludes cache reads/writes; OpenAI and Gemini input
+includes cache tokens. Missing counters remain unknown. Pair-total comparisons
+are scoped heuristics; their results describe reported usage and require
+separate evidence for billing or credential identity.
+
+`input_accounting` owns provider usage paths and the nonnegative int64 domain
+for both counters and computed totals. `provider_semantics` retains the primary
+read/write field names as a generated compatibility projection; aliases belong
+to the accounting paths. After changing those paths, run
+`python scripts/generate_cache_semantics.py`. The existing public-fixture check
+also verifies that this projection has not drifted, without rewriting the file.
+Public product specs select native workspace acceptance because Rust embeds
+them as runtime inputs. Acceptance configuration and signer registration keep
+their separate infrastructure guards.
 
 ### Startup latency
 

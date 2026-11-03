@@ -24,6 +24,7 @@ impl Drop for ReleaseOnDrop {
             "release-two",
             "ci-ready",
             "foreground-release",
+            "history-fill-release",
         ] {
             let _ = fs::write(self.0.join(file), "released");
         }
@@ -1417,9 +1418,7 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
             )
         })
         .collect::<Vec<_>>();
-    let before = common::turn_status_marker(&session);
-    send_calls(&env, &mut session, &calls);
-    expect_parent_complete(&session, &before);
+    complete_history_batch(&env, &mut session, &calls);
     common::expect_screen_rows_settled(
         &session,
         |view| {
@@ -1483,6 +1482,28 @@ fn inspect_history(session: &mut PtySession, count: usize) -> std::collections::
     seen
 }
 
+fn complete_history_batch(env: &TestEnv, session: &mut PtySession, calls: &[Value]) {
+    // Separate batch generation from completion steering: retain every real
+    // worker until the launch turn ends, then test the same history overflow.
+    let release = env.workspace_root().join("history-fill-release");
+    assert!(!release.exists(), "one fill batch per fixture");
+    let calls = calls
+        .iter()
+        .map(|call| {
+            let mut call = call.clone();
+            let command = call["input"]["command"].as_str().unwrap();
+            call["input"]["command"] = json!(format!(
+                "{command}; while [ ! -f history-fill-release ]; do sleep 1; done"
+            ));
+            call
+        })
+        .collect::<Vec<_>>();
+    let before = common::turn_status_marker(session);
+    send_calls(env, session, &calls);
+    expect_parent_complete(session, &before);
+    fs::write(release, "go").unwrap();
+}
+
 #[test]
 fn task_history_retains_inspected_results_and_late_completions() {
     let (env, _release) = task_env("background-history-lru");
@@ -1517,9 +1538,7 @@ fn task_history_retains_inspected_results_and_late_completions() {
             )
         })
         .collect::<Vec<_>>();
-    let before = common::turn_status_marker(&session);
-    send_calls(&env, &mut session, &calls);
-    expect_parent_complete(&session, &before);
+    complete_history_batch(&env, &mut session, &calls);
     screen(&session, "1 terminal · 50 new results");
 
     session.send("/ps\r").unwrap();

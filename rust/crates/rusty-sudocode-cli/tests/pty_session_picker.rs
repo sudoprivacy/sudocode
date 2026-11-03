@@ -60,7 +60,9 @@ fn record_response(
         .filter(|message| message.role == runtime::MessageRole::Assistant)
         .count();
     let directory = runtime::Session::response_captures_dir_for(path, &session.session_id).unwrap();
-    child.send(&format!("{prompt}\r")).unwrap();
+    // Persistence can finish while the coordinator still owns the turn. Use
+    // the shared completion gate before issuing session-management commands.
+    common::run_turn(child, prompt, env.timeout(), "record session response");
     common::expect_screen(
         child,
         |_| {
@@ -85,7 +87,6 @@ fn record_response(
         env.timeout(),
         "persisted answer and finalized raw response",
     );
-    common::expect_input_line_cleared(child, env.timeout(), "response completed");
     directory
 }
 

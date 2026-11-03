@@ -42,3 +42,33 @@ fn scode_help_prints_usage_and_exits_cleanly() {
         .expect("scode --help should exit on its own");
     assert_eq!(exit, 0, "scode --help should exit 0; got {exit}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cold_macos_binary_is_signed_and_starts_under_a_pty() {
+    // A new inode exercises first activation instead of the kernel's warm cache.
+    let directory = tempfile::tempdir().expect("cold executable directory");
+    let binary = directory.path().join("scode");
+    std::fs::copy(common::scode_bin(), &binary).expect("copy the actual CLI");
+
+    let mut session = pty_expect::PtySession::spawn(
+        binary.to_str().expect("UTF-8 fixture executable"),
+        &["--help"],
+    )
+    .expect("spawn the cold CLI under a real PTY");
+    session.set_default_timeout(common::DEFAULT_TIMEOUT);
+    session.expect("Usage:").expect("cold CLI help");
+    assert_eq!(session.expect_eof().expect("cold CLI exit"), 0);
+
+    // Verify after execution so the check cannot prewarm first activation.
+    let verification = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict"])
+        .arg(&binary)
+        .output()
+        .expect("verify the cold executable's code signature");
+    assert!(
+        verification.status.success(),
+        "macOS CLI artifacts must carry a valid code signature: {}",
+        String::from_utf8_lossy(&verification.stderr)
+    );
+}

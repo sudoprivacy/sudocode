@@ -12,9 +12,8 @@ use std::{
 use crossterm::style::ContentStyle;
 
 use crate::render::{
-    prompt_style,
     styled_text::{AnsiDecoder, StyledText},
-    text_layout,
+    text_layout, theme,
 };
 
 const NONE: u64 = u64::MAX;
@@ -317,7 +316,7 @@ impl Transcript {
         let caption = prefix.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut styled = StyledText::default();
         styled.push(
-            prompt_style(false),
+            theme().prompt_style(false),
             &text_layout::truncate_to_width(&caption, width.saturating_sub(1)),
         );
         let caption = Arc::new(styled);

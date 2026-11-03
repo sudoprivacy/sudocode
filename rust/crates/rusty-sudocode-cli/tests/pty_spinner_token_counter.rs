@@ -99,7 +99,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
 #[test]
 fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
     use std::time::Instant;
-    let warning = terminal_palette::expected_color("Idx(220)");
+    let warning = terminal_palette::expected_color("Idx(3)");
     let env = TestEnv::new_mock("spinner-activity");
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],

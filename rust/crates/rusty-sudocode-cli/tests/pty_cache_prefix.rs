@@ -699,7 +699,12 @@ fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
         exit(&mut cli);
         let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
         turn(&mut cli, "Keep the new signed response after restart.");
-        assert_eq!(capture.bodies().len(), 6, "one resumed request");
+        assert_eq!(
+            capture.bodies().len(),
+            6,
+            "one resumed request; mode={mode}, shared={shared}\nPTY:\n{}",
+            common::screen_tail(&cli, 6000)
+        );
         assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
         assert_eq!(repair_archives(&path).len(), 1);
         exit(&mut cli);
@@ -1733,10 +1738,7 @@ fn cache_diagnostics_survive_resume_without_crossing_session_boundaries() {
 }
 
 fn turn(cli: &mut PtySession, text: &str) {
-    let marker = common::turn_status_marker(cli);
-    cli.send(&format!("{text}\r")).unwrap();
-    common::expect_turn_complete_after(cli, &marker, WAIT, text);
-    common::expect_input_line_cleared(cli, WAIT, "turn completed");
+    common::run_turn(cli, text, WAIT, text);
 }
 
 fn cache_rows(directory: &std::path::Path) -> Vec<Value> {

@@ -5,6 +5,7 @@ Small executable fixture commands test the enforcement path. They are never
 reported as product PTY/browser/performance acceptance.
 """
 
+import argparse
 import base64
 import json
 import os
@@ -25,7 +26,7 @@ def fixture_environment():
     environment = {key: value for key, value in os.environ.items() if key not in names
                    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
     environment["PYTHONIOENCODING"] = "utf-8"
-    return environment
+    return {**environment, "NO_COLOR": "1"}
 
 
 FIXTURE_ENV = fixture_environment()
@@ -55,7 +56,7 @@ def scope_acceptance(directory):
     command("git", "commit", "-m", "base", cwd=repository)
 
     def expect_scope(event_name, event, live, daemon, clippy, benchmark=False, container=False, clippy_executor=False,
-                     gzip_codec=False, cohost=None):
+                     gzip_codec=False, cohost=None, vfs_cache=False, a2a=None):
         data = directory / "scope-event.json"
         output = directory / "scope-output.txt"
         data.write_text(json.dumps(event))
@@ -66,12 +67,14 @@ def scope_acceptance(directory):
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert f"live_required={str(live).lower()}" in output.read_text()
         assert f"daemon_required={str(daemon).lower()}" in output.read_text()
+        assert f"a2a_required={str(daemon if a2a is None else a2a).lower()}" in output.read_text()
         assert f"cohost_required={str(daemon if cohost is None else cohost).lower()}" in output.read_text()
         assert f"clippy_required={str(clippy).lower()}" in output.read_text()
         assert f"benchmark_required={str(benchmark).lower()}" in output.read_text()
         assert f"container_required={str(container).lower()}" in output.read_text()
         assert f"clippy_executor_required={str(clippy_executor).lower()}" in output.read_text()
         assert f"gzip_codec_required={str(gzip_codec).lower()}" in output.read_text()
+        assert f"vfs_cache_required={str(vfs_cache).lower()}" in output.read_text()
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -81,6 +84,16 @@ def scope_acceptance(directory):
                 'print(json.dumps(module.changed_cli_test_targets(Path(sys.argv[2]),sys.argv[3])))')
         actual = command(sys.executable, "-c", code, selector, repository, base, cwd=repository)
         assert json.loads(actual) == targets, (base, actual, targets)
+
+    def selected_checks(diff_base):
+        policy = SOURCE / "spec/local_acceptance.json"
+        code = ('import importlib.util,json,subprocess,sys; '
+                'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
+                'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
+                'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
+        return json.loads(command(sys.executable, "-c", code,
+            SOURCE / ".github/scripts/local_acceptance.py", policy, diff_base, cwd=repository))
 
     cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, False, False),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
@@ -96,14 +109,22 @@ def scope_acceptance(directory):
              ("rust/crates/rusty-sudocode-cli/build.rs", True, True, True),
              ("rust/crates/pty-harness/src/lib.rs", True, True, True),
              ("e2e/shared-services/check.py", False, True, False),
-             (".github/local-acceptance/checks.py", False, False, False),
+             (".github/local-acceptance/checks.py", False, True, False),
              (".github/scripts/local_acceptance.py", False, False, False),
              ("e2e/local-acceptance/benchmark_targets_acceptance.py", False, False, False),
+             ("e2e/terminal-resize/benchmark.py", False, False, False),
+             ("e2e/terminal-resize/performance-policy.json", False, False, False),
+             ("e2e/terminal-resize/gui-benchmark.py", False, False, False),
+             ("e2e/terminal-resize/gui-policy.json", False, False, False),
              ("e2e/local-acceptance/container_inputs_acceptance.py", False, False, False),
              ("e2e/local-acceptance/clippy_fail_fast.py", False, False, False),
              ("rust/crates/runtime/src/response_archive.rs", True, True, True),
              ("rust/crates/runtime/src/response_archive/gzip.rs", True, True, True),
-             ("e2e/response-gzip/main.rs", False, False, False)]
+             ("e2e/response-gzip/main.rs", False, False, False),
+             (".github/scripts/vfs_search_cache.py", False, True, False),
+             (".github/actions/vfs-search-cache/action.yml", False, True, False),
+             (".github/workflows/ci-vfs-search-cache.yml", False, True, False),
+             ("e2e/local-acceptance/vfs_search_cache_acceptance.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -116,27 +137,77 @@ def scope_acceptance(directory):
         if path == "rust/crates/pty-harness/src/lib.rs":
             # The helper implementation may move out of tests/common. Its new
             # path must still select real native terminal acceptance.
-            policy = SOURCE / "spec/local_acceptance.json"
-            code = ('import importlib.util,json,subprocess,sys; '
-                    'spec=importlib.util.spec_from_file_location("acceptance",sys.argv[1]); '
-                    'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
-                    'paths=subprocess.check_output(["git","diff","--name-only","--no-renames",sys.argv[3],"HEAD"]).decode().splitlines(); '
-                    'print(json.dumps(module.selected(json.load(open(sys.argv[2])),paths)))')
-            selected = json.loads(command(sys.executable, "-c", code,
-                SOURCE / ".github/scripts/local_acceptance.py", policy, base, cwd=repository))
-            assert {"native-workspace", "native-resize", "rendering", "browser", "native-release"}.issubset(selected)
+            selected = selected_checks(base)
+            assert {"native-workspace", "native-resize", "rendering", "browser"}.issubset(selected)
+            assert "native-release" not in selected, "Dev-only PTY helper edits must not rebuild native releases"
+        if path == "e2e/nexus-a2a/run.sh":
+            assert "native-workspace" not in selected_checks(base), "Daemon script edits keep their actual queue journey"
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
             expect_scope(event_name, event, live, daemon, clippy, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
-                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py"}, path in {
+                ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py",
+                "e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
+                "e2e/terminal-resize/gui-benchmark.py", "e2e/terminal-resize/gui-policy.json"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"}, path in {
                 ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
                 ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
-                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"})
+                "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
+                ".github/workflows/rust-ci.yml", ".github/scripts/vfs_search_cache.py",
+                ".github/actions/vfs-search-cache/action.yml", ".github/workflows/ci-vfs-search-cache.yml",
+                "e2e/local-acceptance/vfs_search_cache_acceptance.py"},
+                cohost=False if path == ".github/local-acceptance/checks.py" else None,
+                a2a=daemon and path not in {
+                ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/action.yml",
+                ".github/workflows/ci-vfs-search-cache.yml"})
+    # The batch imports only the shared nextest helpers. Unrelated function
+    # bodies stay outside its scope; unknown helper globals remain required.
+    checks = repository / ".github/local-acceptance/checks.py"
+    small_module = ('def nextest_binary(output):\n    return output\n'
+                    'def nextest_options(output):\n    return []\n'
+                    'def unrelated():\n    return 1\n')
+    checks.write_text(small_module)
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "baseline nextest execution dependencies", cwd=repository)
+    for label, before, after, required in [
+        ("unrelated body", small_module, small_module.replace("return 1", "return 2"), False),
+        ("executor option", small_module, small_module.replace("return []", "return [1]"), True),
+        ("module assignment", small_module, small_module + "extra = 1\n", True),
+        ("unknown helper global", small_module.replace("return output", "return unrelated()"),
+         small_module.replace("return output", "return unrelated()").replace("return 1", "return 2"), True),
+    ]:
+        checks.write_text(before)
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "--allow-empty", "-m", label + " baseline", cwd=repository)
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        checks.write_text(after)
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", label, cwd=repository)
+        head = command("git", "rev-parse", "HEAD", cwd=repository)
+        expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, False, required, False,
+                     benchmark=True, container=True, gzip_codec=True, cohost=False, a2a=required)
+    # Mixed edits and moves must retain A2A: only a cache-only diff omits it.
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    (repository / ".github/scripts/vfs_search_cache.py").write_text("changed cache helper\n")
+    (repository / "rust/crates/api/src/lib.rs").write_text("changed product source\n")
+    (repository / "e2e/nexus-a2a/run.sh").write_text("changed daemon harness alongside product code\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "mixed cache and product inputs", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True,
+                 vfs_cache=True)
+    assert "native-workspace" in selected_checks(base), "Mixed daemon script and Rust edits retain native validation"
+    base = head
+    command("git", "mv", ".github/scripts/vfs_search_cache.py", "rust/crates/api/src/moved.py", cwd=repository)
+    command("git", "mv", "e2e/nexus-a2a/run.sh", "rust/crates/api/src/moved_harness.py", cwd=repository)
+    command("git", "commit", "-m", "cache helper moves into product source", cwd=repository)
+    head = command("git", "rev-parse", "HEAD", cwd=repository)
+    expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, True, True, True,
+                 vfs_cache=True)
+    assert "native-workspace" in selected_checks(base), "A daemon harness moved into Rust retains native validation"
     # A rename across the test/production boundary must see both paths.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/tests/pty_file_operations.rs",
@@ -182,7 +253,7 @@ def performance_scope_acceptance(directory):
     policy = command("git", "rev-parse", "HEAD", cwd=repository)
     helper = repository / ".github/scripts/local_acceptance.py"
 
-    def expect(base, expected, *, native=True, guard=None):
+    def expect(base, expected, *, native=True, guard=None, resize=None, release=None):
         text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
                        "--host", "windows", "--architecture", "AMD64", cwd=repository)
         plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
@@ -193,26 +264,52 @@ def performance_scope_acceptance(directory):
         assert "Statistical performance profiles:" in text, text
         if not expected:
             assert "indirect performance effects" in text, text
+        assert ("The browser terminal functional smoke runs locally." in text) == ("browser" in expected), text
         assert ("native-workspace" in names) == native, text
+        if resize is not None:
+            assert ("native-resize" in names) == resize, text
         if guard is not None:
             assert ("guard-contract" in names) == guard, text
+        if release is not None:
+            assert ("native-release" in names) == release, text
+            assert "RELEASE_ACCEPTANCE_SCOPE=" in text, text
         assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native else set()), text
         for job in plan["ci"]:
             assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
 
     both = ["rendering", "browser"]
+    measurement_inputs = ["e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
+                          "e2e/terminal-resize/gui-benchmark.py", "e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/gui-policy.json"]
     cases = [(f"rust/crates/{crate}/src/fixture.rs", [])
              for crate in ["api", "runtime", "tools", "engine-acp", "engine-host", "service-host"]]
     cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
-        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs", "rust/crates/engine-core/src/lib.rs",
+        "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs",
         "rust/crates/pty-harness/src/lib.rs", "rust/crates/rusty-sudocode-cli/tests/common/mod.rs",
-        "rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
-        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "e2e/terminal-resize/host.cjs"]]
+        "e2e/terminal-resize/host.cjs"]]
+    cases += [("rust/crates/engine-core/src/lib.rs", ["rendering"])]
+    cases += [(path, []) for path in ["rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs"]]
     cases += [("rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs", ["rendering"]),
               ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"]),
               ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", ["browser"]),
               ("rust/crates/scode-benchmark-drivers/Cargo.toml", both),
               ("rust/crates/scode-benchmark-drivers/future.rs", both)]
+    cases += [("e2e/terminal-resize/benchmark.py", both),
+              ("e2e/terminal-resize/performance-policy.json", ["rendering"]),
+              ("e2e/terminal-resize/gui-benchmark.py", []),
+              ("e2e/terminal-resize/gui-smoke.py", ["browser"]),
+              ("e2e/terminal-resize/gui-policy.json", ["browser"])]
+    release_inputs = {"rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
+        "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "rust/crates/scode-benchmark-drivers/Cargo.toml",
+        "rust/crates/rusty-sudocode-cli/src/main.rs", "rust/crates/rusty-sudocode-cli/src/startup.rs",
+        "rust/crates/rusty-sudocode-cli/src/cli/config_ui.rs", "rust/crates/runtime/src/config.rs",
+        "rust/crates/runtime/src/config/fixture.rs", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
+        "e2e/startup/run.py"}
+    cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/main.rs",
+        "rust/crates/rusty-sudocode-cli/src/startup.rs", "rust/crates/rusty-sudocode-cli/src/cli/config_ui.rs"]]
+    cases += [(path, []) for path in ["rust/crates/runtime/src/config.rs",
+        "rust/crates/runtime/src/config/fixture.rs", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
+        "e2e/startup/run.py"]]
     for index, (path, expected) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -220,7 +317,20 @@ def performance_scope_acceptance(directory):
         file.write_text("actual changed input\n")
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", f"Performance input {index}", cwd=repository)
-        expect(base, expected)
+        measured_only = path in measurement_inputs
+        expect(base, expected, native=not measured_only, resize=False if measured_only else None,
+               release=path in release_inputs)
+    # A known measurement input cannot hide a changed SUT, shared terminal host,
+    # or an unknown external input. The actual committed diff owns the scope.
+    for companion in ["rust/crates/rusty-sudocode-cli/src/render.rs",
+                      "e2e/terminal-resize/host.cjs", "e2e/terminal-resize/future-observer.cjs"]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        for path in [measurement_inputs[0], companion]:
+            file = repository / path
+            file.write_text(file.read_text() + "mixed changed input\n" if file.exists() else "unknown input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", "Mixed measurement and functional inputs", cwd=repository)
+        expect(base, both, resize=True)
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     command("git", "mv", "rust/crates/rusty-sudocode-cli/src/render.rs",
             "rust/crates/runtime/src/moved.rs", cwd=repository)
@@ -230,6 +340,39 @@ def performance_scope_acceptance(directory):
     command("git", "rm", "e2e/terminal-resize/host.cjs", cwd=repository)
     command("git", "commit", "-m", "Delete measurement input", cwd=repository)
     expect(base, both)
+    # A rename into the known set still includes its original shared input.
+    host = repository / "e2e/terminal-resize/host.cjs"
+    host.write_text("shared terminal host\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Restore shared terminal input", cwd=repository)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "mv", "-f", "e2e/terminal-resize/host.cjs", measurement_inputs[0], cwd=repository)
+    command("git", "commit", "-m", "Rename shared host into measurement-only path", cwd=repository)
+    expect(base, both, resize=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", measurement_inputs[-1], cwd=repository)
+    command("git", "commit", "-m", "Delete a statistical policy", cwd=repository)
+    expect(base, ["browser"], native=False, resize=False)
+    # Both sides of a rename and mixed input sets must retain release scope.
+    for left, right in [("rust/crates/rusty-sudocode-cli/src/startup.rs",
+                         "rust/crates/runtime/src/moved_startup.rs"),
+                        ("rust/crates/runtime/src/moved_startup.rs",
+                         "rust/crates/rusty-sudocode-cli/src/startup.rs")]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        command("git", "mv", left, right, cwd=repository)
+        command("git", "commit", "-m", "Move startup implementation across release scope", cwd=repository)
+        expect(base, both, release=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    for path in ["rust/crates/rusty-sudocode-cli/src/render.rs", "rust/crates/runtime/src/config.rs"]:
+        destination = repository / path
+        destination.write_text((destination.read_text() if destination.exists() else "") + "mixed startup change\n")
+    command("git", "add", ".", cwd=repository)
+    command("git", "commit", "-m", "Mixed renderer and startup inputs", cwd=repository)
+    expect(base, both, release=True)
+    base = command("git", "rev-parse", "HEAD", cwd=repository)
+    command("git", "rm", "rust/crates/rusty-sudocode-cli/src/startup.rs", cwd=repository)
+    command("git", "commit", "-m", "Delete startup implementation", cwd=repository)
+    expect(base, both, release=True)
     print("PASS: public Git planner scopes heavy performance, retains native hosts and sees renames/deletions")
     # This actual-Git fixture is required by CI preflight. Editing it alone
     # must not select product Cargo/PTY builds on all three native hosts.
@@ -360,12 +503,13 @@ def plan_acceptance(directory):
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
 
 
-def enforcement_acceptance():
+def enforcement_acceptance(*, profile_compat_only=False, publication_only=False):
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
-        scope_acceptance(directory)
-        performance_scope_acceptance(directory)
-        plan_acceptance(directory)
+        if not profile_compat_only and not publication_only:
+            scope_acceptance(directory)
+            performance_scope_acceptance(directory)
+            plan_acceptance(directory)
         origin, work = directory / "origin.git", directory / "author"
         command("git", "init", "--bare", str(origin), cwd=directory)
         command("git", "init", "--initial-branch=main", str(work), cwd=directory)
@@ -383,13 +527,25 @@ def enforcement_acceptance():
         (work / ".github/workflows/local-acceptance-publish.yml").write_text("# Fixture trusted publisher\n")
         (work / ".github/local-acceptance/checks.py").write_text(
             'import sys\n'
+            'from contextlib import contextmanager\n'
             'def nested_python():\n'
             '    return sys.executable\n'
             'def shared_python():\n'
             '    return nested_python()\n'
             'def browser_only_helper():\n'
             '    return "unused browser helper v1"\n'
+            'def prepare_native_checks(names, root, output, execute):\n'
+            '    if names:\n'
+            '        execute([sys.executable, "-c", '
+            '"from pathlib import Path; import sys; Path(sys.argv[1]).write_text(\'ready\'); '
+            'failed=Path(\'input.txt\').read_text() == \'prepare-fail\'; '
+            'print(\'controlled prerequisite failure\' if failed else \'prerequisite ready\'); '
+            'raise SystemExit(23 if failed else 0)", str(output / "prepare-order")], '
+            'root, output / "prepare.log")\n'
+            '    return {}\n'
             'def run(name, root, output, base, execute):\n'
+            '    assert (output.parent / "prepare-order").is_file(), "preparation must precede checks"\n'
+            '    print("FIXTURE_PROFILE_STARTED", flush=True)\n'
             '    policy_ref, candidate_ref = run.execution_refs\n'
             '    assert policy_ref and len(policy_ref) == 40\n'
             '    assert candidate_ref and len(candidate_ref) == 40\n'
@@ -400,8 +556,10 @@ def enforcement_acceptance():
             '    if name in {"rendering", "browser"}:\n'
             '        raise RuntimeError(browser_only_helper())\n'
             '    return [execute([shared_python(), "-c", '
-            '"from pathlib import Path; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
-            'root, output / "actual-process.log")]\n'
+            '"import os; from pathlib import Path; assert os.environ.get(\'NO_COLOR\') is None, \'NO_COLOR inherited into acceptance child\'; text=Path(\'input.txt\').read_text(); print(text); raise SystemExit(text != \'pass\')"], '
+            'root, output / "actual-process.log"), '
+            'execute([shared_python(), "-c", "import os; assert os.environ.get(\'NO_COLOR\') == \'1\', \'explicit color opt-out was lost\'"], '
+            'root, output / "explicit-optout.log", {"NO_COLOR": "1"})]\n'
         )
         (work / "spec").mkdir()
         (work / "spec/local_acceptance.json").write_text(json.dumps({
@@ -422,6 +580,14 @@ def enforcement_acceptance():
         command("git", "push", "origin", "main", cwd=work)
         command("git", "checkout", "-b", "feature", cwd=work)
         command(sys.executable, helper, "install", "--signer", "fixture", "--key", key, cwd=work)
+
+        # A failed prerequisite blocks real transport before any profile starts.
+        (work / "input.txt").write_text("prepare-fail")
+        command("git", "add", ".", cwd=work)
+        command("git", "commit", "-m", "Fail the real prerequisite", cwd=work)
+        refusal = command("git", "push", "origin", "feature", cwd=work, success=False)
+        assert "controlled prerequisite failure" in refusal and "FIXTURE_PROFILE_STARTED" not in refusal, refusal
+        assert not command("git", "ls-remote", "origin", "refs/heads/feature", cwd=work)
 
         # Failed executable commands must block the actual Git transport.
         (work / "feature.txt").write_text("feature input\n")
@@ -446,9 +612,23 @@ def enforcement_acceptance():
         receipt = json.loads(base64.b64decode(envelope["payload"]))
         assert receipt["checks"]["real-process"][0]["exit_code"] == 0
         assert receipt["checks"]["real-process"][0]["elapsed_seconds"] > 0
+        assert len(receipt['checks']['real-process']) == 2
+        assert receipt['checks']['real-process'][1]['exit_code'] == 0
+
+        if not profile_compat_only:
+            from publication_acceptance import verify_publication
+            verify_publication(directory, work, FIXTURE_ENV)
+            if publication_only:
+                print("TARGETED_PUBLICATION_ONLY: actual publisher/HTTP/Git/SSH checked; "
+                      "remaining scopes were not run. This is not full acceptance.")
+                return
 
         from profile_compat_acceptance import verify_profile_compatibility
         verify_profile_compatibility(directory, work, command)
+        if profile_compat_only:
+            print("TARGETED_PROFILE_COMPATIBILITY_ONLY: actual Git/SSH/hooks checked; "
+                  "remaining enforcement and Cargo scopes were not run. This is not full acceptance.")
+            return
         from resume_acceptance import verify_resume
         verify_resume(directory, SOURCE, command)
         from host_lease_acceptance import verify_host_lease
@@ -571,6 +751,8 @@ def enforcement_acceptance():
         # Passing runs retain every native build, cache and policy guard below.
         print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
                       "--output", directory / "dependency-scope", cwd=SOURCE))
+        print(command(sys.executable, str(Path(__file__).with_name("vfs_search_cache_acceptance.py")),
+                      "--output", directory / "vfs-search-cache", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("cache_acceptance.py")), cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("policy_guard_acceptance.py")), cwd=SOURCE))
 
@@ -578,8 +760,16 @@ def enforcement_acceptance():
 def main():
     sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
-    if sys.argv[1:] == ["--fixture-child"]:
-        enforcement_acceptance()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fixture-child", action="store_true", help=argparse.SUPPRESS)
+    partial = parser.add_mutually_exclusive_group()
+    partial.add_argument("--profile-compat-only", action="store_true",
+                        help="Debug real profile Git/SSH compatibility only; not full acceptance")
+    partial.add_argument("--publication-only", action="store_true",
+                         help="Debug actual publisher/HTTP/Git/SSH ordering only; not full acceptance")
+    args = parser.parse_args()
+    if args.fixture_child:
+        enforcement_acceptance(profile_compat_only=args.profile_compat_only, publication_only=args.publication_only)
         return
     with tempfile.TemporaryDirectory(prefix="scode-hook-parent-") as temporary:
         parent = Path(temporary)
@@ -595,7 +785,12 @@ def main():
                        "GIT_WORK_TREE": str(parent), "GIT_INDEX_FILE": str(parent / ".git/index"),
                        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
                        "GIT_CONFIG_VALUE_0": "Inherited hook identity"}
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--fixture-child"],
+        child = [sys.executable, str(Path(__file__).resolve()), "--fixture-child"]
+        if args.profile_compat_only:
+            child.append("--profile-compat-only")
+        elif args.publication_only:
+            child.append("--publication-only")
+        result = subprocess.run(child,
                                 cwd=parent, env=environment)
         assert result.returncode == 0, "Acceptance failed with a real inherited hook environment"
         assert all((parent / ".git" / name).read_bytes() == data for name, data in before.items())

@@ -155,8 +155,8 @@ fn footer_tip_tool_priorities_clear_and_schema_are_visible_end_to_end() {
 #[test]
 fn footer_tips_preserve_theme_and_unicode_and_draft_across_resize() {
     for (background, no_color, expected) in [
-        ("15;0", false, "Idx(214)"),
-        ("0;15", false, "Idx(94)"),
+        ("15;0", false, "Rgb(196, 167, 103)"),
+        ("0;15", false, "Rgb(139, 98, 20)"),
         ("15;0", true, "Default"),
     ] {
         let env = TestEnv::new_mock("footer-tip-colors");

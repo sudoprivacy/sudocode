@@ -109,6 +109,22 @@ its thread, approval policy and native package context. The initializer only
 prints those commands; it never starts/stops a native server or adopts a
 running frontend. This package adds no native daemon lifecycle implementation.
 
+`userEntryArgv` is an optional foreground entry for an existing command that
+repeats `-c approvals_reviewer=user`. Native Codex treats that CLI override as
+a request for an embedded server, which the shared bridge cannot observe.
+The entry reuses the official daemon start and read-only config API, removes
+only a redundant user-review override after confirming effective `user`
+review for the selected cwd, then delegates all remaining argv and exit status
+to the official native command. A conflicting or absent reviewer refuses
+normalization. Other overrides, explicit private/remote modes and noninteractive
+commands remain unchanged. No policy is rewritten, actor enrolled, package
+updated, or Nexus daemon started by this foreground compatibility step.
+Install the returned entry as the user's ordinary `codex` command after
+review and verify resolution in the actual existing terminal, including shell
+functions and cached paths. Rehashing cannot move an entry ahead of another
+directory in that terminal's PATH. A plain native command remains available by its original
+absolute path. Its incompatible CLI overrides still select native private mode.
+
 Existing fixed-session Agents can be prepared offline with `--bind-codex`.
 The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
 specifies its explicit mapping document, original SID and separate native/ACP
@@ -125,6 +141,17 @@ requires original-thread unload/resume, unchanged actor/SID, zero resume model
 requests and bridge retirement while the native server stays running. Its
 one-second unload setting is fixture-only; it does not select a production
 retirement policy. No Nexus enrollment or production frontend is used.
+
+The same lifecycle fixture accepts `--human-review-entry` to launch the actual
+`--sandbox danger-full-access --ask-for-approval on-request -c
+approvals_reviewer=user` prefix through the canonical foreground entry. Use
+`npm run test:codex-entry -- --codex /absolute/native/codex
+--managed-package-root /absolute/path/to/@openai/codex --case cancelled-resume
+--output /absolute/evidence` (or `completed-resume`). It verifies the effective
+human-review policy, two shared user roots, visible history before interruption,
+actual unload before resume and zero extra resume requests. It uses the same
+private fake provider and preserves the existing lifecycle deadlines and
+request counts; it does not qualify a production installation or new machine.
 
 ## Build a source-bound archive
 

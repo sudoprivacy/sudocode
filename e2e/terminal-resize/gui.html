@@ -15,6 +15,8 @@
   const activated = [], hovered = [], activationEvents = [], keyboard = [];
   const terminal = new Terminal({ ...options, allowProposedApi: true, scrollback: 10000,
     fontFamily: 'monospace', fontSize: 14, cursorBlink: false,
+    // Native selection in mouse mode uses Option on macOS and Shift elsewhere.
+    macOptionClickForcesSelection: true,
     linkHandler: {
       // Match terminal-host conventions: plain dragging selects; Ctrl/Cmd-click opens.
       activate: (event, target) => {
@@ -81,6 +83,10 @@
     get parsed() { return parsed; }, get rendered() { return rendered; },
     get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
     lines, viewport, pixelBounds,
+    selectionModifier() {
+      if (terminal.modes.mouseTrackingMode === 'none' || terminal.options.mouseEventsRequireAlt) return null;
+      return navigator.platform.startsWith('Mac') ? 'Alt' : 'Shift';
+    },
     armInput(draft) { input = { draft }; inputReady = new Promise(resolve => { finishInput = resolve; }); },
     async waitForInput() {
       let timer;

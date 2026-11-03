@@ -22,6 +22,7 @@
 //! [FooterSlot]    ← permission · tasks · one prioritized tip
 //! ```
 
+use crate::render::TextRole;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,7 @@ mod prompt_text;
 mod queued_message;
 mod tasks;
 mod transcript;
+mod transcript_view;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, AnsiText, RichText};
@@ -48,6 +50,7 @@ use choice_text::ChoiceText;
 pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
+use transcript_view::TextFrame;
 pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
@@ -1134,7 +1137,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
                     *delivery == engine_events::InputDelivery::Steer,
                     term_width,
                     support,
-                    theme,
+                    *theme,
                 ));
             }
             PendingItem::Tool(_) => {
@@ -1181,8 +1184,8 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
     }
 
     let t = theme();
-    let success = ansi_fg(t.success);
-    let info = ansi_fg(t.info());
+    let success = t.fg_seq(TextRole::Success);
+    let info = ansi_fg(t.color(crate::render::TextRole::Info));
 
     let completed_count = todos
         .iter()
@@ -2211,7 +2214,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Format with the same iocraft width snapshot as the other chrome,
         // including the very first frame after a resize.
         StatusSlot::Active(spinner.render_frame(frame.get(), activity_state, tools, w))
-    } else if activity_state == EngineState::AwaitingInput {
+    } else if matches!(activity_state, EngineState::AwaitingInput(_)) {
         // The existing question/approval panel owns this interaction. No
         // animation or duplicate waiting instruction above InputSlot.
         StatusSlot::Empty
@@ -2338,10 +2341,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ..crossterm::style::ContentStyle::default()
     };
     let chrome_border = chrome_has_color
-        .then_some(chrome_theme.border)
+        .then_some(chrome_theme.color(TextRole::Border))
         .and_then(ansi_text::ui_color);
-    let chrome_muted = chrome_style(chrome_theme.muted);
-    let question_style = chrome_style(chrome_theme.primary);
+    let chrome_muted = chrome_style(chrome_theme.color(TextRole::Secondary));
+    let question_style = chrome_style(chrome_theme.color(TextRole::Brand));
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::Background { full, .. } => full.clone(),
@@ -2553,15 +2556,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         });
     let input_background = transcript
         .as_ref()
-        .and_then(|_| crate::render::prompt_style(true).background_color)
+        .and_then(|_| crate::render::theme().prompt_style(true).background_color)
         .and_then(ansi_text::ui_color);
     let input_foreground = transcript
         .as_ref()
-        .and_then(|_| crate::render::prompt_style(true).foreground_color)
+        .and_then(|_| crate::render::theme().prompt_style(true).foreground_color)
         .and_then(ansi_text::ui_color);
     let header_background = transcript
         .as_ref()
-        .and_then(|_| crate::render::prompt_style(false).background_color)
+        .and_then(|_| crate::render::theme().prompt_style(false).background_color)
         .and_then(ansi_text::ui_color);
     let viewport_enabled = transcript.is_some();
     // Present an empty live frame before exiting. iocraft otherwise retains
@@ -2576,12 +2579,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
             View(height: row_height(transcript_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 #(transcript_frame.map(|display| element! {
-                    View(flex_direction: FlexDirection::Column, width: slot_width) {
-                        View(height: 1, width: slot_width, background_color: header_background) {
-                            RichText(content: display.header, width: slot_width, wrap: TextWrap::NoWrap)
-                        }
-                        RichText(content: display.body, width: slot_width, wrap: TextWrap::NoWrap)
-                    }
+                    TextFrame(header: display.header, body: display.body,
+                        width: u32::from(term_width), header_background)
                 }))
             }
             // Keep the preview parent mounted across streaming handoff so it
@@ -2602,7 +2601,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
                 View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.warning).and_then(ansi_text::ui_color))
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.color(TextRole::Warning)).and_then(ansi_text::ui_color))
                 }
             }))
             #(row_text("heading", heading, visible.heading))

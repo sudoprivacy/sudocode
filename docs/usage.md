@@ -350,14 +350,16 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
-Unfinished ordinary paragraphs stream above the live status area by default.
+Unfinished ordinary paragraphs and top-level fenced code stream above the live status area by default.
 Finalized text
 moves into native scrollback in the same presentation as preview removal,
 and a draft typed during the response stays available. Parallel tool output
 keeps unfinished Markdown formatting intact. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
-Code, tables, lists, headings and emoji with ambiguous terminal widths use
+Complete code lines retain syntax parser state across deltas; the unfinished
+last line stays literal until its newline arrives. Finalization uses the same
+highlighter as replay. Nested/indented fences, Mermaid diagrams, tables, lists, headings and emoji with ambiguous terminal widths use
 the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
@@ -386,9 +388,14 @@ hooks, approval, or an execution slot; amber while running; the code theme's
 green on success; and red on failure. Frame strokes use normal weight without
 dimming so corners align with vertical borders across terminal fonts.
 Colors adapt to dark/light backgrounds and terminal
-color depth. `ColorTheme` is the single semantic color interface; its `info`
-role (including Thinking/Reasoning) and successful tool borders share one
-soft-green definition. Syntax-backed colors load on demand and stay cached.
+color depth. `ColorTheme` resolves semantic text roles into complete styles for
+transcript, chrome and input surfaces. Brand accents and the activity logo use
+Sudoprivacy amber (#F59E0B), with a darker shade on light backgrounds. Error and
+success roles use the terminal's regular red and green slots, as Codex does;
+the emulator owns their exact RGB values. Informational marks and successful
+tool borders share the syntax theme's soft green. Thinking/Reasoning labels use
+the terminal foreground; stalled activity uses the warning role. Syntax-backed
+roles and terminal capabilities are resolved once and cached.
 Tool names use the shared Codex blue accent. Titles occupy one
 row and use an ellipsis when they exceed the available width. Running titles
 reflow on resize; completed titles remain as printed in terminal scrollback.
@@ -459,25 +466,46 @@ labels and punctuation, with every count in bold terminal foreground, including
 zero. Ordinary task descriptions also retain the terminal foreground instead
 of a slot-wide grey; active labels remain bold and completed labels retain dim
 strikethrough. Amber is reserved for accent/activity, not neutral quantities.
-Per-turn status uses the same
-theme-selected muted foreground without an additional dim attribute; cache
-health indicators keep their semantic colors. Emphasis and color are scoped
+Per-turn status uses syntax-derived accents for the model and usage, with
+secondary labels and separators. The footer's workspace path and branch use
+accents from that same syntax asset. Cache health indicators keep their semantic
+colors. None of these accents adds a dim attribute. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
 Ordinary footer tips use the theme's readable muted foreground, actionable
-recommendations use its primary accent, and urgent tips use its warning role,
+recommendations use its subdued notice role, and urgent tips use its warning role,
 without an additional dim attribute; separators use the border role. The input draft
 retains the terminal foreground. A slot's initial color is decoded as text
 state, not applied again as a fallback to every span: ANSI foreground/full
 resets restore the terminal default instead of silently inheriting a parent
 color. The same structured spans feed the live UI and transcript adapters.
-No-color chrome does not force a palette color.
+No-color chrome does not force a palette color. Secondary text blends the
+reported terminal foreground and background and maintains readable contrast.
+On explicit selection surfaces, role colors are checked against the selected
+background. ANSI status colors remain terminal-owned.
+
+Markdown, code, links, tables and chrome share structured text runs. Live prose
+and question documents consume those runs directly; native scrollback serializes
+ANSI only at the terminal boundary. External program output still has one ANSI
+decoder. There is no second Markdown implementation for the live canvas, and
+these presentation changes do not alter stored messages or model input.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
+Write and Edit share numbered, syntax-highlighted source previews. New files
+show added lines; replacements show removed/added lines with nearby context.
+Running Write previews show the submitted content; completed cards use the
+tool's returned content. Preview lines and characters are bounded before
+highlighting, with explicit omission notices. The complete source is preserved
+in the session and file. Markdown files keep literal Markdown source in these
+tool cards rather than becoming rendered documents.
+When a large tool result is offloaded, the card labels its retained request
+content as an input preview instead of claiming an empty file or guessing
+whether the operation created or replaced it. Replay uses the recorded request;
+the complete tool result remains available through the session's output record.
 On Unix, the default REPL queries the terminal palette once at startup, with
 a shared 250 ms deadline and preservation of queued keys and pastes. Windows
 does not send OSC 10/11 color queries: some console hosts deliver replies as
@@ -494,6 +522,11 @@ Markdown uses Codex's typographic hierarchy: headings and emphasis keep the
 terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
+Tables follow Codex's column allocation: paths and long tokens surrender width
+before prose and compact values. Cells wrap with their styles and links;
+tables that cannot remain readable become labeled key/value records. Layout
+uses the available width when rendering, including replay and plan review.
+Already printed native scrollback keeps the terminal's own resize/reflow behavior.
 
 Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
 show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);
@@ -717,11 +750,19 @@ the footer entry disappears. Existing `/tasks list|get|stop` commands remain
 available for persisted agent manifests.
 
 Shell details update while the parent is idle and include stdout/stderr,
-elapsed time, status, and the actual exit code. The preview retains at most
+labelled runtime, status, and the actual exit code. Long commands wrap across
+up to three preview rows. Output sits in a theme-colored frame that shrinks
+with the terminal; its row range refers to the wrapped, retained output tail.
+Internal blank lines and output colors are preserved, and the stop hint only
+appears for active tasks. The preview retains at most
 24 KiB per task; complete shell output is stored in the private temporary log
 shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
 directory after completion. The session retains at most 50 completed tasks
-in memory. Agent details show current activity and recent output, then their
+in memory, plus active work. The list shows its current entry count; the oldest
+ended tasks leave it automatically as newer tasks finish, without a restart.
+There is no age-based expiration within this limit. This does not delete their
+complete logs. Agent details use the same layout,
+showing current activity and recent output, then their
 final result. These are tasks owned by this session, not a view of other agents
 on the machine.
 

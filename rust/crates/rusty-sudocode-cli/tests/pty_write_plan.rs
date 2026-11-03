@@ -16,6 +16,10 @@ use runtime::{ContentBlock, Session, SessionStore};
 
 #[test]
 fn resumed_plan_uses_the_persisted_session_identity() {
+    // An scode session exports its own plan path to the commands it runs, and
+    // scode keeps an inherited path. This test is about the default path, so
+    // the scode it launches must not inherit one from whoever runs the tests.
+    std::env::remove_var("SUDOCODE_PLAN_FILE");
     let env = TestEnv::new("resumed-plan-identity");
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let session = Session::new().with_workspace_root(env.workspace_root().to_path_buf());

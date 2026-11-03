@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -39,6 +39,9 @@ mod nexus;
 
 #[path = "common/live_nexus.rs"]
 mod live_nexus;
+
+#[path = "common/native_tool.rs"]
+mod native_tool;
 
 #[cfg(target_os = "linux")]
 #[path = "shared_history_records/flush.rs"]
@@ -111,34 +114,6 @@ impl Drop for Worker {
     }
 }
 
-struct ToolChild(Child);
-impl ToolChild {
-    fn spawn(root: &Path) -> Self {
-        // Inherit the writer's process group/job; keep the native child handle.
-        Self(
-            Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "completed_forks_survive_live_tools_compaction_and_restart",
-                    "--nocapture",
-                ])
-                .env(ROOT, root)
-                .env(MODE, "tool")
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
-    }
-}
-impl Drop for ToolChild {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-        }
-        let _ = self.0.wait();
-    }
-}
-
 fn assistant(blocks: Vec<ContentBlock>) -> ConversationMessage {
     ConversationMessage {
         role: MessageRole::Assistant,
@@ -184,13 +159,18 @@ fn wait_for(path: &Path) {
     }
 }
 
+fn start_native_tool(root: &Path) -> native_tool::NativeTool {
+    native_tool::NativeTool::spawn(
+        &root.join("tool-started"),
+        &root.join("tool-release"),
+        &root.join("actual-tool-result"),
+        "REAL_TOOL_A_RESULT",
+        WAIT,
+    )
+    .unwrap()
+}
+
 fn run_worker(root: &Path, mode: &str) {
-    if mode == "tool" {
-        std::fs::write(root.join("tool-started"), std::process::id().to_string()).unwrap();
-        wait_for(&root.join("tool-release"));
-        std::fs::write(root.join("actual-tool-result"), b"REAL_TOOL_A_RESULT").unwrap();
-        return;
-    }
     assert_eq!(mode, "writer-a");
     let raw = StdFsBackend
         .record_log(
@@ -214,8 +194,8 @@ fn run_worker(root: &Path, mode: &str) {
         thought_signature: None,
     }]);
     let assistant_id = append(&mut log, context, &call);
-    let mut tool = ToolChild::spawn(root);
-    assert!(tool.0.wait().unwrap().success());
+    let mut tool = start_native_tool(root);
+    assert!(tool.wait().unwrap().success());
     let result = std::fs::read_to_string(root.join("actual-tool-result")).unwrap();
     let result_id = append(
         &mut log,

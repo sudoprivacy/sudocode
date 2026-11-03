@@ -54,14 +54,18 @@ def main():
     repository = os.environ["GITHUB_REPOSITORY"]
     policy_ref = acceptance.value("rev-parse", "HEAD")
     execution_ref = policy_ref
+    verified_base = None
     plan = None
     if "pull_request" in event:
         pull = api(f"repos/{repository}/pulls/{event['pull_request']['number']}")
         if pull["head"]["sha"] != event["pull_request"]["head"]["sha"]:
             raise RuntimeError("PR advanced while verification was starting")
         head = fetch_head(pull)
-        execution_ref = acceptance.authorized_policy(head, pull["base"]["sha"], policy_ref, api)
-        receipt = acceptance.verify(head, pull["base"]["sha"], execution_ref, signers_ref=policy_ref)
+        # The API/event base SHA can lag main even on a new ready event. The
+        # checked-out protected commit owns both trust and the comparison base.
+        execution_ref = acceptance.authorized_policy(head, policy_ref, policy_ref, api)
+        receipt = acceptance.verify(head, policy_ref, execution_ref, signers_ref=policy_ref)
+        verified_base = receipt["base"]
         current = acceptance.selected(acceptance.load_policy(execution_ref), acceptance.changed_paths(receipt["base"], head),
                                       base=receipt["base"], head=head)
         plan = acceptance.acceptance_plan(acceptance.load_policy(execution_ref), current, receipt["host"])
@@ -104,6 +108,7 @@ def main():
         stream.write("matrix=" + json.dumps({"include": jobs or [{"os": "ubuntu-latest", "name": "No missing hosts",
                      "family": "native", "node": "22", "timeout": 90, "checks": []}]}) + "\n")
         stream.write("policy_ref=" + execution_ref + "\n")
+        stream.write("base_sha=" + (verified_base or "") + "\n")
         stream.write("checks=" + " ".join(checks) + "\n")
         stream.write("platforms=" + json.dumps(platforms or ["ubuntu-latest"]) + "\n")
     return {"plan": plan, "checks": checks, "platforms": platforms,

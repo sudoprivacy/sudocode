@@ -215,6 +215,71 @@ does not enter the co-host build, while shared runtime changes rebuild it.
 Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
+Fixed VFS cache helper, composite action and publisher changes select the
+co-host/search checks without rerunning the independent CLI A2A, cross-node
+and sender-identity journeys. Product Rust and A2A/shared harness changes
+retain those journeys, including mixed edits and moves across that boundary.
+The mandatory output reports both decisions and refuses a missing decision
+or a daemon-job selection that differs from their union. No case, assertion,
+lease wait or timeout is shortened within a selected journey.
+Seven independent runtime reader/stall/receiver-seat fault cases share the
+existing pinned nextest runner, with at most four workers and zero retries.
+Every case keeps its original real daemon, isolated agent, lease clock,
+assertions and deadlines. The batch checks its complete ignored-test inventory
+before execution and requires seven successful JUnit results afterward.
+The first failure cancels this independent batch, retaining failure and cancelled
+results; the outer harness still closes its private daemon. Daemon
+restart and SIGSTOP stay serial, outside the batch. Real native control
+processes verify overlap, failure and missing/non-ignored-case refusal;
+they add no product coverage. The same seven real daemon cases still run in CI.
+Changes confined to the A2A shell/Python harness leave the native Rust workspace
+unchanged. They skip its Cargo/PTY product reruns on the author and complementary
+hosts; the Linux queue still executes the changed real-daemon harness. Author
+acceptance still requires realistic testing of the changed behavior. The native
+workspace does not launch these scripts or provision their daemon. Mixed Rust
+changes and moves into Rust retain the full native workspace assignment. The
+required hook and CI plan print `A2A_HARNESS_SCOPE` when this reduction applies.
+
+The Linux queue reuses a fixed VFS checkout and its isolated Cargo inputs and
+outputs. An independent main-push publisher saves only a missing exact key;
+queue jobs only restore. The key binds the lockfile revision, compiler, runner
+image, build recipe, canonical path and explicit codegen settings.
+An exact key includes the fixed source revision. A compatible fallback excludes
+only that revision and retains every compiler/environment binding. Before
+switching a restored source pin, the helper verifies its old Git tree and saved
+compiler identity, fetches the required revision with checkout hooks disabled,
+cleans old workspace outputs, and verifies the new Git tree. Registry and Git
+dependency artifacts remain available to normal Cargo. An old producer's exact
+current-pin key is recognized for the one-time cache format migration; unrelated
+legacy keys are excluded. A missing main key restores compatible inputs before
+prewarming, even when the initial lookup did not download a cache.
+The required interface reports the actual restored key. Refusal messages identify
+that key for recovery rather than telling an agent to delete a missing new key.
+Source bytes are checked against the pinned Git tree before use, including same-mtime edits
+and unexpected files. Every invocation still asks Cargo to build normally and
+runs the original search authorization/restart case against the current
+checkout's co-host, outside this cache. The fixed driver and plugin retain their
+original optimization profiles. Cache hits never substitute a previous test
+result. The required command prints builds and stores timings and failure logs.
+The main publisher alone performs explicit prewarming. Consumers invoke normal
+`cargo test`, which compiles its driver and runs the original case's plugin build.
+The required job refuses a redundant pre-test build directory; this avoids extra
+switches between the plugin's semantic and default-off dependency variants.
+Outer builds use the cluster package metadata that Cargo supplies to the test's
+nested plugin build. This prevents native dependencies such as ring from
+rebuilding solely because inherited Cargo package variables flip between unset
+and test values. Each build script still receives its own package metadata;
+compiler flags and optimization profiles remain unchanged.
+Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runtime
+refusal; they add no product journey credit. The actual cache footprint and
+cold/warm product timings must be measured before claiming a lifecycle saving.
+
+The PR proof and completed-run publisher verify against their frozen checkout of
+protected main. A PR API or event base SHA can lag that branch. The verified
+receipt's actual merge base drives the complementary hosts as well; those jobs
+do not independently select a base from the event. Queue verification retains
+the merge group's exact base. Git/SSH/process acceptance covers stale API bases
+and refuses a signed receipt for the wrong actual base.
 
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
@@ -227,53 +292,88 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
-Rendering A/A and A/B, painted browser performance and viewport resource checks
-run automatically in local Docker when CLI, engine-core, shared PTY helpers,
-measurement sources or Rust build/dependency inputs change. Other crates' source
-changes keep their selected native functional checks but skip these statistical
-performance comparisons. This deliberately reduces performance coverage for
-indirect effects from API, runtime, tools, ACP and service implementations; it
-does not establish that those effects are impossible. A change known to affect
-the performance workloads must include the corresponding measurement scenario.
-Selected measurements keep their baselines, per-run assertions and budgets.
-Paired rounds are listed below.
-Rendering and browser use the same canonical candidate checkout and Cargo
-outputs under the existing exclusive benchmark lease. Each baseline and the
-trusted rendering driver keep separate outputs. Copied normal release binaries
-stay fixed while dev-feature test drivers compile. Real Cargo acceptance checks
-cross-profile candidate reuse, exact binary identity and unchanged observer stages.
-When rendering and browser run in the same acceptance process for the same
-candidate, protected policy and Docker context, browser reuses rendering's exact
-immutable image and saved normal release. The retained image ID and binary hash
-live in that process only; previous output directories and mutable image tags
-cannot authorize reuse. The release enters browser through read-only inputs and
-is checked against its source, policy, image and SHA256 before use. Changed
-inputs or a fresh process use the ordinary build path; corrupted retained files
-fail explicitly. Browser baseline builds, dev-feature drivers, paired GUI samples
-and viewport observers still run. Real Cargo acceptance compiles another source
-into the shared cache between profiles and verifies the original normal release
-is preserved without another normal candidate build. Actual Docker acceptance
-exercises the frozen image, invocation boundary and five tampered identities/bytes.
-The host and container entrypoint share the canonical `container/<profile>`
-output layout. The Docker fixture calls the actual entrypoint and dispatcher,
-then retains the resulting native binary for browser reuse; a fixture workload
-replaces statistical product measurements. Missing or mismatched output fails
-without promoting old raw results into a signed profile.
-This removes a duplicate build even when another workline churns the cache. It
-does not shorten a successful measurement matrix or prove production speedup.
-Performance drivers compile in the binary-free `scode-benchmark-drivers` package,
-referencing the original CLI test sources. They launch only the explicitly
-selected, copied release through `SCODE_TEST_BIN`. Distinct, opt-in target names
-keep ordinary workspace acceptance from running those cases twice. Older author
-snapshots use their original CLI targets; a present but broken standalone package
-fails instead of falling back. Cargo artifact records and a deliberately broken
-unused CLI prove the production builder omits that extra binary, while retaining
-normal/dev feature separation, actual driver execution and all observers. These
-infrastructure fixtures add no product journey coverage. Per-run assertions,
-sampling policy, baselines and budgets stay unchanged.
-The guard also reads actual Cargo metadata to require unique opt-in test targets
-that reference the original sources. Changes inside the driver package select
-this guard in CI; real Git event fixtures check that selection.
+On macOS, the rendering profile and the release startup measurement require
+external AC power with low-power mode disabled. One shared native probe reads
+the power source and Foundation's active low-power mode before and after the
+timing window and once per second while it runs. Unknown settings, a detected
+power change or a failed probe refuse
+the profile, preserving `host-power.json` and any original command failure.
+Shorter changes between observations may escape this periodic check; the probe
+does not prove a fixed CPU clock or thermal state. It never changes system
+settings, budgets, sample counts or automatic retry policy. Functional-only
+profiles and Linux/Windows keep their existing execution. These environmental
+observations are supplementary diagnostics; completed signed profiles still
+require their actual commands and current protected recipe.
+
+The timing context is created only when a profile calls it. Unused timing helper
+bodies do not invalidate ordinary native execution. Metadata preflight stages only
+its protected history checker; unrelated native fixture pins do not affect its
+recipe. Both staging paths share the same path and SHA256 verification. Exact
+protected migration pairs retain earlier successful evidence for this context
+factory and staging refactor; changed selected commands, signatures, source or
+required checks still need their normal validation.
+For local Git/SSH debugging, `python e2e/local-acceptance/run.py --profile-compat-only`
+uses the real hook and signed-note workflow and explicitly reports its limited
+scope. The mandatory default still runs the complete enforcement matrix.
+
+Typing feel is measured by the paired rendering matrix: keypress-to-echo P95
+while reading history, waiting for the model and streaming, first visible output
+and cancel on prose, paste and resize on a short reply, short-reply RSS peak/after
+limits, and CPU and peak memory on a 12 KB Markdown stream. It drives the actual release binary through a headless
+terminal, which isolates scode's own cost, and compares it with the fixed baseline
+in `e2e/terminal-resize/performance-policy.json`. Each scenario names the metrics
+it is judged on; the driver records them all. No scenario runs an unjudged
+warm-up; the short reply keeps five A/A and seven alternating A/B pairs, the check
+that caught a real RSS regression, and the heavy case uses three and three: 36 judged
+observations. A failed, noisy
+or invalid scenario stops the matrix. Drivers build in the binary-free
+`scode-benchmark-drivers` package, so measuring compiles no extra CLI binary.
+The matrix is mandatory on the author's local Docker before push for CLI,
+engine-core, PTY harness/helper, rendering-driver and named native observer inputs.
+It has no scheduled or manual replacement. Cargo/dependency metadata and unrelated
+crate source no longer select it; their indirect performance effects are outside
+this reduced scope. The browser functional smoke remains separate. Required plan
+output and signed evidence attribute both checks to the exact PR head.
+Foreground/background task-specific performance comparisons are removed from
+required acceptance; their functional PTY cases retain the native suite's scope.
+No new scheduled/manual replacement or extra feature-coverage credit is added.
+
+The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
+PTY helpers, the browser drivers and the browser terminal harness select it. Local
+Docker runs the candidate in pinned
+Chromium/xterm: Markdown links stay clickable, native selection survives
+streaming, the prompt viewport scrolls and selects, and an idle terminal receives
+no output. Measurement-only inputs (`benchmark.py`, `performance-policy.json`,
+`gui-smoke.py`, `gui-policy.json` and the retired `gui-benchmark.py`) do not select
+the native workspace or resize suites, which never execute them.
+The GUI controller, its Python import and sampling policy travel with the runner
+from the frozen protected policy. Older candidate snapshots do not need to contain
+new acceptance scripts; the CLI and native browser drivers still come from the
+candidate. No baseline or full trusted source checkout is added to browser runs.
+When rendering precedes browser smoke in the same acceptance process, browser
+reuses its immutable Docker image and copied normal release. The key binds the
+output namespace, candidate, protected policy and image context; the consumer
+checks source/policy/image identity and binary SHA256 before npm or Cargo starts.
+Other candidates, policies and invocations use their own builds. Browser-only
+acceptance keeps its normal dev build. Native browser drivers and every existing
+interaction still run. When reused, GUI behaviour is checked on the production
+release configuration; that run no longer adds a separate dev-GUI variant.
+Paired browser drivers use the rendering driver's leased release Cargo cache.
+Before Cargo runs, its mutable checkout is synchronized to the exact candidate,
+replacing the earlier policy snapshot. Normal Cargo builds both browser drivers
+and rebuilds changed inputs; no earlier test result is reused. Standalone browser
+drivers keep their dev profile and separate cache. This changes only the paired
+test driver's optimization profile; the product, steps and assertions stay fixed.
+Both measurement harnesses verify the expected driver digest before execution.
+The GUI report records its expected and actual candidate digest, and the wrapper
+checks the candidate again after viewport interaction. Corrupt or mismatched
+promotions fail without starting a replacement build. Reports explicitly record
+whether rendering supplied the release; previous output folders cannot grant reuse.
+Every Docker build keeps its own randomly named image tag alongside the exact
+image ID, so another invocation building identical cached layers cannot replace
+it with a different BuildKit attestation/index. Contract and performance images
+use one tag allocator.
+
 Active checkouts, npm trees, Cargo dependencies and targets live in the Linux
 Docker volume `sudocode-acceptance-benchmark-lease-cache-v1`. The first invocation
 copies the existing host cache's `cargo` and `leased-benchmarks-v1` directories
@@ -290,35 +390,19 @@ partial-copy recovery, and refusal of escaped roots or invalid completion record
 The production Docker launcher is also exercised with private labelled volumes.
 This changes storage placement, not selected workloads, samples or budgets. Both
 Docker execution recipes require new evidence; native profile recipes stay unchanged.
-Rendering completes and judges one scenario at a time. All six scenarios keep
-two warm-ups, per-run interaction counts and budgets. The short scenario keeps
-five A/A and seven alternating A/B pairs, preserving the full check that caught
-a real RSS regression. Other core scenarios use three A/A and three A/B pairs;
-the core matrix runs 96 native samples instead of 156. Browser comparison uses
-three A/A and three A/B pairs plus two warm-ups: 14 runs instead of 26.
-Headless and painted viewport comparisons inherit the same 3/3 rounds: each also
-runs 14 instead of 26 samples. Repeated comparisons total 138 instead of 234
-(41.0% fewer); the separate 60-sample painted interaction check remains.
-Per-run parsed/painted interactions and budgets stay intact.
-This reduces repeat coverage and precision: intermittent regressions and
-environmental noise have fewer chances to appear. A preserved actual viewport
-A/A calibration refuses CPU noise with five pairs but not its first three;
-that original record remains noisy. Equivalent statistical sensitivity and a
-41% whole-lifecycle speedup are not established.
-The repeated-turn stress scenario retains five A/A and seven A/B pairs.
-A failed/noisy/invalid scenario stops the matrix and releases the lease; later
-scenarios remain unrun. The mandatory command prints the declared pair counts,
-active scenario and evidence path. `measurements/report.json` combines the original
-case reports, with original policy and binary/observer hashes, completed scenarios
-and remaining work. Real Cargo/native-process infrastructure acceptance exercises
-full success, relative RSS regression, broken drivers and changed observers with
-the unchanged paired evaluator; it does not claim product performance coverage.
-Both changed performance recipes require new execution; earlier full-matrix
-results cannot authorize the reduced sampling policy. Native profile recipes
-remain unchanged. Actual native fixture processes verify the 96/14 schedules,
-alternating sides, the full short check and rejection of relative RSS/browser
-regressions and policies below their minimum rounds. These fixtures add no
-product performance coverage credit.
+
+Completed guard and browser receipts for the same source head can survive the
+private Docker image-tag ownership fix through exact protected recipe pairs.
+The image reference change retains the caller's image; it changes no completed
+assertion or statistical budget. Browser pairs also retain the already approved
+equivalent wrapper changes. Rendering's changed warm-up conditions still require
+fresh execution. Different heads, altered logs/signatures, missing profiles and
+changed selected criteria keep their existing refusal behavior.
+For a live check against genuine saved author evidence, use
+`python e2e/local-acceptance/saved_profiles_acceptance.py --saved PATH --policy-ref origin/main --profiles browser --refuse-profiles rendering --output FRESH_PATH`
+when testing this historical browser-only migration. The diagnostic exercises
+production resume and tamper controls; it does not sign, publish or authorize a
+source change. Its input must be a complete acceptance directory with original logs.
 
 Default SSE response archives reuse at most one finished deflate state across
 captures. Active captures retain separate states; a finished state releases its
@@ -328,8 +412,9 @@ acceptance checks six consecutive distinct responses and earlier-file integrity.
 The conditional PR codec check also writes 42 actual files, including six
 concurrent captures, independently decodes them and compares quota failure
 prefixes with the previous flate2 encoder. It adds no live-provider coverage.
-These comparisons have no scheduled or manual cloud replacement. Documentation-only changes run preflight;
-ordinary test-only changes do not rebuild an unchanged performance pair. Local
+These comparisons have no scheduled or manual cloud replacement.
+
+Documentation-only changes run preflight. Local
 preflight checks actual conflicts against its supplied base and fetched
 `origin/main` before product builds and benchmark leases. It prints the exact
 paths and recovery step without changing the checkout or index. Clean branches
@@ -339,10 +424,15 @@ receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays re
 in CI preflight; editing it alone skips unrelated native product builds.
 Development-only Cargo manifest/lock changes do not select normal release,
 service, co-host or daemon builds. The shared selector reads committed Git/TOML:
-resolver 2 and workspace settings must stay unchanged, manifest edits must be
-limited to dev dependencies, and existing lock packages/normal edges must stay
-unchanged. New versions of an existing package name, deleted lock nodes and
-unknown/malformed metadata keep the ordinary scope. Native workspace/lint,
+resolver 2 and normal workspace settings must stay unchanged. For the standard
+`crates/*` workspace, shared dev dependency revisions and versions may change
+when every normal/build declaration and its reachable lock records and resolved
+edges remain identical. Aliases, optional dependencies and target-specific
+tables participate in that proof. Removed or replaced dev-only lock nodes are
+allowed; changed normal resolutions, missing/ambiguous edges and unsupported
+metadata retain the ordinary scope. Committed blobs are read in one Git batch,
+without executing candidate code. Older/custom layouts retain the existing
+conservative verifier for direct dev-only additions. Native workspace/lint,
 provider, resize and statistical performance scopes stay unchanged. Other
 source or assertion changes still select their checks. Required output prints
 `BUILD_INPUT_SCOPE` and CI's `normal_product_ignored` paths. Python without the
@@ -355,12 +445,26 @@ Legacy receipts without plans retain known completed checks. Failed/unrun
 required profiles still run, and old failures and first timing remain recorded.
 Local compilers use one job and BelowNormal/nice priority while Cargo and tests stay
 Normal. Set CARGO_TARGET_DIR to an existing owned build directory to reuse it.
+Compiler observation reads executable paths instead of argv, avoiding macOS
+process-argument permission races while preserving native command failures.
 Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner with four
-global test workers. The runner lives in a private acceptance cache; it does not
+Deterministic workspace cases use the checksum-pinned nextest runner. Full
+grouped workspaces default to eight test workers on hosts with at least eight
+logical CPUs; smaller/unknown hosts, older ungrouped sources, isolated targets
+and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
+pool explicitly. Compiler jobs stay at one locally, with only compiler workers
+at BelowNormal priority; test processes stay Normal. A matched Windows run on
+20 logical CPUs passed the same 1,089 integration cases and 69 ignored markers:
+four workers took 424.5 seconds, eight took 244.7 seconds. Real ConPTY echo P95
+was 0.58/0.74 ms. This warm, single-host execution comparison excludes compilation
+and does not establish whole-PR or cross-hardware savings. A test that previously
+left its ACP child holding output pipes now awaits its existing shutdown helper.
+Native guards run actual case processes, observe overlap and enforce an explicit
+four-worker limit; they add no product journey coverage.
+The runner lives in a private acceptance cache; it does not
 replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
 still runs doctests separately. The existing live-provider commands remain on
@@ -368,6 +472,12 @@ Cargo; no provider coverage is inferred from deterministic fixture results.
 Lint now denies warnings before long native builds and PTY execution. Selected
 CLI-only changes lint those targets; a full workspace change lints all targets
 with the native mailbox feature graph. The queue additionally checks all features.
+The isolated-test selector compares the common ancestor with the candidate HEAD.
+Complementary CI can supply a newer main revision; files changed only on main do
+not widen that test-only PR into a full workspace run. Actual branch changes to
+production code, shared helpers, unknown inputs, deletions and renames retain the
+full scope. Real divergent Git branches drive selected and full Cargo/nextest
+commands and verify the native processes that actually ran.
 This moves ordinary source/test lint failures earlier without another full test run.
 The full native workspace opts into eight declarative integration wrappers for
 128 CLI targets, selecting 91 instead of 211 integration targets. The selector
@@ -376,6 +486,40 @@ on its required checks. A Windows prototype passed all 2,505 active cases with
 70 ignored markers; activation still requires fresh exact-head author and
 complementary native acceptance. Original per-file Cargo commands stay available,
 and new ungrouped targets are selected automatically.
+Grouped native workspace execution now selects integration targets explicitly,
+retiring legacy library/binary unit harnesses in line with the test-layer policy.
+An audited Windows run contained 1,423 such unit cases and 1,089 integration
+cases; the unit cases contributed 73 summed worker seconds, so their 56.6%
+share of case count is not a 56.6% time saving. Every selected integration/PTY
+case and ignored marker remains; queue all-feature Clippy,
+vendored Mermaid checks and workspace doctests remain. Legacy unit assertions
+are no longer runtime regression gates and gain no e2e coverage credit.
+Real Cargo/nextest controls poison both unit harnesses, require the former full
+selection to fail, then execute the production dispatcher and verify the complete
+integration inventory without either harness. Older ungrouped sources retain
+Cargo's complete original default suite, including legacy unit harnesses and
+disabled/feature-gated target exclusions. An explicit glob would enable manual
+targets; a real deliberately failing disabled target protects that boundary.
+Native workspace Clippy uses that same validated group inventory, retaining
+library and binary test configurations, examples, benches and ungrouped enabled
+tests. It avoids linting the 128 covered modules as separate crates on every
+author/complementary host: 91 instead of 211 integration targets in the audited
+workspace, 56.9% fewer. This is an inventory reduction, not a measured time saving.
+Ungrouped sources keep `--all-targets`; disabled
+standalone test targets keep their original exclusion. Queue all-feature lint
+retains `--all-targets` for ordinary/shared changes, checking original standalone
+crate identities. Only committed isolated CLI test edits use the same native
+scope predicate: changed original targets and their canonical containing groups.
+Unchanged unrelated integration, library/bin test, example and bench roots are
+not linted again for that test-only class. The full workspace all-feature
+dependency graph remains; a real cross-member feature counterexample rejects
+isolated package selection that drops a required dependency feature. Missing base
+history, dirty/untracked inputs, unknown or unregistered targets retain full lint.
+`QUEUE_CLIPPY_SCOPE` reports the exact mode/reason, counts and command.
+Real Cargo/Clippy controls inject
+errors into ordinary and test-only library/bin code, grouped/ignored tests,
+shared helpers, examples and benches, and verify disabled-target exclusion.
+No product test case, assertion or deadline changes.
 The selector checks real Cargo metadata and exact declarative wrapper bytes;
 missing, duplicated, redirected, unregistered or feature-hidden members fail.
 Wrappers retain the original helper namespaces and explicitly allow only
@@ -412,6 +556,19 @@ Cargo outputs, and points the native workspace's test-profile driver at that
 exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
 feature graph; release-only dev-dependency compilation is no longer repeated.
 The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
+This profile runs for Cargo manifests/lock/config, build scripts, vendored inputs,
+the CLI entry point, startup/parser modules, runtime configuration, the dedicated
+stream-capture test and startup harness. Other business/source and shared PTY
+helper changes skip the additional native optimized builds on the author and
+complementary hosts. Their applicable native functional, resize and service
+checks remain; selected Docker rendering still builds and measures a real Linux
+release. This reduces coverage: optimized-only Windows/macOS behavior and their
+startup budget are not checked on every ordinary source PR. Release tags retain
+their existing platform builds; this change does not add full release-artifact
+journey acceptance there. `RELEASE_ACCEPTANCE_SCOPE` and the mandatory plan state
+this boundary. Real committed Git plans cover retained/omitted inputs, mixed
+edits, renames and deletions; Cargo/native controls retain the selected release
+artifact and driver identity assertions.
 An actual Cargo/native-process fixture checks driver reuse, the release binary's
 identity and rejection of a substituted debug binary. The test driver and its
 in-process fixture helpers now execute in the test profile; the product process
@@ -471,6 +628,12 @@ abrupt process exit can therefore retain earlier completed profiles without
 running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
 host; custom output directories can use the printed `check --resume-from` command.
+When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
+record includes preparation commands and the author-host runner arguments.
+Run preparation first: mainline recovery fetches protected main before resolving
+its current policy, so an old CI diagnostic cannot pin an obsolete recipe.
+Explicit experimental policy snapshots remain pinned. The check freezes the
+resolved commits at startup and still requires every newly selected profile.
 Checkpoint signatures use a different SSH namespace and cannot satisfy the required
 GitHub check or authorize a branch push. Original logs must still match their hashes.
 Earlier `checkpoint/` records remain readable. An incomplete unadvertised generation
@@ -489,9 +652,11 @@ waiting, retries and publication through CI failure or merge. Use the earliest
 applicable start, without adding overlapping intervals. Older/manual history can
 be missing; these diagnostics neither authorize a push nor prove complete history.
 For acceptance-contract changes, the full Git/SSH decision matrix runs automatically
-in a private local Docker container. A native host smoke retains the actual failing
+in a private local Docker container. Native guards retain the actual failing
 process, checkpoint, SSH purpose, damaged-log and automatic-resume workflow; the
-native nextest/Cargo enforcement fixture also remains on the author OS. The full
+native nextest/Cargo enforcement fixture runs on the author OS. Windows author
+acceptance also verifies native color initialization. Docker is required on
+the author's machine, not by complementary native jobs. The full
 negative decision matrix is no longer repeated natively on Windows or macOS, so
 OS-specific negative hook paths have less coverage. The container uses its own
 temporary source/fixtures and does not take the shared performance lease or build
@@ -548,13 +713,58 @@ probe checks. Its first failing step blocks its daemon/provider dependents.
 PRs always start this job, including SDK-only changes; path filters cannot leave
 a required status pending. The queue's protected acceptance gate still checks
 the combined Git history. No unique product test is removed by this consolidation.
-After merge, main reuses those completed integrity checks. Its lightweight
-preflight still resolves the pinned protocol and changed-input scope needed by
-the existing daemon/provider jobs. PR, queue and explicit runs retain the full
-preflight; no product assertion is removed.
+After merge, main reuses those completed integrity checks and does not start
+another Rust CI preflight. Independent cache/package publishers retain their
+own main-push triggers. PR, queue, legacy development-branch pushes and explicit
+runs retain the full preflight; no product assertion is removed.
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
+
+When Windows terminal resize acceptance is selected, both the author hook and
+complementary CI install its checksum-pinned terminal host before long native
+compilation. A failed download stops before workspace builds. The same actual
+installation command/log is retained in the later resize receipt. Completed
+resize checkpoints are reused without another preparation step.
+
+Resize drivers use the workspace dev/mailbox feature graph, so Cargo can reuse
+the same current executable and ignored-test binaries. All selected real
+terminal cases, assertions and deadlines remain. These journeys no longer
+cover a separate standalone default-feature debug graph. Artificial installer
+HTTP/cache corruption checks run when committed non-Rust inputs change,
+excluding the known README/contribution/roadmap and Markdown documentation
+paths. Installer/helper/executor changes, mixed changes, renames/deletions of
+those inputs and unresolved Git scope retain those checks. Ordinary Rust-only edits keep actual
+checksum-pinned installation and all real terminal cases, but skip the unchanged
+installer fault matrix. Negative installer paths therefore have less coverage
+on ordinary source PRs. `WINDOWS_TERMINAL_INSTALLER_SCOPE` and the retained
+`installer-scope.json` explain the decision. Real Git/Cargo/native-process guards
+check input transitions, inherited Git bindings, warm reuse and ignored-only
+target selection; their controlled dependency-acquisition boundaries add no
+product journey coverage.
+
+Resize, service and release-driver tests share the native workspace's package
+selection as well as its mailbox feature. Full acceptance uses `--workspace`;
+an isolated CLI-test scope retains `-p rusty-sudocode-cli`. Other selected
+workspace members can enable additional dependency features, so matching the
+mailbox flag alone does not preserve the graph. `NATIVE_CLI_TEST_GRAPH` reports
+the chosen packages. The shared committed-input reader ignores inherited Git
+bindings and keeps unresolved scope conservative. The normal release product
+build remains separately selected and uses its original package graph.
+
+Native service journeys use the workspace's dev/mailbox feature graph. Cargo
+verifies or builds the `pty_model_stream_close` driver with `--no-run`, then
+the two original Python service harnesses launch the resulting debug `scode`.
+This avoids switching back to a separate normal dependency graph after workspace
+acceptance. It also builds correctly when run alone and refuses stale binaries
+when current source fails compilation. No driver tests execute twice. Service
+cases, RPCs, deadlines and cleanup stay unchanged; these journeys no longer
+cover the standalone default-feature debug graph. Selected normal release
+acceptance retains its separate product graph. The mandatory executor output
+prints this scope, and its real Cargo/native-process fixture checks warm reuse,
+standalone construction and refusal before services when current source fails.
+Both service harnesses use the executor's explicit Python interpreter, including
+the Git Bash call; an unversioned `python` alias is not required on Linux.
 
 `spec/local_acceptance.json` selects required targets, and the protected runner's
 `acceptance_plan` drives both the hook and CI. Push output and CI summaries print
@@ -582,17 +792,46 @@ scoped deployment acceptance still exercises the actual installed system.
 
 The merge queue verifies each included PR's current receipt and completed
 cross-platform workflow, then checks the combined Git history. It does not repeat
-the native suites on the combined merge-group tree. Rust-changing PRs also run
-strict all-target/all-feature Clippy on Linux; the queue runs that same strict
-check on Linux, Windows and macOS against the combined tree. The required daemon
+the native suites on the combined merge-group tree. Native acceptance retains
+its per-host lint. Strict all-feature Clippy runs once on Linux,
+Windows and macOS against the combined queue tree, without a duplicate Linux
+PR job. All-feature-only findings can therefore arrive later in the queue;
+this removes early feedback, not the final three-platform lint requirement.
+The required daemon
 gate waits for those checks and rejects failed or unexpectedly skipped jobs.
 The lint command stops scheduling additional crates after the first error;
 compiler jobs already running may finish before matrix cancellation. Successful
-runs retain every target, feature and `-D warnings` check. An actual three-package
+runs retain every feature and `-D warnings` check; ordinary source changes retain
+all target categories, and isolated test edits
+select changed originals plus their groups. An actual three-package
 Cargo/Clippy fixture compares the old continuing command with the current CI
 command, verifies all packages/targets/features after fixing the warnings, and
-records the actual compiler priorities. It runs once on a PR only when the lint
-workflow, fixture or scope selector changes; queue/main reuse its result.
+records the actual compiler priorities. Additional real compiler controls reject
+errors in either grouped module, examples, benches and library/bin test
+configurations, and refuse noncanonical wrappers. Old/new compiler artifacts
+also prove manual-driver exclusion with deliberately broken manual code. Required output prints
+`QUEUE_CLIPPY_SCOPE`, including all-feature target counts and the actual command.
+The fixture runs once on a PR only when the lint workflow, entry, fixture or scope
+selector changes; queue/main reuse its result.
+Changing the queue entry itself also selects the real all-feature workspace
+lint on all three queue platforms. Real committed PR/push/queue event controls
+verify this trigger and the exclusion of documentation-only changes.
+Draft snapshots use a separate concurrency group and explicit run title. They
+cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
+workflows allocate no publisher runner. A newer applicable ready run and its
+current attempt still own the result, including failures; required jobs and
+SSH signatures remain verified. Publisher output explains an ignored event
+on the mandatory execution path. Real child-process/HTTP/Git/SSH controls cover
+both event orders, queued drafts, failed ready runs and signature corruption.
+In the queue, independent failure-only callers stop unfinished jobs in the same
+Rust CI run after either Clippy or real daemon acceptance fails. Each caller
+waits only for its own failing dependency. The shared cancellation job has the
+Actions write permission and runs no checkout or candidate executable. Successful
+runs allocate no cancellation runner. The original failed step remains visible;
+the command prints how to inspect it and rerun failed work after repair. A live
+GitHub fixture exercises both failure directions and the uncancelled success
+path on a disposable branch. These are CI execution checks and add no product
+journey coverage.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions remain available through explicit acceptance;
@@ -876,8 +1115,8 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
-Renderer changes must pass the mandatory local rendering/browser profiles and
-the required `Local acceptance` status. See the shared
+Renderer changes pass the browser smoke in the required `Local acceptance`
+status, and scoped mandatory local rendering judges their typing latency. See the shared
 [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.

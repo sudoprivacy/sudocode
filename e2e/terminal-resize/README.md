@@ -66,24 +66,49 @@ python3 e2e/terminal-resize/benchmark.py --driver rust/target/release/deps/pty_r
   --base /absolute/path/scode-base --candidate /absolute/path/scode-candidate --output /tmp/render-results
 ```
 
-Run from the repository root. `--profile stress` remains an explicit diagnostic;
-the automatic local profile retains the existing core workload. Reports include
+Run from the repository root. Each case in the policy names the metrics it is
+judged on: typing latency everywhere, first output and cancel on prose, paste and
+resize on the short reply, CPU and peak memory on the heavy Markdown stream.
+`--profile stress` adds the 30-turn memory-growth case as an explicit diagnostic. Reports include
 raw input samples, per-turn resources, terminal traces, binary hashes, A/A noise
 and paired A/B results. A noisy or incomplete run fails. Linux reports the kernel
-RSS high-water mark; local macOS peaks are phase samples.
+RSS high-water mark; local macOS peaks are phase samples. Required core acceptance
+contains short and heavy Markdown cases (36 observations); task-specific
+foreground/background performance comparisons are outside that reduced scope.
+Short keeps its 5/7 pairs and RSS peak/after checks; heavy keeps 3/3 pairs.
 
-The managed pre-push acceptance hook runs full core rendering and painted browser
-checks in local Docker whenever production or measurement inputs change. It uses
-isolated baseline, candidate and trusted-driver Cargo directories and freezes
-normal release binaries before driver compilation. Source snapshots contain only
+The managed author-local acceptance runs the core matrix before push when CLI,
+engine-core, PTY helper/harness, rendering-driver or native observer inputs change.
+Scheduled or manual runs do not replace it. It uses isolated baseline, candidate and
+trusted-driver Cargo directories and freezes normal release binaries before driver
+compilation. Source snapshots contain only
 Git-tracked inputs. Docker gets no model keys or GitHub token. Full logs remain
 local; the signed Git note carries command and log digests bound to the exact
 commit and protected acceptance contract. See
 [mandatory local acceptance](../../CONTRIBUTING.md#mandatory-local-acceptance-and-complementary-ci).
 
-The old hosted rendering/browser jobs, periodic stress run and manual dispatch
-replacement are removed. Native visual/resize contracts still run on all three
-OSes through the author-local plus complementary-CI split. Budget and baseline
+Edits limited to `benchmark.py`, `gui-smoke.py`, `performance-policy.json` and
+`gui-policy.json` skip the ordinary workspace/resize suites and their
+complementary CI hosts. The browser harness files select the browser smoke; the
+rendering policy selects mandatory local paired measurements. Cargo/dependency
+metadata and unrelated crates omit this comparison, reducing indirect performance
+coverage. Rust and shared terminal-host
+changes retain their applicable native checks. The required planner prints the
+actual local and CI responsibilities from committed Git inputs.
+If rendering and browser smoke run in that order in one acceptance process, the
+browser uses the same immutable image and hash-verified normal release. This
+omits a second CLI build while retaining both browser interaction drivers.
+Paired browser drivers also share the rendering driver's release Cargo cache
+under the existing benchmark lease. The mutable checkout is first synchronized
+to the exact candidate, then normal Cargo compiles both browser drivers and
+rebuilds changed inputs. Browser-only drivers keep their dev build and cache.
+Expected driver hashes are checked before either harness starts a native process.
+Browser-only runs still build the dev candidate. Reuse is bound to candidate,
+protected policy, image context and output namespace and never inferred from old
+folders. Incorrect identities/bytes are refused before native builds or the GUI.
+
+Native visual/resize contracts run on all three OSes through the author-local
+plus complementary-CI split. Budget and baseline
 changes require maintainer review and retain original failed/noisy evidence.
 The protected default-branch publisher independently verifies the receipt and
 completed cross-platform workflow before publishing `Local acceptance`; its
@@ -91,11 +116,8 @@ write token never executes candidate code. Candidate jobs use read-only tokens
 and no repository secrets, including for forks. See GitHub's
 [secure workflow guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
-Ordinary integration-test edits skip unchanged release performance pairs.
-Production source/manifests, shared CLI test helpers and measurement-driver edits
-still select their measurements. Workload rounds, sample counts and budgets are
-unchanged. The existing `policy-review.cjs` and live approval diagnostics remain
-historical tools; they no longer publish the required rendering gate.
+The existing `policy-review.cjs` and live approval diagnostics remain historical
+tools; they no longer publish a required rendering gate.
 
 ## Painted terminal and hyperlink acceptance
 
@@ -107,7 +129,13 @@ wrapped Chinese, combining characters and emoji. No programmatic selection API
 stands in for dragging. Selection must contain only visible text, must not open
 a link, and must survive output arriving while old history is selected.
 The workload includes dense links, long URLs, query semicolons, and rejected
-oversized/non-web targets. Static and streamed copies use the same document.
+oversized/non-web targets, plus adaptive tables and multiline fenced code.
+Static and streamed copies use the same document. It also executes a real file
+Write before the model question and verifies the resulting file bytes. A final
+native mouse drag selects wrapped Unicode source from that Write card; the
+selection and screenshot are retained separately. This candidate-only assertion
+runs after resource sampling. It remains a content and native-selection check;
+the smoke does not claim paired CPU/RSS or drag-performance coverage.
 
 Install with `npm ci --prefix e2e/terminal-resize`, then run
 `npx playwright install chromium` in that directory. From `rust/`:
@@ -116,30 +144,29 @@ Install with `npm ci --prefix e2e/terminal-resize`, then run
 SCODE_TEST_BACKEND=mock cargo test -p rusty-sudocode-cli --test pty_hyperlinks -- --ignored --nocapture
 ```
 
-Headless Chromium still runs the DOM layout, renderer, rasterization and native
-xterm selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports
-and screenshots are retained under `SCODE_TERMINAL_LOG_DIR`. Input timing starts
-before browser keyboard dispatch and ends after xterm parses the expected cells,
-two animation frames and a PNG capture. Each typed character must change pixels.
-This is a conservative rendering/readback measurement, including automation and
-capture overhead; it does not measure physical keyboard/display scanout latency.
-The observer waits for fonts and two animation frames, then reads a PNG of the
-same terminal bounds through Chromium CDP with fast lossless compression.
-The fixture disables decorative scrollbar transitions and rejects other running
-CSS animations. Per-capture frame, bounds and PNG
-readback timings remain in the report, and the readback mode is part of the
-browser cohort identity. The settled frame supplies fresh pixel bounds through
-the same geometry provider used by link and selection hit testing.
-Both browser workflows launch through `browser.cjs`. It owns one raster worker,
-keeps the existing container CPU limit, and records the actual graphics backend
-and its own source digest. A/A and A/B reject a changed observer identity.
-Workload counts, two animation frames, PNG readback and all budgets remain.
+Headless Chromium runs DOM layout, renderer, rasterization and native xterm
+selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports and
+screenshots remain under `SCODE_TERMINAL_LOG_DIR`. Each painted input and drag
+must change terminal pixels. `browser.cjs` owns the pinned browser launch and
+records its actual graphics backend; two animation frames and completed PNG
+readback remain part of each observation. Timing includes browser automation
+and readback, so it is not physical keyboard/display latency. The browser smoke
+retains these diagnostics without a paired performance verdict. Core typing,
+CPU and RSS comparisons use the separately required rendering profile.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
 Each phase first samples 100 keys in five short drafts without screenshots,
 then samples 20 keys with pixel evidence. Parsed P95 uses the larger independent
 burst; painted P95 retains its separate readback workload. Sampling counts and the delay schedule are
 owned by `gui-policy.json` and shared by the observer and completeness checks.
+The primary drag repeats four complete twelve-point gestures, giving 48 frame
+observations per workload. Every gesture retains its pixel, Unicode, copied-text
+and link-activation assertions. All raw observations, including readback spikes,
+remain in the report. With only twelve observations, nearest-rank P95 equals
+the maximum; 48 observations put two samples above its rank. Completeness checks
+require at least forty observations across multiple complete gestures and verify
+both each gesture and the flattened sample series. Existing input samples and
+the final Write-source drag remain required by this functional smoke.
 PNG readback can delay the next WebSocket dispatch, so parsed
 latency must come from the independent burst. Both releases receive the same
 deterministic inter-key delays outside timed regions, retained in the report.
@@ -164,19 +191,9 @@ counted multiple times), and peaks are phase samples. The Node observer is
 outside that resource scope. Raw per-process samples make that distinction
 inspectable; these values must not be compared to scode's standalone RSS budget.
 
-`gui-benchmark.py` uses the core gate's paired evaluator: three A/A calibration
-pairs followed by three alternating A/B pairs and two warm-ups (14 runs).
-Each run keeps its existing gestures, observation counts and budgets. Fewer
-repetitions reduce precision and the chance of exposing intermittent regressions;
-equivalent statistical sensitivity is not established. The core six-scenario
-rendering matrix uses 96 runs: short retains five A/A and seven A/B pairs, while
-the other five scenarios use three A/A and three A/B pairs, with two warm-ups
-per scenario. The repeated-turn stress scenario also retains five/seven pairs.
-The short check that caught a real RSS regression and the separate viewport
-checks retain their original sampling. `gui-policy.json` owns the
-additional browser budgets; the original `performance-policy.json` budgets and
-fixed baseline are unchanged. Both binaries receive identical gestures and
-workloads; only candidate hyperlink assertions differ. The browser workflow
-compares releases built from the PR base and candidate in separate target dirs,
-and uploads failures as well as successful evidence. The existing required
-mandatory local rendering profile continues comparing the original workloads.
+`gui-smoke.py` runs this journey once against the candidate as the `browser`
+acceptance profile. It requires a passing journey, clickable links, selection
+preserved while streaming, an idle terminal and the complete interaction workload
+from `gui-policy.json`; the same profile then runs
+`pty_prompt_viewport::viewport_browser_interaction`. CLI sources, the PTY harness,
+shared PTY helpers, the browser drivers and this harness select it.

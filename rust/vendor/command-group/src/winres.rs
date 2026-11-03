@@ -1,12 +1,15 @@
 use std::{
 	convert::TryInto,
-	io::{Error, Result},
+	io::{Error, ErrorKind, Result},
 	mem,
-	os::windows::io::RawHandle,
+	os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
 	ptr,
 };
 use winapi::{
-	shared::minwindef::{BOOL, DWORD, FALSE, LPVOID},
+	shared::{
+		minwindef::{BOOL, DWORD, FALSE, LPVOID},
+		winerror::ERROR_NO_MORE_FILES,
+	},
 	um::{
 		handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
 		ioapiset::CreateIoCompletionPort,
@@ -140,8 +143,16 @@ pub(crate) fn job_object(kill_on_drop: bool) -> Result<(HANDLE, HANDLE)> {
 // to get at PROCESS_INFORMATION!
 fn resume_threads(child_process: HANDLE) -> Result<()> {
 	let child_id = unsafe { GetProcessId(child_process) };
+	if child_id == 0 {
+		return Err(Error::last_os_error());
+	}
 
-	let h = res_null(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+	let h = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+	if h == INVALID_HANDLE_VALUE {
+		return Err(Error::last_os_error());
+	}
+	// Fresh native handles have one owner, including every early error return.
+	let snapshot = unsafe { OwnedHandle::from_raw_handle(h.cast()) };
 	let mut entry = THREADENTRY32 {
 		dwSize: 28,
 		cntUsage: 0,
@@ -152,18 +163,32 @@ fn resume_threads(child_process: HANDLE) -> Result<()> {
 		dwFlags: 0,
 	};
 
-	let mut res = res_bool(unsafe { Thread32First(h, &mut entry) });
-	while res.is_ok() {
+	res_bool(unsafe { Thread32First(snapshot.as_raw_handle().cast(), &mut entry) })?;
+	let mut found_child_thread = false;
+	loop {
 		if entry.th32OwnerProcessID == child_id {
 			let thread_handle = res_null(unsafe { OpenThread(0x0002, 0, entry.th32ThreadID) })?;
-			res_neg(unsafe { ResumeThread(thread_handle) })?;
-			res_bool(unsafe { CloseHandle(thread_handle) })?;
+			let thread = unsafe { OwnedHandle::from_raw_handle(thread_handle.cast()) };
+			res_neg(unsafe { ResumeThread(thread.as_raw_handle().cast()) })?;
+			found_child_thread = true;
 		}
 
-		res = res_bool(unsafe { Thread32Next(h, &mut entry) });
+		if unsafe { Thread32Next(snapshot.as_raw_handle().cast(), &mut entry) } == FALSE {
+			let error = Error::last_os_error();
+			if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+				return Err(error);
+			}
+			break;
+		}
 	}
 
-	res_bool(unsafe { CloseHandle(h) })
+	if !found_child_thread {
+		return Err(Error::new(
+			ErrorKind::NotFound,
+			"the suspended child had no thread in the native snapshot",
+		));
+	}
+	Ok(())
 }
 
 pub(crate) fn assign_child(handle: RawHandle, job: HANDLE) -> Result<()> {

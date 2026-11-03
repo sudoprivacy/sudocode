@@ -4026,7 +4026,14 @@ async fn acp_subagent_events_background_parallel() {
         "two active child streams before release",
     )
     .await;
-    let seen: Vec<Value> = during.iter().chain(&before_release).cloned().collect();
+    let mut seen: Vec<Value> = during.iter().chain(&before_release).cloned().collect();
+    let (status_updates, status) = client
+        .send_request("_sudocode/session/status", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(status["result"]["foreground"]["state"], "idle", "{status}");
+    assert_eq!(status["result"]["background"]["agents"], 2, "{status}");
+    assert_eq!(status["result"]["background"]["terminals"], 0, "{status}");
+    seen.extend(status_updates);
     fs::write(release, "both child streams observed").expect("release real children");
     let after = collect_until_finished(&mut client, &seen, 2).await;
     for n in &after {
@@ -4731,6 +4738,9 @@ async fn acp_session_override_keeps_process_level_append() {
         body.find(SESSION_OVERRIDE) < body.find(PROCESS_APPEND),
         "the replacement comes first, the append stays after it; body: {body}"
     );
+
+    client.shutdown().await;
+    workspace.cleanup();
 }
 
 /// Built-in identity block: present on the default prompt, gone under override.
@@ -7031,6 +7041,15 @@ async fn acp_task_completions_terminal_replay_and_purge() {
     assert!(during
         .iter()
         .all(|v| v["method"] != "_sudocode/task/completed"));
+    let (_, running) = client
+        .send_request("_sudocode/session/status", json!({"sessionId":sid}))
+        .await;
+    assert_eq!(
+        running["result"]["foreground"]["state"], "idle",
+        "{running}"
+    );
+    assert_eq!(running["result"]["background"]["terminals"], 1, "{running}");
+    assert_eq!(running["result"]["background"]["agents"], 0, "{running}");
     fs::write(workspace.root.join("release-task"), "go").unwrap();
     let (_, first) = client
         .recv_until(SUBAGENT_EVENTS_WAIT, |v| {
@@ -7044,6 +7063,13 @@ async fn acp_task_completions_terminal_replay_and_purge() {
     assert_eq!(first["params"]["status"], "failed");
     assert_eq!(first["params"]["originTraceId"], "root:1");
     assert_eq!(first["params"]["parentToolCallId"], "background-1");
+    let (_, completed) = client
+        .send_request("_sudocode/session/status", json!({"sessionId":sid}))
+        .await;
+    assert_eq!(
+        completed["result"]["background"]["terminals"], 0,
+        "{completed}"
+    );
     assert!(first["params"]["message"]
         .as_str()
         .unwrap()
@@ -7495,6 +7521,90 @@ $stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime
     }
 }
 
+/// Wait for native identities and preserve producer diagnostics before cleanup.
+#[cfg(windows)]
+async fn wait_powershell_process_tree(
+    client: &mut AcpTestClient,
+    root: &Path,
+    sid: &str,
+    started: &[Value],
+) -> Vec<String> {
+    let mut last_stamps = Vec::new();
+    // Cold-starting three interpreters uses the same startup budget as the
+    // server fixture. This does not change the runtime's cancellation deadline.
+    let identities = timeout(SERVER_STARTUP_TIMEOUT, async {
+        loop {
+            let mut identities = Vec::new();
+            last_stamps.clear();
+            for name in ["parent", "child", "grandchild"] {
+                let stamp = fs::read_to_string(root.join(format!("{name}.pid")));
+                last_stamps.push(format!("{name}: {stamp:?}"));
+                if let Ok(value) = stamp {
+                    let value = value.trim();
+                    if value.split_once(':').is_some_and(|(pid, ticks)| {
+                        pid.parse::<u32>().is_ok() && ticks.parse::<u64>().is_ok()
+                    }) {
+                        identities.push(value.to_owned());
+                    }
+                }
+            }
+            if identities.len() == 3 {
+                break identities;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    match identities {
+        Ok(identities) => identities,
+        Err(error) => {
+            // Read the producer before unwinding closes the CLI and its Job.
+            // These diagnostics do not extend the readiness deadline above.
+            let outputs: Vec<_> = started
+                .iter()
+                .filter_map(|message| {
+                    message
+                        .pointer("/params/update/rawOutput/rawOutputPath")
+                        .and_then(Value::as_str)
+                })
+                .map(|path| {
+                    (
+                        path,
+                        fs::read(path)
+                            .map(|bytes| process_text::decode_process_output(&bytes).text),
+                    )
+                })
+                .collect();
+            eprintln!("native startup output before cleanup: {outputs:?}");
+            if let Some(task_id) = started.iter().find_map(|message| {
+                message
+                    .pointer("/params/update/rawOutput/backgroundTaskId")
+                    .and_then(Value::as_str)
+            }) {
+                let calls = json!([{"id":"windows-owned-diagnostic","name":"pid_status","input":{"task_id":task_id}}]);
+                let query = client.send_request(
+                    "session/prompt",
+                    json!({
+                        "sessionId": sid,
+                        "_meta": {"traceId": "windows-owned:diagnostic"},
+                        "prompt": [{
+                            "type": "text",
+                            "text": format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}"),
+                        }],
+                    }),
+                );
+                let observed = timeout(
+                    Duration::from_secs(5),
+                    std::panic::AssertUnwindSafe(query).catch_unwind(),
+                )
+                .await;
+                eprintln!("native startup task state before cleanup: {observed:?}");
+            }
+            panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}");
+        }
+    }
+}
+
 /// Native Windows Job accounting must confirm all generations before publishing cancellation.
 #[cfg(windows)]
 #[tokio::test]
@@ -7518,35 +7628,8 @@ async fn acp_powershell_cancellation_reaps_owned_job_before_replay() {
     let calls = json!([{"id":"windows-owned","name":"PowerShell","input":{"command":"Set-ExecutionPolicy -Scope Process Bypass -Force; & ./parent.ps1","run_in_background":true}}]);
     let (started, parent) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"windows-owned:1"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
     assert_eq!(parent["result"]["stopReason"], "end_turn", "{parent}");
-    let mut last_stamps = Vec::new();
-    // Cold-starting three interpreters uses the same startup budget as the
-    // server fixture. This does not change the runtime's cancellation deadline.
-    let identities = timeout(SERVER_STARTUP_TIMEOUT, async {
-        loop {
-            let mut identities = Vec::new();
-            last_stamps.clear();
-            for name in ["parent", "child", "grandchild"] {
-                let stamp = fs::read_to_string(workspace.root.join(format!("{name}.pid")));
-                last_stamps.push(format!("{name}: {stamp:?}"));
-                if let Ok(value) = stamp {
-                    let value = value.trim();
-                    if value.split_once(':').is_some_and(|(pid, ticks)| {
-                        pid.parse::<u32>().is_ok() && ticks.parse::<u64>().is_ok()
-                    }) {
-                        identities.push(value.to_owned());
-                    }
-                }
-            }
-            if identities.len() == 3 {
-                break identities;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!("all three native PowerShell processes must start: {error}; stamps={last_stamps:?}; updates={started:?}")
-    });
+    let identities =
+        wait_powershell_process_tree(&mut client, &workspace.root, &sid, &started).await;
     let running = powershell_process_identities(&identities);
     assert!(
         identities.iter().all(|identity| running.contains(identity)),

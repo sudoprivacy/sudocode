@@ -3,7 +3,8 @@ name: Rust CI
 on:
   push:
     branches:
-      - main
+      # The queue already verified the merged tree. Cache publishers own
+      # their separate main-push triggers; do not allocate another preflight.
       - 'gaebal/**'
       - 'omx-issue-*'
     paths:
@@ -83,13 +84,14 @@ jobs:
 
   clippy-workspace:
     # Local/complementary acceptance owns the native suites. Preserve the
-    # stronger all-feature lint contract, including the integrated queue tree.
+    # stronger all-feature lint contract once on the integrated queue tree.
+    # Only isolated CLI test edits narrow targets; source changes retain all-targets.
+    # All-feature-only findings can arrive later than native per-host lint.
     # Stop at its first error so matrix fail-fast can cancel peer platforms.
     if: >-
       !inputs.live_only && !inputs.cache_only &&
       needs.one-nexus-vfs-pin.outputs.clippy_required == 'true' &&
-      (github.event_name == 'merge_group' ||
-       (github.event_name == 'pull_request' && !github.event.pull_request.draft))
+      github.event_name == 'merge_group'
     needs: one-nexus-vfs-pin
     name: cargo clippy --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -97,12 +99,15 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+        os: [ubuntu-latest, windows-latest, macos-latest]
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -114,7 +119,26 @@ jobs:
           env-vars: ImageOS
           save-if: false
       - name: Run workspace clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: python ../.github/scripts/ci_clippy.py
+
+  stop-after-clippy-failure:
+    # Start as soon as this matrix fails; waiting for the daemon defeats this.
+    if: always() && github.event_name == 'merge_group' && needs.clippy-workspace.result == 'failure'
+    needs: clippy-workspace
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Workspace Clippy
+
+  stop-after-daemon-failure:
+    if: always() && github.event_name == 'merge_group' && needs.a2a-live.result == 'failure'
+    needs: a2a-live
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Real daemon acceptance
 
   integrated-acceptance:
     # A required job must fail when a dependency fails or is unexpectedly
@@ -131,6 +155,7 @@ jobs:
         env:
           PIN_RESULT: ${{ needs.one-nexus-vfs-pin.result }}
           DAEMON_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.daemon_required }}
+          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
           COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
           CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
           A2A_RESULT: ${{ needs.a2a-live.result }}
@@ -138,12 +163,18 @@ jobs:
         run: |
           set -eu
           test "$PIN_RESULT" = success
-          case "$COHOST_REQUIRED" in
-            true|false) ;;
-            *) echo "::error::Missing co-host input decision"; exit 1 ;;
-          esac
-          if [ "$COHOST_REQUIRED" = true ] && [ "$DAEMON_REQUIRED" != true ]; then
-            echo "::error::Co-host acceptance requires the actual daemon job"
+          for selected in "$A2A_REQUIRED" "$COHOST_REQUIRED"; do
+            case "$selected" in
+              true|false) ;;
+              *) echo "::error::Missing CLI A2A or co-host input decision"; exit 1 ;;
+            esac
+          done
+          selected_daemon=false
+          if [ "$A2A_REQUIRED" = true ] || [ "$COHOST_REQUIRED" = true ]; then
+            selected_daemon=true
+          fi
+          if [ "$DAEMON_REQUIRED" != "$selected_daemon" ]; then
+            echo "::error::Daemon job selection must equal CLI A2A or co-host selection"
             exit 1
           fi
           require_result() {
@@ -180,17 +211,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Explain selected daemon acceptance
         env:
+          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
           COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
         run: |
-          case "$COHOST_REQUIRED" in
-            true)
-              echo "CLI daemon journeys and co-host/search acceptance are required by changed inputs."
-              ;;
-            false)
-              echo "CLI daemon journeys remain required. CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
-              ;;
-            *) echo "::error::Missing co-host input decision; no daemon build started"; exit 1 ;;
-          esac
+          for selected in "$A2A_REQUIRED" "$COHOST_REQUIRED"; do
+            case "$selected" in
+              true|false) ;;
+              *) echo "::error::Missing CLI A2A or co-host input decision; no daemon build started"; exit 1 ;;
+            esac
+          done
+          echo "DAEMON_ACCEPTANCE_SCOPE: CLI_A2A=$A2A_REQUIRED cohost_search=$COHOST_REQUIRED"
+          if [ "$A2A_REQUIRED" = false ]; then
+            echo "Fixed VFS cache helpers changed; independent CLI A2A journeys are skipped. Current co-host, search authorization/restart and driver feature checks remain required."
+          fi
+          if [ "$COHOST_REQUIRED" = false ]; then
+            echo "CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -215,15 +251,27 @@ jobs:
       # nexus-vfs's own CI. Adding runners would multiply the daemon-boot flake
       # surface for signal already covered.
       - name: Install native durability fault injector
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: |
           if ! command -v strace >/dev/null; then
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends strace
           fi
       - name: A2A round-trip against the pinned daemon
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+        env:
+          NEXUS_A2A_FAULT_OUTPUT: ${{ runner.temp }}/mailbox-faults
         run: e2e/nexus-a2a/run.sh
+      - name: Retain mailbox fault inventory and exact case results
+        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailbox-fault-cases
+          path: ${{ runner.temp }}/mailbox-faults
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain native syscall fault evidence
-        if: failure()
+        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: native-session-durability
@@ -240,6 +288,7 @@ jobs:
       # cross-machine topology minus the network, which is the part nexus-vfs's
       # federation CI already owns.
       - name: Cross-node A2A against two nodes
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-cross-node.sh
 
       # The steps above prove DELIVERY and assert nothing about identity — and
@@ -254,6 +303,7 @@ jobs:
       # with the credential store bound, which is the only one the property can be
       # claimed in.
       - name: Auth-on A2A — the node decides who a message is from
+        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-auth-on.sh
 
       # Everything above is an agent that TALKS TO a daemon. This one runs
@@ -274,24 +324,28 @@ jobs:
 
       - name: Checkout the VFS contract used by the co-host
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: nexi-lab/nexus-vfs
-          ref: ${{ needs.one-nexus-vfs-pin.outputs.commit }}
-          path: .native-vfs
+        uses: ./.github/actions/vfs-search-cache
 
       - name: Search authorization and restart under the confined co-host owner
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
           NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
         run: |
-          test -x "$NEXUS_SEARCH_USER_RUNTIME_BINARY"
-          cargo build --locked --manifest-path .native-vfs/Cargo.toml -p nexus-search-plugin
-          stat -c 'Search fixture plugin bytes: %s' "$CARGO_TARGET_DIR/debug/libnexus_search_plugin.so"
-          cargo test --locked --manifest-path .native-vfs/Cargo.toml \
-            -p nexus-cluster --all-features --test user_runtime \
-            signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes -- --nocapture
+          if [ -e "$RUNNER_TEMP/vfs-search-build" ]; then
+            echo "::error::The VFS consumer ran a redundant pre-test build. Keep fixed-driver prewarming in the main publisher; normal cargo test builds and executes this case."
+            exit 1
+          fi
+          python3 .github/scripts/vfs_search_cache.py test --output "$RUNNER_TEMP/vfs-search-journey"
+
+      - name: Retain fixed-driver build and current-runtime evidence
+        if: always() && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfs-search-commands
+          path: |
+            ${{ runner.temp }}/vfs-search-build
+            ${{ runner.temp }}/vfs-search-journey
+          if-no-files-found: error
 
       # The one feature combination nothing else builds. `driver-ai` forwards to
       # nexus-cluster so a co-host can carry `llm_mount` — the co-host has to be a
@@ -321,6 +375,7 @@ jobs:
       commit: ${{ steps.pin.outputs.commit }}
       live_required: ${{ steps.scope.outputs.live_required }}
       daemon_required: ${{ steps.scope.outputs.daemon_required }}
+      a2a_required: ${{ steps.scope.outputs.a2a_required }}
       cohost_required: ${{ steps.scope.outputs.cohost_required }}
       clippy_required: ${{ steps.scope.outputs.clippy_required }}
     defaults:
@@ -335,46 +390,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-        if: &full_preflight ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
         with:
           components: rustfmt
       - uses: actions/setup-node@v4
-        if: *full_preflight
         with:
           node-version: '22'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install metadata schema validator
-        if: *full_preflight
         run: python3 -m pip install jsonschema==4.26.0 psutil==7.2.2
       - name: Check formatting
-        if: *full_preflight
         working-directory: rust
         run: cargo fmt --all --check
       - name: Check generated cache metrics
-        if: *full_preflight
         run: python3 scripts/generate_cache_metrics.py --check
       - name: Check public cache usage fixtures
-        if: *full_preflight
         run: python3 scripts/check_cache_usage_fixtures.py
       - name: Check docs and metadata for stale branding
-        if: *full_preflight
         run: python .github/scripts/check_doc_source_of_truth.py
       - name: Reject silent merge rewrites and conflict markers
         # The trusted acceptance gate checks the combined queue history.
-        if: ${{ (github.event_name != 'push' || github.ref != 'refs/heads/main') && github.event_name != 'merge_group' }}
+        if: github.event_name != 'merge_group'
         env:
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: python3 .github/scripts/check_pr_history.py "$BASE" HEAD
       - name: Exercise real Git histories
-        if: *full_preflight
         run: python3 e2e/pr-history/run.py
       - name: Exercise queue cancellation completion races
-        if: *full_preflight
         run: python3 e2e/local-acceptance/queue_maintenance_acceptance.py
       - name: Every committed shell script must be executable
-        if: *full_preflight
         shell: bash
         # `core.filemode=false` on a Windows checkout means a new script is
         # committed 100644 and nobody notices until a runner reports
@@ -392,19 +437,14 @@ jobs:
           echo "all committed shell scripts are executable"
 
       - name: Renderer crates must not name engine-internal streaming types
-        if: *full_preflight
         run: bash .github/scripts/check_engine_boundary.sh
       - name: Exercise real Git boundary violations and scanner failures
-        if: *full_preflight
         run: python3 e2e/engine-boundary/run.py
       - name: Exercise interrupted publication and real installer
-        if: *full_preflight
         run: python3 e2e/release-mirror/run.py
       - name: Exercise provider probe contracts
-        if: *full_preflight
         run: node --test .github/scripts/probe_live_usage.test.cjs
       - name: Exercise explicit model selection and shared native runner without a key
-        if: *full_preflight
         run: python3 .github/scripts/live_model_acceptance_e2e.py --output "${{ runner.temp }}/live-model-policy"
       # Seconds, no build: this is the invariant the co-host rests on, and it is
       # cheap enough to answer before anything compiles.
@@ -482,7 +522,9 @@ jobs:
 
       - name: Select expensive checks from changed inputs
         id: scope
-        run: python3 .github/scripts/ci_input_scope.py
+        run: |
+          python3 .github/scripts/ci_input_scope.py
+          echo "::notice::Native acceptance retains per-host lint. Queue Clippy checks all features on three platforms. Ordinary/shared inputs retain all-targets; isolated CLI test edits select changed originals and their groups. Missing history or dirty inputs retain full lint. Feature-only errors may first appear there. Main reuses completed queue preflight."
 
       - name: Install focused executor observer dependencies
         if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true')
@@ -504,9 +546,20 @@ jobs:
         run: |
           rustup component add clippy
           python3 e2e/local-acceptance/clippy_fail_fast.py --output "$RUNNER_TEMP/clippy-fail-fast"
+          python3 e2e/local-acceptance/failed_ci_live.py --check-wiring
       - name: Verify response gzip bytes, concurrent files and quota failures
         if: github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
         run: python3 e2e/response-gzip/run.py --output "$RUNNER_TEMP/response-gzip"
+      - name: Verify fixed-driver restoration and current runtime refusal
+        if: github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
+        run: python3 e2e/local-acceptance/vfs_search_cache_acceptance.py --output "$RUNNER_TEMP/vfs-search-cache-fixture"
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
+        with:
+          name: vfs-search-cache-fixture
+          path: ${{ runner.temp }}/vfs-search-cache-fixture
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
         with:
@@ -733,6 +786,13 @@ jobs:
         shell: bash
         run: |
           python ../.github/scripts/live_model_acceptance.py --suite pty --execute --output "${{ runner.temp }}/live-acceptance/pty"
+      - name: Deliver offline Nexus mail through Windows ConPTY and a real model
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: .
+        env:
+          SCODE_LIVE_MODEL: *live_model
+        run: bash e2e/nexus-a2a/run-live-offline.sh
       - name: Summarize live model routing evidence
         if: always()
         working-directory: .

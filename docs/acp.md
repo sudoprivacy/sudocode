@@ -65,6 +65,15 @@ session and independent across sessions:
   Setup and legacy slash operations that use the process working directory
   acquire a directory lease while they run.
 
+Managed cohost activity comes from the shared engine event stream, including
+direct A2A calls and management turns. Nexus reports `ready` when no foreground
+operation is in flight, `busy` while one is executing, and `awaiting_input` with
+reason `permission` or `question` while a prompt owns input. Waiting for input
+does not imply that independent tools have stopped. Likewise, `ready` does not
+imply that the session's background tasks have finished; their shared task
+registry owns that lifecycle. These states follow operation and prompt events,
+not output silence or spinner timing.
+
 ### Session-owned input delivery
 
 Hosts check `initialize.result._meta.sudocode.inputDelivery.version == 1`
@@ -317,6 +326,43 @@ opaque TCP traffic is held while pause cancels a request, and a post-execution
 hook withholds a reply while the node already holds the message. Their model
 endpoint refuses every inference request and must record zero calls. This is
 not a cross-host idle callback or production deployment acceptance.
+
+### Runtime status (extension v1)
+
+`initialize.result._meta.sudocode.runtimeStatus.version = 1`
+advertises `_sudocode/session/status`. Send `{ "sessionId": "..." }` for a
+session on this ACP connection. The response contains:
+
+```json
+{
+  "foreground": { "state": "awaiting_input", "waiting_for": "question" },
+  "background": {
+    "terminals": 0,
+    "agents": 0,
+    "execution_unconfirmed": 0,
+    "tool_operations": 1
+  }
+}
+```
+
+Foreground states are `idle`, `running`, and `awaiting_input`. `waiting_for` is
+present only for `awaiting_input`, with `permission` or `question`. The snapshot
+comes from the engine's lifecycle events. It remains queryable during a model
+request, direct tool call, or unanswered input request and starts no model turn.
+Cancellation releases input ownership immediately; foreground work may remain
+`running` while the cancelled turn or its tools finish stopping.
+Background counts come from the session task registry without copying outputs
+or changing task subscriptions. Terminal and Agent counts include only
+background-marked running/stopping tasks. `execution_unconfirmed` counts those
+background records separately; `tool_operations` counts actual worker leases,
+including workers whose caller has already been cancelled.
+
+This describes the selected engine, not a global online/offline decision.
+Several engines may share a SID. The runtime host must retain its instance
+identity and authorization when routing this request. A missing session is an
+error. Disconnects or unsupported hosts do not establish that an Agent is
+offline. Counts and foreground state are observations of independently moving
+work, not a grant of human control; use the pause/fence protocol for takeover.
 
 ### Closing a peer session
 

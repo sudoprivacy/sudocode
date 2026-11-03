@@ -628,6 +628,17 @@ abrupt process exit can therefore retain earlier completed profiles without
 running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
 host; custom output directories can use the printed `check --resume-from` command.
+A later head of the same branch carries a signed profile from an earlier head of
+that branch when nothing it changed selects the profile. Only the PR's own changes
+count: a path changed since the earlier head counts when it differs from current
+main or was part of the PR when the profile ran. Main's own commits keep their own
+acceptance, and a branch behind main merges without rerunning its profiles, so a
+clean merge of main costs nothing extra. Conflict resolutions and PR changes
+replaced by main's version still count. Carrying requires the same native host,
+unchanged profile commands and matching original logs; `preflight` always runs.
+The receipt records each origin head with its signed envelope, and the verifier
+re-checks that envelope, its ancestry, the change set and the copied command
+records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
 When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
 record includes preparation commands and the author-host runner arguments.
 Run preparation first: mainline recovery fetches protected main before resolving

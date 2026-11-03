@@ -637,6 +637,8 @@ def enforcement_acceptance(*, profile_compat_only=False, publication_only=False)
             return
         from resume_acceptance import verify_resume
         verify_resume(directory, SOURCE, command)
+        from carryover_acceptance import verify_carryover
+        verify_carryover(directory, SOURCE, FIXTURE_ENV)
         from host_lease_acceptance import verify_host_lease
         verify_host_lease(directory, SOURCE, command, FIXTURE_ENV)
 

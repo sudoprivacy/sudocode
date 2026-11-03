@@ -757,8 +757,11 @@ appears for active tasks. The preview retains at most
 24 KiB per task; complete shell output is stored in the private temporary log
 shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
 directory after completion. The session retains at most 50 completed tasks
-in memory, plus active work. The list shows its current entry count; the oldest
-ended tasks leave it automatically as newer tasks finish, without a restart.
+in memory, plus active work. The list shows its current entry count. Finishing a
+task or opening its details makes it recently used; when the history exceeds
+50 entries, the least recently used result leaves automatically, without a
+restart. Selecting a list row, repainting, status queries and output updates do
+not extend retention. A long-running task enters history when it finishes.
 There is no age-based expiration within this limit. This does not delete their
 complete logs. Agent details use the same layout,
 showing current activity and recent output, then their

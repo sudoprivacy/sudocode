@@ -1038,6 +1038,14 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
             f"using {'freshly fetched protected main' if mainline else 'the requested snapshot'} "
             f"(observed policy {required_policy}); follow LOCAL_ACCEPTANCE_RECOVERY, then rerun CI")
     check_contract_changes(head, base, policy_ref)
+    for name, group in carried_profiles(receipt).items():
+        if name not in checks:
+            raise RuntimeError(f"Carried {name} is missing from the signed checks")
+    for group in receipt.get("carried", []):
+        origin = verify_carried(group, head, receipt["base"], base, signers_ref or policy_ref, receipt["host"])
+        for name in group["profiles"]:
+            if checks[name] != origin["checks"][name]:
+                raise RuntimeError(f"Carried {name} differs from its origin's signed execution")
     if not completed_only and not set(required).issubset(checks):
         raise RuntimeError(f"Acceptance check set differs from policy: need {required}")
     for name, commands in checks.items():
@@ -1101,6 +1109,116 @@ def publish(head, envelope, remote):
         git("update-ref", "-d", temporary)
 
 
+def carried_change_paths(origin, origin_base, head, base):
+    """Paths whose change since `origin` belongs to this PR rather than to protected main.
+
+    Protected main's commits carry their own acceptance, and a clean branch
+    behind main merges without rerunning its profiles; merging main into the
+    branch must not cost more than that. A path counts when it changed since
+    the evidence ran and either differs from current main or was part of the PR
+    then, so conflict resolutions and PR changes replaced by main's still count.
+    """
+    since = set(changed_paths(origin, head))
+    return sorted(since & (set(changed_paths(base, head)) | set(changed_paths(origin_base, origin))))
+
+
+def verify_carried(group, head, base, base_ref, policy_ref, host_info):
+    """Check one carried group against its origin's own signed receipt; return that receipt."""
+    origin, profiles, envelope = group.get("head"), group.get("profiles"), group.get("envelope")
+    if (not isinstance(origin, str) or origin == head or not isinstance(profiles, list) or not profiles
+            or "preflight" in profiles or not isinstance(envelope, dict)):
+        raise RuntimeError("Carried evidence must name an earlier origin head and its non-preflight profiles")
+    if git("merge-base", "--is-ancestor", origin, head, check=False).returncode:
+        raise RuntimeError("Carried evidence origin is not an ancestor of this head")
+    payload = json.loads(base64.b64decode(envelope["payload"], validate=True))
+    if not isinstance(payload.get("commands_ref"), str):
+        raise RuntimeError("Carried evidence predates attested commands")
+    origin_policy = value("rev-parse", payload["commands_ref"])
+    if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
+        raise RuntimeError("Carried evidence policy is not an ancestor of the current protected policy")
+    receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=policy_ref,
+                              completed_only=payload.get("kind") == "completed-profiles")
+    if receipt["host"] != host_info:
+        raise RuntimeError("Carried evidence belongs to a different native host")
+    affected = set(selected(load_policy(policy_ref), carried_change_paths(origin, receipt["base"], head, base)))
+    for name in profiles:
+        if (name not in receipt["checks"] or name in affected
+                or not compatible_profile_commands(receipt, policy_ref, [name])):
+            raise RuntimeError(f"Changes since {origin[:12]} require {name} to run again")
+    return receipt
+
+
+def carried_profiles(receipt):
+    """Profile name -> the group that carried it into this receipt."""
+    groups = receipt.get("carried", [])
+    if not isinstance(groups, list):
+        raise RuntimeError("Carried evidence must be a list of origin groups")
+    owners = {}
+    for group in groups:
+        for name in group.get("profiles", []) if isinstance(group, dict) else []:
+            if name in owners:
+                raise RuntimeError(f"{name} is carried from more than one origin")
+            owners[name] = group
+    return owners
+
+
+def carry_checks(head, base, base_ref, policy_ref, output, needed):
+    """Carry signed profiles from this branch's earlier heads when later changes do not select them.
+
+    Same-host evidence only. Each carried group keeps its origin's signed
+    envelope, so the verifier re-checks the origin, its ancestry and the change
+    set instead of trusting this receipt's copy.
+    """
+    results = Path.home() / ".nexus/local-acceptance/results"
+    remaining = [name for name in needed if name != "preflight"]
+    carried, groups, refused = {}, {}, set()
+    for candidate in value("rev-list", "--topo-order", head, "--not", base_ref).splitlines()[1:200]:
+        if not remaining:
+            break
+        directories = sorted((results / candidate).iterdir(), reverse=True) if (results / candidate).is_dir() else []
+        for directory in directories:
+            try:
+                proof = local_proof_directory(directory)
+                envelope = json.loads((proof / "envelope.json").read_text())
+                receipt = json.loads(base64.b64decode(envelope["payload"], validate=True))
+                if receipt.get("head") != candidate or receipt.get("host") != host():
+                    continue
+                owners = carried_profiles(receipt)
+            except (OSError, ValueError, KeyError, RuntimeError):
+                continue
+            # The candidate's own executions, then the groups it carried itself.
+            sources = [(candidate, envelope, [name for name in receipt.get("checks", {}) if name not in owners])]
+            sources += [(group["head"], group["envelope"], group["profiles"])
+                        for group in receipt.get("carried", [])]
+            for origin, origin_envelope, available in sources:
+                for name in [name for name in remaining if name in available]:
+                    key = (origin, name)
+                    if key in refused:
+                        continue
+                    try:
+                        origin_receipt = verify_carried({"head": origin, "profiles": [name], "envelope": origin_envelope},
+                                                        head, base, base_ref, policy_ref, host())
+                        logs = {path.name: path.read_bytes() for path in (directory / name).glob("*.log") if path.is_file()}
+                        expected = {command["log_sha256"] for command in origin_receipt["checks"][name]}
+                        if not expected.issubset({sha(contents) for contents in logs.values()}):
+                            raise RuntimeError(f"Carried log missing or changed for {name}")
+                    except (RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+                        refused.add(key)
+                        print(f"Not carrying {name} from {origin[:12]}: {error}", flush=True)
+                        continue
+                    target = output / name
+                    target.mkdir()
+                    for filename, contents in logs.items():
+                        if sha(contents) in expected:
+                            (target / filename).write_bytes(contents)
+                    carried[name] = origin_receipt["checks"][name]
+                    groups.setdefault(origin, {"head": origin, "envelope": origin_envelope, "profiles": []})["profiles"].append(name)
+                    remaining.remove(name)
+            if not remaining:
+                break
+    return carried, [{**group, "profiles": sorted(group["profiles"])} for group in groups.values()]
+
+
 def local_proof_directory(directory):
     """Read one atomic checkpoint pointer to an immutable signed generation."""
     if (directory / "envelope.json").is_file():
@@ -1138,6 +1256,7 @@ def resume_checks(directory, head, base, policy_ref, output, needed):
     if previous["host"] != host():
         raise RuntimeError("Resume receipt belongs to a different native host")
     reusable = {}
+    owners = carried_profiles(previous)
     for name in needed:
         if name not in previous["checks"] or not compatible_profile_commands(previous, policy_ref, [name]):
             continue
@@ -1151,10 +1270,16 @@ def resume_checks(directory, head, base, policy_ref, output, needed):
             if sha(contents) in expected:
                 (target / filename).write_bytes(contents)
         reusable[name] = previous["checks"][name]
+    # A reused profile that the earlier attempt carried keeps its origin group.
+    groups = {}
+    for name in reusable:
+        if name in owners:
+            group = owners[name]
+            groups.setdefault(group["head"], {**group, "profiles": []})["profiles"].append(name)
     return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
                       "commands_ref": previous_policy, "finished_at": previous["finished_at"],
                       "timing": previous.get("timing"),
-                      "profiles": sorted(reusable)}
+                      "profiles": sorted(reusable)}, list(groups.values())
 
 
 def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
@@ -1322,10 +1447,22 @@ def perform_check(args, attempt):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
-    reusable, resumed = {}, None
+    reusable, resumed, groups = {}, None, []
     previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
     if previous:
-        reusable, resumed = resume_checks(previous, head, base_ref, policy_ref, output, needed)
+        reusable, resumed, groups = resume_checks(previous, head, base_ref, policy_ref, output, needed)
+    # Earlier heads of this branch lend profiles that later changes do not select.
+    carried, new_groups = carry_checks(head, base, base_ref, policy_ref, output,
+                                       [name for name in needed if name not in reusable])
+    for group in new_groups:
+        existing = next((item for item in groups if item["head"] == group["head"]), None)
+        if existing:
+            existing["profiles"] = sorted(existing["profiles"] + group["profiles"])
+        else:
+            groups.append(group)
+    if carried:
+        print("CARRIED_PROFILES=" + json.dumps({"head": head, "origins": {
+            group["head"]: group["profiles"] for group in new_groups}}), flush=True)
     prior_timing = (resumed or {}).get("timing")
     prior_start = prior_timing.get("first_recorded_started_at") if isinstance(prior_timing, dict) else None
     known_start = type(prior_start) in (int, float) and 0 < prior_start <= attempt["started_at"]
@@ -1344,20 +1481,34 @@ def perform_check(args, attempt):
                "finished_at": int(time.time()), "checks": results, "plan": plan, "timing": timing}
     if resumed is not None:
         receipt["resumed_from"] = resumed
+
+    def sign_carried():
+        # A checkpoint lists only the carried profiles it already contains.
+        current = [{**group, "profiles": [name for name in group["profiles"] if name in results]} for group in groups]
+        current = [group for group in current if group["profiles"]]
+        if current:
+            receipt["carried"] = current
+        else:
+            receipt.pop("carried", None)
     try:
         with host_acceptance_lease(attempt, head):
             prepare = getattr(module, "prepare_native_checks", None)
             if prepare:
                 module.run.prepared_native = prepare(
-                    [name for name in needed if name not in reusable], ROOT, output, run_command)
+                    [name for name in needed if name not in reusable and name not in carried], ROOT, output, run_command)
             for name in needed:
                 if name in reusable:
                     print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
                     results[name] = reusable[name]
+                elif name in carried:
+                    origin = next(group["head"] for group in groups if name in group["profiles"])
+                    print(f"Carrying signed {name} from {origin[:12]}; changes since then do not select it", flush=True)
+                    results[name] = carried[name]
                 else:
                     print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
                     results[name] = module.run(name, ROOT, output / name, base, run_command)
                 timing["checks_finished_at"] = time.time()
+                sign_carried()
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
                 print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
                       "If this process exits, resume with: "
@@ -1368,6 +1519,7 @@ def perform_check(args, attempt):
         timing["checks_finished_at"] = time.time()
         if results:
             try:
+                sign_carried()
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
                 print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
                       f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
@@ -1377,6 +1529,7 @@ def perform_check(args, attempt):
         raise
     timing["checks_finished_at"] = time.time()
     receipt["finished_at"] = int(time.time())
+    sign_carried()
     envelope = sign_receipt(receipt, output, identity, key)
     verify_envelope(envelope, head, base_ref, policy_ref)
     (output / "envelope.json").write_bytes(canonical(envelope))

@@ -3794,10 +3794,8 @@ fn run_repl_iocraft_dispatch(
                         let _ = commands.send(EngineCommand::Cancel);
                     }
                 }
-                repl_ui::InputEvent::StopBackgroundTask(id) => {
-                    let _ = commands.send(EngineCommand::BackgroundTask {
-                        action: engine_events::BackgroundTaskAction::Stop { id },
-                    });
+                repl_ui::InputEvent::BackgroundTask(action) => {
+                    let _ = commands.send(EngineCommand::BackgroundTask { action });
                 }
                 repl_ui::InputEvent::SetCacheTtl { choice, force_now } => {
                     let session_id = ttl_lifecycle.session_handle().id;

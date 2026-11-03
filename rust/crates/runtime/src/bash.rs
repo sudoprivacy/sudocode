@@ -30,6 +30,70 @@ pub fn shell_process_group<T>(
     group
 }
 
+/// Spawn one captured shell with the same pipe ownership for both readers.
+fn spawn_captured_shell(
+    mut command: TokioCommand,
+) -> io::Result<(
+    command_group::AsyncGroupChild,
+    tokio::process::ChildStdout,
+    tokio::process::ChildStderr,
+)> {
+    // Darwin's anonymous pipe() is followed by separate CLOEXEC fcntl calls.
+    // Another concurrent spawn can inherit a writer in that window, preventing
+    // this command's EOF until an unrelated sibling exits. Open an unlinked
+    // FIFO with O_CLOEXEC instead: each descriptor is private from creation.
+    #[cfg(target_os = "macos")]
+    let (stdout, stderr) = {
+        let (stdout_read, stdout_write) = close_on_exec_pipe()?;
+        let (stderr_read, stderr_write) = close_on_exec_pipe()?;
+        command.stdout(stdout_write).stderr(stderr_write);
+        (
+            tokio::process::ChildStdout::from_std(stdout_read.into())?,
+            tokio::process::ChildStderr::from_std(stderr_read.into())?,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    command.kill_on_drop(true);
+    let mut child = shell_process_group(command.group()).spawn()?;
+    // Custom Stdio files remain owned by Command after spawn. Release the
+    // parent's writers before awaiting EOF, including on every error path.
+    drop(command);
+    #[cfg(target_os = "macos")]
+    {
+        child.inner().stdout = Some(stdout);
+        child.inner().stderr = Some(stderr);
+    }
+    let stdout = child.inner().stdout.take().expect("stdout piped");
+    let stderr = child.inner().stderr.take().expect("stderr piped");
+    Ok((child, stdout, stderr))
+}
+
+/// Create a pipe whose endpoints are atomically close-on-exec on Darwin.
+#[cfg(target_os = "macos")]
+fn close_on_exec_pipe() -> io::Result<(std::os::fd::OwnedFd, std::fs::File)> {
+    use nix::{fcntl::OFlag, sys::stat::Mode, unistd::mkfifo};
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let directory = tempfile::Builder::new()
+        .prefix("scode-shell-pipe-")
+        .tempdir()?;
+    let path = directory.path().join("pipe");
+    mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR)?;
+    let read = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(&path)?;
+    let write = OpenOptions::new()
+        .write(true)
+        .custom_flags(OFlag::O_CLOEXEC.bits())
+        .open(&path)?;
+    std::fs::remove_file(path)?;
+    Ok((read.into(), write))
+}
+
 /// Default foreground subprocess timeout for tool-backed command execution.
 ///
 /// Tool schemas still allow callers to provide a larger or smaller per-call
@@ -619,17 +683,9 @@ async fn execute_bash_async(
     // Detect and emit ship provenance for git push operations
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    command.kill_on_drop(true);
+    let command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = shell_process_group(command.group()).spawn()?;
-    let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
+    let (mut child, mut stdout_pipe, mut stderr_pipe) = spawn_captured_shell(command)?;
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout_sleep);
     let abort_wait = async {
@@ -777,16 +833,9 @@ async fn execute_bash_streaming(
 
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.kill_on_drop(true);
-
+    let command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = shell_process_group(command.group()).spawn()?;
-
-    let stdout = child.inner().stdout.take().expect("stdout piped");
-    let stderr = child.inner().stderr.take().expect("stderr piped");
+    let (mut child, stdout, stderr) = spawn_captured_shell(command)?;
 
     let mut stdout_reader = tokio::io::BufReader::new(stdout);
     let mut stderr_reader = tokio::io::BufReader::new(stderr);

@@ -70,7 +70,10 @@ uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["poll", "process", "signal"] }
+nix = { version = "0.29", features = ["fs", "poll", "process", "signal"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tempfile = "3"
 
 [dev-dependencies]
 backends = { workspace = true }

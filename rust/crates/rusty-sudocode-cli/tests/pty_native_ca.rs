@@ -105,23 +105,26 @@ fn write_certificates(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     paths
 }
 
+fn spawn_tls_client(env: &common::TestEnv, args: &[&str], ca: &Path) -> pty_expect::PtySession {
+    env.spawn_with_env(
+        args,
+        &[
+            ("SSL_CERT_FILE", ca.to_str().unwrap()),
+            ("SSL_CERT_DIR", ""),
+            ("NO_PROXY", "*"),
+            ("no_proxy", "*"),
+        ],
+    )
+}
+
 #[test]
 fn native_ca_trust_reaches_https_model_gateway_after_fresh_launch() {
     let env = common::TestEnv::new_mock("native-ca-trusted");
     let gateway = HttpsGateway::start(&env);
     gateway.configure(&env, "localhost");
-    let ca = gateway.ca.to_str().unwrap();
     let prompt = env.prompt("Compute two plus two.", "single_turn_text");
     for expected_requests in 1..=2 {
-        let mut cli = env.spawn_with_env(
-            &["-p", &prompt],
-            &[
-                ("SSL_CERT_FILE", ca),
-                ("SSL_CERT_DIR", ""),
-                ("NO_PROXY", "*"),
-                ("no_proxy", "*"),
-            ],
-        );
+        let mut cli = spawn_tls_client(&env, &["-p", &prompt], &gateway.ca);
         cli.expect("The answer is 4").expect("HTTPS model response");
         assert_eq!(cli.expect_eof().unwrap(), 0);
         assert_eq!(env.captured_message_count(), expected_requests);
@@ -138,15 +141,7 @@ fn assert_tls_refusal(host: &str, trusted: bool, cause: &str) {
     std::fs::write(&unrelated, unrelated_ca.cert.pem()).unwrap();
     let ca = if trusted { &gateway.ca } else { &unrelated };
     let prompt = env.prompt("Compute two plus two.", "single_turn_text");
-    let mut cli = env.spawn_with_env(
-        &[],
-        &[
-            ("SSL_CERT_FILE", ca.to_str().unwrap()),
-            ("SSL_CERT_DIR", ""),
-            ("NO_PROXY", "*"),
-            ("no_proxy", "*"),
-        ],
-    );
+    let mut cli = spawn_tls_client(&env, &[], ca);
     // Consume initial diagnostics before the actual foreground model request.
     cli.expect("❯").expect("HTTPS refusal fixture input prompt");
     cli.send_line(&prompt)

@@ -31,6 +31,7 @@ on:
       - install.sh
       - scripts/publish_release_mirror.py
       - scripts/generate_cache_metrics.py
+      - scripts/generate_cache_semantics.py
       - scripts/cache_metrics.py
       - scripts/check_cache_usage_fixtures.py
       - spec/cache_metrics.json

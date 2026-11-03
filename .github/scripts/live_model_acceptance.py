@@ -169,8 +169,13 @@ def main():
                                SCODE_LIVE_MODEL=environment["SCODE_AZURE_MODEL"])
         if environment.get("GITHUB_ACTIONS") == "true":
             environment["CARGO_BUILD_JOBS"] = str(os.cpu_count() or 1)
+        # Pass only this command's own settings. Handing run_command the whole
+        # inherited environment restored the shell's PATH over the MSVC one it
+        # had just applied: with VCINSTALLDIR set, rustc took PATH's first
+        # link.exe, which on a Git Bash runner is GNU coreutils' `link`.
+        overrides = {key: value for key, value in environment.items() if os.environ.get(key) != value}
         result = run_command(item["command"], ROOT / item.get("cwd", "rust"),
-                             args.output / f"{args.command_index:03}.log", env=environment)
+                             args.output / f"{args.command_index:03}.log", env=overrides)
         (args.output / f"{args.command_index:03}.execution.json").write_text(json.dumps(result, indent=2) + "\n")
         return result["exit_code"]
     output = args.output or Path(tempfile.mkdtemp(prefix="scode-model-acceptance-")) / args.suite
@@ -213,6 +218,10 @@ def main():
             if code:
                 report.update(outcome="failed", failure_kind=failure_kind(log.read_text(errors="replace"))
                               if log.exists() else "runner_failure")
+                # The log stays on the runner; show why the command failed.
+                if log.exists():
+                    tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]
+                    print(f"--- last {len(tail)} lines of {log.name} ---", *tail, sep="\n", flush=True)
                 break
         else:
             report["outcome"] = "passed"

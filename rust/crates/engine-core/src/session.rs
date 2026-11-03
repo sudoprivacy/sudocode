@@ -69,6 +69,15 @@ use crate::subagent_completion::{CompletionState, EventSink};
 /// The driver never inspects engine internals — it only calls these methods and
 /// forwards the results as [`EngineEvent`]s.
 pub trait EngineDelegate: Send + Sync + 'static {
+    /// Whether this session requires fresh caller-owned context before each turn.
+    fn requires_host_context(&self) -> bool {
+        false
+    }
+
+    /// Replace only caller-owned appended context, retaining history and policy.
+    fn apply_host_context(&self, _text: String) -> Result<(), RuntimeError> {
+        Err(RuntimeError::new("host context is unsupported"))
+    }
     /// Run exactly one turn to completion (or cancellation), driving the
     /// model/tool loop.
     ///
@@ -273,6 +282,7 @@ impl EngineSession {
 /// the shared table so the pump can route the matching answer command back to
 /// the blocked prompter.
 enum PendingAnswer {
+    HostContext(oneshot::Sender<Result<String, String>>),
     Permission(oneshot::Sender<PermissionPromptDecision>),
     Question(oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>),
 }
@@ -281,16 +291,21 @@ enum PendingAnswer {
 /// and the pump for a single turn.
 #[derive(Clone, Default)]
 struct RequestTable {
-    input: Arc<Mutex<InputRequests>>,
+    requests: Arc<Mutex<RequestState>>,
     next_id: Arc<AtomicU64>,
     interaction: runtime::PromptQueue,
 }
 
 #[derive(Default)]
-struct InputRequests {
-    // An answered request retains input ownership until its prompt lease ends.
-    pending: HashMap<RequestId, Option<PendingAnswer>>,
+struct RequestState {
+    pending: HashMap<RequestId, PendingRequest>,
     cancelled: bool,
+}
+
+struct PendingRequest {
+    // An answered user request retains input ownership until its lease ends.
+    answer: Option<PendingAnswer>,
+    input_reason: Option<InputReason>,
 }
 
 impl RequestTable {
@@ -299,24 +314,28 @@ impl RequestTable {
     }
 
     fn take(&self, id: RequestId) -> Option<PendingAnswer> {
-        self.input
+        self.requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pending
             .get_mut(&id)?
+            .answer
             .take()
     }
 
-    /// Dropping the answer senders wakes a worker blocked in a permission or
-    /// question prompt. Input ownership ends now, while the turn may still drain.
+    /// Dropping answer senders wakes host-context and user-prompt waits. Input
+    /// ownership ends now, while the turn may still drain.
     fn cancel_all(&self, tx: &EventSink) {
-        let mut input = self
-            .input
+        let mut requests = self
+            .requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        input.cancelled = true;
-        let had_input = !input.pending.is_empty();
-        input.pending.clear();
+        requests.cancelled = true;
+        let had_input = requests
+            .pending
+            .values()
+            .any(|request| request.input_reason.is_some());
+        requests.pending.clear();
         if had_input {
             let _ = tx.send(EngineEvent::State(EngineState::Running));
         }
@@ -469,7 +488,9 @@ async fn drive(
                 }
                 delegate.abort_signal().abort();
             }
-            EngineCommand::PermissionAnswer { .. } | EngineCommand::QuestionAnswer { .. } => {}
+            EngineCommand::PermissionAnswer { .. }
+            | EngineCommand::QuestionAnswer { .. }
+            | EngineCommand::HostContextAnswer { .. } => {}
             EngineCommand::Close => {
                 shutdown = ShutdownReason::ExplicitClose;
                 break;
@@ -685,6 +706,18 @@ fn spawn_turn_worker(
             tx: turn_tx,
             table: turn_table,
         };
+        if input.management.is_none() && worker.requires_host_context() {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let _lease = prompter.table.begin_request(
+                &prompter.tx,
+                PendingAnswer::HostContext(answer_tx),
+                |id| EngineEvent::HostContextRequest { id },
+            );
+            let context = futures::executor::block_on(answer_rx)
+                .map_err(|_| RuntimeError::new("host context resolution was cancelled"))?
+                .map_err(RuntimeError::new)?;
+            worker.apply_host_context(context)?;
+        }
         execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
     })
 }
@@ -710,14 +743,6 @@ async fn run_one_turn(
         || turn_label(&input.blocks),
         |(line, _)| line.chars().take(80).collect(),
     );
-
-    // The question prompter is installed on the tool executor (via the delegate)
-    // before the turn; the permission prompter + observer are passed into the
-    // blocking turn below.
-    delegate.set_question_prompter(Box::new(QuestionAdapter {
-        tx: evt_tx.clone(),
-        table: table.clone(),
-    }));
 
     let abort = delegate.abort_signal();
     abort.reset();
@@ -757,6 +782,11 @@ async fn run_one_turn(
                 Some(EngineCommand::QuestionAnswer { id, answers }) => {
                     if let Some(PendingAnswer::Question(tx)) = table.take(id) {
                         let _ = tx.send(answers);
+                    }
+                }
+                Some(EngineCommand::HostContextAnswer { id, context }) => {
+                    if let Some(PendingAnswer::HostContext(tx)) = table.take(id) {
+                        let _ = tx.send(context);
                     }
                 }
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
@@ -934,7 +964,7 @@ fn execute_input(
     delegate: &dyn EngineDelegate,
     input: TurnInput,
     observer: &mut dyn RuntimeObserver,
-    prompter: &mut dyn PermissionPrompter,
+    prompter: &mut PrompterAdapter,
 ) -> Result<TurnComplete, RuntimeError> {
     if let Some((line, build)) = input.management {
         let cancelled = delegate.run_management(&line, &build, observer)?;
@@ -948,6 +978,12 @@ fn execute_input(
         });
     }
     let blocks = delegate.prepare_prompt(input.blocks, input.image_policy)?;
+    // Host context and image preparation can rebuild the runtime. Install the
+    // question bridge only once preparation has selected the runtime to execute.
+    delegate.set_question_prompter(Box::new(QuestionAdapter {
+        tx: prompter.tx.clone(),
+        table: prompter.table.clone(),
+    }));
     delegate.run_turn(blocks, observer, prompter)
 }
 
@@ -1195,7 +1231,7 @@ impl PermissionPrompter for PrompterAdapter {
         let request = request.clone();
         self.table.interaction.enqueue(move || async move {
             let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = table.show_prompt(&tx, PendingAnswer::Permission(answer_tx), |id| {
+            let _lease = table.begin_request(&tx, PendingAnswer::Permission(answer_tx), |id| {
                 EngineEvent::PermissionRequest { id, request }
             });
             answer_rx
@@ -1233,7 +1269,7 @@ impl QuestionPrompter for QuestionAdapter {
         let request = request.clone();
         self.table.interaction.enqueue(move || async move {
             let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = table.show_prompt(&tx, PendingAnswer::Question(answer_tx), |id| {
+            let _lease = table.begin_request(&tx, PendingAnswer::Question(answer_tx), |id| {
                 EngineEvent::QuestionRequest { id, request }
             });
             answer_rx.await.unwrap_or_else(|_| {
@@ -1243,51 +1279,65 @@ impl QuestionPrompter for QuestionAdapter {
     }
 }
 
-/// Releases input ownership and removes an unanswered request even if its
+/// Removes the request and releases any user-input ownership even if its
 /// future is dropped on cancellation or a provider stream failure.
-struct PromptLease {
+struct RequestLease {
     table: RequestTable,
     tx: EventSink,
     id: RequestId,
 }
 
-impl Drop for PromptLease {
+impl Drop for RequestLease {
     fn drop(&mut self) {
-        let mut input = self
+        let mut requests = self
             .table
-            .input
+            .requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if input.pending.remove(&self.id).is_some() && !input.cancelled {
+        if requests
+            .pending
+            .remove(&self.id)
+            .is_some_and(|request| request.input_reason.is_some())
+            && !requests.cancelled
+        {
             let _ = self.tx.send(EngineEvent::State(EngineState::Running));
         }
     }
 }
 
 impl RequestTable {
-    fn show_prompt(
+    fn begin_request(
         &self,
         tx: &EventSink,
         answer: PendingAnswer,
         event: impl FnOnce(RequestId) -> EngineEvent,
-    ) -> PromptLease {
+    ) -> RequestLease {
         let id = self.alloc();
-        let mut input = self
-            .input
+        let mut requests = self
+            .requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Admission, cancellation and lifecycle publication share this lock.
         // A queued prompt cannot publish AwaitingInput after cancellation.
-        if !input.cancelled {
-            let reason = match &answer {
-                PendingAnswer::Permission(_) => InputReason::Permission,
-                PendingAnswer::Question(_) => InputReason::Question,
+        if !requests.cancelled {
+            let input_reason = match &answer {
+                PendingAnswer::HostContext(_) => None,
+                PendingAnswer::Permission(_) => Some(InputReason::Permission),
+                PendingAnswer::Question(_) => Some(InputReason::Question),
             };
-            input.pending.insert(id, Some(answer));
-            let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput(reason)));
+            requests.pending.insert(
+                id,
+                PendingRequest {
+                    answer: Some(answer),
+                    input_reason,
+                },
+            );
+            if let Some(reason) = input_reason {
+                let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput(reason)));
+            }
             let _ = tx.send(event(id));
         }
-        PromptLease {
+        RequestLease {
             table: self.clone(),
             tx: tx.clone(),
             id,

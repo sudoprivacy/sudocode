@@ -317,4 +317,9 @@ else
   echo "== [skip] LLM duet - set SUDOROUTER_API_KEY + SCODE_BIN to enable =="
 fi
 
+# The independent process belongs to CLI acceptance. Keep this out of the
+# cohost/search build so CLI-only changes still exercise managed ACP hosting.
+authon_stop
+bash ./run-managed-subprocess.sh
+
 echo "E2E OK"

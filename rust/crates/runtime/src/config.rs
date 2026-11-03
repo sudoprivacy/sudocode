@@ -1221,6 +1221,36 @@ impl RuntimeConfig {
         self.feature_config.thinking
     }
 
+    /// Whether the runtime compacts on its own near the context limit
+    /// (`autoCompactEnabled`, default true). Off, an over-budget request is
+    /// refused with a request to run `/compact` instead.
+    #[must_use]
+    pub fn auto_compact_enabled(&self) -> bool {
+        self.get("autoCompactEnabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true)
+    }
+
+    /// The language replies should use (`language`), when one is set.
+    #[must_use]
+    pub fn language(&self) -> Option<&str> {
+        self.get("language")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+    }
+
+    /// An explicit terminal background (`theme`: `dark` or `light`); `None`
+    /// detects it from the terminal.
+    #[must_use]
+    pub fn light_theme(&self) -> Option<bool> {
+        match self.get("theme").and_then(JsonValue::as_str)? {
+            "light" => Some(true),
+            "dark" => Some(false),
+            _ => None,
+        }
+    }
+
     /// Persisted effort preference. Max is deliberately session scoped, as in CC.
     #[must_use]
     pub fn effort_level(&self) -> Option<&str> {

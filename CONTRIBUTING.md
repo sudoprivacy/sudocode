@@ -718,6 +718,11 @@ keep full workspace acceptance. All other selected native/local profiles remain.
 Shared PTY helper sources also select native terminal resize acceptance, whether
 they live under CLI `tests/common` or the test-only `rust/crates/pty-harness` path.
 
+Public `spec/` inputs selected by the native workspace policy also select the
+queue's all-feature Clippy and real CLI/co-host daemon journeys. The CI selector
+reads that same committed policy, including its acceptance-metadata exclusions;
+mixed changes and moves retain both paths. Paid model calls remain on demand.
+
 The required `CI preflight` job shares one checkout and tool setup for format,
 generated cache schemas, docs, history, boundary, release-mirror and provider
 probe checks. Its first failing step blocks its daemon/provider dependents.

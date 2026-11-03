@@ -341,7 +341,7 @@ fn exercise_cohost_context_questions(
 ) {
     let started = start_scripted_worker(kernel, "context-worker");
     let (mailbox, created) =
-        open_scripted_controller_with_meta(kernel, &started, json!({"hostContext":{"version":1}}));
+        open_scripted_controller_with_meta(kernel, &started, &json!({"hostContext":{"version":1}}));
     let sid = created["result"]["sessionId"].as_str().unwrap();
     assert_runtime_state(kernel, &started["session_id"], "ready", None);
     assert_status(&mailbox, sid, "idle", None);
@@ -1069,13 +1069,13 @@ fn open_scripted_controller(
     kernel: &Arc<Kernel>,
     started: &Value,
 ) -> (SessionMailbox<Kernel>, Value) {
-    open_scripted_controller_with_meta(kernel, started, json!({}))
+    open_scripted_controller_with_meta(kernel, started, &json!({}))
 }
 
 fn open_scripted_controller_with_meta(
     kernel: &Arc<Kernel>,
     started: &Value,
-    meta: Value,
+    meta: &Value,
 ) -> (SessionMailbox<Kernel>, Value) {
     let endpoint: SessionEndpoint =
         serde_json::from_value(started["session_endpoint"].clone()).unwrap();

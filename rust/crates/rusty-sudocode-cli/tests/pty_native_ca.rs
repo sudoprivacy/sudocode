@@ -141,13 +141,13 @@ fn assert_tls_refusal(host: &str, trusted: bool, cause: &str) {
     std::fs::write(&unrelated, unrelated_ca.cert.pem()).unwrap();
     let ca = if trusted { &gateway.ca } else { &unrelated };
     let prompt = env.prompt("Compute two plus two.", "single_turn_text");
-    let mut cli = spawn_tls_client(&env, &[], ca);
-    // Consume initial diagnostics before the actual foreground model request.
-    cli.expect("❯").expect("HTTPS refusal fixture input prompt");
-    cli.send_line(&prompt)
-        .expect("submit the TLS model request");
-    cli.expect(cause)
-        .expect("the actual certificate verification failure must be visible");
+    // Use the same foreground startup-input path as pty_retry_visibility.
+    // A rendered prompt glyph alone does not establish input admission.
+    let mut cli = spawn_tls_client(&env, &["--permission-mode", "read-only", &prompt], ca);
+    cli.expect(cause).unwrap_or_else(|error| {
+        let screen = cli.render(common::screen_contents);
+        panic!("the actual certificate verification failure must be visible: {error}\nPTY screen:\n{screen}");
+    });
     assert_eq!(
         env.captured_message_count(),
         0,

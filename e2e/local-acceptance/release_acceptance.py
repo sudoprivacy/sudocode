@@ -295,7 +295,19 @@ a.directory.mkdir(parents=True)
         failed = json.loads((output / "compiler-failure/003.command.json").read_text(encoding="utf-8"))
         assert failed["exit_code"] == 17, failed
         assert not (output / "compiler-failure/004.log").exists()
+    execute(["git", "add", "e2e/compiler-context/run.py"], root, output / "compiler-history-add.log")
+    execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-m", "Introduce required compiler journey"],
+            root, output / "compiler-history-commit.log")
+    driver.unlink()
+    try:
+        profiles.run("native-release", root, output / "compiler-missing", "fixture-base", execute)
+        raise AssertionError("Deleting a required compiler journey silently skipped acceptance")
+    except RuntimeError as error:
+        assert "Required compiler context acceptance driver is missing" in str(error), error
+        assert not (output / "compiler-missing/003.log").exists()
     return {"commands": records, "failed_compiler_exit": failed["exit_code"],
+            "introduced_driver_removal_refused": True,
             "scope": "Native executor/CLI artifact boundary only; not product compiler coverage"}
 
 
@@ -386,6 +398,11 @@ fn unselected_case_must_not_run() { panic!("release profile widened its selectio
     def cargo(*args, name):
         return execute(["cargo", *args], rust, output / (name + ".log"))
 
+    execute(["git", "init", "--initial-branch=main"], root, output / "source-history-init.log")
+    execute(["git", "add", "rust", "e2e/startup"], root, output / "source-history-add.log")
+    execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-m", "Historical source without compiler journey"],
+            root, output / "source-history-commit.log")
     cargo("generate-lockfile", name="lockfile")
     cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
           "--no-run", "--message-format=json-render-diagnostics", name="workspace-driver")

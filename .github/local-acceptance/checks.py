@@ -113,14 +113,29 @@ def workspace_nextest_options(output, grouped):
     return options
 
 
+def committed_git(root, *arguments):
+    """Inspect this checkout independently of caller Git bindings."""
+    return subprocess.check_output(
+        ["git", *arguments], cwd=root,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        stderr=subprocess.PIPE)
+
+
 def committed_input_paths(root, base):
     """Read this checkout's committed inputs independently of caller Git bindings."""
     if not base:
         raise ValueError("No committed base")
-    return subprocess.check_output(
-        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD"], cwd=root,
-        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-        stderr=subprocess.PIPE).decode().split("\0")[:-1]
+    return committed_git(root, "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD").decode().split("\0")[:-1]
+
+
+def compiler_context_driver_present(root):
+    """Permit genuine older source, but refuse removal of an introduced journey."""
+    relative = "e2e/compiler-context/run.py"
+    if (root / relative).is_file():
+        return True
+    if committed_git(root, "log", "-1", "--format=%H", "HEAD", "--", relative).strip():
+        raise RuntimeError("Required compiler context acceptance driver is missing from this source")
+    return False
 
 
 def changed_cli_test_targets(root, base):
@@ -520,7 +535,7 @@ def run(name, root, output, base, execute):
         with stable_performance_power(output):
             command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
                     "--report", str(output / "startup.json"))
-        if (root / "e2e/compiler-context/run.py").is_file():
+        if compiler_context_driver_present(root):
             command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
                     "--directory", str(output / "compiler-context"))
         else:
@@ -636,7 +651,7 @@ def native_guard_files():
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/publication_acceptance.py": "5667fdfa6197ff362299d6f7ee59fc6930ec28e88aabec4d15eeba641aa03f5e",
-        "e2e/local-acceptance/release_acceptance.py": "d47c830e17d30c0df5b8756e6c7e71764ac825a7010cc4c075fb36eb80c5f246",
+        "e2e/local-acceptance/release_acceptance.py": "3618d4f4c1cc5dff493990dc7e4984840a8dea770211fe99731207989df4dc99",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
         "e2e/local-acceptance/run.py": "1e79dbcb72bd62bc4b7e60863e7f2fb225de7649cb419d701d4146cdb0ca740a",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
@@ -695,7 +710,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "3def022ef9bf0006d97d59d7471c0fa846b1a3bdfaff2d4c4a8aa54a312bd6df"
+    expected = "a996e4e33e9d628ca414f3cd3df2ef3fe52b59c92ef4ce55a902c99c2470a8fb"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

@@ -1663,8 +1663,8 @@ where
     /// overwhelmingly common case.
     ///
     /// Workspace root is the turn's scoped root (the process cwd outside
-    /// ACP), matching the per-workspace `.sudocode-inbox/coordinator.jsonl`
-    /// convention that every emit site uses (same root).
+    /// ACP), the same root every emit site writes the coordinator's
+    /// conversation under.
     fn prepend_pending_task_notifications(
         blocks: Vec<ContentBlock>,
     ) -> Result<(Vec<ContentBlock>, crate::mailbox::PendingMessages), RuntimeError> {

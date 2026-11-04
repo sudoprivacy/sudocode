@@ -2904,10 +2904,10 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
 
 // ── SendMessage ────────────────────────────────────────────────────
 
-/// Best-effort sanitizer for a mailbox filename stem. Recipient
-/// names can be arbitrary strings from the model — collapse anything
-/// outside `[A-Za-z0-9_-]` to `_` so we can't traverse or overwrite
-/// files outside `.sudocode-inbox/`.
+/// Best-effort sanitizer for a recipient name used in a mailbox path.
+/// Recipient names can be arbitrary strings from the model — collapse
+/// anything outside `[A-Za-z0-9_-]` to `_` so a name can't traverse out
+/// of the mailbox root or address another conversation.
 fn sanitize_recipient(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {

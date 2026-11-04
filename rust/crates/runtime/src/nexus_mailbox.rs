@@ -1,5 +1,6 @@
-//! Nexus-backed A2A mailbox - the standalone counterpart to the local
-//! [`crate::agent_mailbox`] (`.sudocode-inbox`).
+//! Nexus-backed A2A mailbox - the standalone counterpart to the
+//! workspace-local conversation transcript
+//! ([`crate::mailbox::Mailbox::workspace_local`]).
 //!
 //! A message is one framed append to the recipient's replicated `DT_STREAM`
 //! inbox at `/agents/<recipient>/chat-with-me`; under auth-on the node

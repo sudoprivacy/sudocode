@@ -428,7 +428,9 @@ mutating flags remain serial.
 
 `AskUserQuestion` can wait alongside independent reads. Questions and permission
 requests share one input queue, so only one prompt owns the editor at a time;
-other results continue to render while it waits. MCP tools
+other results continue to render while it waits. When one call asks several
+questions, ← or Shift+Tab returns to the previous question with its answer
+selected, so an answer can be changed before the last one is given. MCP tools
 can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
 other MCP transports and resource/prompt wrappers remain serial. A visible
 tool card may still be queued: the amber border marks actual execution.

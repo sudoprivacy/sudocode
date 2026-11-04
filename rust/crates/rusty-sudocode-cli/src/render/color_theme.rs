@@ -1,5 +1,6 @@
-//! Semantic terminal styles. Syntax assets supply code and metadata accents;
+//! Semantic terminal styles. Syntax assets supply prose, code and metadata accents;
 //! terminal-owned ANSI colors supply status, and amber identifies the brand.
+//! Markup scopes follow Codex 079e17a4's MarkdownStyles; renderers consume roles.
 
 use super::{ansi_fg, code_theme, color_math, terminal_palette, ColorSupport};
 use crossterm::style::{Attribute, Color, ContentStyle};
@@ -11,6 +12,16 @@ use std::sync::OnceLock;
 pub enum TextRole {
     Body,
     Reasoning,
+    ProseStrong,
+    Emphasis,
+    Strikethrough,
+    Heading1,
+    Heading2,
+    Heading3,
+    Heading4,
+    Heading5,
+    Heading6,
+    Link,
     Strong,
     Secondary,
     Border,
@@ -24,7 +35,10 @@ pub enum TextRole {
     Code,
     TableHeader,
     Quote,
-    ListMarker,
+    OrderedListMarker,
+    UnorderedListMarker,
+    DiagramNode,
+    DiagramEdge,
     Model,
     Path,
     Usage,
@@ -33,6 +47,8 @@ pub enum TextRole {
     Removed,
 }
 const ROLE_COUNT: usize = TextRole::Removed as usize + 1;
+type Rgb = (u8, u8, u8);
+type ScopeForegrounds = [OnceLock<Option<Rgb>>; ROLE_COUNT];
 
 /// One adaptive theme shared by transcript, input, status and syntax rendering.
 /// Each role resolves once per palette/capability, outside subsequent redraws.
@@ -88,13 +104,82 @@ impl ColorTheme {
                     style.foreground_color = Some(color);
                 }
             }
-            if matches!(role, TextRole::Strong | TextRole::TableHeader) {
+            if matches!(
+                role,
+                TextRole::ProseStrong
+                    | TextRole::Strong
+                    | TextRole::TableHeader
+                    | TextRole::Heading1
+                    | TextRole::Heading2
+                    | TextRole::Heading3
+            ) {
                 style.attributes.set(Attribute::Bold);
-            } else if role == TextRole::Reasoning {
+            }
+            if matches!(
+                role,
+                TextRole::Emphasis
+                    | TextRole::Heading3
+                    | TextRole::Heading4
+                    | TextRole::Heading5
+                    | TextRole::Heading6
+            ) {
+                style.attributes.set(Attribute::Italic);
+            }
+            if matches!(role, TextRole::Heading1 | TextRole::Link) {
+                style.attributes.set(Attribute::Underlined);
+            }
+            if role == TextRole::Strikethrough {
+                style.attributes.set(Attribute::CrossedOut);
+            }
+            if role == TextRole::Reasoning {
                 style.attributes.set(Attribute::Dim);
             }
             style
         })
+    }
+
+    /// Inner semantic foregrounds override outer ones; modifiers accumulate.
+    /// The parser composes only when entering a tag, not for each text token.
+    #[inline]
+    pub(crate) fn overlay(
+        self,
+        mut base: ContentStyle,
+        role: TextRole,
+        support: ColorSupport,
+    ) -> ContentStyle {
+        let overlay = self.style_for(role, support);
+        if overlay.foreground_color.is_some() {
+            base.foreground_color = overlay.foreground_color;
+        }
+        if overlay.background_color.is_some() {
+            base.background_color = overlay.background_color;
+        }
+        if overlay.underline_color.is_some() {
+            base.underline_color = overlay.underline_color;
+        }
+        base.attributes.extend(overlay.attributes);
+        base
+    }
+
+    pub(crate) fn heading_style(
+        self,
+        level: pulldown_cmark::HeadingLevel,
+        support: ColorSupport,
+        base: ContentStyle,
+    ) -> ContentStyle {
+        use pulldown_cmark::HeadingLevel;
+        self.overlay(
+            base,
+            match level {
+                HeadingLevel::H1 => TextRole::Heading1,
+                HeadingLevel::H2 => TextRole::Heading2,
+                HeadingLevel::H3 => TextRole::Heading3,
+                HeadingLevel::H4 => TextRole::Heading4,
+                HeadingLevel::H5 => TextRole::Heading5,
+                HeadingLevel::H6 => TextRole::Heading6,
+            },
+            support,
+        )
     }
 
     #[inline]
@@ -112,7 +197,9 @@ impl ColorTheme {
         let limited = support == ColorSupport::Ansi16;
         let readable = |rgb| color_math::foreground(rgb, terminal_palette::background(), support);
         match role {
-            TextRole::Body | TextRole::Strong | TextRole::Reasoning => Color::Reset,
+            TextRole::Body | TextRole::Strong | TextRole::Reasoning | TextRole::Strikethrough => {
+                Color::Reset
+            }
             TextRole::Brand => {
                 if limited {
                     Color::DarkYellow
@@ -138,7 +225,7 @@ impl ColorTheme {
             // Regular terminal red/green slots, as in Codex, preserve the user's
             // palette instead of imposing a bright or hardcoded RGB status color.
             TextRole::Error | TextRole::Removed => Color::DarkRed,
-            TextRole::Success | TextRole::Added | TextRole::Quote => Color::DarkGreen,
+            TextRole::Success | TextRole::Added => Color::DarkGreen,
             TextRole::Warning => {
                 if self.light_background {
                     Color::Reset
@@ -178,8 +265,21 @@ impl ColorTheme {
                     readable(preferred)
                 }
             }
-            TextRole::ListMarker => Color::Blue,
-            TextRole::Code
+            TextRole::ProseStrong
+            | TextRole::Emphasis
+            | TextRole::Heading1
+            | TextRole::Heading2
+            | TextRole::Heading3
+            | TextRole::Heading4
+            | TextRole::Heading5
+            | TextRole::Heading6
+            | TextRole::Link
+            | TextRole::Quote
+            | TextRole::OrderedListMarker
+            | TextRole::UnorderedListMarker
+            | TextRole::DiagramNode
+            | TextRole::DiagramEdge
+            | TextRole::Code
             | TextRole::Info
             | TextRole::TableHeader
             | TextRole::Model
@@ -189,33 +289,78 @@ impl ColorTheme {
         }
     }
 
+    /// All TextMate scope-to-role decisions live beside UI palette policy.
+    fn syntax_scopes(role: TextRole) -> &'static [&'static str] {
+        match role {
+            TextRole::Code | TextRole::Info => &[
+                "markup.inline.raw.string.markdown",
+                "markup.raw.inline.markdown",
+            ],
+            TextRole::ProseStrong => &["markup.bold.markdown"],
+            TextRole::Emphasis => &["markup.italic.markdown"],
+            TextRole::Heading1 => &["markup.heading.1.markdown", "markup.heading.markdown"],
+            TextRole::Heading2 => &["markup.heading.2.markdown", "markup.heading.markdown"],
+            TextRole::Heading3 => &["markup.heading.3.markdown", "markup.heading.markdown"],
+            TextRole::Heading4 => &["markup.heading.4.markdown", "markup.heading.markdown"],
+            TextRole::Heading5 => &["markup.heading.5.markdown", "markup.heading.markdown"],
+            TextRole::Heading6 => &["markup.heading.6.markdown", "markup.heading.markdown"],
+            TextRole::Link => &["markup.underline.link.markdown"],
+            TextRole::Quote => &["markup.quote.markdown"],
+            TextRole::OrderedListMarker => &["markup.list.numbered.markdown"],
+            TextRole::UnorderedListMarker => &[
+                "markup.list.unnumbered.markdown",
+                "markup.list.bullet.markdown",
+            ],
+            TextRole::TableHeader | TextRole::Model | TextRole::DiagramNode => {
+                &["entity.name.type", "support.type", "variable"]
+            }
+            TextRole::DiagramEdge => &["comment"],
+            TextRole::Path => &["string", "markup.underline.link"],
+            TextRole::Usage => &["constant.numeric", "constant"],
+            TextRole::Branch => &["entity.name.function", "entity.name.tag"],
+            _ => &[],
+        }
+    }
+
     fn syntax_color(self, role: TextRole, support: ColorSupport) -> Color {
-        use code_theme::SyntaxAccent;
-        let (accent, fallback) = match role {
-            TextRole::Code => (SyntaxAccent::Inline, Color::Reset),
-            TextRole::Info => (SyntaxAccent::Inline, Color::DarkCyan),
-            TextRole::TableHeader => (SyntaxAccent::Type, Color::Reset),
-            TextRole::Model => (SyntaxAccent::Type, Color::DarkCyan),
-            TextRole::Path => (SyntaxAccent::String, Color::DarkGreen),
-            TextRole::Usage => (SyntaxAccent::Number, Color::DarkGreen),
-            TextRole::Branch => (SyntaxAccent::Function, Color::DarkBlue),
-            _ => unreachable!("only syntax-backed roles enter the syntax palette"),
+        // Raw scope queries happen once per role/light-dark palette. A different
+        // terminal color depth reuses the same assets without reparsing scopes.
+        static FOREGROUNDS: [ScopeForegrounds; 2] =
+            [const { [const { OnceLock::new() }; ROLE_COUNT] }; 2];
+        let fallback = match role {
+            TextRole::Link | TextRole::Code => self.color_for(TextRole::Accent, support),
+            TextRole::Info | TextRole::Model | TextRole::DiagramNode => Color::DarkCyan,
+            TextRole::Path | TextRole::Quote | TextRole::Usage => Color::DarkGreen,
+            TextRole::TableHeader => self.color_for(TextRole::ProseStrong, support),
+            TextRole::Branch => Color::DarkBlue,
+            TextRole::OrderedListMarker => Color::Blue,
+            _ => Color::Reset,
         };
         if support == ColorSupport::Ansi16 {
             return fallback;
         }
-        let Some((r, g, b)) = code_theme::accent(accent, self.light_background) else {
-            return if role == TextRole::Info {
-                Color::Reset
-            } else {
-                fallback
-            };
+        let foreground = FOREGROUNDS[usize::from(self.light_background)][role as usize]
+            .get_or_init(|| {
+                code_theme::foreground_for_scopes(self.light_background, Self::syntax_scopes(role))
+            });
+        let Some((r, g, b)) = *foreground else {
+            return fallback;
         };
         if matches!(
             role,
-            TextRole::Code | TextRole::Info | TextRole::TableHeader
+            TextRole::Code
+                | TextRole::Info
+                | TextRole::TableHeader
+                | TextRole::DiagramNode
+                | TextRole::DiagramEdge
         ) {
             return support.color(Color::Rgb { r, g, b });
+        }
+        if !matches!(
+            role,
+            TextRole::Model | TextRole::Path | TextRole::Usage | TextRole::Branch
+        ) {
+            return color_math::foreground((r, g, b), terminal_palette::background(), support);
         }
         // Metadata follows Codex's 85% saturation, without the faint attribute.
         let luma = (77 * u16::from(r) + 150 * u16::from(g) + 29 * u16::from(b)) / 256;
@@ -228,6 +373,40 @@ impl ColorTheme {
             terminal_palette::background(),
             support,
         )
+    }
+
+    /// Shared syntax policy for final blocks, streaming code and diff tokens.
+    #[inline]
+    pub(super) const fn supports_syntax(support: ColorSupport) -> bool {
+        matches!(support, ColorSupport::TrueColor | ColorSupport::Ansi256)
+    }
+
+    /// Source-code modifiers intentionally differ from Markdown typography.
+    #[inline]
+    pub(super) fn syntax_style(
+        style: syntect::highlighting::Style,
+        support: ColorSupport,
+    ) -> ContentStyle {
+        if support == ColorSupport::NoColor {
+            return ContentStyle::default();
+        }
+        let mut resolved = ContentStyle {
+            foreground_color: Some(support.color(Color::Rgb {
+                r: style.foreground.r,
+                g: style.foreground.g,
+                b: style.foreground.b,
+            })),
+            ..ContentStyle::default()
+        };
+        // Codex retains bold but suppresses theme-provided italic/underline in
+        // source code. Markdown modifiers are resolved separately above.
+        if style
+            .font_style
+            .contains(syntect::highlighting::FontStyle::BOLD)
+        {
+            resolved.attributes.set(Attribute::Bold);
+        }
+        resolved
     }
 
     /// ANSI is a serialization boundary, never the internal style model.
@@ -295,26 +474,73 @@ impl ColorTheme {
         }
     }
 
+    /// A focused choice marker keeps the brand's readable color and neutral bold.
+    #[inline]
+    pub fn choice_marker_style(self, support: ColorSupport) -> ContentStyle {
+        self.overlay(
+            self.selected_style(TextRole::Brand, support),
+            TextRole::Strong,
+            support,
+        )
+    }
+
     /// Resolve a selected label against its painted surface, not the terminal.
     pub fn selected_style(self, role: TextRole, support: ColorSupport) -> ContentStyle {
         let mut style = self.selection_style(support);
         let foreground = self.color_for(role, support);
-        style.foreground_color =
-            match (foreground, style.background_color) {
-                (Color::Rgb { r, g, b }, Some(Color::AnsiValue(bg))) => Some(
-                    color_math::foreground((r, g, b), Some(color_math::xterm(bg)), support),
-                ),
-                (Color::AnsiValue(index @ 16..), Some(Color::AnsiValue(bg))) => {
-                    Some(color_math::foreground(
-                        color_math::xterm(index),
-                        Some(color_math::xterm(bg)),
-                        support,
-                    ))
-                }
-                (Color::Reset, _) => style.foreground_color,
-                (color, _) => Some(color),
-            };
+        if foreground != Color::Reset {
+            style.foreground_color = Some(Self::readable_on(
+                foreground,
+                style.background_color,
+                support,
+            ));
+        }
         style
+    }
+
+    fn readable_on(foreground: Color, background: Option<Color>, support: ColorSupport) -> Color {
+        let rgb = |color| match color {
+            Color::Rgb { r, g, b } => Some((r, g, b)),
+            Color::AnsiValue(index @ 16..) => Some(color_math::xterm(index)),
+            _ => None,
+        };
+        rgb(foreground).map_or(foreground, |foreground| {
+            color_math::foreground(foreground, background.and_then(rgb), support)
+        })
+    }
+
+    #[inline]
+    pub(super) fn diff_prefix_style(self, sign: char, support: ColorSupport) -> ContentStyle {
+        ContentStyle {
+            foreground_color: self.diff_sign_color(sign, support),
+            background_color: self.diff_background(sign, support),
+            ..ContentStyle::default()
+        }
+    }
+
+    /// Resolve syntax colors against the diff fill before reducing color depth.
+    #[inline]
+    pub(super) fn diff_content_style(
+        self,
+        surface: ContentStyle,
+        source: Option<ContentStyle>,
+        support: ColorSupport,
+    ) -> ContentStyle {
+        if let Some(mut style) = source {
+            style.foreground_color = style
+                .foreground_color
+                .map(|color| Self::readable_on(color, surface.background_color, support));
+            style.background_color = surface.background_color;
+            style
+        } else {
+            let mut style = surface;
+            if self.light_background
+                && matches!(support, ColorSupport::TrueColor | ColorSupport::Ansi256)
+            {
+                style.foreground_color = None;
+            }
+            style
+        }
     }
 
     pub fn code_background(self) -> u8 {
@@ -332,7 +558,7 @@ impl ColorTheme {
         }
     }
 
-    pub(super) fn diff_sign_color(self, sign: char, support: ColorSupport) -> Option<Color> {
+    fn diff_sign_color(self, sign: char, support: ColorSupport) -> Option<Color> {
         let role = match sign {
             '+' => TextRole::Added,
             '-' => TextRole::Removed,
@@ -347,7 +573,7 @@ impl ColorTheme {
             TextRole::Secondary
         })
     }
-    pub(super) fn diff_background(self, sign: char, support: ColorSupport) -> Option<Color> {
+    fn diff_background(self, sign: char, support: ColorSupport) -> Option<Color> {
         let rgb = match (sign, self.light_background) {
             ('+', false) => (33, 58, 43),
             ('-', false) => (74, 34, 29),

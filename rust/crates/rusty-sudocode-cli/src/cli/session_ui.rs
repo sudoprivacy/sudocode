@@ -53,6 +53,7 @@ pub(crate) fn select_session(
             custom_input_hint: None,
             force_fuzzy_select: true,
             back_value: None,
+            initial_value: None,
         },
         sessions.into_iter().map(|session| session.id).collect(),
         move |target, cli, out| {
@@ -118,6 +119,7 @@ pub(crate) fn confirm_delete(
             custom_input_hint: None,
             force_fuzzy_select: false,
             back_value: None,
+            initial_value: None,
         },
         vec!["cancel".into(), "delete".into()],
         move |answer, cli, out| {

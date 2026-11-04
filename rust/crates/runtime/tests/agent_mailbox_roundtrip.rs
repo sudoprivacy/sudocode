@@ -1,5 +1,6 @@
 //! Integration test for the `SendMessage` tool's mailbox surface —
-//! `runtime::agent_mailbox`.
+//! the `runtime::agent_mailbox` envelope and the workspace-local
+//! conversation transcript it travels through.
 //!
 //! Complements `session_pre_seed.rs` and `fork_dispatch_context.rs`;
 //! together they lock in every runtime-side primitive the sub-agent
@@ -7,6 +8,7 @@
 //! or hitting an LLM.
 
 use std::fs;
+use std::path::PathBuf;
 
 use runtime::agent_mailbox::{self, kinds, MailboxEnvelope};
 use runtime::mailbox::Mailbox;
@@ -37,37 +39,48 @@ fn make_envelope(from: &str, to: &str, text: &str, kind: &str) -> MailboxEnvelop
     }
 }
 
-// ── append + round-trip ───────────────────────────────────────────
+// ── send + read round-trip ─────────────────────────────────────────
+
+/// A workspace-local mailbox for `self_id`: the path a session with no
+/// daemon writes and reads its conversations through.
+fn mailbox(ws: &std::path::Path, self_id: &str) -> Mailbox {
+    Mailbox::workspace_local(ws, self_id.to_string())
+}
 
 #[test]
-fn append_creates_inbox_dir_and_file() {
-    let ws = temp_workspace("append-creates-file");
+fn send_creates_the_conversation_transcript() {
+    let ws = temp_workspace("send-creates-transcript");
 
-    agent_mailbox::append_envelope(
-        &ws,
-        "researcher",
-        make_envelope("team-lead", "researcher", "hello", kinds::MESSAGE),
-    )
-    .expect("append should succeed");
+    mailbox(&ws, "team-lead")
+        .send(make_envelope(
+            "team-lead",
+            "researcher",
+            "hello",
+            kinds::MESSAGE,
+        ))
+        .expect("send should succeed");
 
-    let expected_file = agent_mailbox::inbox_path_under(&ws, "researcher");
+    let transcript = PathBuf::from(mailbox(&ws, "team-lead").transcript_path("researcher"));
     assert!(
-        expected_file.exists(),
-        "recipient's inbox must be created lazily on first append at {}",
-        expected_file.display()
+        transcript.exists(),
+        "the pair's transcript must be created lazily on first send at {}",
+        transcript.display()
+    );
+    assert_eq!(
+        transcript,
+        PathBuf::from(mailbox(&ws, "researcher").transcript_path("team-lead")),
+        "both sides must derive the same transcript"
     );
 }
 
 #[test]
-fn append_fills_timestamp_when_zero() {
-    let ws = temp_workspace("append-fills-timestamp");
-    let path = agent_mailbox::append_envelope(
-        &ws,
-        "worker",
-        make_envelope("team-lead", "worker", "hi", kinds::MESSAGE),
-    )
-    .expect("append should succeed");
-    let contents = fs::read_to_string(&path).expect("read jsonl");
+fn send_fills_timestamp_when_zero() {
+    let ws = temp_workspace("send-fills-timestamp");
+    mailbox(&ws, "team-lead")
+        .send(make_envelope("team-lead", "worker", "hi", kinds::MESSAGE))
+        .expect("send should succeed");
+    let contents = fs::read_to_string(mailbox(&ws, "worker").transcript_path("team-lead"))
+        .expect("read jsonl");
     let value: serde_json::Value = serde_json::from_str(contents.trim()).expect("parse jsonl");
     let ts = value
         .get("timestamp")
@@ -75,84 +88,76 @@ fn append_fills_timestamp_when_zero() {
         .unwrap_or(0);
     assert!(
         ts > 0,
-        "append_envelope must stamp `timestamp` with the current unix seconds when caller passes 0"
+        "send must stamp `timestamp` with the current unix seconds when caller passes 0"
     );
 }
 
 #[test]
-fn read_all_returns_envelopes_in_append_order() {
-    let ws = temp_workspace("read-all-order");
-    agent_mailbox::append_envelope(
-        &ws,
-        "worker",
-        make_envelope("a", "worker", "first", kinds::MESSAGE),
-    )
-    .unwrap();
-    agent_mailbox::append_envelope(
-        &ws,
-        "worker",
-        make_envelope("b", "worker", "second", kinds::MESSAGE),
-    )
-    .unwrap();
-    agent_mailbox::append_envelope(
-        &ws,
-        "worker",
-        make_envelope("c", "worker", "third", kinds::MESSAGE),
-    )
-    .unwrap();
+fn read_conversation_returns_envelopes_in_send_order() {
+    let ws = temp_workspace("read-order");
+    let sender = mailbox(&ws, "team-lead");
+    for text in ["first", "second", "third"] {
+        sender
+            .send(make_envelope("team-lead", "worker", text, kinds::MESSAGE))
+            .unwrap();
+    }
 
-    let envelopes = agent_mailbox::read_all(&ws, "worker").expect("read_all should succeed");
-    assert_eq!(envelopes.len(), 3);
-    assert_eq!(envelopes[0].body, "first");
-    assert_eq!(envelopes[1].body, "second");
-    assert_eq!(envelopes[2].body, "third");
+    let envelopes = mailbox(&ws, "worker")
+        .read_conversation("team-lead")
+        .expect("read_conversation should succeed");
+    let bodies: Vec<_> = envelopes.iter().map(|e| e.body.as_str()).collect();
+    assert_eq!(bodies, ["first", "second", "third"]);
 }
 
 #[test]
-fn read_all_on_missing_inbox_is_empty_not_error() {
+fn read_conversation_on_missing_transcript_is_empty_not_error() {
     let ws = temp_workspace("read-missing");
-    // Never wrote anything for this recipient.
-    let envelopes = agent_mailbox::read_all(&ws, "nobody").expect("missing inbox must not error");
-    assert_eq!(
-        envelopes,
-        [] as [runtime::agent_mailbox::MailboxEnvelope; 0]
-    );
+    // Never wrote anything in this conversation.
+    let envelopes = mailbox(&ws, "worker")
+        .read_conversation("nobody")
+        .expect("a missing transcript must not error");
+    assert_eq!(envelopes, [] as [MailboxEnvelope; 0]);
 }
 
 #[test]
-fn read_all_skips_malformed_lines() {
+fn read_conversation_skips_malformed_lines() {
     let ws = temp_workspace("read-malformed");
-    agent_mailbox::append_envelope(
-        &ws,
-        "worker",
-        make_envelope("a", "worker", "good1", kinds::MESSAGE),
-    )
-    .unwrap();
-    // Inject a malformed line via raw file write between two valid appends.
-    let path = agent_mailbox::mailbox_path(&ws, "worker");
+    let sender = mailbox(&ws, "team-lead");
+    sender
+        .send(make_envelope(
+            "team-lead",
+            "worker",
+            "good1",
+            kinds::MESSAGE,
+        ))
+        .unwrap();
+    // Inject a malformed line via raw file write between two valid sends.
     {
         use std::io::Write as _;
         let mut f = fs::OpenOptions::new()
             .append(true)
-            .open(&path)
+            .open(sender.transcript_path("worker"))
             .expect("open jsonl for malformed injection");
         writeln!(f, "not-json-at-all").expect("write malformed line");
     }
-    agent_mailbox::append_envelope(
-        &ws,
-        "worker",
-        make_envelope("b", "worker", "good2", kinds::MESSAGE),
-    )
-    .unwrap();
+    sender
+        .send(make_envelope(
+            "team-lead",
+            "worker",
+            "good2",
+            kinds::MESSAGE,
+        ))
+        .unwrap();
 
-    let envelopes = agent_mailbox::read_all(&ws, "worker").expect("read_all should succeed");
+    let envelopes = mailbox(&ws, "worker")
+        .read_conversation("team-lead")
+        .expect("read_conversation should succeed");
+    let bodies: Vec<_> = envelopes.iter().map(|e| e.body.as_str()).collect();
     assert_eq!(
-        envelopes.len(),
-        2,
+        bodies,
+        ["good1", "good2"],
         "malformed line must be skipped, not counted"
     );
-    assert_eq!(envelopes[0].body, "good1");
-    assert_eq!(envelopes[1].body, "good2");
 }
 
 // ── kinds SSOT ───────────────────────────────────────────────────
@@ -192,9 +197,11 @@ fn structured_shutdown_envelope_survives_roundtrip() {
         kind: kinds::SHUTDOWN_REQUEST.to_string(),
         request_id: Some("req_abc".to_string()),
     };
-    agent_mailbox::append_envelope(&ws, "worker", envelope).expect("append");
+    mailbox(&ws, "team-lead").send(envelope).expect("send");
 
-    let round = agent_mailbox::read_all(&ws, "worker").expect("read");
+    let round = mailbox(&ws, "worker")
+        .read_conversation("team-lead")
+        .expect("read");
     assert_eq!(round.len(), 1);
     assert_eq!(round[0].kind, kinds::SHUTDOWN_REQUEST);
     assert_eq!(round[0].request_id.as_deref(), Some("req_abc"));

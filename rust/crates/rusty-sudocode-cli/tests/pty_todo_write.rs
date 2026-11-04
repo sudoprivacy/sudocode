@@ -136,3 +136,64 @@ fn todo_write_persists_then_empty_wipes_store() {
         );
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 3. The header counts each item once: open means pending only
+// ──────────────────────────────────────────────────────────────────────
+
+/// Seed a list and read the header the panel paints at startup.
+fn seeded_header(name: &str, todos: &str) -> String {
+    let env = TestEnv::new(name);
+    let store = env.workspace_root().join("todos.json");
+    std::fs::write(&store, todos).expect("seed todo store");
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_TODO_STORE", store.to_str().unwrap())],
+    );
+    sess.expect("❯").expect("input ready");
+    let screen = common::expect_screen(
+        &sess,
+        |screen| screen.contains(" todos ("),
+        env.timeout(),
+        "todo header painted",
+    );
+    sess.send("/exit\r").unwrap();
+    let _ = sess.expect_eof();
+    screen
+        .lines()
+        .find(|line| line.contains(" todos ("))
+        .expect("header line")
+        .trim()
+        .to_string()
+}
+
+fn todo(content: &str, status: &str) -> String {
+    format!(r#"{{"content":"{content}","status":"{status}","activeForm":"Doing {content}"}}"#)
+}
+
+#[test]
+fn todo_header_counts_in_progress_once_and_open_as_pending() {
+    let mixed = format!(
+        "[{},{},{}]",
+        todo("parse", "completed"),
+        todo("render", "in_progress"),
+        todo("ship", "pending")
+    );
+    assert_eq!(
+        seeded_header("todo-header-mixed", &mixed),
+        "3 todos (1 done, 1 in progress, 1 open)"
+    );
+
+    // The reported case: everything but the in-progress item is done.
+    let mut items: Vec<String> = (1..=8)
+        .map(|n| todo(&format!("step {n}"), "completed"))
+        .collect();
+    items.push(todo("ship", "in_progress"));
+    assert_eq!(
+        seeded_header(
+            "todo-header-last-in-progress",
+            &format!("[{}]", items.join(","))
+        ),
+        "9 todos (8 done, 1 in progress, 0 open)"
+    );
+}

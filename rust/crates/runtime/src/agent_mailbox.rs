@@ -1,13 +1,11 @@
-//! Unified agent mailbox envelope, the A2A prompt contract, and the
-//! per-recipient JSONL inbox helpers.
+//! Unified agent mailbox envelope, the A2A prompt contract, and the JSONL
+//! line format.
 //!
 //! [`MailboxEnvelope`] is the SINGLE envelope type for all inter-agent
 //! messaging. Peers append it to their pair's conversation transcript
 //! ([`crate::mailbox::Mailbox`]): on a nexus node, on the same-machine pair
-//! root, or in the workspace. The per-recipient JSONL inbox
-//! (`{root}/agents/<name>/chat-with-me`, built by [`inbox_path_under`])
-//! carries coordinator notifications. The a2a substrate's `from`-stamping
-//! hook operates on raw JSON and only touches `from`, so the extra fields are
+//! root, or in the workspace. The a2a substrate's `from`-stamping hook
+//! operates on raw JSON and only touches `from`, so the extra fields are
 //! transparent to it.
 //!
 //! ## Wire compatibility
@@ -22,10 +20,7 @@
 //! - An envelope written with extras is ignored by old readers that
 //!   use `a2a::MailboxEnvelope` (which silently drops unknown fields).
 //!
-//! ## Per-recipient JSONL inbox
-//!
-//! Each recipient has one append-only JSONL file at
-//! `{root}/agents/<recipient>/chat-with-me`.
+//! ## Structured messages
 //!
 //! For structured messages (`shutdown_request`,
 //! `shutdown_response`, `plan_approval_response`), `body` is the
@@ -33,8 +28,7 @@
 //! Recipients parse `kind` before deciding how to interpret `body`.
 
 use std::fmt::Write as _;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -133,7 +127,7 @@ pub struct MailboxEnvelope {
     pub summary: Option<String>,
     /// Unix seconds, stamped by the sender at write time on every path —
     /// [`crate::mailbox::Mailbox::send`] for both conventions, and
-    /// [`append_envelope_to_path`] for a caller that writes a line directly.
+    /// [`append_envelope_via`] for a caller that writes a line directly.
     ///
     /// Load-bearing for a receiver, not decoration. Inbox delivery is
     /// at-least-once (see [`crate::mailbox::spawn_inbox_poller`]: the cursor is
@@ -325,63 +319,6 @@ pub(crate) fn now_secs() -> u64 {
 /// distinct recipients.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Directory the workspace-local JSONL inboxes live in.
-///
-/// The layout SSOT for the local convention: `mailbox_dir` and
-/// `mailbox_path` build every path under it, and
-/// `crate::mailbox::InboxConvention::LocalJsonl` re-exports it rather than
-/// re-spelling it.
-pub const LOCAL_INBOX_DIR: &str = ".sudocode-inbox";
-
-/// Resolve the mailbox directory for a workspace root. Callers must
-/// ensure the directory exists before writing; [`append_envelope`]
-/// creates it lazily.
-#[must_use]
-pub fn mailbox_dir(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(LOCAL_INBOX_DIR)
-}
-
-/// Resolve the mailbox file for a recipient — the unified
-/// `{workspace}/agents/{recipient}/chat-with-me` shape. Retained as the
-/// workspace-rooted convenience over [`inbox_path_under`]; `append_envelope`
-/// and `read_all` build on it so the legacy `(workspace, recipient)` API and
-/// the path-based API resolve to the same file.
-#[must_use]
-pub fn mailbox_path(workspace_root: &Path, recipient: &str) -> PathBuf {
-    inbox_path_under(workspace_root, recipient)
-}
-
-/// The unified per-recipient inbox path under a root:
-/// `{root}/agents/{recipient}/chat-with-me`. The host-FS SSOT for the shape
-/// [`crate::mailbox::InboxConvention`] resolves — used by the
-/// coordinator queue (root = workspace) so it builds the same path a `Mailbox`
-/// would, rather than re-spelling it.
-#[must_use]
-pub fn inbox_path_under(root: &Path, recipient: &str) -> PathBuf {
-    root.join("agents").join(recipient).join("chat-with-me")
-}
-
-/// Append one envelope to the recipient's mailbox. Creates the parent
-/// directory and file as needed.
-///
-/// # Errors
-///
-/// Returns a `String` error when the mailbox directory can't be
-/// created, the file can't be opened for append, or the JSON encoding
-/// / write fails. The critical section is guarded by [`WRITE_LOCK`]
-/// so concurrent calls to the same file cannot produce partial lines.
-pub fn append_envelope(
-    workspace_root: &Path,
-    recipient: &str,
-    mut envelope: MailboxEnvelope,
-) -> Result<PathBuf, String> {
-    if envelope.to.is_empty() {
-        envelope.to = recipient.to_string();
-    }
-    let path = mailbox_path(workspace_root, recipient);
-    append_envelope_to_path(&path.to_string_lossy(), envelope)
-}
-
 /// Append one envelope as a JSONL line THROUGH `backend`.
 ///
 /// The one writer of the local JSONL format: the line shape and the append-lock
@@ -424,16 +361,6 @@ pub fn append_envelope_via(
         .map_err(|e| format!("write mailbox {path}: {e}"))
 }
 
-/// [`append_envelope_via`] on the host filesystem.
-///
-/// # Errors
-///
-/// As [`append_envelope_via`].
-pub fn append_envelope_to_path(path: &str, envelope: MailboxEnvelope) -> Result<PathBuf, String> {
-    append_envelope_via(&crate::fs_backend::StdFsBackend, path, envelope)?;
-    Ok(PathBuf::from(path))
-}
-
 /// Parse a JSONL mailbox body into envelopes, skipping lines that do not.
 ///
 /// A malformed line is skipped rather than fatal: the receiver keeps making
@@ -450,55 +377,6 @@ pub fn parse_envelope_lines(bytes: &[u8]) -> Vec<MailboxEnvelope> {
                 .flatten()
         })
         .collect()
-}
-
-/// Read the recipient's mailbox as a Vec<MailboxEnvelope>. Skips
-/// lines that fail to parse — the receiver keeps making progress if
-/// a malformed line ever gets committed by a buggy writer.
-///
-/// # Errors
-///
-/// Returns a `String` error only when the file exists but can't be
-/// opened (permissions, IO). A missing mailbox is treated as an empty
-/// vec — this is the fresh-workspace case.
-pub fn read_all(workspace_root: &Path, recipient: &str) -> Result<Vec<MailboxEnvelope>, String> {
-    let path = mailbox_path(workspace_root, recipient);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text =
-        fs::read_to_string(&path).map_err(|e| format!("read mailbox {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(env) = serde_json::from_str::<MailboxEnvelope>(trimmed) {
-            out.push(env);
-        }
-    }
-    Ok(out)
-}
-
-/// Read a mailbox JSONL file by path (used by [`crate::mailbox::Mailbox`]).
-pub fn read_all_from_path(path: &str) -> Result<Vec<MailboxEnvelope>, String> {
-    let p = std::path::Path::new(path);
-    if !p.exists() {
-        return Ok(Vec::new());
-    }
-    let text = fs::read_to_string(p).map_err(|e| format!("read mailbox {path}: {e}"))?;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(env) = serde_json::from_str::<MailboxEnvelope>(trimmed) {
-            out.push(env);
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

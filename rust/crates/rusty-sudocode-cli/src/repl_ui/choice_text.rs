@@ -1,7 +1,7 @@
 //! Choice surfaces and focus markers, without changing input or layout owners.
 use crate::render::TextRole;
 use crate::render::{ColorSupport, ColorTheme};
-use crossterm::style::{Attribute, ContentStyle};
+use crossterm::style::ContentStyle;
 
 pub(super) struct ChoiceText<'a> {
     theme: &'a ColorTheme,
@@ -35,8 +35,7 @@ impl<'a> ChoiceText<'a> {
     pub fn prefix(&self, text: &str) -> String {
         let mut style = self.surface;
         if self.focused {
-            style = self.theme.selected_style(TextRole::Brand, self.support);
-            style.attributes.set(Attribute::Bold);
+            style = self.theme.choice_marker_style(self.support);
         }
         self.paint(text, style)
     }
@@ -59,6 +58,7 @@ impl<'a> ChoiceText<'a> {
 mod tests {
     use super::*;
     use crate::render::styled_text::StyledText;
+    use crossterm::style::Attribute;
 
     #[test]
     fn selected_surface_resets_before_unselected_body_and_hints_are_not_dim() {

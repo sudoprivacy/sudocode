@@ -2595,6 +2595,7 @@ fn show_effort_selection(
             custom_input_hint: None,
             force_fuzzy_select: true,
             back_value: None,
+            initial_value: None,
         },
         items,
         move |level, cli, out| {
@@ -2648,7 +2649,12 @@ impl IocraftQuestionPrompter {
         }
     }
 
-    fn show_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
+    fn show_field(
+        &self,
+        request: &runtime::QuestionPromptRequest,
+        index: usize,
+        earlier: Option<&runtime::QuestionPromptAnswer>,
+    ) {
         let field = &request.fields[index];
         self.ui.show_question(repl_ui::QuestionPromptView {
             presentation: request.presentation.clone(),
@@ -2671,7 +2677,8 @@ impl IocraftQuestionPrompter {
             allow_custom_input: field.allow_custom_input,
             custom_input_hint: field.custom_input_hint.clone(),
             force_fuzzy_select: false,
-            back_value: None,
+            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
+            initial_value: earlier.map(|answer| answer.value.clone()),
         });
     }
 
@@ -2742,20 +2749,28 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
         let this = self.clone();
         let request = request.clone();
         Box::pin(async move {
-            let mut answers = Vec::with_capacity(request.fields.len());
-            for index in 0..request.fields.len() {
+            // Answers are kept per question so going back restores them.
+            let mut answers: Vec<Option<runtime::QuestionPromptAnswer>> =
+                vec![None; request.fields.len()];
+            let mut index = 0;
+            while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
-                this.show_field(&request, index);
+                this.show_field(&request, index, answers[index].as_ref());
                 let raw = if let Ok(answer) = rx.await {
                     answer.trim().to_string()
                 } else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };
-                answers.push(Self::answer_for_field(&request.fields[index], raw));
+                if raw == repl_ui::QUESTION_BACK {
+                    index = index.saturating_sub(1);
+                    continue;
+                }
+                answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
+                index += 1;
             }
             this.ui.clear_question();
-            Ok(answers)
+            Ok(answers.into_iter().flatten().collect())
         })
     }
 }
@@ -3377,6 +3392,7 @@ fn run_repl_iocraft_dispatch(
                 .dequeue_all_human()
         })
     };
+    let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
@@ -3384,7 +3400,10 @@ fn run_repl_iocraft_dispatch(
         seed_todos,
         input_history,
         Some(dequeue_hook),
+        Arc::clone(&completions),
     );
+    cli.completions = Some(completions);
+    cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
@@ -3897,6 +3916,7 @@ fn run_repl_iocraft_dispatch(
                                     custom_input_hint: Some("or type a model name".to_string()),
                                     force_fuzzy_select: false,
                                     back_value: None,
+                                    initial_value: None,
                                 },
                                 models,
                                 move |model_name, cli, out| {
@@ -4015,6 +4035,7 @@ fn run_repl_iocraft_dispatch(
                                     )
                             {
                                 repl_ui_cmd.begin_turn();
+                                cli_lock.refresh_completions();
                             }
                             repl_ui_cmd.set_cache_tip(cli_lock.cache_ttl_tip());
                             true
@@ -4337,6 +4358,8 @@ struct LiveCli {
     /// `println!`. Set by the iocraft REPL dispatch so slash command output
     /// goes through `split_for_iocraft` and renders correctly in raw mode.
     iocraft_output: Option<repl_ui::OutputSender>,
+    /// What the iocraft REPL's Tab offers for slash-command arguments.
+    completions: Option<Arc<Mutex<commands::CompletionContext>>>,
 }
 
 fn run_acp_server(
@@ -4706,6 +4729,7 @@ impl LiveCli {
             shared_queue_mode: None,
             is_repl: false,
             iocraft_output: None,
+            completions: None,
         })
     }
 
@@ -5209,6 +5233,37 @@ impl LiveCli {
         )
     }
 
+    /// Refresh what Tab offers for slash-command arguments, at startup,
+    /// between turns and after a command changes the session or model. Models
+    /// come from what is already known (no discovery refresh); sessions are
+    /// listed only when Tab completes a session argument.
+    fn refresh_completions(&self) {
+        let Some(shared) = &self.completions else {
+            return;
+        };
+        let active = self.lifecycle.session_handle().id;
+        let sessions: commands::ValueList = Arc::new(move || {
+            let mut ids = vec![active.clone()];
+            ids.extend(
+                list_managed_sessions()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|session| session.id)
+                    .filter(|id| *id != active)
+                    .take(20),
+            );
+            ids
+        });
+        let context = commands::CompletionContext {
+            models: self.lifecycle.known_models(),
+            sessions: Some(sessions),
+            cwd: env::current_dir().unwrap_or_default(),
+        };
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context;
+    }
+
     /// Show lifecycle usage in the dynamic status slot, or plain output.
     fn print_turn_status_line(
         &self,
@@ -5256,6 +5311,7 @@ impl LiveCli {
             // A turn can switch branches (its tools run git), so refresh here.
             ui.set_workspace_position(workspace_position());
         }
+        self.refresh_completions();
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
             // status line is deliberately NOT echoed to scrollback: the

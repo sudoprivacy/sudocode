@@ -29,7 +29,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::render::activity::{ActivityState, ToolActivity};
-use commands::suggest_slash_commands;
 use engine_events::EngineState;
 use iocraft::prelude::*;
 
@@ -112,9 +111,36 @@ pub struct QuestionPromptView {
     /// When true, always use FuzzySelect regardless of option count.
     /// Used for config picker and other lists that benefit from search.
     pub force_fuzzy_select: bool,
-    /// When set, Left arrow submits this value as the answer (← Back).
-    /// Right arrow always submits the current selection (same as Enter).
+    /// When set, Left arrow (or Shift+Tab) submits this value as the answer
+    /// (← Back). Right arrow always submits the current selection (same as Enter).
     pub back_value: Option<String>,
+    /// An earlier answer to restore when the user comes back to this
+    /// question: the option the cursor starts on, or typed text to refill.
+    pub initial_value: Option<String>,
+}
+
+/// The answer a question sends when the user goes back from it.
+pub const QUESTION_BACK: &str = "\x00__back__";
+
+impl QuestionPromptView {
+    /// The earlier answer's option when there is one, else the recommended one.
+    fn initial_cursor(&self) -> usize {
+        self.initial_option()
+            .or_else(|| self.options.iter().position(|o| o.recommended))
+            .unwrap_or(0)
+    }
+
+    fn initial_option(&self) -> Option<usize> {
+        let value = self.initial_value.as_deref()?;
+        self.options.iter().position(|o| o.value == value)
+    }
+
+    /// An earlier answer that was typed rather than picked from the options.
+    fn initial_text(&self) -> Option<&str> {
+        self.initial_value
+            .as_deref()
+            .filter(|_| self.initial_option().is_none())
+    }
 }
 
 /// ChromeSlot: primary interaction area between the two separators.
@@ -146,11 +172,7 @@ struct FuzzySelectState {
 impl FuzzySelectState {
     fn new(question: QuestionPromptView) -> Self {
         let filtered: Vec<usize> = (0..question.options.len()).collect();
-        let cursor = question
-            .options
-            .iter()
-            .position(|o| o.recommended)
-            .unwrap_or(0);
+        let cursor = question.initial_cursor();
         let scroll = cursor.saturating_sub(FUZZY_WINDOW_SIZE / 2);
         Self {
             question,
@@ -737,10 +759,12 @@ fn format_question_panel(
             choice.prefix(&format!("{selector} [+] "))
         ));
     }
-    let arrow_hint = if question.back_value.is_some() {
+    let arrow_hint = if question.back_value.is_none() {
+        ""
+    } else if question.options.iter().any(|o| o.is_navigable) {
         "\u{2190}\u{2192} back/open \u{00b7} "
     } else {
-        ""
+        "\u{2190} back \u{00b7} "
     };
     let custom_hint = if question.allow_custom_input {
         " \u{00b7} type to enter your own"
@@ -1147,7 +1171,10 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
         .iter()
         .filter(|t| t.status == runtime::TodoStatus::InProgress)
         .count();
-    let open_count = todos.len() - completed_count;
+    let open_count = todos
+        .iter()
+        .filter(|t| t.status == runtime::TodoStatus::Pending)
+        .count();
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();
@@ -1261,6 +1288,10 @@ struct ReplContext {
     pending: Arc<Mutex<Vec<PendingItem>>>,
     /// Earlier prompts `↑` walks before anything typed in this process.
     input_history: Arc<Vec<String>>,
+    /// Runtime values Tab offers for slash-command arguments (models, session
+    /// ids, the working directory). The coordinator refreshes it between turns,
+    /// so a key press only filters what is already here.
+    completions: Arc<Mutex<commands::CompletionContext>>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
     /// coordinator's staging area and returns its text for the input slot,
     /// skipping inbound A2A/peer items. `None` when no queue is wired (the
@@ -1294,6 +1325,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_for_future = Arc::clone(&ctx.pending);
     let dequeue_hook = ctx.dequeue_hook.clone();
     let input_history = Arc::clone(&ctx.input_history);
+    let completions = Arc::clone(&ctx.completions);
     let tasks = Arc::clone(&ctx.tasks);
     let tasks_for_future = Arc::clone(&ctx.tasks);
     let tasks_for_events = Arc::clone(&ctx.tasks);
@@ -1555,8 +1587,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             fs.move_down();
                         }
                     }
-                    // ── Left — submit back_value (tree navigation) ────
-                    KeyCode::Left if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) => {
+                    // ── Left / Shift+Tab — submit back_value ───────────
+                    KeyCode::Left | KeyCode::BackTab if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) => {
                         let back = match &current_slot {
                             InputSlot::DialPad(q) | InputSlot::FuzzySelect(FuzzySelectState { question: q, .. }) => {
                                 q.back_value.clone()
@@ -1726,7 +1758,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 tab_index.set(idx);
                                 input_value.set(candidates[idx].clone());
                             } else {
-                                let suggestions = suggest_slash_commands(&val, 10);
+                                let suggestions = commands::complete_slash_input(
+                                    &val,
+                                    &completions
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                );
                                 if !suggestions.is_empty() {
                                     input_value.set(suggestions[0].clone());
                                     tab_candidates.set(suggestions);
@@ -1899,7 +1936,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // A request's immutable description belongs to
                             // history. Only its first field presents it; the
                             // live slot owns the current field's controls.
-                            if question.index == 0 {
+                            // A revisited question was answered, so its
+                            // description is already in history.
+                            if question.index == 0 && question.initial_value.is_none() {
                                 if let Some(description) = &question.description {
                                     let document = prompt_text::render_document(
                                         description,
@@ -1919,13 +1958,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             {
                                 InputSlot::FuzzySelect(FuzzySelectState::new(question))
                             } else {
-                                let initial = question
-                                    .options
-                                    .iter()
-                                    .position(|o| o.recommended)
-                                    .unwrap_or(0);
-                                dialpad_cursor.set(initial);
-                                dialpad_input.set(String::new());
+                                dialpad_cursor.set(question.initial_cursor());
+                                dialpad_input.set(question.initial_text().unwrap_or_default().to_string());
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
@@ -2292,18 +2326,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     // Decode semantic initial styles before measurement. Painting consumes the
     // same spans, so explicit resets never acquire a parent fallback color.
-    let chrome_has_color =
-        crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
     let chrome_theme = crate::render::theme();
-    let chrome_style = |color| crossterm::style::ContentStyle {
-        foreground_color: chrome_has_color.then_some(color),
-        ..crossterm::style::ContentStyle::default()
-    };
-    let chrome_border = chrome_has_color
-        .then_some(chrome_theme.color(TextRole::Border))
+    let chrome_border = chrome_theme
+        .style(TextRole::Border)
+        .foreground_color
         .and_then(ansi_text::ui_color);
-    let _chrome_muted = chrome_style(chrome_theme.color(TextRole::Secondary));
-    let question_style = chrome_style(chrome_theme.color(TextRole::Brand));
+    let question_style = chrome_theme.style(TextRole::Brand);
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::Background { full, .. } => full.clone(),
@@ -2560,7 +2588,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
                 View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.color(TextRole::Warning)).and_then(ansi_text::ui_color))
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_theme.style(TextRole::Warning).foreground_color.and_then(ansi_text::ui_color))
                 }
             }))
             #(row_text("heading", heading, visible.heading))
@@ -2781,6 +2809,7 @@ pub fn spawn_repl_ui(
     todo_items: Vec<runtime::Todo>,
     input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
+    completions: Arc<Mutex<commands::CompletionContext>>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
@@ -2812,6 +2841,7 @@ pub fn spawn_repl_ui(
         todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),
         input_history: Arc::new(input_history),
+        completions,
         dequeue_hook,
     };
 
@@ -2884,6 +2914,7 @@ pub fn spawn_repl_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commands::suggest_slash_commands;
 
     fn tool_card(id: &str, name: &str) -> ToolCard {
         ToolCard::new(id.to_string(), name, "{}")
@@ -3010,6 +3041,7 @@ mod tests {
             custom_input_hint: None,
             force_fuzzy_select: false,
             back_value: None,
+            initial_value: None,
         }
     }
 
@@ -3027,6 +3059,7 @@ mod tests {
             custom_input_hint: None,
             force_fuzzy_select: false,
             back_value: None,
+            initial_value: None,
         };
 
         assert_eq!(

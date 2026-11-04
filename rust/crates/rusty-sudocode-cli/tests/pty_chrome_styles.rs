@@ -804,7 +804,13 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                 for count in [
                     format!("{} todos", statuses.len()),
                     "1 done".into(),
-                    format!("{} open", statuses.len() - 1),
+                    format!(
+                        "{} open",
+                        statuses
+                            .iter()
+                            .filter(|status| **status == "pending")
+                            .count()
+                    ),
                 ] {
                     expect_style(&sess, &count, ("Default", true, false));
                 }

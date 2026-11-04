@@ -2,7 +2,7 @@
 
 End-to-end tests for the standalone-`scode` ↔ nexus A2A path: a terminal `scode`
 dials a real `nexusd-cluster` as a plain gRPC client and sends/receives over the
-replicated `/agents/<name>/chat-with-me` DT_STREAM (`NEXUS_A2A_*` env; off by
+replicated `/conversations/<id>/transcript` DT_STREAM each pair shares (`NEXUS_A2A_*` env; off by
 default). The transport lives in `runtime::mailbox` +
 `nexus-vfs-client`; the send half feeds `CliToolExecutor` via the same
 `handle_send_message` the co-host uses.

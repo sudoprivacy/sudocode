@@ -100,9 +100,14 @@ export async function runScodeMcp(file: string, lifecycle: {
   process.stdin.once('end', onEof);
   try {
     if (config.codexCallback) callback = await connectCodexCallback(config.codexCallback, config.acpSessionId!);
+    // A Codex callback or Claude channel makes this client the agent its peers
+    // address, so scode hands peer messages over instead of answering them.
+    const peerOwner = callback;
     scode = await connectScode({ ...config, signal: abort.signal,
-      ...(channel ? { onPeerMessage: toChannel } : {}) }, notification => {
-      callback?.receive(notification);
+      ...(channel || peerOwner ? { onPeerMessage: (message: ScodePeerMessage) => {
+        peerOwner?.receive(message);
+        toChannel(message);
+      } } : {}) }, notification => {
       if (observed && notification.update.sessionUpdate !== 'agent_thought_chunk') {
         const bytes = Buffer.byteLength(JSON.stringify(notification));
         if (observed.bytes+bytes <= 512 * 1024) { observed.updates.push(notification); observed.bytes += bytes; }

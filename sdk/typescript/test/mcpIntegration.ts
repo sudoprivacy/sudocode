@@ -148,8 +148,8 @@ async function main(): Promise<void> {
     assert.equal(scodeNativeA2aAudit(first)?.requestedInputSha256, scodeNativeA2aAudit(second)?.requestedInputSha256);
   } finally { await connection.close(); }
 
-  const notification = { sessionId: 'native', update: { sessionUpdate: 'user_message_chunk' as const,
-    content: { type: 'text' as const, text: 'peer data' } } };
+  const message = { sessionId: 'native', text: '<mailbox-message from="peer">peer data</mailbox-message>',
+    body: 'peer data', sudocode: { a2a: { from: 'peer' } } };
   for (const state of ['idle', 'active', 'notLoaded']) {
     const calls: Array<{ method: string; params: unknown }> = [];
     const request = async <T>(method: string, params: unknown): Promise<T> => {
@@ -159,8 +159,8 @@ async function main(): Promise<void> {
           : method === 'turn/steer' ? { turnId: 'running' } : { turn: { id: 'fresh' } };
       return result as T;
     };
-    if (state === 'notLoaded') await assert.rejects(forwardScodeToCodex(request, 'original', notification, 'event'));
-    else assert.equal((await forwardScodeToCodex(request, 'original', notification, 'event')).method,
+    if (state === 'notLoaded') await assert.rejects(forwardScodeToCodex(request, 'original', message, 'event'));
+    else assert.equal((await forwardScodeToCodex(request, 'original', message, 'event')).method,
       state === 'idle' ? 'turn/start' : 'turn/steer');
     assert.ok(!calls.some(call => /resume|fork/.test(call.method)));
     if (state === 'active') assert.equal((calls.at(-1)?.params as { expectedTurnId: string }).expectedTurnId, 'running');

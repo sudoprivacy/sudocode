@@ -58,7 +58,10 @@ bridge owner. It uses Codex's normal global MCP configuration. It does not copy
 one fixed Agent/session config into every workspace. Same-directory roots get
 distinct durable bindings; resuming a thread reuses its original Agent and ACP
 session. Task prompts and exact direct messages keep the same implementations
-as the fixed-session bridge below.
+as the fixed-session bridge below. Each owned scode session uses
+[client-owned peer input](../../docs/acp.md#client-owned-peer-input-clientcapabilities_metasudocodepeerinput),
+so peer messages reach the Codex thread and the scode session's own model never
+answers them; a scode without it is refused.
 
 This mode requires native root inventory and host-supplied tool-call metadata
 (qualified on native Codex 0.163.0), a compatible scode with native actor audit,
@@ -493,8 +496,9 @@ connects to the existing native app-server proxy/socket and original loaded
 thread. It steers an active turn or starts an idle turn through the native
 frontend; it does not resume, fork, create another controller or weaken the
 frontend's approvals. Configure it using `CodexCallbackConfig` from the
-`/codexCallback` export. Notification content remains peer data, not user
-authority. An active steer or a delayed callback is not proof of true idle
+`/codexCallback` export. The bridge's scode connection then owns peer input, so
+the frontend is the only respondent to each peer message. Message content
+remains peer data, not user authority. An active steer or a delayed callback is not proof of true idle
 wakeup: acceptance must observe native idle and an accepted `turn/start`.
 
 A pre-existing thread can retain a temporary MCP config override. On Codex

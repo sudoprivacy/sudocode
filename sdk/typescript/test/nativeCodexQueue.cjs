@@ -115,12 +115,13 @@ void(async()=>{
     const argv=options.case==='response-loss'?[process.execPath,path.join(__dirname,'fixtures/nativeQueueResponseLoss.cjs'),options.codex]:[options.codex];
     callback=await connectCodexCallback({codexArgv:argv,nativeHome:home,env,transport:'native-queue',threadId,
       peers:['fixture-peer'],log:callbackLog,onProducerObservation:row=>receipt.producerObservations.push(row)},'existing-fixture-acp-session');
-    const notification={sessionId:'existing-fixture-acp-session',update:{sessionUpdate:'user_message_chunk',content:{type:'text',text:nonce+' — exact peer 🌎\nnext line'}},
-      _meta:{sudocode:{a2a:{from:'fixture-peer',kind:'message'}}}};
-    callback.receive({...notification,sessionId:'wrong-session'});
-    callback.receive({...notification,_meta:{sudocode:{a2a:{from:'denied-peer'}}}});
+    const body=nonce+' — exact peer 🌎\nnext line';
+    const message={sessionId:'existing-fixture-acp-session',text:'<mailbox-message from="fixture-peer">'+body+'</mailbox-message>',body,
+      sudocode:{a2a:{from:'fixture-peer',kind:'message'}}};
+    callback.receive({...message,sessionId:'wrong-session'});
+    callback.receive({...message,sudocode:{a2a:{from:'denied-peer'}}});
     assert.equal(receipt.producerObservations.length,0,'refused peers/SID cannot spawn a producer');
-    phase='peer';const submittedAt=Date.now();callback.receive(notification);
+    phase='peer';const submittedAt=Date.now();callback.receive(message);
     await wait(()=>jsonLines(callbackLog).some(row=>row.phase===(options.case==='response-loss'?'pending':'queued')),20000,'callback outcome');
     receipt.callbackAudit=jsonLines(callbackLog);
     const received=receipt.callbackAudit.filter(row=>row.phase==='received');assert.equal(received.length,1);

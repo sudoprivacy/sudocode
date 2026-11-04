@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 pub enum TextRole {
     Body,
     Reasoning,
-    Strong,
+    ProseStrong,
     Emphasis,
     Strikethrough,
     Heading1,
@@ -22,7 +22,7 @@ pub enum TextRole {
     Heading5,
     Heading6,
     Link,
-    ResponseMarker,
+    Strong,
     Secondary,
     Border,
     Brand,
@@ -98,17 +98,16 @@ impl ColorTheme {
         } + usize::from(self.light_background) * 4;
         *STYLES[tier][role as usize].get_or_init(|| {
             let mut style = ContentStyle::default();
-            if support == ColorSupport::NoColor {
-                return style;
-            }
-            let color = self.resolve_color(role, support);
-            if color != Color::Reset {
-                style.foreground_color = Some(color);
+            if support != ColorSupport::NoColor {
+                let color = self.resolve_color(role, support);
+                if color != Color::Reset {
+                    style.foreground_color = Some(color);
+                }
             }
             if matches!(
                 role,
-                TextRole::Strong
-                    | TextRole::ResponseMarker
+                TextRole::ProseStrong
+                    | TextRole::Strong
                     | TextRole::TableHeader
                     | TextRole::Heading1
                     | TextRole::Heading2
@@ -198,10 +197,9 @@ impl ColorTheme {
         let limited = support == ColorSupport::Ansi16;
         let readable = |rgb| color_math::foreground(rgb, terminal_palette::background(), support);
         match role {
-            TextRole::Body
-            | TextRole::ResponseMarker
-            | TextRole::Reasoning
-            | TextRole::Strikethrough => Color::Reset,
+            TextRole::Body | TextRole::Strong | TextRole::Reasoning | TextRole::Strikethrough => {
+                Color::Reset
+            }
             TextRole::Brand => {
                 if limited {
                     Color::DarkYellow
@@ -267,7 +265,7 @@ impl ColorTheme {
                     readable(preferred)
                 }
             }
-            TextRole::Strong
+            TextRole::ProseStrong
             | TextRole::Emphasis
             | TextRole::Heading1
             | TextRole::Heading2
@@ -298,7 +296,7 @@ impl ColorTheme {
                 "markup.inline.raw.string.markdown",
                 "markup.raw.inline.markdown",
             ],
-            TextRole::Strong => &["markup.bold.markdown"],
+            TextRole::ProseStrong => &["markup.bold.markdown"],
             TextRole::Emphasis => &["markup.italic.markdown"],
             TextRole::Heading1 => &["markup.heading.1.markdown", "markup.heading.markdown"],
             TextRole::Heading2 => &["markup.heading.2.markdown", "markup.heading.markdown"],
@@ -333,7 +331,7 @@ impl ColorTheme {
             TextRole::Link | TextRole::Code => self.color_for(TextRole::Accent, support),
             TextRole::Info | TextRole::Model | TextRole::DiagramNode => Color::DarkCyan,
             TextRole::Path | TextRole::Quote | TextRole::Usage => Color::DarkGreen,
-            TextRole::TableHeader => self.color_for(TextRole::Strong, support),
+            TextRole::TableHeader => self.color_for(TextRole::ProseStrong, support),
             TextRole::Branch => Color::DarkBlue,
             TextRole::OrderedListMarker => Color::Blue,
             _ => Color::Reset,

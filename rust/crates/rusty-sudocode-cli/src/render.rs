@@ -907,7 +907,7 @@ impl TerminalRenderer {
                 state.push_style(self.color_theme, self.color_support, TextRole::Emphasis);
             }
             Event::Start(Tag::Strong) => {
-                state.push_style(self.color_theme, self.color_support, TextRole::Strong);
+                state.push_style(self.color_theme, self.color_support, TextRole::ProseStrong);
             }
             Event::Start(Tag::Strikethrough) => state.push_style(
                 self.color_theme,
@@ -1672,7 +1672,7 @@ impl ResponseGlyphState {
                         } else {
                             self.started = true;
                             first_glyph = Some(out.text.len());
-                            out.push(theme().style(TextRole::ResponseMarker), "•");
+                            out.push(theme().style(TextRole::Strong), "•");
                             out.plain(" ");
                         }
                     }

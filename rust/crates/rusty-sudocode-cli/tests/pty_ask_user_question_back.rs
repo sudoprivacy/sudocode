@@ -21,8 +21,7 @@ fn expect_selected(env: &TestEnv, sess: &PtySession, prompt: &str, label: &str) 
         |screen| {
             let selected = screen
                 .lines()
-                .filter(|line| line.trim_start().starts_with("> ["))
-                .last();
+                .rfind(|line| line.trim_start().starts_with("> ["));
             screen.contains(prompt) && selected.is_some_and(|line| line.contains(label))
         },
         env.timeout(),

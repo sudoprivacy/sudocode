@@ -6,25 +6,10 @@ fn startup_information_fits_terminal_cells_without_losing_long_unicode_paths() {
     let env = common::TestEnv::new(
         "startup x y-workspace-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-中文",
     );
-    let binary = common::scode_bin();
-    let shell = common::resolve_sh();
     let mut has_literal_path_space = false;
     for columns in [80, 40, 20] {
-        // Establish geometry before scode starts: resizing an already running
-        // application races its first terminal-width query.
-        let backend_args = env.backend_args();
-        let mut args = vec![
-            "-c",
-            "printf 'STARTUP-GATE\\n'; IFS= read -r release; exec \"$@\"",
-            "startup-gate",
-            binary.to_str().unwrap(),
-        ];
-        args.extend(backend_args.iter().map(String::as_str));
-        args.extend(["--permission-mode", "read-only"]);
-        let mut child = env.spawn_binary_with_env(std::path::Path::new(&shell), &args, &[]);
-        child.expect("STARTUP-GATE").unwrap();
-        child.resize(100, columns).unwrap();
-        child.send("go\r").unwrap();
+        let mut child =
+            env.spawn_with_env_at_size(&["--permission-mode", "read-only"], &[], 100, columns);
         common::expect_input_line_cleared(&child, env.timeout(), "startup prompt ready");
         child.render(|screen| {
             let raw = screen.raw();

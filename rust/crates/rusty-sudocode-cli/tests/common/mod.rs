@@ -348,6 +348,32 @@ pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, contex
     );
 }
 
+/// Preserve the original failure and the terminal wire when input ownership fails.
+pub fn expect_input_line_with_wire_trace(
+    sess: &mut PtySession,
+    text: &str,
+    budget: Duration,
+    context: &str,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        expect_input_line(sess, text, budget, context);
+    }));
+    if let Err(error) = result {
+        let geometry = sess.render(|screen| {
+            (
+                screen.size(),
+                screen.cursor(),
+                screen.raw().rows(0, screen.size().1).collect::<Vec<_>>(),
+            )
+        });
+        // An empty-capable match reads already delivered bytes immediately;
+        // it adds no wait or retry and runs only after the original failure.
+        let wire = sess.expect_within("(?s).*", Duration::ZERO);
+        eprintln!("PTY input failure geometry: {geometry:?}\nPTY wire: {wire:?}");
+        std::panic::resume_unwind(error);
+    }
+}
+
 /// What the REPL's input buffer holds: the text after the last prompt marker on
 /// the lowest screen row carrying one.
 ///
@@ -902,12 +928,45 @@ impl TestEnv {
 
     /// Like [`spawn`] but with additional environment variables.
     pub fn spawn_with_env(&self, extra_args: &[&str], env_vars: &[(&str, &str)]) -> PtySession {
-        let args = self.backend_args();
-        let args = args.each_ref().map(String::as_str);
+        self.spawn_with_initial_size(extra_args, env_vars, None)
+    }
+
+    /// Establish initial geometry before the CLI can query or render it.
+    /// Later live resizes remain explicit actions in the individual journeys.
+    pub fn spawn_with_env_at_size(
+        &self,
+        extra_args: &[&str],
+        env_vars: &[(&str, &str)],
+        rows: u16,
+        columns: u16,
+    ) -> PtySession {
+        self.spawn_with_initial_size(extra_args, env_vars, Some((rows, columns)))
+    }
+
+    fn spawn_with_initial_size(
+        &self,
+        extra_args: &[&str],
+        env_vars: &[(&str, &str)],
+        initial_size: Option<(u16, u16)>,
+    ) -> PtySession {
+        let backend_args = self.backend_args();
+        let args: Vec<_> = backend_args
+            .iter()
+            .map(String::as_str)
+            .chain(extra_args.iter().copied())
+            .collect();
         let workspace = match &self.backend {
             Backend::Mock { workspace, .. } | Backend::Live { workspace } => workspace,
         };
-        spawn_with_workspace(workspace, None, &args, extra_args, self.timeout(), env_vars)
+        spawn_binary_with_workspace(
+            workspace,
+            None,
+            &scode_bin(),
+            &args,
+            self.timeout(),
+            env_vars,
+            initial_size,
+        )
     }
 
     /// Share provider selection with wrappers that must run before the CLI.
@@ -935,7 +994,15 @@ impl TestEnv {
         let workspace = match &self.backend {
             Backend::Mock { workspace, .. } | Backend::Live { workspace } => workspace,
         };
-        spawn_binary_with_workspace(workspace, None, binary, &[], args, self.timeout(), env_vars)
+        spawn_binary_with_workspace(
+            workspace,
+            None,
+            binary,
+            args,
+            self.timeout(),
+            env_vars,
+            None,
+        )
     }
 
     /// The workspace root (temp dir).  Useful for writing fixture
@@ -1102,39 +1169,15 @@ pub fn read_file_with_retry(
         .filter(|s| !s.trim().is_empty())
 }
 
-/// Spawn scode under a PTY via `env VAR=val ... scode <args>`.
-///
-/// `config_home_override`: if `Some`, sets `SUDO_CODE_CONFIG_HOME`
-/// to this path (live mode — point at real config). If `None`, uses
-/// the workspace's own config dir (mock mode — temp sudocode.json).
-fn spawn_with_workspace(
-    workspace: &HarnessWorkspace,
-    config_home_override: Option<&std::path::Path>,
-    base_args: &[&str],
-    extra_args: &[&str],
-    timeout: Duration,
-    env_vars: &[(&str, &str)],
-) -> PtySession {
-    spawn_binary_with_workspace(
-        workspace,
-        config_home_override,
-        &scode_bin(),
-        base_args,
-        extra_args,
-        timeout,
-        env_vars,
-    )
-}
-
 /// Apply one isolation and terminal contract to both built and installed executables.
 fn spawn_binary_with_workspace(
     workspace: &HarnessWorkspace,
     config_home_override: Option<&std::path::Path>,
     bin: &std::path::Path,
-    base_args: &[&str],
-    extra_args: &[&str],
+    args: &[&str],
     timeout: Duration,
     env_vars: &[(&str, &str)],
+    initial_size: Option<(u16, u16)>,
 ) -> PtySession {
     let bin_str = bin.to_string_lossy().to_string();
     #[cfg(not(windows))]
@@ -1213,15 +1256,16 @@ fn spawn_binary_with_workspace(
         write!(cmd, " {}={}", k, shell_quote(v)).unwrap();
     }
     write!(cmd, " {}", shell_quote(&bin_str)).unwrap();
-    for arg in base_args {
-        write!(cmd, " {}", shell_quote(arg)).unwrap();
-    }
-    for arg in extra_args {
+    for arg in args {
         write!(cmd, " {}", shell_quote(arg)).unwrap();
     }
 
     let sh = resolve_sh();
-    let mut sess = PtySession::spawn(&sh, &["-c", &cmd]).expect("spawn scode");
+    let mut sess = match initial_size {
+        Some((rows, columns)) => PtySession::spawn_with_size(&sh, &["-c", &cmd], rows, columns),
+        None => PtySession::spawn(&sh, &["-c", &cmd]),
+    }
+    .expect("spawn scode");
     sess.set_default_timeout(at_least(timeout));
     sess
 }

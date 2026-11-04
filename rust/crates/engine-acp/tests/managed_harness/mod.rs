@@ -116,12 +116,10 @@ pub fn spawn_managed_agent(
     let mut options = crate::common::managed_session::seed_managed_session(&kernel, &desc);
     options.session_endpoint = Some(endpoint.clone());
     let host: Arc<dyn SpawnHandle> = Arc::from(
-        engine_acp::managed_agent::SudoCodeSpawnAdapter.spawn_with_options(
-            Arc::clone(&kernel),
-            desc,
-            options,
-            Arc::new(observer),
-        )?,
+        engine_acp::managed_agent::SudoCodeSpawnAdapter {
+            authenticated_senders: false,
+        }
+        .spawn_with_options(Arc::clone(&kernel), desc, options, Arc::new(observer))?,
     );
     let mailbox = match connect(kernel, endpoint, None) {
         Ok(mailbox) => mailbox,

@@ -6401,8 +6401,10 @@ where
             // A shutdown in a mixed batch cannot acknowledge ordinary messages
             // before their turn succeeds. Process that batch, then stop.
             is_shutdown_pending = has_shutdown;
-            current_prompt =
-                runtime::agent_mailbox::compose_next_turn_from_envelopes(&new_envelopes);
+            current_prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
+                &new_envelopes,
+                mailbox.authenticates_senders(),
+            );
             continue;
         }
 

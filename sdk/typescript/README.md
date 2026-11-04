@@ -41,9 +41,10 @@ never answers it. Claude replies with `scode_send`; `scode_agent_list`,
 ```
 
 `node-namespace` accepts any sender the Node stamped, after `agent_list` proves
-the session's Node identity, and marks events `verified="true"`. `allowlist`
-with `peers` accepts only those names and marks them `verified="false"`,
-because without that check `from` is self-reported. Register the bridge as an
+the session's Node identity. `allowlist` with `peers` accepts only those names.
+`verified` comes from scode's per-message provenance (`true` when the session's
+mailbox authenticates writers); for a scode that does not report it, the bridge
+marks events verified only after its own Node identity check. Register the bridge as an
 MCP server (for example `claude mcp add nexus_scode -- node /abs/server.cjs
 --config /abs/private/claude.json`) and start Claude Code with
 `claude --dangerously-load-development-channels server:nexus_scode` while

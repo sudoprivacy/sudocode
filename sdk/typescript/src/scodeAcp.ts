@@ -38,7 +38,8 @@ export interface ScodePeerMessage {
   /** The `<mailbox-message>` wrapper a session model would have read. */
   text: string;
   body: string;
-  sudocode: { a2a: { from: string; kind?: string; summary?: string } };
+  /** `verified` is scode's fact: the reading mailbox authenticated the sender. */
+  sudocode: { a2a: { from: string; kind?: string; summary?: string; verified?: boolean } };
 }
 
 function parsePeerMessage(value: unknown): ScodePeerMessage {

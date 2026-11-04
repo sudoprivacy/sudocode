@@ -69,14 +69,17 @@ export async function runScodeMcp(file: string, lifecycle: {
   // cursor already advanced when scode handed them over.
   const early: ScodePeerMessage[] = [];
   const toChannel = (message: ScodePeerMessage) => {
-    const { from, kind, summary } = message.sudocode.a2a;
+    const { from, kind, summary, verified: authenticated } = message.sudocode.a2a;
+    // scode states provenance per message; the bridge's own Node check is the
+    // fallback for a scode that predates it.
+    const senderVerified = typeof authenticated === 'boolean' ? authenticated : verified;
     if (!channel || message.sessionId !== config.acpSessionId
         || (channel.peerPolicy === 'allowlist' && !channel.peers!.includes(from))) return;
     if (!transportReady) { if (early.length < 64) early.push(message); return; }
-    audit({ phase: 'peer_message', sessionId: message.sessionId, from, verified });
+    audit({ phase: 'peer_message', sessionId: message.sessionId, from, verified: senderVerified });
     void server.server.notification({ method: 'notifications/claude/channel', params: {
       content: message.text,
-      meta: { from, verified: String(verified), ...(kind ? { kind } : {}), ...(summary ? { summary } : {}) },
+      meta: { from, verified: String(senderVerified), ...(kind ? { kind } : {}), ...(summary ? { summary } : {}) },
     } }).catch(error => process.stderr.write(`claude channel: ${String(error)}\n`));
   };
   let stopping: Promise<void> | undefined;

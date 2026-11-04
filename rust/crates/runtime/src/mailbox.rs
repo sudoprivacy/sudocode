@@ -266,6 +266,10 @@ pub struct Mailbox {
     /// identity nothing deletes, whereas `is_append_stream` changes its answer
     /// the moment a stream is created.
     provisioned: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Whether every writer this mailbox reads was authenticated by its
+    /// transport, so a frame's `from` is the writer's identity rather than its
+    /// claim. Set by the constructor that knows: never by a sender.
+    authenticated_senders: bool,
 }
 
 impl Mailbox {
@@ -280,7 +284,26 @@ impl Mailbox {
             self_id,
             convention,
             provisioned: std::sync::Mutex::new(std::collections::HashSet::new()),
+            authenticated_senders: false,
         }
+    }
+
+    /// Declare that the transport behind this mailbox authenticates every
+    /// writer, so each frame's `from` is the writer's identity. Only the host
+    /// that built the transport knows this: a node's certificate-only mTLS
+    /// connection, or a co-host whose daemon arms the stamping hook.
+    #[must_use]
+    pub fn with_authenticated_senders(mut self, authenticated: bool) -> Self {
+        self.authenticated_senders = authenticated;
+        self
+    }
+
+    /// Whether a message read here has a verified sender (see
+    /// [`Self::with_authenticated_senders`]).
+    #[must_use]
+    #[inline]
+    pub fn authenticates_senders(&self) -> bool {
+        self.authenticated_senders
     }
 
     /// A mailbox addressing the daemon's own path space: `self_id`'s
@@ -450,6 +473,9 @@ impl Mailbox {
             agent.into(),
             InboxConvention::new(String::new()),
         )
+        // The certificate is the credential: the daemon authenticated every
+        // writer and its stamping hook wrote each `from`.
+        .with_authenticated_senders(true)
     }
 
     #[must_use]

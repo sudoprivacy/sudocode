@@ -762,7 +762,9 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     );
     managed_agent::install_managed_agent_with_spawn(
         &kernel,
-        Arc::new(engine_acp::managed_agent::SudoCodeSpawnAdapter),
+        Arc::new(engine_acp::managed_agent::SudoCodeSpawnAdapter {
+            authenticated_senders: false,
+        }),
     )
     .unwrap();
     let agent = "resume-agent";

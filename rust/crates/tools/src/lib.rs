@@ -4554,6 +4554,8 @@ struct AgentJob {
     /// config as the parent, regardless of CWD changes.
     sudocode_config: SudoCodeConfig,
     fallback_config: ProviderFallbackConfig,
+    /// Tool rounds per turn before the subagent winds down and answers.
+    step_budget: u32,
     /// Auth mode captured at spawn time so the subagent uses the same
     /// credential path (api-key / proxy / subscription) as the parent — see
     /// [`subagent_auth_mode`]. `None` only when no session has published one.
@@ -5630,7 +5632,15 @@ fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
         .map(|report| report.load_outcome())
 }
 
-const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
+/// Tool rounds a subagent turn may take when the user has not set `maxSteps`.
+/// Reaching it winds the turn down exactly as the main loop does: the next
+/// request carries no tools, so the subagent reports what it found instead of
+/// failing and losing it.
+const DEFAULT_AGENT_STEP_BUDGET: u32 = 100;
+
+/// Hard backstop above the step budget, for a model that keeps going after
+/// its tools are withdrawn.
+const AGENT_ITERATION_MARGIN: usize = 8;
 
 fn execute_agent(
     input: AgentInput,
@@ -5744,7 +5754,7 @@ fn prepare_agent_job(
     // Capture provider config at spawn time so the subagent thread inherits the
     // parent's auth/credential settings rather than re-loading from CWD.
     let sudocode_config = load_sudocode_config();
-    let fallback_config = load_provider_fallback_config();
+    let (fallback_config, step_budget) = load_agent_runtime_settings();
     // Explicit override from the Agent tool call, falling back to the mode the
     // session's own client resolved to.
     let auth_mode = subagent_auth_mode(input.auth_mode.as_deref())?;
@@ -5780,6 +5790,7 @@ fn prepare_agent_job(
         allowed_tools,
         sudocode_config,
         fallback_config,
+        step_budget,
         auth_mode,
         inherited_messages,
         execution,
@@ -6046,14 +6057,14 @@ fn notify_agent_completion(original_manifest: &AgentOutput, fs: &dyn FsBackend) 
 
 /// Default per-subagent cap on how many DISTINCT user-turns the
 /// multi-turn loop will service before force-exiting. Not the same as
-/// `DEFAULT_AGENT_MAX_ITERATIONS` (which caps tool-loop iterations
-/// WITHIN a single turn). Overridable via
+/// `DEFAULT_AGENT_STEP_BUDGET` (which bounds tool rounds WITHIN a single
+/// turn). Overridable via
 /// `SUDOCODE_SUBAGENT_MAX_MULTI_TURNS`.
 ///
 /// Sized to leave plenty of headroom for a coordinator-driven
 /// conversation where the parent sends 5–10 follow-ups before the
-/// worker completes; at 16 turns × 32 tool-loop iterations that's
-/// still bounded well below runaway.
+/// worker completes; at 16 turns × 100 tool rounds that's still
+/// bounded well below runaway.
 const DEFAULT_SUBAGENT_MAX_MULTI_TURNS: usize = 16;
 
 fn subagent_max_multi_turns() -> usize {
@@ -6070,8 +6081,13 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
             .map_err(|error| error.to_string())?,
     );
     let _mailbox = runtime::mailbox::MailboxScope::enter(Arc::clone(&mailbox));
-    let mut conv_runtime =
-        build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
+    let mut conv_runtime = build_agent_runtime(job)?
+        .with_max_steps(Some(job.step_budget))
+        .with_max_iterations(
+            usize::try_from(job.step_budget).map_or(usize::MAX, |budget| {
+                budget.saturating_add(AGENT_ITERATION_MARGIN)
+            }),
+        );
     // Accumulate telemetry across every multi-turn iteration so a
     // long coordinator-driven conversation reports one aggregated
     // `<total_tokens>` / `<tool_uses>` count in the task-notification.
@@ -7659,6 +7675,24 @@ fn build_provider_entry_with_config(
     })
 }
 
+/// Provider fallbacks and the subagent step budget, from one config load.
+/// The user's `maxSteps` bounds every turn, the subagent's included.
+fn load_agent_runtime_settings() -> (ProviderFallbackConfig, u32) {
+    let config = current_workspace_root()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok());
+    let fallback = config
+        .as_ref()
+        .map_or_else(ProviderFallbackConfig::default, |config| {
+            config.provider_fallbacks().clone()
+        });
+    let step_budget = config
+        .as_ref()
+        .and_then(|config| config.feature_config().max_steps())
+        .unwrap_or(DEFAULT_AGENT_STEP_BUDGET);
+    (fallback, step_budget)
+}
+
 fn load_sudocode_config() -> SudoCodeConfig {
     current_workspace_root()
         .ok()
@@ -7668,15 +7702,6 @@ fn load_sudocode_config() -> SudoCodeConfig {
                 .ok()
         })
         .unwrap_or_default()
-}
-
-fn load_provider_fallback_config() -> ProviderFallbackConfig {
-    current_workspace_root()
-        .ok()
-        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
-        .map_or_else(ProviderFallbackConfig::default, |config| {
-            config.provider_fallbacks().clone()
-        })
 }
 
 /// Turn a provider error into a [`RuntimeError`] that keeps its

@@ -1561,9 +1561,10 @@ fn line_closes_fence(line: &str, opener: FenceMarker) -> bool {
 
 /// Stateful processor that prefixes the first line with • (bold) and indents
 /// all continuation lines by two spaces so that column 0 is reserved
-/// exclusively for status glyphs. Hard-wraps text at the terminal width so the
-/// terminal never soft-wraps into column 0. Pure terminal-UI state — shared by
-/// the streaming renderers.
+/// exclusively for status glyphs. A reasoning block leads with its own dim ✻
+/// instead, and leaves the • for the answer. Hard-wraps text at the terminal
+/// width so the terminal never soft-wraps into column 0. Pure terminal-UI
+/// state — shared by the streaming renderers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ResponsePosition {
     is_started: bool,
@@ -1572,6 +1573,8 @@ pub(crate) struct ResponsePosition {
 
 pub(crate) struct ResponseGlyphState {
     started: bool,
+    /// Inside a reasoning block: `Some(false)` until its ✻ lead is drawn.
+    reasoning: Option<bool>,
     pub(crate) visible_col: usize,
     max_col: usize,
 }
@@ -1594,10 +1597,22 @@ impl ResponseGlyphState {
     pub(crate) fn new(terminal_width: usize) -> Self {
         Self {
             started: false,
+            reasoning: None,
             visible_col: 0,
             // Ensure at least 4 columns to avoid degenerate wrapping.
             max_col: terminal_width.max(4),
         }
+    }
+
+    /// The rows that follow are reasoning. Its first row leads with ✻ — the
+    /// mark that this is the model thinking, which the spinner's "Thinking..."
+    /// says only while it streams — and the response's • stays for the answer.
+    pub(crate) fn begin_reasoning(&mut self) {
+        self.reasoning = Some(false);
+    }
+
+    pub(crate) fn end_reasoning(&mut self) {
+        self.reasoning = None;
     }
 
     /// Apply the current viewport before emitting the next response chunk.
@@ -1647,13 +1662,24 @@ impl ResponseGlyphState {
                         self.visible_col = 0;
                     }
                     if self.visible_col == 0 {
-                        if self.started {
-                            out.plain("  ");
-                        } else {
-                            self.started = true;
+                        let lead = match &mut self.reasoning {
+                            Some(led) if !*led => {
+                                *led = true;
+                                Some((TextRole::Reasoning, "✻"))
+                            }
+                            Some(_) => None,
+                            None if self.started => None,
+                            None => {
+                                self.started = true;
+                                Some((TextRole::Strong, "•"))
+                            }
+                        };
+                        if let Some((role, glyph)) = lead {
                             first_glyph = Some(out.text.len());
-                            out.push(theme().style(TextRole::Strong), "•");
+                            out.push(theme().style(role), glyph);
                             out.plain(" ");
+                        } else {
+                            out.plain("  ");
                         }
                     }
                     out.append(&row);

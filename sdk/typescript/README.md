@@ -22,6 +22,34 @@ contract](../../docs/design/codex-native-queue-callback.md) specifies the explic
 native home, bounded unloaded producer, Unknown/no-replay behavior and actual
 native/ConPTY acceptance. Socket callbacks remain the default.
 
+## Claude Code channel attachment
+
+Claude Code joins the agent network through the fixed-session bridge with
+`claudeChannel` in its config. The bridge declares the Claude Code
+[`claude/channel`](https://code.claude.com/docs/en/channels-reference) capability
+and asks scode for [client-owned peer input](../../docs/acp.md#client-owned-peer-input-clientcapabilities_metasudocodepeerinput):
+each peer message arrives in the Claude Code session as
+`<channel source="…" from="…" verified="…">` holding the same
+`<mailbox-message>` block a scode model reads, and the scode session's own model
+never answers it. Claude replies with `scode_send`; `scode_agent_list`,
+`scode_prompt` and `scode_status` are unchanged.
+
+```json
+{ "version": 1, "scodeArgv": ["/abs/scode", "acp"], "workspace": "/abs/workspace",
+  "acpSessionId": "EXISTING_NODE_SESSION", "auditLog": "/abs/private/audit.jsonl",
+  "claudeChannel": { "peerPolicy": "node-namespace" } }
+```
+
+`node-namespace` accepts any sender the Node stamped, after `agent_list` proves
+the session's Node identity, and marks events `verified="true"`. `allowlist`
+with `peers` accepts only those names and marks them `verified="false"`,
+because without that check `from` is self-reported. Register the bridge as an
+MCP server (for example `claude mcp add nexus_scode -- node /abs/server.cjs
+--config /abs/private/claude.json`) and start Claude Code with
+`claude --dangerously-load-development-channels server:nexus_scode` while
+channels are in research preview. A scode without client-owned peer input is
+refused at startup instead of answering peers alongside Claude.
+
 ## Global native Codex attachment
 
 The `--codex` entry connects all loaded user-root threads through one per-user

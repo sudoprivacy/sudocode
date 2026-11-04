@@ -13,6 +13,7 @@ const actor = scenario === 'operator'
 const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
 const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
 let sessionId;
+let peerOwned = false;
 const frame = (hash, value) => {
   const bytes = Buffer.from(value), length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length)); hash.update(length).update(bytes);
@@ -41,11 +42,15 @@ const result = (value, tool, input) => {
   } } } } };
 };
 const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
-  .onRequest(acp.methods.agent.initialize, () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true },
-    ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
-      version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
-    } } } }),
-  }))
+  .onRequest(acp.methods.agent.initialize, ctx => {
+    peerOwned = scenario.startsWith('channel')
+      && ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version >= 1;
+    return { protocolVersion: 1, agentCapabilities: { loadSession: true },
+      ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
+        version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
+      }, ...(peerOwned ? { peerInput: { version: 1 } } : {}) } } }),
+    };
+  })
   .onRequest(acp.methods.agent.session.new, () => {
     sessionId=`session-${randomUUID()}`;log({method:'session/new',sessionId});return {sessionId};
   })
@@ -55,7 +60,16 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
       _meta:{sudocode:{a2a:{from:ctx.params.from,kind:'message'}}}});
     return {};
   })
-  .onRequest(acp.methods.agent.session.load, ctx => { sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId }); return {}; })
+  .onRequest(acp.methods.agent.session.load, ctx => {
+    sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
+    // A client that owns peer input hears peers even before its own startup completes.
+    if (peerOwned) setTimeout(() => { for (const from of ['fixture-peer', 'stranger']) {
+      void ctx.client.notify('_sudocode/session/peer_message', { sessionId,
+        text: `<mailbox-message from="${from}" summary="greeting">\nhello from ${from}\n</mailbox-message>`,
+        body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting' } } }).catch(() => {});
+    } }, 50);
+    return {};
+  })
   .onRequest(acp.methods.agent.session.prompt, async ctx => {
     log({ method: 'session/prompt' });
     if (scenario !== 'task') throw new Error('Unexpected model path');

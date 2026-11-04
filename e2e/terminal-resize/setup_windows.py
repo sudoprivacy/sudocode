@@ -89,21 +89,44 @@ def verify_archive(archive):
 def download_archive(archive):
     url = f"https://update.code.visualstudio.com/commit:{COMMIT}/win32-x64-archive/stable"
     temporary = archive.with_suffix(".partial")
-    for attempt in range(1, 4):
+    temporary.unlink(missing_ok=True)
+    stalled = 0
+    for attempt in range(1, 11):
+        offset = temporary.stat().st_size if temporary.exists() else 0
         try:
-            with urllib.request.urlopen(url, timeout=120) as response, temporary.open("wb") as out:
-                shutil.copyfileobj(response, out)
+            headers = {"Range": f"bytes={offset}-"} if offset else {}
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as response:
+                # Append only when the server confirms the requested offset;
+                # otherwise the response restarts the whole archive.
+                resumed = offset and response.status == 206 and (
+                    response.headers.get("Content-Range", "").startswith(f"bytes {offset}-"))
+                with temporary.open("ab" if resumed else "wb") as out:
+                    shutil.copyfileobj(response, out)
+                # Chunked reads end silently at an early close, leaving the
+                # rest of the declared length unread.
+                if response.length:
+                    raise IncompleteRead(b"", response.length)
             # A CDN may return a truncated or incorrect body without an HTTP
             # error. Never promote it to the cache before checking the pin.
             verify_archive(temporary)
             temporary.replace(archive)
             return
-        except (OSError, ValueError, IncompleteRead) as error:
+        except ValueError as error:
+            # Wrong bytes cannot be repaired by resuming; start over.
             temporary.unlink(missing_ok=True)
-            if attempt == 3:
-                raise
-            print(f"Terminal download attempt {attempt}/3 failed: {error}; retrying", flush=True)
-            time.sleep(attempt)
+            stalled += 1
+            failure = error
+        except (OSError, IncompleteRead) as error:
+            # Keep the received prefix; the next request resumes after it.
+            progressed = temporary.exists() and temporary.stat().st_size > offset
+            stalled = 0 if progressed else stalled + 1
+            failure = error
+        if stalled == 3 or attempt == 10:
+            temporary.unlink(missing_ok=True)
+            raise failure
+        print(f"Terminal download attempt {attempt} failed: {failure}; "
+              f"retrying from byte {temporary.stat().st_size if temporary.exists() else 0}", flush=True)
+        time.sleep(min(attempt, 5))
 
 
 def main():

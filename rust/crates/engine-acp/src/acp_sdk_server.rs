@@ -874,8 +874,10 @@ async fn ensure_a2a_receiver(
         cx.clone(),
         agent,
         session_id.to_owned(),
-        client_owned,
-        verified,
+        PeerRoute {
+            client_owned,
+            verified,
+        },
     ));
 }
 
@@ -884,6 +886,15 @@ type PeerDelivery = (
     std::sync::mpsc::SyncSender<bool>,
 );
 type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
+
+/// Where a session's peer messages go, and what is known about their senders.
+#[derive(Clone, Copy)]
+struct PeerRoute {
+    /// The client owns peer input (`peerInput`): deliver to it, start no turn.
+    client_owned: bool,
+    /// The session's mailbox authenticates every writer.
+    verified: bool,
+}
 
 async fn admit_peer_receiver(
     registry: &SharedSessionRegistry,
@@ -978,9 +989,12 @@ async fn run_peer_receiver(
     cx: ConnectionTo<Client>,
     agent: String,
     mut bound: String,
-    client_owned: bool,
-    verified: bool,
+    route: PeerRoute,
 ) {
+    let PeerRoute {
+        client_owned,
+        verified,
+    } = route;
     let stop = receiver.stop.clone();
     loop {
         // A retried mailbox cursor must refer to the same still-pending input.

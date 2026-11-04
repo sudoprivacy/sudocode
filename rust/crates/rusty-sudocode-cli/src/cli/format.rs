@@ -1,13 +1,14 @@
 //! Pure formatting and report functions extracted from `main.rs`.
 
 mod a2a;
+mod agent;
 mod plan;
+pub(crate) mod reasoning;
 use crate::render::TextRole;
 pub(super) use a2a::summary_preview;
 
 use std::fmt::Write as _;
 
-use engine_core::{AuthMode, ProviderKind};
 use runtime::{self, TokenUsage};
 use std::time::Duration;
 #[cfg(test)]
@@ -16,13 +17,9 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) use crate::render::text_layout::display_width;
 use crate::render::text_layout::{truncate_to_width, wrap_ansi_to_width};
 
+use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
-use crate::render::{styled_text::StyledText, StyledLine};
-use crate::{
-    load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
-    InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
-    SESSION_AUTO_SAVE_PATH, VERSION,
-};
+use crate::{GitWorkspaceSummary, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, VERSION};
 use crossterm::style::Color;
 
 // ---------------------------------------------------------------------------
@@ -108,10 +105,9 @@ pub(crate) fn render_message(
                         // model wrote for itself, and letting a stray `#` or
                         // `*` in it become a heading or emphasis would make it
                         // louder than the answer it belongs under.
-                        let thinking =
-                            format!("{}{}", thinking_header(), dim_thinking(thinking.trim_end()));
                         crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out, &thinking,
+                            &mut out,
+                            &reasoning::block(thinking.trim_end(), term_width),
                         );
                     }
                     runtime::ContentBlock::ToolUse { id, input, .. } => {
@@ -238,32 +234,6 @@ pub(crate) fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         .join("\n")
 }
 
-/// Reasoning is styled prose, never parsed as Markdown. Both live and replay
-/// consume this representation; terminal adapters alone serialize ANSI.
-pub(crate) fn dim_thinking_styled(text: &str) -> StyledText {
-    StyledText::from_ansi_with_style(text, theme().style(TextRole::Reasoning))
-}
-
-pub(crate) fn thinking_header_styled() -> StyledText {
-    let mut text = dim_thinking_styled("✻ Thinking…");
-    text.plain("\n");
-    text
-}
-
-#[inline]
-pub(crate) fn dim_thinking(text: &str) -> String {
-    let mut output = String::new();
-    dim_thinking_styled(text).write_ansi_lines(&mut output);
-    output
-}
-
-#[inline]
-pub(crate) fn thinking_header() -> String {
-    let mut output = String::new();
-    thinking_header_styled().write_ansi_lines(&mut output);
-    output
-}
-
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant
 // constants. Expressed via concat! so the value can remain a `const`.
 pub(crate) const DISPLAY_TRUNCATION_NOTICE: &str = concat!(
@@ -283,77 +253,13 @@ pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
 /// cut with an ellipsis. The full result is still in the session file.
 pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS: usize = 200;
 
-pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::Xai => "xai",
-        ProviderKind::OpenAi => "openai",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-    }
-}
-
-pub(crate) fn format_connected_line(model: &str) -> String {
-    format_connected_line_with_mode(model, None)
-}
-
-pub(crate) fn format_connected_line_with_mode(model: &str, mode: Option<AuthMode>) -> String {
-    let config = load_sudocode_config_for_current_dir();
-    format_connected_line_with_config(model, mode, &config)
-}
-
-pub(crate) fn format_connected_line_with_config(
-    model: &str,
-    mode: Option<AuthMode>,
-    sudocode_config: &engine_core::SudoCodeConfig,
-) -> String {
-    // Try to get provider label from sudocode.json config.
-    let resolved_mode = mode.or_else(|| {
-        // Auto-detect from model config: first available in priority order.
-        const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
-        let entry = engine_core::resolve_model(sudocode_config, model)?;
-        let mode_str = PRIORITY
-            .iter()
-            .find(|m| entry.providers.contains_key(**m))?;
-        AuthMode::parse(mode_str).ok()
-    });
-    let provider = {
-        // Look up provider name from config entry's mapping for the resolved mode.
-        let mode_key = resolved_mode.map(|m| m.label().to_string());
-        engine_core::resolve_model(sudocode_config, model)
-            .and_then(|entry| {
-                let mapping = if let Some(key) = &mode_key {
-                    entry.providers.get(key.as_str())
-                } else {
-                    entry.providers.values().next()
-                };
-                mapping.map(|m| m.provider.clone())
-            })
-            .unwrap_or_else(|| model.to_string())
-    };
-    let auth_hint = match resolved_mode {
-        Some(m) => format!(" ({})", m.label()),
-        None => String::new(),
-    };
-    let base_url = match mode {
-        Some(m) => engine_core::base_url_for_mode(m),
-        None => engine_core::read_base_url(),
-    };
-    let endpoint_hint = if base_url == engine_core::DEFAULT_BASE_URL {
-        String::new()
-    } else {
-        format!("\nEndpoint:  {base_url}")
-    };
-    format!("Connected: {model} via {provider}{auth_hint}{endpoint_hint}")
-}
-
 // The model / compact / sandbox report formatters now live in
 // `commands::reports` (shared with the ACP renderer so both render the same
 // reports from one definition). `format_model_report` gained a `config`
 // parameter there so it stays a pure formatter: the caller loads the config.
 pub(crate) use commands::reports::{
-    format_acp_compact_report, format_compaction_notice, format_compaction_report_with_messages,
-    format_model_report, format_model_switch_report, format_sandbox_report,
+    format_compaction_notice, format_compaction_report_with_messages, format_model_report,
+    format_model_switch_report, format_sandbox_report,
 };
 
 pub(crate) fn format_permissions_report(mode: &str) -> String {
@@ -540,15 +446,6 @@ pub(crate) fn format_resume_report(session_path: &str, message_count: usize, tur
     )
 }
 
-pub(crate) fn render_resume_usage() -> String {
-    format!(
-        "Resume
-  Usage            /resume <session-path|session-id|{LATEST_SESSION_REFERENCE}>
-  Auto-save        {SESSION_AUTO_SAVE_PATH}
-  Tip              use /session list to inspect saved sessions"
-    )
-}
-
 pub(crate) fn format_compact_report(
     removed: usize,
     resulting_messages: usize,
@@ -656,53 +553,6 @@ pub(crate) fn render_version_report() -> String {
     )
 }
 
-pub(crate) fn format_internal_prompt_progress_line(
-    event: InternalPromptProgressEvent,
-    snapshot: &InternalPromptProgressState,
-    elapsed: Duration,
-    error: Option<&str>,
-) -> String {
-    let elapsed_seconds = elapsed.as_secs();
-    let step_label = if snapshot.step == 0 {
-        "current step pending".to_string()
-    } else {
-        format!("current step {}", snapshot.step)
-    };
-    let mut status_bits = vec![step_label, format!("phase {}", snapshot.phase)];
-    if let Some(detail) = snapshot
-        .detail
-        .as_deref()
-        .filter(|detail| !detail.is_empty())
-    {
-        status_bits.push(detail.to_string());
-    }
-    let status = status_bits.join(" · ");
-    match event {
-        InternalPromptProgressEvent::Started => {
-            format!(
-                "🧭 {} status · planning started · {status}",
-                snapshot.command_label
-            )
-        }
-        InternalPromptProgressEvent::Update => {
-            format!("… {} status · {status}", snapshot.command_label)
-        }
-        InternalPromptProgressEvent::Heartbeat => format!(
-            "… {} heartbeat · {elapsed_seconds}s elapsed · {status}",
-            snapshot.command_label
-        ),
-        InternalPromptProgressEvent::Complete => format!(
-            "✔ {} status · completed · {elapsed_seconds}s elapsed · {} steps total",
-            snapshot.command_label, snapshot.step
-        ),
-        InternalPromptProgressEvent::Failed => format!(
-            "✘ {} status · failed · {elapsed_seconds}s elapsed · {}",
-            snapshot.command_label,
-            error.unwrap_or("unknown error")
-        ),
-    }
-}
-
 /// Render submitted input through the same formatter for live and replay.
 ///
 /// `lines_consumed` is the number of `\n`-delimited input lines so callers
@@ -768,6 +618,11 @@ pub(crate) enum ToolKind {
     Send,
     AgentList,
     WritePlan,
+    AgentSpawn,
+    PidFork,
+    PidOutput,
+    PidStatus,
+    PidKill,
 }
 
 impl ToolKind {
@@ -788,6 +643,11 @@ impl ToolKind {
             Self::Send => "Send",
             Self::AgentList => "AgentList",
             Self::WritePlan => "WritePlan",
+            Self::AgentSpawn => "AgentSpawn",
+            Self::PidFork => "PidFork",
+            Self::PidOutput => "PidOutput",
+            Self::PidStatus => "PidStatus",
+            Self::PidKill => "PidKill",
         }
     }
 
@@ -817,6 +677,11 @@ impl ToolKind {
             "send" | "Send" => Some(Self::Send),
             "agent_list" | "AgentList" => Some(Self::AgentList),
             "write_plan" | "WritePlan" => Some(Self::WritePlan),
+            "agent_spawn" | "AgentSpawn" => Some(Self::AgentSpawn),
+            "pid_fork" | "PidFork" => Some(Self::PidFork),
+            "pid_output" | "PidOutput" => Some(Self::PidOutput),
+            "pid_status" | "PidStatus" => Some(Self::PidStatus),
+            "pid_kill" | "PidKill" => Some(Self::PidKill),
             _ => None,
         }
     }
@@ -889,22 +754,6 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     }
 }
 
-/// Staging (in-flight) render for a tool call: the SAME card the completed
-/// scrollback render draws, but with no `output` yet and a yellow Running
-/// frame. A thin shell over [`tool_card_content`] — the SSOT that guarantees a
-/// tool looks identical running and done, differing only in frame color and
-/// whether the result body is present.
-///
-/// **Invariant: overlay-only.** `Running` (amber) is a live status; the sole
-/// caller is the iocraft staging overlay ([`crate::repl_ui`]), a self-clearing
-/// region that removes the card on completion. It must NEVER be committed to
-/// durable scrollback — that would freeze an amber "in-flight" card above the
-/// real result forever. Scrollback carries exactly one card per call: the
-/// completed (green/red) [`format_tool_result`].
-pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
-    render_tool_card(&tool_call_start_content(name, input), ToolStatus::Running)
-}
-
 pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardContent {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -937,6 +786,10 @@ pub(crate) fn tool_card_content(
         }
         Some(ToolKind::AgentList) => a2a::agent_list_card(input, output, status),
         Some(ToolKind::WritePlan) => plan::card(output, status),
+        Some(ToolKind::AgentSpawn | ToolKind::PidFork) => agent::spawn_card(name, input, output),
+        Some(ToolKind::PidOutput | ToolKind::PidStatus | ToolKind::PidKill) => {
+            agent::pid_card(name, input, output)
+        }
         Some(ToolKind::Read) => read_card(input, output, status),
         Some(ToolKind::Write) => write_card(input, output, status),
         Some(ToolKind::Edit) => edit_card(input, output, status),
@@ -2604,61 +2457,6 @@ pub(crate) fn format_permission_prompt_box(
     out
 }
 
-/// Compact one-line summary of all tool calls that ran in a turn.
-///
-/// Returns `None` when no tool calls happened (silent for plain
-/// text-only turns). Each entry shows the tool name followed by a status
-/// glyph (`✓` for success, `✗` for error). The line ends with the total
-/// count and turn duration so users can read it as `"3 tools, 1.2s"`.
-///
-/// Example output:
-/// ```text
-/// 🔧 bash ✓  read_file ✓  edit_file ✗ (3 tools, 4.7s)
-/// ```
-pub(crate) fn format_tool_timeline(
-    tool_results: &[runtime::ConversationMessage],
-    elapsed: Duration,
-) -> Option<String> {
-    let mut entries: Vec<(String, bool)> = Vec::new();
-    for message in tool_results {
-        for block in &message.blocks {
-            if let runtime::ContentBlock::ToolResult {
-                tool_name,
-                is_error,
-                ..
-            } = block
-            {
-                entries.push((tool_name.clone(), !*is_error));
-            }
-        }
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    let count = entries.len();
-    let t = theme();
-    let success_fg = t.fg_seq(TextRole::Success);
-    let error_fg = t.fg_seq(TextRole::Error);
-    let parts: Vec<String> = entries
-        .into_iter()
-        .map(|(name, ok)| {
-            // Bold tool name; green check or red cross.
-            let glyph = if ok {
-                format!("{success_fg}✓{RESET}")
-            } else {
-                format!("{error_fg}✗{RESET}")
-            };
-            format!("{BOLD}{name}{RESET} {glyph}")
-        })
-        .collect();
-    let body = parts.join("  ");
-    let plural = if count == 1 { "tool" } else { "tools" };
-    let secs = elapsed.as_secs_f64();
-    Some(format!(
-        "🔧 {body} {DIM}({count} {plural}, {secs:.1}s){RESET}"
-    ))
-}
-
 pub(crate) fn truncate_output_for_display(
     content: &str,
     max_lines: usize,
@@ -3127,26 +2925,6 @@ mod tests {
         );
     }
 
-    fn user_message_with_results(results: Vec<(&str, bool)>) -> runtime::ConversationMessage {
-        runtime::ConversationMessage {
-            history: None,
-            role: runtime::MessageRole::User,
-            blocks: results
-                .into_iter()
-                .enumerate()
-                .map(|(i, (name, is_error))| runtime::ContentBlock::ToolResult {
-                    tool_use_id: format!("tool_{i}"),
-                    tool_name: name.to_string(),
-                    output: String::new(),
-                    is_error,
-                })
-                .collect(),
-            usage: None,
-            model: None,
-            duration_ms: None,
-        }
-    }
-
     fn strip_ansi(s: &str) -> String {
         let mut out = String::new();
         let mut chars = s.chars().peekable();
@@ -3266,73 +3044,6 @@ mod tests {
             rendered.contains("Edited src/main.rs"),
             "edit header must show the path from input, not `?`: {rendered}"
         );
-    }
-
-    #[test]
-    fn tool_timeline_is_silent_when_no_tools_ran() {
-        let messages = vec![user_message_with_results(vec![])];
-        assert!(format_tool_timeline(&messages, Duration::from_millis(500)).is_none());
-        assert!(format_tool_timeline(&[], Duration::from_millis(500)).is_none());
-    }
-
-    #[test]
-    fn tool_timeline_singular_form_for_one_tool() {
-        let messages = vec![user_message_with_results(vec![("bash", false)])];
-        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(1.2)).unwrap();
-        let plain = strip_ansi(&rendered);
-        assert!(plain.contains("bash"), "{plain}");
-        assert!(plain.contains("✓"), "{plain}");
-        assert!(plain.contains("(1 tool, 1.2s)"), "{plain}");
-    }
-
-    #[test]
-    fn tool_timeline_lists_each_tool_with_status_glyph() {
-        let messages = vec![user_message_with_results(vec![
-            ("bash", false),
-            ("read_file", false),
-            ("edit_file", true),
-        ])];
-        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(4.7)).unwrap();
-        let plain = strip_ansi(&rendered);
-        assert!(plain.contains("bash ✓"), "{plain}");
-        assert!(plain.contains("read_file ✓"), "{plain}");
-        assert!(plain.contains("edit_file ✗"), "{plain}");
-        assert!(plain.contains("(3 tools, 4.7s)"), "{plain}");
-    }
-
-    #[test]
-    fn tool_timeline_walks_multiple_messages() {
-        let messages = vec![
-            user_message_with_results(vec![("bash", false)]),
-            user_message_with_results(vec![("read_file", false)]),
-        ];
-        let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
-        let plain = strip_ansi(&rendered);
-        assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
-    }
-
-    #[test]
-    fn running_header_and_completed_card_agree_on_tool_label() {
-        // Bug: the running card built its header from the raw wire name
-        // (lowercase `bash`), while the completed card hardcoded `Bash` — so a
-        // tool changed case the moment it finished. Both must resolve the same
-        // canonical label via ToolKind.
-        let running = strip_ansi(&format_tool_call_start("bash", r#"{"command":"echo hi"}"#));
-        let done = strip_ansi(&format_tool_result(
-            "bash",
-            r#"{"command":"echo hi"}"#,
-            r#"{"stdout":"hi","stderr":""}"#,
-            false,
-        ));
-        assert!(
-            running.contains("Bash"),
-            "running header should show canonical `Bash`: {running}"
-        );
-        assert!(
-            !running.contains("bash"),
-            "running header must not show lowercase `bash`: {running}"
-        );
-        assert!(done.contains("Bash"), "completed card shows `Bash`: {done}");
     }
 
     #[test]

@@ -7,6 +7,7 @@ import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
 import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
+import { installCodexMcp } from './codexSetup';
 
 interface Manifest {
   sourceCommit: string;
@@ -44,7 +45,9 @@ async function main(): Promise<void> {
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
     'prepare-codex-owner': { type: 'boolean' },
     'launch-codex': {type:'boolean'},
+    'install-codex': {type:'boolean'}, 'command-entry': {type:'string'},
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
+    'native-env-file': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
@@ -58,10 +61,12 @@ async function main(): Promise<void> {
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
       + 'scode-acp-bridge --init-codex --config FILE --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES [--port 23262]\n'
       + '  Use --native-argv JSON_ARGV instead of --native-codex to preserve an official wrapper command.\n'
+      + '  --native-env-file PRIVATE_JSON pins the complete native environment, including CODEX_HOME.\n'
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
+      + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
       + 'scode-acp-bridge --init-codex-operator --config FILE --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]\n'
@@ -74,6 +79,12 @@ async function main(): Promise<void> {
   }
   if (values.verify) { verify(); return; }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
+  if(values['install-codex']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','install-codex','command-entry'].includes(key)))throw new Error('Select one installation mode');
+    if(!values['command-entry'])throw new Error('--command-entry must select the ordinary Codex launcher');
+    console.log(JSON.stringify(await installCodexMcp(values.config,__filename,values['command-entry'])));return;
+  }
+  if(values['command-entry']&&!values['init-codex'])throw new Error('--command-entry requires --install-codex or --init-codex');
   if(values['launch-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','launch-codex'].includes(key)))throw new Error('Select one foreground launch mode');
     process.exitCode=await launchCodexFromConfig(values.config,positionals);return;
@@ -96,7 +107,7 @@ async function main(): Promise<void> {
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace
-      ||values['session-id']||values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Select one preparation mode');
+      ||values['session-id']||values['native-codex']||values['native-argv']||values['native-env-file']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Select one preparation mode');
     if(!values.binding||!path.isAbsolute(values.binding))throw new Error('--binding must be an absolute private mapping file');
     console.log(JSON.stringify(await prepareExistingCodexBinding(values.config,JSON.parse(fs.readFileSync(values.binding,'utf8')))));
     return;
@@ -105,12 +116,15 @@ async function main(): Promise<void> {
   if(values['init-codex']){
     if(values.init||values.codex||values['codex-owner']||values.scode||values.workspace||values['session-id'])throw new Error('Select one initializer mode');
     if(Boolean(values['native-codex'])===Boolean(values['native-argv']))throw new Error('Select exactly one native executable or argv');
-    console.log(JSON.stringify(prepareCodexMcp(values.config,values['native-argv']?JSON.parse(values['native-argv']):values['native-codex']!,JSON.parse(values.enrollment??'null'),
+    if(values['native-env-file']&&!path.isAbsolute(values['native-env-file']))throw new Error('--native-env-file must be an absolute private file');
+    const nativeArgv=values['native-argv']?JSON.parse(values['native-argv']):[values['native-codex']!];
+    console.log(JSON.stringify(prepareCodexMcp(values.config,values['native-env-file']
+      ? {codexArgv:nativeArgv,env:JSON.parse(fs.readFileSync(values['native-env-file'],'utf8'))} : nativeArgv,JSON.parse(values.enrollment??'null'),
       JSON.parse(values.peers??'null'),__filename,values.port===undefined?undefined:Number(values.port),
-      values['peer-policy'] as 'allowlist'|'node-namespace'|undefined)));
+      values['peer-policy'] as 'allowlist'|'node-namespace'|undefined,values['command-entry'])));
     return;
   }
-  if(values['native-codex']||values['native-argv']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Codex initializer fields require --init-codex');
+  if(values['native-codex']||values['native-argv']||values['native-env-file']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Codex initializer fields require --init-codex');
   if (values.init) {
     const executable = values.scode;
     const workspace = values.workspace;

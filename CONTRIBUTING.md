@@ -283,8 +283,11 @@ and refuses a signed receipt for the wrong actual base.
 
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
-while its profiles run; a second invocation prints the holder from
-`host-lease.json` and starts when that holder exits, including an abrupt exit.
+while its profiles run; a later invocation prints the holder from
+`host-lease.json` and its queue position. Waiters start in arrival order when the
+holder exits, including an abrupt exit; each holds a ticket under
+`~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
+`e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
 Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
@@ -330,13 +333,13 @@ or invalid scenario stops the matrix. Drivers build in the binary-free
 `scode-benchmark-drivers` package, so measuring compiles no extra CLI binary.
 The matrix is mandatory on the author's local Docker before push for CLI,
 engine-core, PTY harness/helper, rendering-driver and named native observer inputs.
-It has no scheduled or manual replacement. Cargo/dependency metadata and unrelated
-crate source no longer select it; their indirect performance effects are outside
-this reduced scope. The browser functional smoke remains separate. Required plan
-output and signed evidence attribute both checks to the exact PR head.
-Foreground/background task-specific performance comparisons are removed from
-required acceptance; their functional PTY cases retain the native suite's scope.
-No new scheduled/manual replacement or extra feature-coverage credit is added.
+Cargo/dependency metadata and unrelated crate source do not select it per PR.
+The browser functional smoke remains separate. Required plan output and signed
+evidence attribute both checks to the exact PR head. Foreground/background task
+and repeated-turn comparisons run in the `stress` profile on every release
+candidate, which also judges dependency-only changes; see
+[Release acceptance coverage](#release-acceptance-coverage). Their functional
+PTY cases keep the native suite's per-PR scope.
 
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
@@ -562,11 +565,10 @@ stream-capture test and startup harness. Other business/source and shared PTY
 helper changes skip the additional native optimized builds on the author and
 complementary hosts. Their applicable native functional, resize and service
 checks remain; selected Docker rendering still builds and measures a real Linux
-release. This reduces coverage: optimized-only Windows/macOS behavior and their
-startup budget are not checked on every ordinary source PR. Release tags retain
-their existing platform builds; this change does not add full release-artifact
-journey acceptance there. `RELEASE_ACCEPTANCE_SCOPE` and the mandatory plan state
-this boundary. Real committed Git plans cover retained/omitted inputs, mixed
+release. Optimized-only Windows/macOS behavior and their startup budget are
+judged on every release candidate on Linux, Windows and macOS; see
+[Release acceptance coverage](#release-acceptance-coverage).
+`RELEASE_ACCEPTANCE_SCOPE` and the mandatory plan state this per-PR boundary. Real committed Git plans cover retained/omitted inputs, mixed
 edits, renames and deletions; Cargo/native controls retain the selected release
 artifact and driver identity assertions.
 An actual Cargo/native-process fixture checks driver reuse, the release binary's
@@ -1066,6 +1068,29 @@ binaries; the same immutable mirror verification and promotion rules apply.
 pinning, optional bundle delivery and checksum rejection with the real publisher
 and installer through a local HTTP mirror; it is also a CI gate.
 
+### Release acceptance coverage
+
+Accept every release candidate with one dispatch on its commit:
+
+```bash
+gh workflow run rust-ci.yml --ref <tag-or-branch> -f live_only=true
+```
+
+Per-PR acceptance is scoped to each PR's inputs. The release dispatch covers
+the candidate as a whole, comparing against the previous `v*` tag:
+
+| Coverage | Per PR (local + complementary CI) | Release dispatch |
+|---|---|---|
+| Rendering matrix against the fixed baseline | `core`: short reply and 12 KiB Markdown, 36 judged observations, for CLI, engine-core, PTY and rendering-driver inputs | `stress`: `core` plus foreground task, background task and repeated turns, 84 judged observations (`release-rendering`, Linux Docker) |
+| Cargo/dependency metadata and unrelated crate source | Native functional checks | Indirect performance effects judged by the same `stress` matrix |
+| Optimized build, stream/resume journey, 100 ms startup budget (`native-release`) | Cargo/build/vendor, CLI entry/startup/parser and runtime configuration inputs | Linux, Windows and macOS on every candidate (`release-native`) |
+| Real provider and model journeys | Scripted model transport | Live API smoke and Linux/Windows PTY suites |
+
+The rendering and native jobs use no credentials. Their evidence is uploaded as
+`release-rendering` and `release-native-<os>` artifacts for 30 days. The same
+stress matrix runs locally with
+`SCODE_RENDERING_PROFILE=stress python .github/local-acceptance/checks.py --native-checks rendering --base <previous-tag>`.
+
 Sudo Code forbids `unsafe_code` workspace-wide (`unsafe_code = "forbid"`
 in `rust/Cargo.toml`). Relaxing this for a single crate goes through
 the PR description first.
@@ -1170,8 +1195,9 @@ status, and scoped mandatory local rendering judges their typing latency. See th
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.
 
-The daily `Model Compatibility` workflow discovers gateway models and runs
-live PTYs in batches of at most eight, with three batches running concurrently.
+When explicitly dispatched under the [provider acceptance policy](#company-model-routing-in-ci),
+the `Model Compatibility` workflow discovers gateway models and runs live PTYs
+in batches of at most eight, with three batches running concurrently.
 Each process has one 90-second deadline. A pass requires exit 0 and the expected
 persisted assistant answer; model names and error text cannot satisfy it.
 If retry backoff outlasts the deadline, the report uses the last HTTP attempt's
@@ -1186,7 +1212,8 @@ compatibility and is never retried. An all-refused sweep still fails the
 aggregate's requirement for a real pass. Reports include request parameters
 and HTTP results for diagnosis, without prompts, tool definitions or headers.
 
-CI gates these on every PR. Run them locally before pushing:
+Ordinary PRs gate source checks selected by the protected acceptance plan.
+For Rust changes, run the applicable local checks before pushing:
 
 ```bash
 cd rust/
@@ -1281,6 +1308,8 @@ chosen branch. Normal manual cache/preflight runs do not authorize it:
 gh workflow run rust-ci.yml --ref <branch> -f live_only=true
 ```
 
+The same dispatch runs the credential-free release coverage jobs; see
+[Release acceptance coverage](#release-acceptance-coverage).
 There is no scheduled paid PTY/model compatibility run. Select one local or
 manual execution for the required candidate coverage rather than repeating it
 before and after every merge. A deterministic native pass is not evidence of

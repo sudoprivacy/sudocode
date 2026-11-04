@@ -1,4 +1,3 @@
-use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -176,20 +175,17 @@ pub const DIM: &str = "\x1b[2m";
 /// ANSI bold.
 pub const BOLD: &str = "\x1b[1m";
 
-/// The REPL prompt glyph (`❯`). Single source of truth: the live input line,
-/// the resumed-history echo, and any other prompt reprint all reference this so
+/// The REPL prompt glyph (`❯`) and the space after it — the exact prefix a
+/// prompt line starts with. Single source of truth: the live input line, the
+/// resumed-history echo, and any other prompt reprint all reference this so
 /// they can never drift (a past bug rendered resumed messages with `›` while
 /// the live prompt used `❯`).
-pub const PROMPT_GLYPH: &str = "\u{276f}";
-/// The prompt glyph followed by one space — the exact prefix a prompt line
-/// starts with.
 pub const PROMPT_PREFIX: &str = "\u{276f} ";
 
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
 #[derive(Clone)]
 pub struct SpinnerRef {
-    pb: ProgressBar,
     progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -202,7 +198,6 @@ impl SpinnerRef {
     /// for the iocraft REPL path, sharing the same activity clock.
     pub fn from_activity_state(state: &activity::ActivityState) -> Self {
         Self {
-            pb: ProgressBar::hidden(),
             progress: Arc::clone(&state.progress),
             is_thinking: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
@@ -307,7 +302,6 @@ impl SpinnerHandle {
     #[must_use]
     pub fn spinner_ref(&self) -> SpinnerRef {
         SpinnerRef {
-            pb: self.pb.clone(),
             progress: Arc::clone(&self.progress),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
@@ -374,13 +368,6 @@ impl SpinnerHandle {
     pub fn clear(&mut self) {
         self.stop_updater();
         self.pb.finish_and_clear();
-    }
-
-    pub fn finish(&mut self, label: &str) {
-        self.stop_updater();
-        self.pb.finish_and_clear();
-        let success = theme().fg_seq(TextRole::Success);
-        println!("{success}✔ {label}{RESET}");
     }
 
     pub fn fail(&mut self, label: &str) {
@@ -623,11 +610,6 @@ impl TerminalRenderer {
     pub(crate) fn with_color_support(mut self, support: ColorSupport) -> Self {
         self.color_support = support;
         self
-    }
-
-    #[must_use]
-    pub fn render_markdown(&self, markdown: &str) -> String {
-        self.render_markdown_with_width(markdown, query_terminal_width())
     }
 
     /// Adapt prompt content through the same Markdown engine as answers,
@@ -1581,9 +1563,10 @@ fn line_closes_fence(line: &str, opener: FenceMarker) -> bool {
 
 /// Stateful processor that prefixes the first line with • (bold) and indents
 /// all continuation lines by two spaces so that column 0 is reserved
-/// exclusively for status glyphs. Hard-wraps text at the terminal width so the
-/// terminal never soft-wraps into column 0. Pure terminal-UI state — shared by
-/// the streaming renderers.
+/// exclusively for status glyphs. A reasoning block leads with its own dim ✻
+/// instead, and leaves the • for the answer. Hard-wraps text at the terminal
+/// width so the terminal never soft-wraps into column 0. Pure terminal-UI
+/// state — shared by the streaming renderers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ResponsePosition {
     is_started: bool,
@@ -1592,6 +1575,8 @@ pub(crate) struct ResponsePosition {
 
 pub(crate) struct ResponseGlyphState {
     started: bool,
+    /// Inside a reasoning block: `Some(false)` until its ✻ lead is drawn.
+    reasoning: Option<bool>,
     pub(crate) visible_col: usize,
     max_col: usize,
 }
@@ -1614,10 +1599,22 @@ impl ResponseGlyphState {
     pub(crate) fn new(terminal_width: usize) -> Self {
         Self {
             started: false,
+            reasoning: None,
             visible_col: 0,
             // Ensure at least 4 columns to avoid degenerate wrapping.
             max_col: terminal_width.max(4),
         }
+    }
+
+    /// The rows that follow are reasoning. Its first row leads with ✻ — the
+    /// mark that this is the model thinking, which the spinner's "Thinking..."
+    /// says only while it streams — and the response's • stays for the answer.
+    pub(crate) fn begin_reasoning(&mut self) {
+        self.reasoning = Some(false);
+    }
+
+    pub(crate) fn end_reasoning(&mut self) {
+        self.reasoning = None;
     }
 
     /// Apply the current viewport before emitting the next response chunk.
@@ -1667,13 +1664,24 @@ impl ResponseGlyphState {
                         self.visible_col = 0;
                     }
                     if self.visible_col == 0 {
-                        if self.started {
-                            out.plain("  ");
-                        } else {
-                            self.started = true;
+                        let lead = match &mut self.reasoning {
+                            Some(led) if !*led => {
+                                *led = true;
+                                Some((TextRole::Reasoning, "✻"))
+                            }
+                            Some(_) => None,
+                            None if self.started => None,
+                            None => {
+                                self.started = true;
+                                Some((TextRole::Strong, "•"))
+                            }
+                        };
+                        if let Some((role, glyph)) = lead {
                             first_glyph = Some(out.text.len());
-                            out.push(theme().style(TextRole::Strong), "•");
+                            out.push(theme().style(role), glyph);
                             out.plain(" ");
+                        } else {
+                            out.plain("  ");
                         }
                     }
                     out.append(&row);

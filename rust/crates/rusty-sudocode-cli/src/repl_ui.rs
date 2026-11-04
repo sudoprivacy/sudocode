@@ -45,7 +45,7 @@ mod transcript;
 mod transcript_view;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{row_text, AnsiText, RichText};
+use ansi_text::{row_text, RichText};
 use choice_text::ChoiceText;
 pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
@@ -374,13 +374,6 @@ impl UiCommandSender {
         });
     }
 
-    pub fn show_input_hint(&self, text: &str) {
-        self.set_tip(engine_core::Tip {
-            priority: engine_core::TipPriority::Normal,
-            message: text.to_string(),
-        });
-    }
-
     pub(crate) fn set_tip(&self, tip: engine_core::Tip) {
         let _ = self.tx.send(UiCommand::SetTip(tip));
     }
@@ -447,7 +440,7 @@ impl UiCommandSender {
 /// Submit the currently selected DialPad option. Shared by Enter key
 /// and digit-key shortcut paths (DRY).
 fn submit_dialpad_selection(
-    question: &QuestionPromptView,
+    _question: &QuestionPromptView,
     selected_index: usize,
     input_tx: &SyncSender<InputEvent>,
 ) {
@@ -970,26 +963,6 @@ pub struct ReplHandle {
 }
 
 impl ReplHandle {
-    /// Wait for the iocraft render loop thread to exit, with a timeout.
-    /// If the thread doesn't exit within 500ms (e.g. Windows PTY
-    /// interaction), abandon it — the process exit will clean up.
-    pub fn join(self) {
-        // Drop channels so the render loop sees Disconnected and exits.
-        drop(self.output);
-        drop(self.ui);
-        drop(self.input_rx);
-        if let Some(h) = self.ui_thread {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-            while !h.is_finished() {
-                if std::time::Instant::now() >= deadline {
-                    return; // Abandon — process exit will clean up.
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let _ = h.join();
-        }
-    }
-
     /// Decompose into parts for the coordinator event channel bridge.
     /// The returned join closure replaces `self.join()` — call it after
     /// the coordinator loop exits.
@@ -1021,27 +994,6 @@ impl ReplHandle {
         };
         (self.output, self.ui, self.input_rx, self.spinner, join_fn)
     }
-}
-
-/// Strip ANSI escape sequences (ESC[...m) to count visible characters.
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // Consume '[' then everything up to and including the terminating letter.
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
 }
 
 // ── PendingSlot — in-flight tools and queued messages ─────────────────
@@ -1391,10 +1343,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // task details when OpenTasks is applied between the two event consumers.
     // Clone for the terminal event handler.
     let input_tx_for_events = input_tx.clone();
-    let stdout_for_events = stdout.clone();
+    let _stdout_for_events = stdout.clone();
 
     hooks.use_terminal_events({
-        let pending_for_keys = Arc::clone(&pending);
+        let _pending_for_keys = Arc::clone(&pending);
         let input_frame = input_frame.clone();
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
@@ -2345,7 +2297,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .style(TextRole::Border)
         .foreground_color
         .and_then(ansi_text::ui_color);
-    let chrome_muted = chrome_theme.style(TextRole::Secondary);
     let question_style = chrome_theme.style(TextRole::Brand);
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),

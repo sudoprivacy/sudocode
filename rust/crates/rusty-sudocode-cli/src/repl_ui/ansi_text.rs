@@ -2,7 +2,9 @@ mod adapter;
 
 #[cfg(test)]
 use crate::render::TextRole;
-pub(super) use adapter::{ui_color, AnsiText, RichText};
+#[cfg(test)]
+use adapter::AnsiText;
+pub(super) use adapter::{ui_color, RichText};
 
 use crate::render::styled_text::StyledText;
 #[cfg(test)]

@@ -56,7 +56,7 @@ fn roundtrip() {
     assert!(screen.contains("File:"));
     if env.is_mock() {
         assert!(
-            screen.contains("✻ Thinking"),
+            screen.contains("✻ Compare the existing readers"),
             "reasoning remains visible: {screen}"
         );
         let lines: Vec<_> = screen.lines().collect();

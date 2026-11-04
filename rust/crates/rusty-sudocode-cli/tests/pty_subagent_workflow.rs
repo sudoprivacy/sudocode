@@ -326,6 +326,57 @@ fn assert_parent_prefix_stable(env: &TestEnv) {
     );
 }
 
+/// The spawn and collection cards say what happened, not the raw manifest.
+fn assert_agent_cards(shown: &str) {
+    let cards = without_escapes(shown);
+    for card in [
+        "AgentSpawn · Verification · ",
+        "Running in background · pid ",
+        "PidOutput · ",
+    ] {
+        assert!(
+            cards.contains(card),
+            "sub-agent cards show {card:?}: {cards}"
+        );
+    }
+    for noise in ["laneEvents", "manifestFile", "derivedState", "createdAt"] {
+        assert!(
+            !shown.contains(noise),
+            "sub-agent cards hide manifest field {noise}: {cards}"
+        );
+    }
+}
+
+/// Terminal output as text: drop CSI/OSC sequences and other escapes.
+fn without_escapes(raw: &str) -> String {
+    let mut text = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            text.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
 fn manifests(env: &TestEnv) -> Vec<Value> {
     fs::read_dir(env.workspace_root().join(".sudocode-agents"))
         .into_iter()
@@ -364,12 +415,14 @@ fn explicitly_collected_result_does_not_trigger_another_turn() {
     );
     // Results are append-only transcript output and may already have scrolled
     // out of the viewport when ConPTY publishes the completed-turn footer.
-    parent.expect(evidence).unwrap_or_else(|error| {
+    // `expect` returns the stream up to the match, which holds both cards.
+    let shown = parent.expect(evidence).unwrap_or_else(|error| {
         panic!(
             "collected evidence must reach the terminal: {error}\n{}",
             common::screen_tail(&parent, 4000)
         )
     });
+    assert_agent_cards(&shown);
     let before = common::turn_status_marker(&parent);
     parent
         .send("While CI runs, what is 17 + 25? Answer the number only.\r")

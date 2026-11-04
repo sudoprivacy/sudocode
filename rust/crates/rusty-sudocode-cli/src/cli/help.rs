@@ -8,7 +8,7 @@ use runtime::{ConfigLoader, ConfigSource, ContentBlock, ProjectContext, Session}
 use serde_json::json;
 
 use crate::cli::session::LATEST_SESSION_REFERENCE;
-use crate::render::{ansi_fg, theme, BOLD, RESET};
+use crate::render::{theme, BOLD, RESET};
 use crate::SESSION_AUTO_SAVE_PATH;
 use crate::{truncate_for_prompt, CliOutputFormat, LocalHelpTopic, STUB_COMMANDS, VERSION};
 
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn colorize_diff_paints_added_and_removed_lines() {
-        use crate::render::{ansi_fg, theme, BOLD, RESET};
+        use crate::render::{theme, BOLD, RESET};
         let t = theme();
         let added = t.fg_seq(crate::render::TextRole::Added);
         let removed = t.fg_seq(crate::render::TextRole::Removed);

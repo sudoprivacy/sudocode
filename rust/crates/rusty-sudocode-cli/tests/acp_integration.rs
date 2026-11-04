@@ -8879,7 +8879,10 @@ async fn direct_a2a_through_a_node_appends_once_as_the_session() {
     );
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     for local in [
-        runtime::agent_mailbox::inbox_path_under(&workspace.root, &receiver),
+        PathBuf::from(
+            runtime::mailbox::Mailbox::workspace_local(&workspace.root, sender.clone())
+                .transcript_path(&receiver),
+        ),
         PathBuf::from(
             runtime::mailbox::Mailbox::workspace_local(&pair_root, receiver.clone())
                 .transcript_path(&sender),

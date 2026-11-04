@@ -265,7 +265,7 @@ fn run_duet(transport: &Transport, offline: bool) {
     // failure being guarded is the ambient fallback writing a local file while
     // the tool still answers "sent". "Arrived" has to mean it arrived at the
     // daemon and nowhere else.
-    assert_no_local_duet_inbox(sender_env.workspace_root(), transport);
+    assert_no_local_duet_inbox(sender_env.workspace_root(), &sender_name, transport);
 
     // ── 4. The receiver surfaces it ────────────────────────────────────────
     // The REPL frames a peer message under `Message from <name>`. Seeing
@@ -498,8 +498,11 @@ fn assert_duet_receiver_receipt(
     );
 }
 
-fn assert_no_local_duet_inbox(workspace: &Path, transport: &Transport) {
-    let workspace_inbox = runtime::agent_mailbox::inbox_path_under(workspace, RECEIVER);
+fn assert_no_local_duet_inbox(workspace: &Path, sender: &str, transport: &Transport) {
+    let workspace_inbox = std::path::PathBuf::from(
+        runtime::mailbox::Mailbox::workspace_local(workspace, sender.to_string())
+            .transcript_path(RECEIVER),
+    );
     assert!(
         !workspace_inbox.exists(),
         "[{}] the sender is on nexus, so nothing may be written to {}",

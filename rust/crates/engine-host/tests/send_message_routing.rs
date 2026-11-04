@@ -376,7 +376,7 @@ fn the_envelope_carries_its_summary_over_nexus() {
 /// itself carries a later one.
 ///
 /// Pinned on the FRAMED path specifically, because that is where it was missing:
-/// the JSONL branch has always stamped inside `append_envelope_to_path`, while
+/// the JSONL branch has always stamped inside `append_envelope_via`, while
 /// the stream branch serialises the envelope as-is, so every message that ever
 /// crossed a `DT_STREAM` arrived with `timestamp` absent. A `StdFsBackend` pair
 /// root cannot show this — its `is_append_stream` is a hardcoded `false`, so it

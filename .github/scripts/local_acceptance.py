@@ -1336,53 +1336,112 @@ def try_host_lock(descriptor):
         return False
 
 
+def release_host_lock(descriptor):
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with contextlib.suppress(OSError):
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+
+def live_lease_tickets(queue, own):
+    """Return waiting tickets in arrival order, removing those whose waiter exited.
+
+    Each waiter locks its own ticket for its lifetime. A ticket whose lock can be
+    taken belongs to a process that exited, including after a crash or kill. A
+    ticket younger than ten seconds may not be locked yet and is kept.
+    """
+    live = [own]
+    for ticket in queue.glob("*.ticket"):
+        if ticket == own:
+            continue
+        try:
+            if time.time() - ticket.stat().st_mtime < 10:
+                live.append(ticket)
+                continue
+            descriptor = os.open(ticket, os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            abandoned = try_host_lock(descriptor)
+            if abandoned:
+                release_host_lock(descriptor)
+        finally:
+            os.close(descriptor)
+        if abandoned:
+            with contextlib.suppress(OSError):
+                ticket.unlink()
+        else:
+            live.append(ticket)
+    return sorted(live)
+
+
 @contextlib.contextmanager
 def host_acceptance_lease(attempt, head):
-    """Run one acceptance at a time on this host.
+    """Run one acceptance at a time on this host, in arrival order.
 
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Processes started under the holder inherit HOST_LEASE_ENV and
-    are already serialized, so nested fixture checks do not wait for their parent.
+    a memory kill. Waiters take the host in the order they arrived. Processes
+    started under the holder inherit HOST_LEASE_ENV and are already serialized,
+    so nested fixture checks do not wait for their parent.
     """
     if os.environ.get(HOST_LEASE_ENV):
         yield
         return
     directory = Path.home() / ".nexus/local-acceptance"
-    directory.mkdir(parents=True, exist_ok=True)
+    queue = directory / "queue"
+    queue.mkdir(parents=True, exist_ok=True)
     lock, holder = directory / "host.lock", directory / "host-lease.json"
     started = time.monotonic()
-    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    ticket = queue / f"{time.time_ns():020d}-{os.getpid()}.ticket"
+    waiting = os.open(ticket, os.O_RDWR | os.O_CREAT, 0o600)
+    descriptor = None
     try:
+        if not try_host_lock(waiting):
+            raise RuntimeError(f"Cannot hold this waiter's acceptance queue ticket: {ticket}")
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
         reported = None
-        while not try_host_lock(descriptor):
+        while True:
+            tickets = live_lease_tickets(queue, ticket)
+            if tickets[0] == ticket and try_host_lock(descriptor):
+                break
             if reported is None or time.monotonic() - reported >= 600:
                 try:
                     current = holder.read_text(encoding="utf-8").strip()
                 except OSError:
                     current = "an unrecorded process"
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
-                      "One acceptance runs per host; this one starts when that holder exits.", flush=True)
+                      f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
+                      "one acceptance runs per host and waiters start in arrival order.", flush=True)
                 reported = time.monotonic()
-            time.sleep(5)
+            time.sleep(1)
         attempt["host_lease_wait_seconds"] = round(time.monotonic() - started, 3)
         holder.write_bytes(canonical({"pid": os.getpid(), "head": head, "root": str(ROOT),
                                       "acquired_at": time.time()}))
         print(f"Acquired this host's local acceptance lease after {attempt['host_lease_wait_seconds']:.3f}s",
               flush=True)
+        # The holder no longer waits; the next ticket becomes the queue head.
+        release_host_lock(waiting)
+        os.close(waiting)
+        waiting = None
+        with contextlib.suppress(OSError):
+            ticket.unlink()
         os.environ[HOST_LEASE_ENV] = str(os.getpid())
         try:
             yield
         finally:
             os.environ.pop(HOST_LEASE_ENV, None)
-            if os.name == "nt":
-                import msvcrt
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                with contextlib.suppress(OSError):
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            release_host_lock(descriptor)
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
+        if waiting is not None:
+            release_host_lock(waiting)
+            os.close(waiting)
+            with contextlib.suppress(OSError):
+                ticket.unlink()
 
 
 def check(args):

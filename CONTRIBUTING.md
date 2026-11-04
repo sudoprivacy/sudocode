@@ -283,8 +283,11 @@ and refuses a signed receipt for the wrong actual base.
 
 One acceptance runs per host at a time. Every `check`, whether from the hook,
 `contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
-while its profiles run; a second invocation prints the holder from
-`host-lease.json` and starts when that holder exits, including an abrupt exit.
+while its profiles run; a later invocation prints the holder from
+`host-lease.json` and its queue position. Waiters start in arrival order when the
+holder exits, including an abrupt exit; each holds a ticket under
+`~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
+`e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
 Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so

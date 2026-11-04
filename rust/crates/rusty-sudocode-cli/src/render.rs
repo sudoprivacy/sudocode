@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crossterm::style::{Color, ContentStyle, Stylize};
+use crossterm::style::{Color, ContentStyle};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 

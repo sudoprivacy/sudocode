@@ -499,10 +499,8 @@ const TOP_LEVEL_LIST_INDENT: usize = 2;
 #[derive(Debug, Default, Clone, PartialEq)]
 struct RenderState {
     code_block_complete: bool,
-    emphasis: usize,
-    strong: usize,
-    strikethrough: usize,
-    heading_level: Option<u8>,
+    base_style: ContentStyle,
+    inline_styles: Vec<ContentStyle>,
     quote: usize,
     list_stack: Vec<ListKind>,
     /// Column where markers of the list at each `list_stack` level start.
@@ -556,25 +554,17 @@ impl RenderState {
         }
     }
 
-    fn text_style(&self, theme: ColorTheme) -> ContentStyle {
-        // Codex Markdown uses terminal foreground and typographic hierarchy.
-        let mut style = ContentStyle::default();
-        if matches!(self.heading_level, Some(1..=3)) || self.strong > 0 {
-            style = style.bold();
-        }
-        if self.heading_level == Some(1) {
-            style = style.underlined();
-        }
-        if matches!(self.heading_level, Some(3..=6)) || self.emphasis > 0 {
-            style = style.italic();
-        }
-        if self.strikethrough > 0 {
-            style = style.crossed_out();
-        }
-        if self.quote > 0 {
-            style = style.with(theme.color(TextRole::Quote));
-        }
-        style
+    #[inline]
+    fn text_style(&self) -> ContentStyle {
+        self.inline_styles
+            .last()
+            .copied()
+            .unwrap_or(self.base_style)
+    }
+
+    fn push_style(&mut self, theme: ColorTheme, support: ColorSupport, role: TextRole) {
+        self.inline_styles
+            .push(theme.overlay(self.text_style(), role, support));
     }
 
     fn destination<'a>(&'a mut self, output: &'a mut StyledText) -> &'a mut StyledText {
@@ -587,8 +577,8 @@ impl RenderState {
         }
     }
 
-    fn append_raw(&mut self, output: &mut StyledText, text: &str) {
-        self.append_style(output, text, ContentStyle::default());
+    fn append_text(&mut self, output: &mut StyledText, text: &str) {
+        self.append_style(output, text, self.text_style());
     }
 
     fn append_style(&mut self, output: &mut StyledText, text: &str, style: ContentStyle) {
@@ -598,10 +588,6 @@ impl RenderState {
         } else {
             target.push(style, text);
         }
-    }
-
-    fn append_styled(&mut self, output: &mut StyledText, text: &str, theme: ColorTheme) {
-        self.append_style(output, text, self.text_style(theme));
     }
 }
 
@@ -727,6 +713,9 @@ impl TerminalRenderer {
         let normalized = markdown_source(&normalized);
         let mut output = StyledText::default();
         let mut state = RenderState {
+            base_style: self
+                .color_theme
+                .style_for(TextRole::Body, self.color_support),
             max_width: width.max(1),
             ..RenderState::default()
         };
@@ -811,7 +800,12 @@ impl TerminalRenderer {
     ) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                Self::start_heading(state, level as u8, output);
+                state.inline_styles.push(self.color_theme.heading_style(
+                    level,
+                    self.color_support,
+                    state.text_style(),
+                ));
+                Self::start_heading(output);
             }
             Event::End(TagEnd::Paragraph) => {
                 if state.list_stack.is_empty() {
@@ -822,10 +816,11 @@ impl TerminalRenderer {
             Event::Start(Tag::BlockQuote(..)) => self.start_quote(state, output),
             Event::End(TagEnd::BlockQuote(..)) => {
                 state.quote = state.quote.saturating_sub(1);
+                state.inline_styles.pop();
                 output.plain("\n");
             }
             Event::End(TagEnd::Heading(..)) => {
-                state.heading_level = None;
+                state.inline_styles.pop();
                 output.plain("\n\n");
             }
             Event::End(TagEnd::Item) => {
@@ -834,18 +829,18 @@ impl TerminalRenderer {
                 // blank hole between the nested items and the next sibling.
                 if !output.text.ends_with('\n') {
                     state.wrap_list_line(output);
-                    state.append_raw(output, "\n");
+                    state.append_text(output, "\n");
                 }
                 state.item_content_col = state.parent_item_cols.pop().unwrap_or(0);
             }
             Event::SoftBreak | Event::HardBreak => {
                 state.wrap_list_line(output);
-                state.append_raw(output, "\n");
+                state.append_text(output, "\n");
                 // Inside a list item, align the continuation line under the
                 // item's text — without this it landed at column 0, hanging
                 // left of the marker.
                 if !state.list_stack.is_empty() && state.item_content_col > 0 {
-                    state.append_raw(output, &" ".repeat(state.item_content_col));
+                    state.append_text(output, &" ".repeat(state.item_content_col));
                 }
             }
             Event::Start(Tag::List(first_item)) => {
@@ -908,36 +903,47 @@ impl TerminalRenderer {
                 code_language.clear();
                 code_buffer.clear();
             }
-            Event::Start(Tag::Emphasis) => state.emphasis += 1,
-            Event::End(TagEnd::Emphasis) => state.emphasis = state.emphasis.saturating_sub(1),
-            Event::Start(Tag::Strong) => state.strong += 1,
-            Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
-            Event::Start(Tag::Strikethrough) => state.strikethrough += 1,
-            Event::End(TagEnd::Strikethrough) => {
-                state.strikethrough = state.strikethrough.saturating_sub(1);
+            Event::Start(Tag::Emphasis) => {
+                state.push_style(self.color_theme, self.color_support, TextRole::Emphasis);
+            }
+            Event::Start(Tag::Strong) => {
+                state.push_style(self.color_theme, self.color_support, TextRole::Strong);
+            }
+            Event::Start(Tag::Strikethrough) => state.push_style(
+                self.color_theme,
+                self.color_support,
+                TextRole::Strikethrough,
+            ),
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
+                state.inline_styles.pop();
             }
             Event::Code(code) => {
-                let style = state.text_style(self.color_theme).with(
-                    self.color_theme
-                        .color_for(TextRole::Code, self.color_support),
+                let style = self.color_theme.overlay(
+                    state.text_style(),
+                    TextRole::Code,
+                    self.color_support,
                 );
                 state.append_style(output, &code, style);
             }
-            Event::Rule => output.plain("---\n"),
+            Event::Rule => output.push(
+                self.color_theme
+                    .style_for(TextRole::Border, self.color_support),
+                "---\n",
+            ),
             Event::Text(text) => {
                 self.push_text(text.as_ref(), state, output, code_buffer, *in_code_block);
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                state.append_raw(output, &html);
+                state.append_text(output, &html);
             }
             Event::FootnoteReference(reference) => {
-                state.append_raw(output, &format!("[{reference}]"));
+                state.append_text(output, &format!("[{reference}]"));
             }
             Event::TaskListMarker(done) => {
-                state.append_raw(output, if done { "[x] " } else { "[ ] " });
+                state.append_text(output, if done { "[x] " } else { "[ ] " });
             }
             Event::InlineMath(math) | Event::DisplayMath(math) => {
-                state.append_raw(output, &math);
+                state.append_text(output, &math);
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 state.link_stack.push(LinkState {
@@ -947,7 +953,7 @@ impl TerminalRenderer {
             }
             Event::End(TagEnd::Link) => {
                 if let Some(link) = state.link_stack.pop() {
-                    let rendered = self.render_link(&link);
+                    let rendered = self.render_link(&link, state.text_style());
                     state.destination(output).append(&rendered);
                 }
             }
@@ -1015,7 +1021,7 @@ impl TerminalRenderer {
         }
     }
 
-    fn render_link(&self, link: &LinkState) -> StyledText {
+    fn render_link(&self, link: &LinkState, base_style: ContentStyle) -> StyledText {
         let label = &link.text;
         let destination = &link.destination;
         let local = destination.starts_with('/')
@@ -1027,25 +1033,20 @@ impl TerminalRenderer {
             || matches!(destination.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
         let mut rendered = StyledText::default();
         if local {
+            let style = self
+                .color_theme
+                .overlay(base_style, TextRole::Code, self.color_support);
             let name = label.text.trim();
             if !name.is_empty()
                 && name != destination
                 && !destination.ends_with(&format!("/{name}"))
             {
                 rendered.append(label);
-                rendered.plain(" (");
-                rendered.push(
-                    self.color_theme
-                        .style_for(TextRole::Code, self.color_support),
-                    destination,
-                );
-                rendered.plain(")");
+                rendered.push(base_style, " (");
+                rendered.push(style, destination);
+                rendered.push(base_style, ")");
             } else {
-                rendered.push(
-                    self.color_theme
-                        .style_for(TextRole::Code, self.color_support),
-                    destination,
-                );
+                rendered.push(style, destination);
             }
             return rendered;
         }
@@ -1054,32 +1055,32 @@ impl TerminalRenderer {
             .enabled()
             .then(|| hyperlink::destination(destination))
             .flatten();
-        let foreground = self
-            .color_theme
-            .color_for(TextRole::Accent, self.color_support);
         for (style, text) in label.spans(0..label.text.len()) {
-            rendered.push_link(style.with(foreground).underlined(), text, target.as_ref());
+            rendered.push_link(
+                self.color_theme
+                    .overlay(style, TextRole::Link, self.color_support),
+                text,
+                target.as_ref(),
+            );
         }
         if label.text != *destination
             && (target.is_none() || self.link_display.show_destination() || label.text.is_empty())
         {
             let style = self
                 .color_theme
-                .style_for(TextRole::Accent, self.color_support)
-                .underlined();
+                .style_for(TextRole::Link, self.color_support);
             if label.text.is_empty() {
                 rendered.push_link(style, destination, target.as_ref());
             } else {
-                rendered.plain(" (");
+                rendered.push(base_style, " (");
                 rendered.push_link(style, destination, target.as_ref());
-                rendered.plain(")");
+                rendered.push(base_style, ")");
             }
         }
         rendered
     }
 
-    fn start_heading(state: &mut RenderState, level: u8, output: &mut StyledText) {
-        state.heading_level = Some(level);
+    fn start_heading(output: &mut StyledText) {
         if output.text.is_empty() {
             return;
         }
@@ -1104,6 +1105,7 @@ impl TerminalRenderer {
 
     fn start_quote(&self, state: &mut RenderState, output: &mut StyledText) {
         state.quote += 1;
+        state.push_style(self.color_theme, self.color_support, TextRole::Quote);
         output.push(
             self.color_theme
                 .style_for(TextRole::Quote, self.color_support),
@@ -1133,15 +1135,15 @@ impl TerminalRenderer {
         // continuation lines align to this. `chars().count()` is the right
         // width here — both marker shapes are single-column characters.
         state.item_content_col = indent + marker.chars().count();
-        if matches!(state.list_stack.last(), Some(ListKind::Ordered { .. })) {
-            output.push(
-                self.color_theme
-                    .style_for(TextRole::ListMarker, self.color_support),
-                &marker,
-            );
+        let role = if matches!(state.list_stack.last(), Some(ListKind::Ordered { .. })) {
+            TextRole::OrderedListMarker
         } else {
-            output.plain(&marker);
-        }
+            TextRole::UnorderedListMarker
+        };
+        output.push(
+            self.color_theme.style_for(role, self.color_support),
+            &marker,
+        );
     }
 
     fn finish_code_block(
@@ -1160,7 +1162,7 @@ impl TerminalRenderer {
             let width = state.max_width.saturating_sub(visible_width(&prefix));
             let rendered = state
                 .code_block_complete
-                .then(|| mermaid::render(code_buffer, width, self.color_theme));
+                .then(|| mermaid::render(code_buffer, width, self.color_theme, self.color_support));
             let block = match rendered {
                 Some(Ok(diagram)) => diagram,
                 result => {
@@ -1221,7 +1223,7 @@ impl TerminalRenderer {
         if in_code_block {
             code_buffer.push_str(text);
         } else {
-            state.append_styled(output, text, self.color_theme);
+            state.append_text(output, text);
         }
     }
 
@@ -1670,7 +1672,7 @@ impl ResponseGlyphState {
                         } else {
                             self.started = true;
                             first_glyph = Some(out.text.len());
-                            out.push(theme().style(TextRole::Strong), "•");
+                            out.push(theme().style(TextRole::ResponseMarker), "•");
                             out.plain(" ");
                         }
                     }

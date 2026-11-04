@@ -20,16 +20,24 @@ def main():
     parser.add_argument("--codex", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--refresh-code-fixtures", action="store_true",
+                        help="Also refresh the adjacent code and Bash reference fixtures")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     reference = args.codex.resolve()
+    revision = subprocess.check_output(["git", "-C", str(reference), "rev-parse", "HEAD"], text=True).strip()
+    def upstream(path):
+        return subprocess.check_output(["git", "-C", str(reference), "show", f"{revision}:codex-rs/{path}"], text=True)
     work = args.work_dir.resolve()
     (work / "src").mkdir(parents=True, exist_ok=True)
-    tui = reference / "codex-rs/tui/src"
-    highlight = (tui / "render/highlight.rs").read_text()
-    markdown = (tui / "markdown_render.rs").read_text()
-    color = (tui / "color.rs").read_text()
-    lock = tomllib.loads((reference / "codex-rs/Cargo.lock").read_text())
+    highlight = upstream("tui/src/render/highlight.rs")
+    markdown = upstream("tui/src/markdown_render.rs")
+    color = upstream("tui/src/color.rs")
+    style = upstream("tui/src/style.rs")
+    contrast = upstream("tui/src/style/contrast.rs")
+    palette = upstream("tui/src/terminal_palette.rs")
+    diff = upstream("tui/src/diff_render.rs")
+    lock = tomllib.loads(upstream("Cargo.lock"))
     versions = {
         package["name"]: package["version"] for package in lock["package"]
         if package["name"] in {"syntect", "two-face", "ratatui"}
@@ -57,8 +65,52 @@ def main():
     extracted += "\n\n" + block(markdown, "struct MarkdownStyles {")
     extracted += "\n\n" + block(markdown, "impl MarkdownStyles {")
     extracted += "\n\n" + block(color, "pub(crate) fn perceptual_distance(")
+    for name in ["DARK_TC_ADD_LINE_BG_RGB", "DARK_TC_DEL_LINE_BG_RGB",
+                 "LIGHT_TC_ADD_LINE_BG_RGB", "LIGHT_TC_DEL_LINE_BG_RGB"]:
+        extracted += "\n" + re.search(r"^const " + name + r":.*$", diff, re.M)[0]
+    # Preserve the upstream contrast implementation as well as MarkdownStyles.
+    # Only terminal observations are injected: these reference variants model
+    # the PTY's missing OSC palette response, then quantize terminal cells below.
+    color_module = "\n\n".join(block(color, marker) for marker in [
+        "pub(crate) fn is_light(", "pub(crate) fn blend(",
+        "pub(crate) fn perceptual_distance(",
+    ])
+    palette_module = "\n\n".join(block(palette, marker) for marker in [
+        "pub enum StdoutColorLevel {", "pub fn rgb_color(",
+        "pub fn indexed_color(", "pub fn best_color_for_level(",
+        "fn best_color_for_color_level(",
+    ])
+    start = palette.index("pub const XTERM_COLORS:")
+    palette_module += "\n" + palette[start:palette.index("\n];", start) + 3]
+    palette_module += """
+fn xterm_fixed_colors() -> impl Iterator<Item = (usize, (u8, u8, u8))> {
+    XTERM_COLORS.into_iter().enumerate().skip(16)
+}
+pub fn default_fg() -> Option<(u8,u8,u8)> { None }
+pub fn default_bg() -> Option<(u8,u8,u8)> { None }
+pub fn effective_stdout_color_level() -> StdoutColorLevel { StdoutColorLevel::TrueColor }
+"""
+    style_module = "\n\n".join(block(style, marker) for marker in [
+        "fn background_rgb(", "pub(crate) fn readable_color_on(",
+    ])
+    (work / "src/color.rs").write_text(color_module)
+    (work / "src/terminal_palette.rs").write_text(
+        "use ratatui::style::Color;\nuse crate::color::perceptual_distance;\n"
+        "#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]\n" + palette_module
+    )
+    (work / "src/contrast.rs").write_text(contrast)
+    (work / "src/style.rs").write_text(
+        "use ratatui::style::Color;\n"
+        "use crate::terminal_palette::{default_bg,default_fg,effective_stdout_color_level};\n"
+        '#[path="contrast.rs"] mod contrast;\n'
+        "const CHATGPT_BLUE_100: (u8,u8,u8) = (164,205,251);\n"
+        "const CHATGPT_BLUE_200: (u8,u8,u8) = (99,168,248);\n" + style_module
+    )
     prelude = """
 #![allow(dead_code)]
+mod color;
+mod terminal_palette;
+mod style;
 use std::sync::OnceLock;
 use ratatui::style::{Color as RtColor, Modifier, Style};
 use ratatui::text::Span;
@@ -117,12 +169,19 @@ fn cell_style(style: Style, indexed: bool) -> Value {
 fn main() {
     let input: Value = serde_json::from_str(&std::fs::read_to_string(std::env::args().nth(1).unwrap()).unwrap()).unwrap();
     let mut variants = serde_json::Map::new();
-    for (name, theme_name, link) in [
-        ("dark", EmbeddedThemeName::CatppuccinMocha, RtColor::Rgb(99,168,248)),
-        ("light", EmbeddedThemeName::CatppuccinLatte, RtColor::Rgb(28,100,200)),
+    for (name, theme_name) in [
+        ("dark", EmbeddedThemeName::CatppuccinMocha),
+        ("light", EmbeddedThemeName::CatppuccinLatte),
     ] {
         let theme = two_face::theme::extra().get(theme_name).clone();
         let markdown = MarkdownStyles::for_theme(&theme);
+        let string = foreground_style_for_scopes_with_theme(&theme, &["string"]).unwrap_or_default();
+        let (add_bg, del_bg) = if name == "light" {
+            (LIGHT_TC_ADD_LINE_BG_RGB, LIGHT_TC_DEL_LINE_BG_RGB)
+        } else {
+            (DARK_TC_ADD_LINE_BG_RGB, DARK_TC_DEL_LINE_BG_RGB)
+        };
+        let on_diff = |bg: (u8,u8,u8)| string.fg.map_or(string, |fg| string.fg(crate::style::readable_color_on(fg, Some(RtColor::Rgb(bg.0,bg.1,bg.2)))));
         for indexed in [false, true] {
             let mut roles = serde_json::Map::new();
             for (name, style) in [
@@ -131,8 +190,20 @@ fn main() {
                 ("h6", markdown.h6), ("strong", markdown.strong),
                 ("emphasis", markdown.emphasis), ("strike", markdown.strikethrough),
                 ("quote", markdown.blockquote), ("ordered", markdown.ordered_list_marker),
-                ("link", Style::new().fg(link).underlined()),
+                ("unordered", markdown.unordered_list_marker),
+                ("link", markdown.link),
                 ("prose", Style::new()), ("bold_code", markdown.code.bold()),
+                ("strong_emphasis", markdown.strong.patch(markdown.emphasis)),
+                ("emphasis_strong", markdown.emphasis.patch(markdown.strong)),
+                ("quote_strong", markdown.blockquote.patch(markdown.strong)),
+                ("quote_emphasis", markdown.blockquote.patch(markdown.emphasis)),
+                ("quote_code", markdown.blockquote.patch(markdown.code)),
+                ("strong_link", markdown.strong.patch(markdown.link)),
+                ("heading_strong", markdown.h2.patch(markdown.strong)),
+                ("diagram_node", foreground_style_for_scopes_with_theme(&theme, &["entity.name.type", "support.type", "variable"]).unwrap_or_else(|| Style::new().cyan())),
+                ("diagram_edge", foreground_style_for_scopes_with_theme(&theme, &["comment"]).unwrap_or_else(|| Style::new().dim())),
+                ("diff_added_string", on_diff(add_bg)),
+                ("diff_removed_string", on_diff(del_bg)),
             ] {
                 roles.insert(name.into(), cell_style(style, indexed));
             }
@@ -163,13 +234,41 @@ fn main() {
         {"language": language, "code": code}
         for language, code in re.findall(fence + r"([^\n]*)\n(.*?)" + fence, fixture, re.S)
     ]
+    showcase_count = len(documents)
+    legacy = {}
+    if args.refresh_code_fixtures:
+        fixture_dir = repo / "rust/crates/rusty-sudocode-cli/tests/fixtures"
+        for name in ["codex_default_colors.json", "codex_bash_colors.json"]:
+            fixture = json.loads((fixture_dir / name).read_text())
+            samples = fixture["themes"][0]["samples"]
+            legacy[name] = (fixture, len(documents), len(samples))
+            documents.extend({"language": sample["language"], "code": sample["code"]}
+                             for sample in samples)
     (work / "input.json").write_text(json.dumps({"documents": documents}))
     output = subprocess.check_output([
         "cargo", "run", "--quiet", "--manifest-path", str(work / "Cargo.toml"),
         "--", str(work / "input.json"),
     ], text=True)
     variants = json.loads(output)
+    digest = hashlib.sha256(
+        (extracted + color_module + palette_module + style_module + contrast).encode()
+    ).hexdigest()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    for name, (fixture, start, count) in legacy.items():
+        for theme in fixture["themes"]:
+            variant = variants["light-truecolor" if theme["theme"].endswith("latte") else "dark-truecolor"]
+            for sample, document in zip(theme["samples"], variant["documents"][start:start + count], strict=True):
+                sample["rows"] = [[{
+                    "text": span["text"], "foreground": span["style"]["fg"],
+                    "bold": span["style"]["bold"],
+                } for span in line["spans"]] for line in document["lines"]]
+            for key in ["inline_foreground", "diff_added_string", "diff_removed_string"]:
+                if key in theme:
+                    theme[key] = variant["roles"]["inline" if key == "inline_foreground" else key]["fg"]
+        fixture.update(revision=revision, helper_source_sha256=digest, two_face=versions["two-face"])
+        (args.output.parent / name).write_text(json.dumps(fixture, indent=2) + "\n")
     for variant in variants.values():
+        variant["documents"] = variant["documents"][:showcase_count]
         styles = []
         def intern(style):
             if style not in styles:
@@ -184,10 +283,10 @@ fn main() {
     result = {
         "reference": {
             "repository": "https://github.com/openai/codex",
-            "commit": subprocess.check_output(["git", "-C", str(reference), "rev-parse", "HEAD"], text=True).strip(),
+            "commit": revision,
             "versions": versions,
-            "helper_source_sha256": hashlib.sha256(extracted.encode()).hexdigest(),
-            "method": "Unmodified upstream MarkdownStyles and highlighting helpers; terminal cell styles use the upstream CIE76 palette-distance helper.",
+            "helper_source_sha256": digest,
+            "method": "Unmodified upstream MarkdownStyles, highlighting and contrast helpers; absent OSC foreground/background, TrueColor style resolution, and CIE76 indexed terminal-cell conversion. Nested roles use upstream Style::patch order.",
         },
         "variants": variants,
     }

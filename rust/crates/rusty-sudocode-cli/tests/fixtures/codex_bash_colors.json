@@ -1,5 +1,5 @@
 {
-  "revision": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+  "revision": "079e17a422347e49d02501304f79fade7e569362",
   "source": "openai/codex",
   "themes": [
     {
@@ -10,29 +10,29 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "echo",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "echo"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "CODEX_SINGLE_LINE_OUTPUT",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "CODEX_SINGLE_LINE_OUTPUT"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               }
             ]
           ]
@@ -43,75 +43,75 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "#",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "#"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Shell colors",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " Shell colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "echo",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "echo"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "CODEX_SHELL_OUTPUT",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "CODEX_SHELL_OUTPUT"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "echo",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "echo"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "MULTILINE",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "MULTILINE"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "CONTINUATION",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "CONTINUATION"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               }
             ]
           ]
@@ -127,29 +127,29 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "echo",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "echo"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "CODEX_SINGLE_LINE_OUTPUT",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "CODEX_SINGLE_LINE_OUTPUT"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               }
             ]
           ]
@@ -160,75 +160,75 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "#",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "#"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Shell colors",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " Shell colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "echo",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "echo"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "CODEX_SHELL_OUTPUT",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "CODEX_SHELL_OUTPUT"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "echo",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "echo"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "MULTILINE",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "MULTILINE"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "CONTINUATION",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "CONTINUATION"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               }
             ]
           ]
@@ -237,5 +237,6 @@
       "theme": "catppuccin-latte"
     }
   ],
-  "two_face": "0.5.1"
+  "two_face": "0.5.1",
+  "helper_source_sha256": "0694086d858a25b4876ff4f4104f38ff9991737d830fe32ed6bdfa110de77350"
 }

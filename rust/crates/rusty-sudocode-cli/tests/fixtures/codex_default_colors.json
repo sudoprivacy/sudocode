@@ -1,5 +1,5 @@
 {
-  "revision": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+  "revision": "079e17a422347e49d02501304f79fade7e569362",
   "source": "openai/codex",
   "themes": [
     {
@@ -13,165 +13,165 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "//",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "//"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Rust colors",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " Rust colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "fn",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "fn"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "greet",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "greet"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "(",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "("
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "name",
                 "foreground": "Rgb(235, 160, 172)",
-                "text": "name"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ":"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(235, 160, 172)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "&",
                 "foreground": "Rgb(148, 226, 213)",
-                "text": "&"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "str",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "str"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ")",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ")"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "->",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "->"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " String",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " String"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "{"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "    ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "    "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "format!",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "format!"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "(",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "("
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "Hello ",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "Hello "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{name}",
                 "foreground": "Rgb(245, 194, 231)",
-                "text": "{name}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ": ",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": ": "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{}",
                 "foreground": "Rgb(245, 194, 231)",
-                "text": "{}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ",",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ","
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "42",
                 "foreground": "Rgb(250, 179, 135)",
-                "text": "42"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ")",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ")"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "}",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "}"
+                "bold": false
               }
             ]
           ]
@@ -182,138 +182,138 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "//",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "//"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " TypeScript colors",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " TypeScript colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "const",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "const"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "enabled",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "enabled"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(148, 226, 213)",
-                "text": ":"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(249, 226, 175)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "boolean",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "boolean"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(249, 226, 175)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(148, 226, 213)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "true",
                 "foreground": "Rgb(250, 179, 135)",
-                "text": "true"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ";",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ";"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "const",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "const"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "message",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "message"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(148, 226, 213)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "`",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "`"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "Hello ",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "Hello "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "${",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "${"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "enabled",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "enabled"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "}",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "`",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "`"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ";",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ";"
+                "bold": false
               }
             ]
           ]
@@ -324,128 +324,128 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "#",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "#"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Python colors",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " Python colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "def",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "def"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "greet",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "greet"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "(",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "("
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "name",
                 "foreground": "Rgb(235, 160, 172)",
-                "text": "name"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ":"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(235, 160, 172)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "str",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "str"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ")",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ")"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ":"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "    ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "    "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "return",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "return"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "f",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "f"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "Hello ",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "Hello "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "{"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "name",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "name"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "}",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ", ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": ", "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "42",
                 "foreground": "Rgb(250, 179, 135)",
-                "text": "42"
+                "bold": false
               }
             ]
           ]
@@ -456,103 +456,103 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "#",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "#"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Shell colors",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " Shell colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "export",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "export"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "GREETING",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "GREETING"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(148, 226, 213)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "hello",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "hello"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "printf",
                 "foreground": "Rgb(137, 180, 250)",
-                "text": "printf"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "'",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "'"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "%s\\n",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "%s\\n"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "'",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "'"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "$",
                 "foreground": "Rgb(243, 139, 168)",
-                "text": "$"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "GREETING",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": "GREETING"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(166, 227, 161)",
-                "text": "\""
+                "bold": false
               }
             ]
           ]
@@ -563,58 +563,58 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "/*",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "/*"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " multiline color",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " multiline color"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": " comment continuation ",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": " comment continuation "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "*/",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": "*/"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "let",
                 "foreground": "Rgb(203, 166, 247)",
-                "text": "let"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " answer ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " answer "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(148, 226, 213)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(205, 214, 244)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "42",
                 "foreground": "Rgb(250, 179, 135)",
-                "text": "42"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ";",
                 "foreground": "Rgb(147, 153, 178)",
-                "text": ";"
+                "bold": false
               }
             ]
           ]
@@ -633,165 +633,165 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "//",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "//"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Rust colors",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " Rust colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "fn",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "fn"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "greet",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "greet"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "(",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "("
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "name",
                 "foreground": "Rgb(230, 69, 83)",
-                "text": "name"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ":"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(230, 69, 83)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "&",
                 "foreground": "Rgb(23, 146, 153)",
-                "text": "&"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "str",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "str"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ")",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ")"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "->",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "->"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " String",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " String"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "{"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "    ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "    "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "format!",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "format!"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "(",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "("
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "Hello ",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "Hello "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{name}",
                 "foreground": "Rgb(234, 118, 203)",
-                "text": "{name}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ": ",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": ": "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{}",
                 "foreground": "Rgb(234, 118, 203)",
-                "text": "{}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ",",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ","
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "42",
                 "foreground": "Rgb(254, 100, 11)",
-                "text": "42"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ")",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ")"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "}",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "}"
+                "bold": false
               }
             ]
           ]
@@ -802,138 +802,138 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "//",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "//"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " TypeScript colors",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " TypeScript colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "const",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "const"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "enabled",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "enabled"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(23, 146, 153)",
-                "text": ":"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(223, 142, 29)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "boolean",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "boolean"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(223, 142, 29)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(23, 146, 153)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "true",
                 "foreground": "Rgb(254, 100, 11)",
-                "text": "true"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ";",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ";"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "const",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "const"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "message",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "message"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(23, 146, 153)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "`",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "`"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "Hello ",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "Hello "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "${",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "${"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "enabled",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "enabled"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "}",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "`",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "`"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ";",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ";"
+                "bold": false
               }
             ]
           ]
@@ -944,128 +944,128 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "#",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "#"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Python colors",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " Python colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "def",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "def"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "greet",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "greet"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "(",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "("
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "name",
                 "foreground": "Rgb(230, 69, 83)",
-                "text": "name"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ":"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(230, 69, 83)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "str",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "str"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ")",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ")"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ":",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ":"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "    ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "    "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "return",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "return"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "f",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "f"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "Hello ",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "Hello "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "{",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "{"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "name",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "name"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "}",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "}"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ", ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": ", "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "42",
                 "foreground": "Rgb(254, 100, 11)",
-                "text": "42"
+                "bold": false
               }
             ]
           ]
@@ -1076,103 +1076,103 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "#",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "#"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " Shell colors",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " Shell colors"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "export",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "export"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "GREETING",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "GREETING"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(23, 146, 153)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "hello",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "hello"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "printf",
                 "foreground": "Rgb(30, 102, 245)",
-                "text": "printf"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "'",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "'"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "%s\\n",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "%s\\n"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "'",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "'"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "$",
                 "foreground": "Rgb(210, 15, 57)",
-                "text": "$"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "GREETING",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": "GREETING"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "\"",
                 "foreground": "Rgb(64, 160, 43)",
-                "text": "\""
+                "bold": false
               }
             ]
           ]
@@ -1183,58 +1183,58 @@
           "rows": [
             [
               {
-                "bold": false,
+                "text": "/*",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "/*"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " multiline color",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " multiline color"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": " comment continuation ",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": " comment continuation "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "*/",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": "*/"
+                "bold": false
               }
             ],
             [
               {
-                "bold": false,
+                "text": "let",
                 "foreground": "Rgb(136, 57, 239)",
-                "text": "let"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " answer ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " answer "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "=",
                 "foreground": "Rgb(23, 146, 153)",
-                "text": "="
+                "bold": false
               },
               {
-                "bold": false,
+                "text": " ",
                 "foreground": "Rgb(76, 79, 105)",
-                "text": " "
+                "bold": false
               },
               {
-                "bold": false,
+                "text": "42",
                 "foreground": "Rgb(254, 100, 11)",
-                "text": "42"
+                "bold": false
               },
               {
-                "bold": false,
+                "text": ";",
                 "foreground": "Rgb(124, 127, 147)",
-                "text": ";"
+                "bold": false
               }
             ]
           ]
@@ -1243,5 +1243,6 @@
       "theme": "catppuccin-latte"
     }
   ],
-  "two_face": "0.5.1"
+  "two_face": "0.5.1",
+  "helper_source_sha256": "0694086d858a25b4876ff4f4104f38ff9991737d830fe32ed6bdfa110de77350"
 }

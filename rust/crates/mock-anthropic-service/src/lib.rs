@@ -237,6 +237,7 @@ enum Scenario {
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
     AskUserQuestionRoundtrip,
+    AskUserQuestionTwoFields,
     /// Streaming request without a compaction summary in its history is
     /// rejected with Anthropic's real `input length and max_tokens exceed
     /// context limit` 400; once the history carries a summary the request is
@@ -398,6 +399,7 @@ impl Scenario {
             "context_limit_then_text" => Some(Self::ContextLimitThenText),
             "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
+            "ask_user_question_two_fields" => Some(Self::AskUserQuestionTwoFields),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
@@ -479,6 +481,7 @@ impl Scenario {
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
             Self::DelayedText => "delayed_text",
             Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
+            Self::AskUserQuestionTwoFields => "ask_user_question_two_fields",
             Self::RetryThenSucceed => "retry_then_succeed",
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
@@ -1907,6 +1910,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::TodoWriteLifecycleRoundtrip => stream_todo_write_lifecycle_roundtrip,
         Scenario::SleepShortRoundtrip => stream_sleep_short_roundtrip,
         Scenario::AskUserQuestionRoundtrip => stream_ask_user_question_roundtrip,
+        Scenario::AskUserQuestionTwoFields => stream_ask_user_question_two_fields,
         Scenario::SleepOverMaxRoundtrip => stream_sleep_over_max_roundtrip,
         Scenario::ForkSubagentRecursionGuardRoundtrip => stream_fork_guard,
         Scenario::LlmCompactionRoundtrip => stream_llm_compaction_roundtrip,
@@ -2484,6 +2488,23 @@ fn stream_ask_user_question_roundtrip(request: &MessageRequest, _scenario: Scena
             &[
                 r#"{"questions":[{"id":"q1","question":"Which colour?","#,
                 r#""options":[{"label":"red","value":"red"},{"label":"blue","value":"blue"}]}]}"#,
+            ],
+        ),
+    }
+}
+
+/// Two questions in one call, so an answered one can be revisited.
+fn stream_ask_user_question_two_fields(request: &MessageRequest, _scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("ask_user_question answered: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_ask_user_question_two_fields",
+            "AskUserQuestion",
+            &[
+                r#"{"questions":[{"id":"fruit","question":"Pick a fruit?","options":[{"label":"apple","value":"apple"},{"label":"pear","value":"pear"},{"label":"plum","value":"plum"}]},"#,
+                r#"{"id":"size","question":"Pick a size?","options":[{"label":"small","value":"small"},{"label":"large","value":"large"}]}]}"#,
             ],
         ),
     }
@@ -3228,6 +3249,28 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 600}),
             ),
         },
+        Scenario::AskUserQuestionTwoFields => match current_turn_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_ask_user_question_two_fields_final",
+                &format!("ask_user_question answered: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_ask_user_question_two_fields_tool",
+                "toolu_ask_user_question_two_fields",
+                "AskUserQuestion",
+                json!({"questions": [
+                    {"id": "fruit", "question": "Pick a fruit?", "options": [
+                        {"label": "apple", "value": "apple"},
+                        {"label": "pear", "value": "pear"},
+                        {"label": "plum", "value": "plum"}
+                    ]},
+                    {"id": "size", "question": "Pick a size?", "options": [
+                        {"label": "small", "value": "small"},
+                        {"label": "large", "value": "large"}
+                    ]}
+                ]}),
+            ),
+        },
         Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_ask_user_question_final",
@@ -3541,6 +3584,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         }
         Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
         Scenario::AskUserQuestionRoundtrip => "req_ask_user_question_roundtrip",
+        Scenario::AskUserQuestionTwoFields => "req_ask_user_question_two_fields",
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",

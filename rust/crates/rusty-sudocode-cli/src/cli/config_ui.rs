@@ -54,6 +54,7 @@ pub(crate) fn build_config_tree_handler(
         custom_input_hint: None,
         force_fuzzy_select: false,
         back_value: None,
+        initial_value: None,
     };
     ui.show_question(question);
 
@@ -86,9 +87,6 @@ pub(crate) fn build_config_tree_handler(
 }
 
 // ── schema level navigation ─────────────────────────────────────────
-
-/// Sentinel value used as the DialPad option for "← Back".
-const BACK_VALUE: &str = "\x00__back__";
 
 /// Show a DialPad/FuzzySelect for one level of the schema tree.
 ///
@@ -153,7 +151,8 @@ fn show_schema_level(
         allow_custom_input: false,
         custom_input_hint: None,
         force_fuzzy_select: visible.len() > 9,
-        back_value: Some(BACK_VALUE.to_string()),
+        back_value: Some(crate::repl_ui::QUESTION_BACK.to_string()),
+        initial_value: None,
     };
     ui.show_question(question);
 
@@ -166,7 +165,7 @@ fn show_schema_level(
         let selected = resolve_answer(answer, &keys);
 
         // ← Back
-        if selected == BACK_VALUE {
+        if selected == crate::repl_ui::QUESTION_BACK {
             return if let Some(parent) = parent_schema {
                 // Go up one level.
                 let mut parent_bc = breadcrumb2.clone();
@@ -286,6 +285,7 @@ fn handle_leaf_edit(
                 custom_input_hint: None,
                 force_fuzzy_select: false,
                 back_value: None,
+                initial_value: None,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();
@@ -350,6 +350,7 @@ fn handle_leaf_edit(
                 custom_input_hint: Some("or type a model name".to_string()),
                 force_fuzzy_select: true,
                 back_value: None,
+                initial_value: None,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();

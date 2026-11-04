@@ -1147,7 +1147,10 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
         .iter()
         .filter(|t| t.status == runtime::TodoStatus::InProgress)
         .count();
-    let open_count = todos.len() - completed_count;
+    let open_count = todos
+        .iter()
+        .filter(|t| t.status == runtime::TodoStatus::Pending)
+        .count();
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();

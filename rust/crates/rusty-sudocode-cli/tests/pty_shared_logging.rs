@@ -11,6 +11,7 @@ use telemetry::{AnalyticsEvent, SudoclawLogSink, TelemetryEvent, TelemetrySink};
 
 fn turn(env: &TestEnv, cli: &mut PtySession, marker: &str) {
     common::expect_input_line_cleared(cli, env.timeout(), "runtime accepts input");
+    let turn = env.captured_message_count() + 1;
     let prompt = env.prompt(
         &format!("{marker} Calculate 2+2 and reply with 'The answer is N'."),
         "single_turn_text",
@@ -18,7 +19,17 @@ fn turn(env: &TestEnv, cli: &mut PtySession, marker: &str) {
     cli.send(&prompt).unwrap();
     common::expect_input_line(cli, marker, env.timeout(), "prompt entered");
     cli.send("\r").unwrap();
-    cli.expect("The answer is 4").expect("actual model answer");
+    // Every turn answers the same text and redraws repeat earlier output, so
+    // the answer alone cannot show that this turn finished. Its own request
+    // and its numbered status line can.
+    common::expect_screen(
+        cli,
+        |screen| {
+            env.captured_message_count() >= turn && screen.contains(&format!("· turn {turn} ·"))
+        },
+        env.timeout(),
+        "this turn answered",
+    );
     common::expect_input_line_cleared(cli, env.timeout(), "completed turn");
 }
 

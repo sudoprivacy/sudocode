@@ -103,12 +103,17 @@ def verify_host_lease(directory, source, command, environment):
     def waiting(process):
         return "Waiting for this host's local acceptance lease" in process.log.read_text()
 
-    # A second check waits for the holder and never interleaves its profile.
-    (fixture / "release-B").touch()
+    # Later checks wait for the holder, never interleave its profile, and take
+    # the host in the order they arrived rather than in polling order.
+    for label in ["B", "X", "Y"]:
+        (fixture / f"release-{label}").touch()
     holder = start("A")
     wait_until(lambda: events() == ["start:A"], "the first check to hold the host")
-    queued = start("B")
-    wait_until(lambda: waiting(queued), "the second check to report the holder")
+    queued = []
+    for label in ["B", "X", "Y"]:
+        queued.append(start(label))
+        wait_until(lambda: waiting(queued[-1]), f"check {label} to report the holder")
+    assert "Queue position 3 of 3" in queued[-1].log.read_text(), queued[-1].log.read_text()
     assert events() == ["start:A"], events()
     # A check started under the holder is already serialized by it.
     (fixture / "release-C").touch()
@@ -116,24 +121,44 @@ def verify_host_lease(directory, source, command, environment):
     assert events() == ["start:A", "start:C", "end:C"], events()
     (fixture / "release-A").touch()
     finished(holder)
-    finished(queued)
-    assert events() == ["start:A", "start:C", "end:C", "end:A", "start:B", "end:B"], events()
-    assert "Acquired this host's local acceptance lease" in queued.log.read_text()
+    for process in queued:
+        finished(process)
+    assert events() == ["start:A", "start:C", "end:C", "end:A", "start:B", "end:B",
+                        "start:X", "end:X", "start:Y", "end:Y"], events()
+    assert "Acquired this host's local acceptance lease" in queued[0].log.read_text()
     timing = json.loads((fixture / "B/attempt.json").read_text())
     assert timing["host_lease_wait_seconds"] > 0, timing
+    assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+
+    # A waiter killed in the queue does not block those behind it.
+    events_log.unlink()
+    (fixture / "release-F").touch()
+    holder = start("D")
+    wait_until(lambda: events() == ["start:D"], "the next check to hold the host")
+    abandoned = start("E")
+    wait_until(lambda: waiting(abandoned), "a check to queue behind the holder")
+    queued = start("F")
+    wait_until(lambda: waiting(queued), "a check to queue behind the killed waiter")
+    abandoned.kill()
+    abandoned.wait(timeout=60)
+    (fixture / "release-D").touch()
+    finished(holder)
+    finished(queued)
+    assert events() == ["start:D", "end:D", "start:F", "end:F"], events()
 
     # An abruptly killed holder releases the host without a stale lock.
     events_log.unlink()
-    (fixture / "release-E").touch()
-    holder = start("D")
-    wait_until(lambda: events() == ["start:D"], "the next check to hold the host")
-    queued = start("E")
+    (fixture / "release-H").touch()
+    holder = start("G")
+    wait_until(lambda: events() == ["start:G"], "the next check to hold the host")
+    queued = start("H")
     wait_until(lambda: waiting(queued), "a check to wait behind the next holder")
     holder.kill()
     holder.wait(timeout=60)
     finished(queued)
-    assert events() == ["start:D", "start:E", "end:E"], events()
+    assert events() == ["start:G", "start:H", "end:H"], events()
     # The killed runner's profile step outlives it; let it exit before cleanup.
-    (fixture / "release-D").touch()
-    wait_until(lambda: "end:D" in events(), "the killed holder's orphaned step to exit")
-    print("PASS: one acceptance per host, nested checks under the holder, release on abrupt exit")
+    (fixture / "release-G").touch()
+    wait_until(lambda: "end:G" in events(), "the killed holder's orphaned step to exit")
+    print("PASS: one acceptance per host in arrival order, nested checks under the holder, "
+          "release on abrupt holder or waiter exit")

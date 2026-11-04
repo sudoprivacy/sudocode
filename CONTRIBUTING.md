@@ -1086,7 +1086,7 @@ the candidate as a whole, comparing against the previous `v*` tag:
 The rendering and native jobs use no credentials. Their evidence is uploaded as
 `release-rendering` and `release-native-<os>` artifacts for 30 days. The same
 stress matrix runs locally with
-`python .github/local-acceptance/checks.py --native-checks rendering --rendering-profile stress --base <previous-tag>`.
+`SCODE_RENDERING_PROFILE=stress python .github/local-acceptance/checks.py --native-checks rendering --base <previous-tag>`.
 
 Sudo Code forbids `unsafe_code` workspace-wide (`unsafe_code = "forbid"`
 in `rust/Cargo.toml`). Relaxing this for a single crate goes through

@@ -885,9 +885,10 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
             "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
             "--mount", f"type=volume,source={lease_volume},target=/locks",
-            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image_id,
+            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo",
+            "--env", f"SCODE_RENDERING_PROFILE={rendering_profile()}", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
-            "--base", base, "--rendering-profile", RENDERING_PROFILE)
+            "--base", base)
     if name == "rendering":
         profile_output = container_profile_output(output, name)
         binary = profile_output / "scode-candidate"
@@ -1054,17 +1055,21 @@ def benchmark_storage(name):
     return state / name, state / "target" / name
 
 
-# The judged rendering profile. Per-PR acceptance runs `core`; release
-# acceptance selects `stress`, which adds the foreground/background task and
-# repeated-turn scenarios. Set once by `main` and forwarded into the container.
-RENDERING_PROFILE = "core"
+def rendering_profile():
+    """Per-PR acceptance judges `core`. Release acceptance selects `stress`,
+    which adds the foreground/background task and repeated-turn scenarios."""
+    profile = os.environ.get("SCODE_RENDERING_PROFILE", "core")
+    if profile not in {"core", "stress"}:
+        raise RuntimeError(f"Unknown rendering profile: {profile}")
+    return profile
 
 
 def rendering_cases(terminal, arguments, output, command, plan):
     """Finish and judge each complete scenario before admitting the next one."""
     policy_path = terminal / "performance-policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
-    cases = policy["profiles"][RENDERING_PROFILE]
+    profile = rendering_profile()
+    cases = policy["profiles"][profile]
     if (plan.get("unjudged_warmups") != 0
             or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
@@ -1073,7 +1078,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
     output.mkdir(parents=True, exist_ok=False)
-    report = {"version": 1, "profile": RENDERING_PROFILE, "preview": "0", "policy": policy,
+    report = {"version": 1, "profile": profile, "preview": "0", "policy": policy,
               "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
               "status": "running", "samples": [], "metrics": [], "calibration": [],
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
@@ -1087,7 +1092,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
     for case in cases:
         # Partition the declared scenarios without changing their workloads,
         # paired round policy, interaction samples or budgets.
-        selected = dict(policy, profiles={**policy["profiles"], RENDERING_PROFILE: [case]})
+        selected = dict(policy, profiles={**policy["profiles"], profile: [case]})
         selected_path = output / f"{case}-policy.json"
         selected_path.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
         report["case_policy_sha256"][case] = hashlib.sha256(selected_path.read_bytes()).hexdigest()
@@ -1099,7 +1104,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
         try:
-            command(*arguments, "--output", str(output / case), "--policy", str(selected_path), "--profile", RENDERING_PROFILE)
+            command(*arguments, "--output", str(output / case), "--policy", str(selected_path), "--profile", profile)
             succeeded = True
         finally:
             child_path = output / case / "report.json"
@@ -1176,7 +1181,7 @@ def benchmark_locked(name, root, output, base, command, target):
         replace_checkout(inputs / label, work / label)
     candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
     terminal = trusted / "e2e/terminal-resize"
-    plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", RENDERING_PROFILE,
+    plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", rendering_profile(),
                        "--policy", str(terminal / "performance-policy.json"))
     render_plan = json.loads(plan_log.read_text(encoding="utf-8"))
     print(f"Required rendering plan: {len(render_plan['cases'])} scenarios, {render_plan['total_samples']} samples. "
@@ -1287,10 +1292,7 @@ def main():
     parser.add_argument("--native-checks", nargs="*")
     parser.add_argument("--base", required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--rendering-profile", choices=["core", "stress"], default="core")
     args = parser.parse_args()
-    global RENDERING_PROFILE
-    RENDERING_PROFILE = args.rendering_profile
     runner = Path(__file__).resolve().parents[2]
     root = Path("/inputs/candidate") if args.container_check else runner
     spec = importlib.util.spec_from_file_location("local_acceptance", runner / ".github/scripts/local_acceptance.py")

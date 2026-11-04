@@ -1157,8 +1157,9 @@ status, and scoped mandatory local rendering judges their typing latency. See th
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.
 
-The daily `Model Compatibility` workflow discovers gateway models and runs
-live PTYs in batches of at most eight, with three batches running concurrently.
+When explicitly dispatched under the [provider acceptance policy](#company-model-routing-in-ci),
+the `Model Compatibility` workflow discovers gateway models and runs live PTYs
+in batches of at most eight, with three batches running concurrently.
 Each process has one 90-second deadline. A pass requires exit 0 and the expected
 persisted assistant answer; model names and error text cannot satisfy it.
 If retry backoff outlasts the deadline, the report uses the last HTTP attempt's
@@ -1173,7 +1174,8 @@ compatibility and is never retried. An all-refused sweep still fails the
 aggregate's requirement for a real pass. Reports include request parameters
 and HTTP results for diagnosis, without prompts, tool definitions or headers.
 
-CI gates these on every PR. Run them locally before pushing:
+Ordinary PRs gate source checks selected by the protected acceptance plan.
+For Rust changes, run the applicable local checks before pushing:
 
 ```bash
 cd rust/

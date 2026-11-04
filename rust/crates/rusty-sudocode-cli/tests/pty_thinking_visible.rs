@@ -17,8 +17,9 @@ use std::time::Duration;
 mod common;
 use common::TestEnv;
 
-/// Reasoning is written to the transcript under a `Thinking` header, and the
-/// answer that follows it is still rendered.
+/// Reasoning is written to the transcript led by a dim ✻, with no header row
+/// (the live spinner already says "Thinking"), and the answer that follows it
+/// still gets the response's •.
 #[test]
 fn thinking_content_is_rendered_before_the_answer() {
     let env = TestEnv::new_mock("thinking-visible");
@@ -38,22 +39,6 @@ fn thinking_content_is_rendered_before_the_answer() {
     let marker = common::turn_status_marker(&sess);
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    // The header marks the dim block as reasoning. Without it dim text reads as
-    // a faded answer.
-    //
-    // Matched on the ✻ glyph, not on the bare word "Thinking": the spinner's
-    // own phase label says "Thinking" too, so a bare-word assertion passes even
-    // when no reasoning is rendered at all. The glyph is emitted only by
-    // `cli::format::thinking_header`.
-    sess.expect("✻ Thinking").unwrap_or_else(|e| {
-        let screen = sess.render(common::screen_contents);
-        panic!("thinking header should render: {e}\nPTY:\n{screen}");
-    });
-
-    // Both halves of the canned reasoning must survive. The second one is
-    // the real gate: it arrives as a delta that starts mid-sentence on a
-    // line the previous delta opened, which is exactly where a per-delta
-    // spinner clear used to erase what had been drawn.
     sess.expect("Reasoning step one").unwrap_or_else(|e| {
         let screen = sess.render(common::screen_contents);
         panic!("first reasoning delta should render: {e}\nPTY:\n{screen}");
@@ -71,6 +56,31 @@ fn thinking_content_is_rendered_before_the_answer() {
             let screen = sess.render(common::screen_contents);
             panic!("the answer must still render after thinking: {e}\nPTY:\n{screen}");
         });
+    // Leads are styled apart from their text, so they are checked on the
+    // rendered screen rather than in the byte stream. The ✻ marks the dim
+    // block as reasoning (without it dim text reads as a faded answer), and
+    // the answer keeps the turn's •.
+    let screen = sess.render(common::screen_contents);
+    assert!(
+        !screen.contains("Thinking…"),
+        "no header row repeats the spinner's label: {screen}"
+    );
+    let reasoning: Vec<_> = screen
+        .lines()
+        .filter(|line| line.contains("Reasoning step"))
+        .collect();
+    assert!(
+        reasoning.len() == 2
+            && reasoning[0].starts_with("✻ Reasoning step one")
+            && reasoning[1].starts_with("  Reasoning step two"),
+        "first row led by ✻, the next indented under it: {reasoning:?}"
+    );
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.starts_with("• The answer follows the reasoning")),
+        "the answer keeps the response's •: {screen}"
+    );
 
     common::expect_turn_complete_after(
         &sess,

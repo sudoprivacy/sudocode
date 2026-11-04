@@ -4,10 +4,11 @@ mod common;
 #[test]
 fn startup_information_fits_terminal_cells_without_losing_long_unicode_paths() {
     let env = common::TestEnv::new(
-        "startup-long-workspace-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-中文",
+        "startup x y-workspace-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-中文",
     );
     let binary = common::scode_bin();
     let shell = common::resolve_sh();
+    let mut has_literal_path_space = false;
     for columns in [80, 40, 20] {
         // Establish geometry before scode starts: resizing an already running
         // application races its first terminal-width query.
@@ -29,6 +30,7 @@ fn startup_information_fits_terminal_cells_without_losing_long_unicode_paths() {
             let raw = screen.raw();
             assert_eq!(raw.size(), (100, columns));
             let rows: Vec<_> = raw.rows(0, columns).collect();
+            has_literal_path_space |= rows.iter().any(|row| row.contains("x y"));
             let top = rows.iter().position(|row| row.starts_with('╭')).unwrap();
             let bottom = rows.iter().position(|row| row.starts_with('╰')).unwrap();
             assert!(
@@ -66,8 +68,10 @@ fn startup_information_fits_terminal_cells_without_losing_long_unicode_paths() {
             let directory = env.workspace_root().canonicalize().unwrap();
             // Windows canonicalization adds a verbatim prefix; getcwd does not.
             let directory = directory.to_str().unwrap().trim_start_matches(r"\\?\");
+            // Apply the same visual whitespace projection to both operands.
+            let directory: String = directory.split_whitespace().collect();
             assert!(
-                information.contains(directory),
+                information.contains(directory.as_str()),
                 "full Unicode directory was lost at {columns} columns: {information:?}",
             );
             if columns == 20 {
@@ -77,6 +81,10 @@ fn startup_information_fits_terminal_cells_without_losing_long_unicode_paths() {
         child.send("/exit\r").unwrap();
         assert_eq!(child.expect_eof().unwrap(), 0);
     }
+    assert!(
+        has_literal_path_space,
+        "filesystem spaces must remain visible"
+    );
     if env.is_mock() {
         assert_eq!(env.captured_message_count(), 0);
     }

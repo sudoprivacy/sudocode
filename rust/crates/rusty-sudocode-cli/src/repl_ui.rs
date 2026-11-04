@@ -29,7 +29,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::render::activity::{ActivityState, ToolActivity};
-use commands::suggest_slash_commands;
 use engine_events::EngineState;
 use iocraft::prelude::*;
 
@@ -1261,6 +1260,10 @@ struct ReplContext {
     pending: Arc<Mutex<Vec<PendingItem>>>,
     /// Earlier prompts `↑` walks before anything typed in this process.
     input_history: Arc<Vec<String>>,
+    /// Runtime values Tab offers for slash-command arguments (models, session
+    /// ids, the working directory). The coordinator refreshes it between turns,
+    /// so a key press only filters what is already here.
+    completions: Arc<Mutex<commands::CompletionContext>>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
     /// coordinator's staging area and returns its text for the input slot,
     /// skipping inbound A2A/peer items. `None` when no queue is wired (the
@@ -1294,6 +1297,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_for_future = Arc::clone(&ctx.pending);
     let dequeue_hook = ctx.dequeue_hook.clone();
     let input_history = Arc::clone(&ctx.input_history);
+    let completions = Arc::clone(&ctx.completions);
     let tasks = Arc::clone(&ctx.tasks);
     let tasks_for_future = Arc::clone(&ctx.tasks);
     let tasks_for_events = Arc::clone(&ctx.tasks);
@@ -1726,7 +1730,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 tab_index.set(idx);
                                 input_value.set(candidates[idx].clone());
                             } else {
-                                let suggestions = suggest_slash_commands(&val, 10);
+                                let suggestions = commands::complete_slash_input(
+                                    &val,
+                                    &completions
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                );
                                 if !suggestions.is_empty() {
                                     input_value.set(suggestions[0].clone());
                                     tab_candidates.set(suggestions);
@@ -2781,6 +2790,7 @@ pub fn spawn_repl_ui(
     todo_items: Vec<runtime::Todo>,
     input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
+    completions: Arc<Mutex<commands::CompletionContext>>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
@@ -2812,6 +2822,7 @@ pub fn spawn_repl_ui(
         todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),
         input_history: Arc::new(input_history),
+        completions,
         dequeue_hook,
     };
 
@@ -2884,6 +2895,7 @@ pub fn spawn_repl_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commands::suggest_slash_commands;
 
     fn tool_card(id: &str, name: &str) -> ToolCard {
         ToolCard::new(id.to_string(), name, "{}")

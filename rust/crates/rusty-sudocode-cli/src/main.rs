@@ -3377,6 +3377,7 @@ fn run_repl_iocraft_dispatch(
                 .dequeue_all_human()
         })
     };
+    let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
@@ -3384,7 +3385,10 @@ fn run_repl_iocraft_dispatch(
         seed_todos,
         input_history,
         Some(dequeue_hook),
+        Arc::clone(&completions),
     );
+    cli.completions = Some(completions);
+    cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
@@ -4010,6 +4014,7 @@ fn run_repl_iocraft_dispatch(
                                     )
                             {
                                 repl_ui_cmd.begin_turn();
+                                cli_lock.refresh_completions();
                             }
                             repl_ui_cmd.set_cache_tip(cli_lock.cache_ttl_tip());
                             true
@@ -4332,6 +4337,8 @@ struct LiveCli {
     /// `println!`. Set by the iocraft REPL dispatch so slash command output
     /// goes through `split_for_iocraft` and renders correctly in raw mode.
     iocraft_output: Option<repl_ui::OutputSender>,
+    /// What the iocraft REPL's Tab offers for slash-command arguments.
+    completions: Option<Arc<Mutex<commands::CompletionContext>>>,
 }
 
 fn run_acp_server(
@@ -4701,6 +4708,7 @@ impl LiveCli {
             shared_queue_mode: None,
             is_repl: false,
             iocraft_output: None,
+            completions: None,
         })
     }
 
@@ -5204,6 +5212,33 @@ impl LiveCli {
         )
     }
 
+    /// Refresh what Tab offers for slash-command arguments. Runs between turns
+    /// and after a command changes the session or model, so a key press never
+    /// waits on model discovery or the session store.
+    fn refresh_completions(&self) {
+        let Some(shared) = &self.completions else {
+            return;
+        };
+        let active = self.lifecycle.session_handle().id;
+        let mut sessions = vec![active.clone()];
+        sessions.extend(
+            list_managed_sessions()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|session| session.id)
+                .filter(|id| *id != active)
+                .take(20),
+        );
+        let context = commands::CompletionContext {
+            models: self.lifecycle.available_models(),
+            sessions,
+            cwd: env::current_dir().unwrap_or_default(),
+        };
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context;
+    }
+
     /// Show lifecycle usage in the dynamic status slot, or plain output.
     fn print_turn_status_line(
         &self,
@@ -5251,6 +5286,7 @@ impl LiveCli {
             // A turn can switch branches (its tools run git), so refresh here.
             ui.set_workspace_position(workspace_position());
         }
+        self.refresh_completions();
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
             // status line is deliberately NOT echoed to scrollback: the

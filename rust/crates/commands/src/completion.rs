@@ -11,19 +11,25 @@
 //! REPL refreshes between turns, so a key press never waits on the network.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::{find_slash_command_spec, suggest_slash_commands};
 
 /// The most candidates one Tab offers.
 const LIMIT: usize = 50;
 
+/// Lists values on demand, when a completion actually needs them.
+pub type ValueList = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// Runtime values a REPL can offer for slash-command arguments.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CompletionContext {
     /// Models `/model` can switch to, current first.
     pub models: Vec<String>,
-    /// Session ids `/resume` and `/session` accept, most recent first.
-    pub sessions: Vec<String>,
+    /// Session ids `/resume` and `/session` accept, most recent first. Listed
+    /// only when a session argument is completed: reading the session store
+    /// parses transcripts, which no other key press should pay for.
+    pub sessions: Option<ValueList>,
     /// Directory relative paths resolve against.
     pub cwd: PathBuf,
 }
@@ -148,7 +154,14 @@ fn placeholder_values(name: &str, partial: &str, context: &CompletionContext) ->
     let starts = |value: &&String| value.starts_with(partial);
     match name.trim_end_matches("...") {
         "model" => context.models.iter().filter(starts).cloned().collect(),
-        "session-id" | "session-path" => context.sessions.iter().filter(starts).cloned().collect(),
+        "session-id" | "session-path" => context
+            .sessions
+            .as_ref()
+            .map(|list| list())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|value| value.starts_with(partial))
+            .collect(),
         "path" | "file" => path_values(partial, &context.cwd),
         _ => Vec::new(),
     }

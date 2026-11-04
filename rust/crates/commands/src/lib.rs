@@ -13,7 +13,7 @@ mod completion;
 pub mod reports;
 
 pub use cli_packages::render_cli_packages_prompt_section;
-pub use completion::{complete_slash_input, CompletionContext};
+pub use completion::{complete_slash_input, CompletionContext, ValueList};
 
 use plugins::{
     discover_marketplace_manifest, MarketplaceDiscoveryError, MarketplaceManifest, PluginError,

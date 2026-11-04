@@ -5212,26 +5212,30 @@ impl LiveCli {
         )
     }
 
-    /// Refresh what Tab offers for slash-command arguments. Runs between turns
-    /// and after a command changes the session or model, so a key press never
-    /// waits on model discovery or the session store.
+    /// Refresh what Tab offers for slash-command arguments, at startup,
+    /// between turns and after a command changes the session or model. Models
+    /// come from what is already known (no discovery refresh); sessions are
+    /// listed only when Tab completes a session argument.
     fn refresh_completions(&self) {
         let Some(shared) = &self.completions else {
             return;
         };
         let active = self.lifecycle.session_handle().id;
-        let mut sessions = vec![active.clone()];
-        sessions.extend(
-            list_managed_sessions()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|session| session.id)
-                .filter(|id| *id != active)
-                .take(20),
-        );
+        let sessions: commands::ValueList = Arc::new(move || {
+            let mut ids = vec![active.clone()];
+            ids.extend(
+                list_managed_sessions()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|session| session.id)
+                    .filter(|id| *id != active)
+                    .take(20),
+            );
+            ids
+        });
         let context = commands::CompletionContext {
-            models: self.lifecycle.available_models(),
-            sessions,
+            models: self.lifecycle.known_models(),
+            sessions: Some(sessions),
             cwd: env::current_dir().unwrap_or_default(),
         };
         *shared

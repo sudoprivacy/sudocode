@@ -1125,3 +1125,66 @@ fn ctrl_c_from_the_task_browser_cancels_even_with_queued_input() {
     submit(&mut session, "/exit", "\r");
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
+
+/// A background task that finishes while a turn is running reaches that turn
+/// at its next safe point, exactly as typed input steered with Enter does,
+/// instead of waiting for the turn to end.
+#[test]
+fn background_completion_steers_into_the_running_turn() {
+    let env = TestEnv::new("background-completion-steer");
+    if env.is_live() {
+        return;
+    }
+    fs::write(env.workspace_root().join("wait.sh"),
+        "printf started > tool-started; while test ! -f release-tool; do sleep 0.1; done; printf 'ORIGINAL_TOOL_RESULT\\n'").unwrap();
+    let _release = Release(env.workspace_root().to_path_buf());
+    let mut session = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    session.resize(60, 120).unwrap();
+    common::expect_input_line_cleared(&session, Duration::from_secs(30), "initial prompt");
+    let batch = json!([
+        {"id": "background-tool", "name": "Bash",
+         "input": {"command": "printf BACKGROUND_DONE", "run_in_background": true}},
+        {"id": "steer-tool", "name": "Bash",
+         "input": {"command": "sh wait.sh", "timeout": common::LIVE_TURN_BUDGET.as_millis() * 3}},
+    ]);
+    submit(
+        &mut session,
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "\r",
+    );
+    common::expect_screen(
+        &session,
+        |_| env.workspace_root().join("tool-started").exists(),
+        common::LIVE_TURN_BUDGET,
+        "foreground tool holds the turn",
+    );
+    // The completion waits for the held tool, as steering does.
+    common::expect_screen(
+        &session,
+        |view| view.contains("steering:") && view.contains("Background task"),
+        common::DEFAULT_TIMEOUT,
+        "background completion steers into the running turn",
+    );
+    fs::write(env.workspace_root().join("release-tool"), "release").unwrap();
+    common::expect_screen(
+        &session,
+        |view| view.contains("Concurrency batch done.") && view.contains("ctx "),
+        common::LIVE_TURN_BUDGET,
+        "turn finished",
+    );
+    let captured = requests(&env);
+    assert_eq!(
+        captured.len(),
+        2,
+        "one turn, no follow-up turn for the completion"
+    );
+    let next = captured[1]["messages"].to_string();
+    assert!(
+        next.contains("ORIGINAL_TOOL_RESULT") && next.contains("BACKGROUND_DONE"),
+        "the same turn's next request carries the completion: {next}"
+    );
+    finish(&mut session);
+}

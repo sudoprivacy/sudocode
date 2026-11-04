@@ -2595,6 +2595,7 @@ fn show_effort_selection(
             custom_input_hint: None,
             force_fuzzy_select: true,
             back_value: None,
+            initial_value: None,
         },
         items,
         move |level, cli, out| {
@@ -2648,7 +2649,12 @@ impl IocraftQuestionPrompter {
         }
     }
 
-    fn show_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
+    fn show_field(
+        &self,
+        request: &runtime::QuestionPromptRequest,
+        index: usize,
+        earlier: Option<&runtime::QuestionPromptAnswer>,
+    ) {
         let field = &request.fields[index];
         self.ui.show_question(repl_ui::QuestionPromptView {
             presentation: request.presentation.clone(),
@@ -2671,7 +2677,8 @@ impl IocraftQuestionPrompter {
             allow_custom_input: field.allow_custom_input,
             custom_input_hint: field.custom_input_hint.clone(),
             force_fuzzy_select: false,
-            back_value: None,
+            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
+            initial_value: earlier.map(|answer| answer.value.clone()),
         });
     }
 
@@ -2742,20 +2749,28 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
         let this = self.clone();
         let request = request.clone();
         Box::pin(async move {
-            let mut answers = Vec::with_capacity(request.fields.len());
-            for index in 0..request.fields.len() {
+            // Answers are kept per question so going back restores them.
+            let mut answers: Vec<Option<runtime::QuestionPromptAnswer>> =
+                vec![None; request.fields.len()];
+            let mut index = 0;
+            while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
-                this.show_field(&request, index);
+                this.show_field(&request, index, answers[index].as_ref());
                 let raw = if let Ok(answer) = rx.await {
                     answer.trim().to_string()
                 } else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };
-                answers.push(Self::answer_for_field(&request.fields[index], raw));
+                if raw == repl_ui::QUESTION_BACK {
+                    index = index.saturating_sub(1);
+                    continue;
+                }
+                answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
+                index += 1;
             }
             this.ui.clear_question();
-            Ok(answers)
+            Ok(answers.into_iter().flatten().collect())
         })
     }
 }
@@ -3892,6 +3907,7 @@ fn run_repl_iocraft_dispatch(
                                     custom_input_hint: Some("or type a model name".to_string()),
                                     force_fuzzy_select: false,
                                     back_value: None,
+                                    initial_value: None,
                                 },
                                 models,
                                 move |model_name, cli, out| {

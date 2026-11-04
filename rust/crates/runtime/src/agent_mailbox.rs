@@ -231,15 +231,16 @@ fn xml_attr_escape(s: &str) -> String {
 
 /// Markup the harness owns: the tag the system prompt tells the model is
 /// authoritative (`system-reminder`, see `prompt::get_simple_system_section`),
-/// the coordinator's injected `task-notification` XML, and the four framings a
+/// the coordinator's injected `task-notification` XML, the four framings a
 /// mailbox turn is assembled from (`compose_next_turn_from_envelopes` wraps each
-/// envelope in one).
+/// envelope in one), and the `channel` frame a Claude Code client receives the
+/// same envelope in.
 ///
 /// A body is written by ANOTHER agent — in the cross-org case by another
 /// organisation — so a body spelling one of these either impersonates the
 /// harness or closes the frame built around it.
 const HARNESS_OWNED_TAGS: &str = "system-reminder|task-notification|mailbox-message|\
-                                  shutdown-request|shutdown-response|plan-approval-response";
+                                  shutdown-request|shutdown-response|plan-approval-response|channel";
 
 /// Render an envelope `body` for a prompt with the harness's own markup inert.
 ///

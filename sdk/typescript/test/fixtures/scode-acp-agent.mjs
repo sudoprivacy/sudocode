@@ -5,11 +5,16 @@ import { Readable, Writable } from 'node:stream';
 const scenario = process.argv[2] ?? 'normal';
 let sessionId = 'fixture-native-session';
 let cancelled = false;
+let peerOwned = false;
 const hang = () => new Promise(() => {});
 const app = acp.agent({ name: 'hydra-acp-fixture', version: '1' })
-  .onRequest(acp.methods.agent.initialize, async () => {
+  .onRequest(acp.methods.agent.initialize, async ctx => {
     if (scenario === 'startup-hang') return hang();
-    return { protocolVersion: 1, agentCapabilities: { loadSession: scenario !== 'no-load' } };
+    // An older scode ignores the request and keeps answering peers itself.
+    peerOwned = scenario !== 'no-peer-input'
+      && ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version >= 1;
+    return { protocolVersion: 1, agentCapabilities: { loadSession: scenario !== 'no-load' },
+      ...(peerOwned ? { _meta: { sudocode: { peerInput: { version: 1 } } } } : {}) };
   })
   .onRequest(acp.methods.agent.session.new, () => ({ sessionId }))
   .onRequest(acp.methods.agent.session.load, async ctx => {
@@ -48,6 +53,14 @@ const app = acp.agent({ name: 'hydra-acp-fixture', version: '1' })
             { label: 'Revise', value: 'revise', recommended: false },
           ] }],
       });
+    }
+    if (text === 'peer-message' && peerOwned) {
+      for (const from of ['fixture-peer', 'stranger']) {
+        await ctx.client.notify('_sudocode/session/peer_message', {
+          sessionId, text: `<mailbox-message from="${from}">\nhello from ${from}\n</mailbox-message>`,
+          body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting' } },
+        });
+      }
     }
     await ctx.client.notify(acp.methods.client.session.update, {
       sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Foreground result' } },

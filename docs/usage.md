@@ -1028,6 +1028,10 @@ steps with the user. This final answer is an additional model request, outside
 the execution budget. Each new user turn gets a fresh budget. Already-started
 background work is not cancelled by this limit.
 
+Subagents (`Agent`, `agent_spawn`) get the same budget for each of their turns
+and wind down the same way, returning what they found as a completed result.
+Without `maxSteps`, a subagent turn is limited to 100 steps.
+
 ## Editing files
 
 `edit_file` requires a nonempty `old_string`. By default it must match exactly

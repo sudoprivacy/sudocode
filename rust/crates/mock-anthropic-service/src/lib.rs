@@ -263,6 +263,9 @@ enum Scenario {
     CohostReply,
     CohostReadThenReply,
     CohostDelegate,
+    /// Parent spawns one foreground `Agent` whose child repeats a tool until
+    /// its step budget withdraws the tools, then answers with the child's text.
+    SubagentStepBudgetParent,
     CohostShellPwd,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
@@ -402,6 +405,7 @@ impl Scenario {
             "cohost_reply" => Some(Self::CohostReply),
             "cohost_read_then_reply" => Some(Self::CohostReadThenReply),
             "cohost_delegate" => Some(Self::CohostDelegate),
+            "subagent_step_budget_parent" => Some(Self::SubagentStepBudgetParent),
             "cohost_shell_pwd" => Some(Self::CohostShellPwd),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
@@ -484,6 +488,7 @@ impl Scenario {
             Self::CohostReply => "cohost_reply",
             Self::CohostReadThenReply => "cohost_read_then_reply",
             Self::CohostDelegate => "cohost_delegate",
+            Self::SubagentStepBudgetParent => "subagent_step_budget_parent",
             Self::CohostShellPwd => "cohost_shell_pwd",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
@@ -1475,6 +1480,9 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
     if matches!(scenario, Scenario::CohostDelegate) {
         return cohost_delegate_step(request);
     }
+    if matches!(scenario, Scenario::SubagentStepBudgetParent) {
+        return subagent_step_budget_parent_step(request);
+    }
     let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     let background_child =
@@ -1580,6 +1588,24 @@ fn with_subagent_release(request: &MessageRequest, prompt: String) -> String {
     match subagent_release_path(request) {
         Some(path) => format!("{prompt} SUBAGENT_RELEASE:{}", json!(path)),
         None => prompt,
+    }
+}
+
+fn subagent_step_budget_parent_step(request: &MessageRequest) -> SubagentStep {
+    match tool_results_by_name(request).get("Agent") {
+        Some((result, _)) => SubagentStep::Answer(format!("subagent returned: {result}")),
+        None => SubagentStep::Tools(vec![(
+            "toolu_step_budget_agent",
+            "Agent",
+            agent_call_input(
+                "budgeted child",
+                &format!(
+                    "{SCENARIO_PREFIX}step_budget Repeatedly run echo step >> steps.txt. When the step budget is reached, summarize results and suggest next steps."
+                ),
+                "general-purpose",
+                false,
+            ),
+        )]),
     }
 }
 
@@ -1894,6 +1920,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::SubagentDelegationParent => stream_delegation,
         Scenario::SubagentCalcChild => stream_subagent_calc_child,
         Scenario::CohostDelegate
+        | Scenario::SubagentStepBudgetParent
         | Scenario::SubagentWorkflow
         | Scenario::SubagentWorkflowChild
         | Scenario::SubagentEventsSync
@@ -3421,6 +3448,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             text_message_response("msg_subagent_calc_child", &sum.to_string())
         }
         Scenario::CohostDelegate
+        | Scenario::SubagentStepBudgetParent
         | Scenario::SubagentWorkflow
         | Scenario::SubagentWorkflowChild
         | Scenario::SubagentEventsSync
@@ -3522,6 +3550,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::CohostReply => "req_cohost_reply",
         Scenario::CohostReadThenReply => "req_cohost_read_then_reply",
         Scenario::CohostDelegate => "req_cohost_delegate",
+        Scenario::SubagentStepBudgetParent => "req_subagent_step_budget_parent",
         Scenario::CohostShellPwd => "req_cohost_shell_pwd",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",

@@ -288,8 +288,18 @@ fn openai_reasoning_fields_reach_the_terminal_and_session() {
             .unwrap();
         let has_thinking = !matches!(case, "none" | "empty");
         if has_thinking {
-            cli.expect("✻ Thinking").expect(case);
-            cli.expect("校验 fixture").unwrap();
+            cli.expect("校验 fixture").expect(case);
+            // The lead is styled apart from the text: check the rendered row.
+            common::expect_screen(
+                &cli,
+                |screen| {
+                    screen
+                        .lines()
+                        .any(|line| line.starts_with("✻ 校验 fixture"))
+                },
+                common::DEFAULT_TIMEOUT,
+                case,
+            );
             cli.expect("最后一步").unwrap();
         }
         cli.expect(&nonce).unwrap();

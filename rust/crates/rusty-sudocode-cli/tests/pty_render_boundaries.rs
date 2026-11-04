@@ -58,8 +58,7 @@ fn assert_ordered_response(screen: &str) {
     let positions: Vec<_> = [
         "Boundary before.",
         "card",
-        "✻ Thinking",
-        "Reasoning step one.",
+        "✻ Reasoning step one.",
         "Reasoning step two continues the same line.",
         "The answer follows the reasoning.",
     ]

@@ -7,8 +7,8 @@ use std::ops::Range;
 use codex_mermaid::{RenderError, Role};
 
 use super::{
-    styled_text::StyledText, CodeBlockKind, ColorTheme, Event, Options, Parser, Tag, TagEnd,
-    TextRole,
+    styled_text::StyledText, CodeBlockKind, ColorSupport, ColorTheme, Event, Options, Parser, Tag,
+    TagEnd, TextRole,
 };
 
 pub(super) fn is_mermaid(info: &str) -> bool {
@@ -85,15 +85,17 @@ pub(super) fn render(
     source: &str,
     width: usize,
     theme: ColorTheme,
+    support: ColorSupport,
 ) -> Result<StyledText, RenderError> {
     let mut output = StyledText::default();
     for line in codex_mermaid::render_spans(source, width)? {
         for span in line {
-            match span.role {
-                Role::Node => output.push(theme.style(TextRole::Accent), &span.text),
-                Role::Edge => output.push(theme.style(TextRole::Border), &span.text),
-                Role::Text => output.push(theme.style(TextRole::Body), &span.text),
-            }
+            let role = match span.role {
+                Role::Node => TextRole::DiagramNode,
+                Role::Edge => TextRole::DiagramEdge,
+                Role::Text => TextRole::Body,
+            };
+            output.push(theme.style_for(role, support), &span.text);
         }
         output.plain("\n");
     }

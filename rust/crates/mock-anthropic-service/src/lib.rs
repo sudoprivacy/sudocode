@@ -3725,7 +3725,7 @@ pub const CODEX_COLORS_SHOWCASE_DOC: &str = include_str!("fixtures/codex-colors.
 pub const SYNTAX_SHOWCASE_DOC: &str = r#"Theme prose.
 
 # ThemeHeadingOne
-## ThemeHeadingTwo
+## ThemeHeadingTwo **ThemeHeadingStrong**
 ### ThemeHeadingThree
 #### ThemeHeadingFour
 ##### ThemeHeadingFive
@@ -3733,6 +3733,11 @@ pub const SYNTAX_SHOWCASE_DOC: &str = r#"Theme prose.
 
 **ThemeStrong** *ThemeEmphasis* ~~ThemeStrike~~
 
+**OuterStrong *ThemeStrongEmphasis* ThemeStrongAfter**
+
+*OuterEmphasis **ThemeEmphasisStrong** ThemeEmphasisAfter*
+
+- ThemeUnordered
 - `~/.zshrc.bak-20261001`
 - `~/.config/scode/credentials.bak`
 
@@ -3740,11 +3745,17 @@ Inline `ThemeInline` and **`ThemeBoldCode`**.
 
 [ThemeWeb](https://example.com/reference)
 
+**[ThemeStrongLink](https://example.com/strong)**
+
+[**ThemeLinkStrong**](https://example.com/link-strong)
+
 [ThemePath](./src/main.rs:42) and [src/lib.rs](./src/lib.rs)
+
+**[./src/strong.rs](./src/strong.rs)**
 
 1. ThemeOrdered
 
-> ThemeQuote
+> ThemeQuote **ThemeQuoteStrong** *ThemeQuoteEmphasis* `ThemeQuoteCode`
 
 ```rust,no_run
 // ThemeComment

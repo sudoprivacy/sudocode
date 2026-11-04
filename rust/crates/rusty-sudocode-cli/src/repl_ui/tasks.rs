@@ -40,32 +40,32 @@ impl TaskSummary {
         frame: usize,
     ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
         let active = self.running + self.stopping;
-        let (full, short, color) = if self.unconfirmed > 0 {
+        let (full, short, role) = if self.unconfirmed > 0 {
             (
                 format!(
                     "{} unconfirmed",
                     quantity(self.unconfirmed, "background task")
                 ),
                 format!("{} unconfirmed", self.unconfirmed),
-                theme().color(TextRole::Warning),
+                TextRole::Warning,
             )
         } else if self.failed > 0 {
             (
                 format!("{} failed", quantity(self.failed, "background task")),
                 format!("{} failed", self.failed),
-                theme().color(TextRole::Error),
+                TextRole::Error,
             )
         } else if self.stopping > 0 {
             (
                 format!("Stopping {}…", quantity(self.stopping, "background task")),
                 format!("{} stopping", self.stopping),
-                theme().color(TextRole::Brand),
+                TextRole::Brand,
             )
         } else if self.running > 0 {
             (
                 format!("{} still running", quantity(self.running, "task")),
                 format!("{} running", self.running),
-                theme().color(TextRole::Brand),
+                TextRole::Brand,
             )
         } else {
             return None;
@@ -85,25 +85,20 @@ impl TaskSummary {
             .animates_status()
             .then(|| crate::render::activity::spinner_frame(frame));
         let logo_width = logo.map_or(0, |logo| display_width(logo) + 1);
-        let has_color =
-            crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
-        let style = |color| crossterm::style::ContentStyle {
-            foreground_color: has_color.then_some(color),
-            ..Default::default()
-        };
+        let theme = theme();
         let render = |label: &str, metadata: &str| {
             let mut text = StyledText::default();
             if let Some(logo) = logo {
                 text.push(
-                    style(theme().color(TextRole::Brand)),
+                    theme.style(TextRole::Brand),
                     &truncate_to_width(&format!("{logo} "), width),
                 );
             }
             text.push(
-                style(color),
+                theme.style(role),
                 &truncate_to_width(label, width.saturating_sub(logo_width)),
             );
-            text.push(style(theme().color(TextRole::Secondary)), metadata);
+            text.push(theme.style(TextRole::Secondary), metadata);
             std::sync::Arc::new(text)
         };
         let summary = render(&short, "");

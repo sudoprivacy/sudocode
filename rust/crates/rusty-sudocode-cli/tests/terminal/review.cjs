@@ -3,6 +3,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { createHost } = require('../../../../../e2e/terminal-resize/host.cjs');
+const reference = require('../fixtures/codex_styles.json').variants['dark-truecolor'];
+
+function terminalColor(value, isDefault, isRgb) {
+  if (isDefault) return 'Default';
+  return isRgb ? `Rgb(${value >>> 16}, ${(value >>> 8) & 255}, ${value & 255})` : `Idx(${value})`;
+}
+
+function cellStyle(cell) {
+  return {
+    fg: terminalColor(cell.getFgColor(), cell.isFgDefault(), cell.isFgRGB()),
+    bg: terminalColor(cell.getBgColor(), cell.isBgDefault(), cell.isBgRGB()),
+    bold: Boolean(cell.isBold()), italic: Boolean(cell.isItalic()),
+    underline: Boolean(cell.isUnderline()), strike: Boolean(cell.isStrikethrough()),
+    dim: Boolean(cell.isDim()),
+  };
+}
 
 function countLines(host, expected, kind) {
   const lines = host.snapshot().split('\n');
@@ -13,13 +29,17 @@ function countLines(host, expected, kind) {
 
 function documentStyles(host, config) {
   const expected = [
-    ['Full review document', !config.isNoColor, false],
-    ['ReviewLine000', !config.isNoColor, false],
-    ['src/main.rs', false, !config.isNoColor],
+    ['Full review document', 'h1'],
+    ['ReviewLine000', 'strong'],
+    ['src/main.rs', 'inline'],
   ];
-  if (config.kind === 'plan') expected.push(['Context', !config.isNoColor, false]);
+  if (config.kind === 'plan') expected.push(['Context', 'h2']);
   const buffer = host.terminal.buffer.active;
-  return expected.map(([needle, bold, colored]) => {
+  return expected.map(([needle, role]) => {
+    const style = config.isNoColor
+      ? { fg: 'Default', bg: 'Default', bold: false, italic: false,
+        underline: false, strike: false, dim: false }
+      : { ...reference.styles[reference.roles[role]], dim: false };
     const matches = [];
     for (let row = 0; row < buffer.length; row++) {
       const line = buffer.getLine(row), text = line.translateToString(true);
@@ -34,13 +54,13 @@ function documentStyles(host, config) {
         const cell = line.getCell(col);
         const chars = cell.getChars() || (cell.getWidth() === 0 ? '' : ' ');
         if (chars && offset === at) {
-          matches.push({ bold: Boolean(cell.isBold()), colored: cell.getFgColorMode() !== 0 });
+          matches.push(cellStyle(cell));
           break;
         }
         offset += chars.length;
       }
     }
-    assert.deepEqual(matches, [{ bold, colored }],
+    assert.deepEqual(matches, [style],
       `${needle}: review styles survive history, resize and inspection (NoColor=${config.isNoColor})`);
     return { needle, ...matches[0] };
   });

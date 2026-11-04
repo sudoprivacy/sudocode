@@ -1176,6 +1176,19 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
+Terminal palette policy has one owner: `render::ColorTheme`. It selects semantic
+Markdown scopes, code/metadata colors, status fallbacks, and contrast on painted
+surfaces. `code_theme` reads syntax assets; Markdown and diff renderers consume
+resolved styles. Preserve this boundary when adding presentation roles. External
+tool ANSI remains source data decoded at the terminal adapter boundary.
+
+`pty_syntax_theme` compares terminal cells with a pinned, independently generated
+Codex reference, including nested Markdown, live preview, resize, history handoff
+and resume. Its fixture records the upstream commit and helper digest. Refresh
+it with `e2e/codex-style/capture.py` against the intended upstream checkout when
+updating parity; retain the upstream style/contrast helpers rather than copying
+scode's expected colors into the reference. Brand amber remains a scode role.
+
 Renderer changes pass the browser smoke in the required `Local acceptance`
 status, and scoped mandatory local rendering judges their typing latency. See the shared
 [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).

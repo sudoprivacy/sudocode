@@ -1,10 +1,8 @@
 //! Codex default diff colors on scode's existing inline tool cards.
-//! Source: openai/codex b741e480, tui/src/diff_render.rs and style/contrast.rs.
+//! Source: openai/codex 079e17a4, tui/src/diff_render.rs and style/contrast.rs.
 //! Copyright 2025 OpenAI. Apache-2.0; see third_party/codex.
 
-use crossterm::style::{Color, ContentStyle};
-
-use super::{code_theme, color_math, styled_text::StyledText, theme, ColorSupport};
+use super::{code_theme, styled_text::StyledText, theme, ColorSupport};
 
 /// Highlight a complete hunk, preserving parser state across its source rows.
 pub(crate) fn render_rows(rows: &[(char, &str)], language: &str, separator: &str) -> Vec<String> {
@@ -51,58 +49,22 @@ fn render(
     rows.iter()
         .enumerate()
         .map(|(index, (sign, text))| {
-            let bg = palette.diff_background(*sign, support);
-            let sign_color = palette.diff_sign_color(*sign, support);
+            let surface = palette.diff_prefix_style(*sign, support);
             let mut output = StyledText::default();
             if let Some(numbers) = numbers {
                 let number = numbers[index];
-                output.push(
-                    ContentStyle {
-                        foreground_color: sign_color,
-                        background_color: bg,
-                        ..ContentStyle::default()
-                    },
-                    &format!("{number:number_width$} "),
-                );
+                output.push(surface, &format!("{number:number_width$} "));
             }
-            output.push(
-                ContentStyle {
-                    foreground_color: sign_color,
-                    background_color: bg,
-                    ..ContentStyle::default()
-                },
-                &format!("{sign}{separator}"),
-            );
+            output.push(surface, &format!("{sign}{separator}"));
             if let Some(source) = &highlighted {
-                for (mut style, content) in source.spans(offset..offset + text.len()) {
-                    if let Some(Color::Rgb { r, g, b }) = style.foreground_color {
-                        let background = bg.and_then(|bg| match bg {
-                            Color::Rgb { r, g, b } => Some((r, g, b)),
-                            Color::AnsiValue(index) => Some(color_math::xterm(index)),
-                            _ => None,
-                        });
-                        style.foreground_color =
-                            Some(color_math::foreground((r, g, b), background, support));
-                    }
-                    style.background_color = bg;
-                    output.push(style, content);
+                for (style, content) in source.spans(offset..offset + text.len()) {
+                    output.push(
+                        palette.diff_content_style(surface, Some(style), support),
+                        content,
+                    );
                 }
             } else {
-                let foreground_color = if light
-                    && matches!(support, ColorSupport::TrueColor | ColorSupport::Ansi256)
-                {
-                    None
-                } else {
-                    sign_color
-                };
-                output.push(
-                    ContentStyle {
-                        foreground_color,
-                        background_color: bg,
-                        ..ContentStyle::default()
-                    },
-                    text,
-                );
+                output.push(palette.diff_content_style(surface, None, support), text);
             }
             offset += text.len() + 1;
             let mut ansi = String::new();

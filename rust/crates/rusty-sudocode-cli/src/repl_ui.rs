@@ -2292,18 +2292,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     // Decode semantic initial styles before measurement. Painting consumes the
     // same spans, so explicit resets never acquire a parent fallback color.
-    let chrome_has_color =
-        crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
     let chrome_theme = crate::render::theme();
-    let chrome_style = |color| crossterm::style::ContentStyle {
-        foreground_color: chrome_has_color.then_some(color),
-        ..crossterm::style::ContentStyle::default()
-    };
-    let chrome_border = chrome_has_color
-        .then_some(chrome_theme.color(TextRole::Border))
+    let chrome_border = chrome_theme
+        .style(TextRole::Border)
+        .foreground_color
         .and_then(ansi_text::ui_color);
-    let _chrome_muted = chrome_style(chrome_theme.color(TextRole::Secondary));
-    let question_style = chrome_style(chrome_theme.color(TextRole::Brand));
+    let question_style = chrome_theme.style(TextRole::Brand);
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::Background { full, .. } => full.clone(),
@@ -2560,7 +2554,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
                 View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.color(TextRole::Warning)).and_then(ansi_text::ui_color))
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_theme.style(TextRole::Warning).foreground_color.and_then(ansi_text::ui_color))
                 }
             }))
             #(row_text("heading", heading, visible.heading))

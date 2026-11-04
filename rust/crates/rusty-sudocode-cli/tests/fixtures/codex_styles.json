@@ -1,14 +1,14 @@
 {
   "reference": {
     "repository": "https://github.com/openai/codex",
-    "commit": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+    "commit": "079e17a422347e49d02501304f79fade7e569362",
     "versions": {
       "ratatui": "0.30.2",
       "syntect": "5.3.0",
       "two-face": "0.5.1"
     },
-    "helper_source_sha256": "749fdb46718ecf7c1f108afe45782a3f9e51902bb0db1811b0ba4482da647206",
-    "method": "Unmodified upstream MarkdownStyles and highlighting helpers; terminal cell styles use the upstream CIE76 palette-distance helper."
+    "helper_source_sha256": "0694086d858a25b4876ff4f4104f38ff9991737d830fe32ed6bdfa110de77350",
+    "method": "Unmodified upstream MarkdownStyles, highlighting and contrast helpers; absent OSC foreground/background, TrueColor style resolution, and CIE76 indexed terminal-cell conversion. Nested roles use upstream Style::patch order."
   },
   "variants": {
     "dark-indexed": {
@@ -19,11 +19,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "//"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " ThemeComment"
                 }
               ],
@@ -32,19 +32,19 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "struct"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": "ThemeType"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -53,63 +53,63 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "fn"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "palette_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 21,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 16,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "usize"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "->"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "bool"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 }
               ],
@@ -118,15 +118,15 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "let"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " message "
                 },
                 {
@@ -134,23 +134,23 @@
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "ThemeString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -159,7 +159,7 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "    count "
                 },
                 {
@@ -167,15 +167,15 @@
                   "text": ">="
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "42"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
@@ -183,7 +183,7 @@
                   "text": "&&"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
@@ -191,7 +191,7 @@
                   "text": "!"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "message"
                 },
                 {
@@ -199,15 +199,15 @@
                   "text": "."
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "is_empty"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 }
               ],
@@ -216,7 +216,7 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -230,11 +230,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "#"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " PythonComment"
                 }
               ],
@@ -243,31 +243,31 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "def"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "python_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 21,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 }
               ],
@@ -276,47 +276,47 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "return"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "PythonString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "if"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "count"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
@@ -324,27 +324,27 @@
                   "text": ">"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "7"
                 },
                 {
-                  "style": 13,
-                  "text": " "
-                },
-                {
-                  "style": 12,
-                  "text": "else"
-                },
-                {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
                   "style": 18,
+                  "text": "else"
+                },
+                {
+                  "style": 19,
+                  "text": " "
+                },
+                {
+                  "style": 22,
                   "text": "None"
                 }
               ],
@@ -358,107 +358,107 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "theme_key"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "JsonString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "42"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "ready"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "true"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -472,15 +472,15 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "const"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "typed_probe"
                 },
                 {
@@ -488,15 +488,15 @@
                   "text": ":"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "string"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": " "
                 },
                 {
@@ -504,23 +504,23 @@
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "TypedString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -534,7 +534,7 @@
             {
               "spans": [
                 {
-                  "style": 8,
+                  "style": 13,
                   "text": "plain_identifier <opaque> 42"
                 }
               ],
@@ -548,23 +548,23 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "-1 +1"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 }
               ],
@@ -573,11 +573,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "-"
                 },
                 {
-                  "style": 19,
+                  "style": 23,
                   "text": "removed_value"
                 }
               ],
@@ -586,11 +586,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "+"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "added_value"
                 }
               ],
@@ -601,20 +601,32 @@
       ],
       "roles": {
         "bold_code": 0,
-        "emphasis": 1,
-        "h1": 2,
-        "h2": 3,
-        "h3": 4,
-        "h4": 1,
-        "h5": 1,
-        "h6": 1,
-        "inline": 5,
-        "link": 6,
-        "ordered": 7,
-        "prose": 8,
-        "quote": 9,
-        "strike": 10,
-        "strong": 3
+        "diagram_edge": 1,
+        "diagram_node": 2,
+        "diff_added_string": 3,
+        "diff_removed_string": 3,
+        "emphasis": 4,
+        "emphasis_strong": 5,
+        "h1": 6,
+        "h2": 7,
+        "h3": 8,
+        "h4": 9,
+        "h5": 9,
+        "h6": 9,
+        "heading_strong": 10,
+        "inline": 3,
+        "link": 11,
+        "ordered": 12,
+        "prose": 13,
+        "quote": 14,
+        "quote_code": 3,
+        "quote_emphasis": 4,
+        "quote_strong": 10,
+        "strike": 15,
+        "strong": 10,
+        "strong_emphasis": 5,
+        "strong_link": 16,
+        "unordered": 17
       },
       "styles": [
         {
@@ -628,32 +640,16 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Default",
-          "italic": true,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": true,
-          "fg": "Default",
-          "italic": false,
-          "strike": false,
-          "underline": true
-        },
-        {
-          "bg": "Default",
-          "bold": true,
-          "fg": "Default",
+          "fg": "Idx(103)",
           "italic": false,
           "strike": false,
           "underline": false
         },
         {
           "bg": "Default",
-          "bold": true,
-          "fg": "Default",
-          "italic": true,
+          "bold": false,
+          "fg": "Idx(223)",
+          "italic": false,
           "strike": false,
           "underline": false
         },
@@ -668,7 +664,63 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(75)",
+          "fg": "Idx(211)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(211)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(211)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(216)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(223)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(223)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(211)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(111)",
           "italic": false,
           "strike": false,
           "underline": true
@@ -692,7 +744,7 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(2)",
+          "fg": "Idx(225)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -707,8 +759,16 @@
         },
         {
           "bg": "Default",
+          "bold": true,
+          "fg": "Idx(111)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
           "bold": false,
-          "fg": "Idx(103)",
+          "fg": "Idx(116)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -732,14 +792,6 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(223)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
           "fg": "Idx(111)",
           "italic": false,
           "strike": false,
@@ -749,14 +801,6 @@
           "bg": "Default",
           "bold": false,
           "fg": "Idx(217)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
-          "fg": "Idx(116)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -787,11 +831,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "//"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " ThemeComment"
                 }
               ],
@@ -800,19 +844,19 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "struct"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": "ThemeType"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -821,63 +865,63 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "fn"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "palette_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 21,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 16,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "usize"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "->"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "bool"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 }
               ],
@@ -886,15 +930,15 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "let"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " message "
                 },
                 {
@@ -902,23 +946,23 @@
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "ThemeString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -927,7 +971,7 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "    count "
                 },
                 {
@@ -935,15 +979,15 @@
                   "text": ">="
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "42"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
@@ -951,7 +995,7 @@
                   "text": "&&"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
@@ -959,7 +1003,7 @@
                   "text": "!"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "message"
                 },
                 {
@@ -967,15 +1011,15 @@
                   "text": "."
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "is_empty"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 }
               ],
@@ -984,7 +1028,7 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -998,11 +1042,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "#"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " PythonComment"
                 }
               ],
@@ -1011,31 +1055,31 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "def"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "python_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 21,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 }
               ],
@@ -1044,47 +1088,47 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "return"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "PythonString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "if"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "count"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
@@ -1092,27 +1136,27 @@
                   "text": ">"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "7"
                 },
                 {
-                  "style": 13,
-                  "text": " "
-                },
-                {
-                  "style": 12,
-                  "text": "else"
-                },
-                {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
                   "style": 18,
+                  "text": "else"
+                },
+                {
+                  "style": 19,
+                  "text": " "
+                },
+                {
+                  "style": 22,
                   "text": "None"
                 }
               ],
@@ -1126,107 +1170,107 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "theme_key"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "JsonString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "42"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 20,
                   "text": "ready"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 22,
                   "text": "true"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -1240,15 +1284,15 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "const"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "typed_probe"
                 },
                 {
@@ -1256,15 +1300,15 @@
                   "text": ":"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 18,
                   "text": "string"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": " "
                 },
                 {
@@ -1272,23 +1316,23 @@
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "TypedString"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -1302,7 +1346,7 @@
             {
               "spans": [
                 {
-                  "style": 8,
+                  "style": 13,
                   "text": "plain_identifier <opaque> 42"
                 }
               ],
@@ -1316,23 +1360,23 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": "-1 +1"
                 },
                 {
-                  "style": 13,
+                  "style": 19,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 }
               ],
@@ -1341,11 +1385,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "-"
                 },
                 {
-                  "style": 19,
+                  "style": 23,
                   "text": "removed_value"
                 }
               ],
@@ -1354,11 +1398,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "+"
                 },
                 {
-                  "style": 5,
+                  "style": 3,
                   "text": "added_value"
                 }
               ],
@@ -1369,20 +1413,32 @@
       ],
       "roles": {
         "bold_code": 0,
-        "emphasis": 1,
-        "h1": 2,
-        "h2": 3,
-        "h3": 4,
-        "h4": 1,
-        "h5": 1,
-        "h6": 1,
-        "inline": 5,
-        "link": 6,
-        "ordered": 7,
-        "prose": 8,
-        "quote": 9,
-        "strike": 10,
-        "strong": 3
+        "diagram_edge": 1,
+        "diagram_node": 2,
+        "diff_added_string": 3,
+        "diff_removed_string": 3,
+        "emphasis": 4,
+        "emphasis_strong": 5,
+        "h1": 6,
+        "h2": 7,
+        "h3": 8,
+        "h4": 9,
+        "h5": 9,
+        "h6": 9,
+        "heading_strong": 10,
+        "inline": 3,
+        "link": 11,
+        "ordered": 12,
+        "prose": 13,
+        "quote": 14,
+        "quote_code": 3,
+        "quote_emphasis": 4,
+        "quote_strong": 10,
+        "strike": 15,
+        "strong": 10,
+        "strong_emphasis": 5,
+        "strong_link": 16,
+        "unordered": 17
       },
       "styles": [
         {
@@ -1396,32 +1452,16 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Default",
-          "italic": true,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": true,
-          "fg": "Default",
-          "italic": false,
-          "strike": false,
-          "underline": true
-        },
-        {
-          "bg": "Default",
-          "bold": true,
-          "fg": "Default",
+          "fg": "Rgb(147, 153, 178)",
           "italic": false,
           "strike": false,
           "underline": false
         },
         {
           "bg": "Default",
-          "bold": true,
-          "fg": "Default",
-          "italic": true,
+          "bold": false,
+          "fg": "Rgb(249, 226, 175)",
+          "italic": false,
           "strike": false,
           "underline": false
         },
@@ -1436,7 +1476,63 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Rgb(99, 168, 248)",
+          "fg": "Rgb(243, 139, 168)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(243, 139, 168)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(243, 139, 168)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(250, 179, 135)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(249, 226, 175)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(249, 226, 175)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(243, 139, 168)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(137, 180, 250)",
           "italic": false,
           "strike": false,
           "underline": true
@@ -1460,7 +1556,7 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(2)",
+          "fg": "Rgb(245, 194, 231)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -1475,8 +1571,16 @@
         },
         {
           "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(137, 180, 250)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
           "bold": false,
-          "fg": "Rgb(147, 153, 178)",
+          "fg": "Rgb(148, 226, 213)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -1500,14 +1604,6 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Rgb(249, 226, 175)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
           "fg": "Rgb(137, 180, 250)",
           "italic": false,
           "strike": false,
@@ -1517,14 +1613,6 @@
           "bg": "Default",
           "bold": false,
           "fg": "Rgb(235, 160, 172)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
-          "fg": "Rgb(148, 226, 213)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -1555,11 +1643,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "//"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " ThemeComment"
                 }
               ],
@@ -1568,19 +1656,19 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "struct"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": "ThemeType"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -1589,63 +1677,63 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "fn"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 21,
                   "text": "palette_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 22,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 16,
+                  "style": 22,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "usize"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "->"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "bool"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 }
               ],
@@ -1654,39 +1742,39 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "let"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " message "
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 5,
-                  "text": "\""
-                },
-                {
-                  "style": 5,
-                  "text": "ThemeString"
-                },
-                {
-                  "style": 5,
+                  "style": 11,
                   "text": "\""
                 },
                 {
                   "style": 11,
+                  "text": "ThemeString"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -1695,55 +1783,55 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "    count "
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": ">="
                 },
                 {
-                  "style": 13,
+                  "style": 20,
+                  "text": " "
+                },
+                {
+                  "style": 23,
+                  "text": "42"
+                },
+                {
+                  "style": 20,
                   "text": " "
                 },
                 {
                   "style": 18,
-                  "text": "42"
-                },
-                {
-                  "style": 13,
-                  "text": " "
-                },
-                {
-                  "style": 17,
                   "text": "&&"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": "!"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "message"
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": "."
                 },
                 {
-                  "style": 15,
+                  "style": 21,
                   "text": "is_empty"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 }
               ],
@@ -1752,7 +1840,7 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -1766,11 +1854,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "#"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " PythonComment"
                 }
               ],
@@ -1779,31 +1867,31 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "def"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 21,
                   "text": "python_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 22,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 }
               ],
@@ -1812,75 +1900,75 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "return"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "PythonString"
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "\""
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "if"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "count"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": ">"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 23,
                   "text": "7"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "else"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 23,
                   "text": "None"
                 }
               ],
@@ -1894,107 +1982,107 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 21,
                   "text": "theme_key"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "JsonString"
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 21,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 23,
                   "text": "42"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 21,
                   "text": "ready"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 23,
                   "text": "true"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -2008,55 +2096,55 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "const"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "typed_probe"
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": ":"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 19,
                   "text": "string"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": " "
                 },
                 {
-                  "style": 17,
+                  "style": 18,
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 5,
-                  "text": "\""
-                },
-                {
-                  "style": 5,
-                  "text": "TypedString"
-                },
-                {
-                  "style": 5,
+                  "style": 11,
                   "text": "\""
                 },
                 {
                   "style": 11,
+                  "text": "TypedString"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -2070,7 +2158,7 @@
             {
               "spans": [
                 {
-                  "style": 8,
+                  "style": 14,
                   "text": "plain_identifier <opaque> 42"
                 }
               ],
@@ -2084,23 +2172,23 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": "-1 +1"
                 },
                 {
-                  "style": 13,
+                  "style": 20,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 }
               ],
@@ -2109,11 +2197,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "-"
                 },
                 {
-                  "style": 19,
+                  "style": 24,
                   "text": "removed_value"
                 }
               ],
@@ -2122,11 +2210,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "+"
                 },
                 {
-                  "style": 5,
+                  "style": 11,
                   "text": "added_value"
                 }
               ],
@@ -2137,20 +2225,32 @@
       ],
       "roles": {
         "bold_code": 0,
-        "emphasis": 1,
-        "h1": 2,
-        "h2": 3,
-        "h3": 4,
-        "h4": 1,
-        "h5": 1,
-        "h6": 1,
-        "inline": 5,
-        "link": 6,
-        "ordered": 7,
-        "prose": 8,
-        "quote": 9,
-        "strike": 10,
-        "strong": 3
+        "diagram_edge": 1,
+        "diagram_node": 2,
+        "diff_added_string": 3,
+        "diff_removed_string": 3,
+        "emphasis": 4,
+        "emphasis_strong": 5,
+        "h1": 6,
+        "h2": 7,
+        "h3": 8,
+        "h4": 9,
+        "h5": 9,
+        "h6": 9,
+        "heading_strong": 10,
+        "inline": 11,
+        "link": 12,
+        "ordered": 13,
+        "prose": 14,
+        "quote": 15,
+        "quote_code": 11,
+        "quote_emphasis": 4,
+        "quote_strong": 10,
+        "strike": 16,
+        "strong": 10,
+        "strong_emphasis": 5,
+        "strong_link": 17,
+        "unordered": 18
       },
       "styles": [
         {
@@ -2164,7 +2264,31 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Default",
+          "fg": "Idx(244)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(172)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(22)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(197)",
           "italic": true,
           "strike": false,
           "underline": false
@@ -2172,7 +2296,15 @@
         {
           "bg": "Default",
           "bold": true,
-          "fg": "Default",
+          "fg": "Idx(197)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(197)",
           "italic": false,
           "strike": false,
           "underline": true
@@ -2180,7 +2312,7 @@
         {
           "bg": "Default",
           "bold": true,
-          "fg": "Default",
+          "fg": "Idx(202)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -2188,8 +2320,24 @@
         {
           "bg": "Default",
           "bold": true,
-          "fg": "Default",
+          "fg": "Idx(172)",
           "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(172)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(197)",
+          "italic": false,
           "strike": false,
           "underline": false
         },
@@ -2204,7 +2352,7 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(26)",
+          "fg": "Idx(27)",
           "italic": false,
           "strike": false,
           "underline": true
@@ -2228,7 +2376,7 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(2)",
+          "fg": "Idx(212)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -2243,8 +2391,16 @@
         },
         {
           "bg": "Default",
+          "bold": true,
+          "fg": "Idx(27)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
           "bold": false,
-          "fg": "Idx(244)",
+          "fg": "Idx(30)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -2268,14 +2424,6 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(172)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
           "fg": "Idx(27)",
           "italic": false,
           "strike": false,
@@ -2285,14 +2433,6 @@
           "bg": "Default",
           "bold": false,
           "fg": "Idx(203)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
-          "fg": "Idx(30)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -2323,11 +2463,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "//"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " ThemeComment"
                 }
               ],
@@ -2336,19 +2476,19 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "struct"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 14,
+                  "style": 2,
                   "text": "ThemeType"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -2357,63 +2497,63 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "fn"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 22,
                   "text": "palette_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 23,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 16,
+                  "style": 23,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "usize"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "->"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "bool"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 }
               ],
@@ -2422,39 +2562,39 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "let"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " message "
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": "="
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "ThemeString"
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -2463,55 +2603,55 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "    count "
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": ">="
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 24,
                   "text": "42"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": "&&"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": "!"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "message"
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": "."
                 },
                 {
-                  "style": 15,
+                  "style": 22,
                   "text": "is_empty"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 }
               ],
@@ -2520,7 +2660,7 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -2534,11 +2674,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "#"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": " PythonComment"
                 }
               ],
@@ -2547,31 +2687,31 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "def"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 15,
+                  "style": 22,
                   "text": "python_probe"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "("
                 },
                 {
-                  "style": 16,
+                  "style": 23,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ")"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 }
               ],
@@ -2580,75 +2720,75 @@
             {
               "spans": [
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "    "
                 },
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "return"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "PythonString"
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "if"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "count"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": ">"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 24,
                   "text": "7"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "else"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 24,
                   "text": "None"
                 }
               ],
@@ -2662,107 +2802,107 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "{"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 22,
                   "text": "theme_key"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "JsonString"
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 22,
                   "text": "count"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 24,
                   "text": "42"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ","
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 15,
+                  "style": 22,
                   "text": "ready"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ":"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 18,
+                  "style": 24,
                   "text": "true"
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "}"
                 }
               ],
@@ -2776,55 +2916,55 @@
             {
               "spans": [
                 {
-                  "style": 12,
+                  "style": 20,
                   "text": "const"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "typed_probe"
                 },
                 {
-                  "style": 17,
+                  "style": 19,
                   "text": ":"
                 },
                 {
-                  "style": 14,
+                  "style": 2,
+                  "text": " "
+                },
+                {
+                  "style": 20,
+                  "text": "string"
+                },
+                {
+                  "style": 2,
+                  "text": " "
+                },
+                {
+                  "style": 19,
+                  "text": "="
+                },
+                {
+                  "style": 21,
                   "text": " "
                 },
                 {
                   "style": 12,
-                  "text": "string"
-                },
-                {
-                  "style": 14,
-                  "text": " "
-                },
-                {
-                  "style": 17,
-                  "text": "="
-                },
-                {
-                  "style": 13,
-                  "text": " "
-                },
-                {
-                  "style": 5,
                   "text": "\""
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "TypedString"
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "\""
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": ";"
                 }
               ],
@@ -2838,7 +2978,7 @@
             {
               "spans": [
                 {
-                  "style": 8,
+                  "style": 15,
                   "text": "plain_identifier <opaque> 42"
                 }
               ],
@@ -2852,23 +2992,23 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": "-1 +1"
                 },
                 {
-                  "style": 13,
+                  "style": 21,
                   "text": " "
                 },
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "@@"
                 }
               ],
@@ -2877,11 +3017,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "-"
                 },
                 {
-                  "style": 19,
+                  "style": 25,
                   "text": "removed_value"
                 }
               ],
@@ -2890,11 +3030,11 @@
             {
               "spans": [
                 {
-                  "style": 11,
+                  "style": 1,
                   "text": "+"
                 },
                 {
-                  "style": 5,
+                  "style": 12,
                   "text": "added_value"
                 }
               ],
@@ -2905,20 +3045,32 @@
       ],
       "roles": {
         "bold_code": 0,
-        "emphasis": 1,
-        "h1": 2,
-        "h2": 3,
-        "h3": 4,
-        "h4": 1,
-        "h5": 1,
-        "h6": 1,
-        "inline": 5,
-        "link": 6,
-        "ordered": 7,
-        "prose": 8,
-        "quote": 9,
-        "strike": 10,
-        "strong": 3
+        "diagram_edge": 1,
+        "diagram_node": 2,
+        "diff_added_string": 3,
+        "diff_removed_string": 4,
+        "emphasis": 5,
+        "emphasis_strong": 6,
+        "h1": 7,
+        "h2": 8,
+        "h3": 9,
+        "h4": 10,
+        "h5": 10,
+        "h6": 10,
+        "heading_strong": 11,
+        "inline": 12,
+        "link": 13,
+        "ordered": 14,
+        "prose": 15,
+        "quote": 16,
+        "quote_code": 12,
+        "quote_emphasis": 5,
+        "quote_strong": 11,
+        "strike": 17,
+        "strong": 11,
+        "strong_emphasis": 6,
+        "strong_link": 18,
+        "unordered": 19
       },
       "styles": [
         {
@@ -2932,7 +3084,39 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Default",
+          "fg": "Rgb(124, 127, 147)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(223, 142, 29)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(50, 126, 34)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(49, 124, 33)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(210, 15, 57)",
           "italic": true,
           "strike": false,
           "underline": false
@@ -2940,7 +3124,15 @@
         {
           "bg": "Default",
           "bold": true,
-          "fg": "Default",
+          "fg": "Rgb(210, 15, 57)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(210, 15, 57)",
           "italic": false,
           "strike": false,
           "underline": true
@@ -2948,7 +3140,7 @@
         {
           "bg": "Default",
           "bold": true,
-          "fg": "Default",
+          "fg": "Rgb(254, 100, 11)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -2956,8 +3148,24 @@
         {
           "bg": "Default",
           "bold": true,
-          "fg": "Default",
+          "fg": "Rgb(223, 142, 29)",
           "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(223, 142, 29)",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(210, 15, 57)",
+          "italic": false,
           "strike": false,
           "underline": false
         },
@@ -2972,7 +3180,7 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Rgb(28, 100, 200)",
+          "fg": "Rgb(30, 102, 245)",
           "italic": false,
           "strike": false,
           "underline": true
@@ -2996,7 +3204,7 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Idx(2)",
+          "fg": "Rgb(234, 118, 203)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -3011,8 +3219,16 @@
         },
         {
           "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(30, 102, 245)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
           "bold": false,
-          "fg": "Rgb(124, 127, 147)",
+          "fg": "Rgb(23, 146, 153)",
           "italic": false,
           "strike": false,
           "underline": false
@@ -3036,14 +3252,6 @@
         {
           "bg": "Default",
           "bold": false,
-          "fg": "Rgb(223, 142, 29)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
           "fg": "Rgb(30, 102, 245)",
           "italic": false,
           "strike": false,
@@ -3053,14 +3261,6 @@
           "bg": "Default",
           "bold": false,
           "fg": "Rgb(230, 69, 83)",
-          "italic": false,
-          "strike": false,
-          "underline": false
-        },
-        {
-          "bg": "Default",
-          "bold": false,
-          "fg": "Rgb(23, 146, 153)",
           "italic": false,
           "strike": false,
           "underline": false

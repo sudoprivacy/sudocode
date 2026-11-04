@@ -1,5 +1,6 @@
 {
-  "revision": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+  "helper_source_sha256": "0694086d858a25b4876ff4f4104f38ff9991737d830fe32ed6bdfa110de77350",
+  "revision": "079e17a422347e49d02501304f79fade7e569362",
   "source": "openai/codex",
   "themes": [
     {

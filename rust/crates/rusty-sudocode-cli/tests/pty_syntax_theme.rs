@@ -3,6 +3,7 @@
 mod common;
 
 use common::TestEnv;
+use pty_expect::PtySession;
 use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr;
 
@@ -10,24 +11,35 @@ const MARKDOWN_ROLES: &[(&str, &str)] = &[
     ("Theme prose.", "prose"),
     ("ThemeHeadingOne", "h1"),
     ("ThemeHeadingTwo", "h2"),
+    ("ThemeHeadingStrong", "heading_strong"),
     ("ThemeHeadingThree", "h3"),
     ("ThemeHeadingFour", "h4"),
     ("ThemeHeadingFive", "h5"),
     ("ThemeHeadingSix", "h6"),
     ("ThemeStrong", "strong"),
     ("ThemeEmphasis", "emphasis"),
+    ("ThemeStrongEmphasis", "strong_emphasis"),
+    ("ThemeStrongAfter", "strong"),
+    ("ThemeEmphasisStrong", "emphasis_strong"),
+    ("ThemeEmphasisAfter", "emphasis"),
     ("ThemeStrike", "strike"),
     ("~/.zshrc.bak-20261001", "inline"),
     ("~/.config/scode/credentials.bak", "inline"),
     ("ThemeInline", "inline"),
     ("ThemeBoldCode", "bold_code"),
     ("ThemeWeb", "link"),
+    ("ThemeStrongLink", "strong_link"),
+    ("ThemeLinkStrong", "strong_link"),
     ("https://example.com/reference", "link"),
     ("./src/main.rs:42", "inline"),
     ("./src/lib.rs", "inline"),
+    ("./src/strong.rs", "bold_code"),
     ("ThemePath", "prose"),
     ("1.", "ordered"),
     ("ThemeQuote", "quote"),
+    ("ThemeQuoteStrong", "quote_strong"),
+    ("ThemeQuoteEmphasis", "quote_emphasis"),
+    ("ThemeQuoteCode", "quote_code"),
     ("Highlight done.", "prose"),
 ];
 
@@ -51,7 +63,7 @@ fn showcase(light: bool, truecolor: bool, no_color: bool) {
             ("NO_COLOR", if no_color { "1" } else { "" }),
         ],
     );
-    sess.resize(110, 100).expect("resize");
+    sess.resize(140, 110).expect("resize");
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "stable input ready");
     let natural_prompt = if env.is_live() {
         format!(
@@ -157,6 +169,22 @@ fn check_screen(screen: &pty_expect::Screen, light: bool, truecolor: bool, no_co
             );
         }
     }
+    let (row, line) = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start + 1)
+        .find(|(_, line)| line.contains("ThemeUnordered"))
+        .expect("unordered list");
+    let marker = line.find('•').expect("unordered marker");
+    check_cell(
+        screen,
+        row,
+        line[..marker].width(),
+        &expected["styles"]
+            [usize::try_from(expected["roles"]["unordered"].as_u64().unwrap()).unwrap()],
+        no_color,
+    );
     let mut cursor = start;
     for document in expected["documents"].as_array().unwrap() {
         for line in document["lines"].as_array().unwrap() {
@@ -268,6 +296,156 @@ fn light_indexed_matches_codex() {
 #[test]
 fn no_color_markdown_stays_plain() {
     showcase(false, true, true);
+}
+
+fn check_preview_theme(session: &PtySession, variant: &Value, no_color: bool) {
+    session.render(|screen| {
+        let raw = screen.raw();
+        // Match logical letters while retaining physical cells across wraps.
+        let mut logical = String::new();
+        let mut positions = Vec::new();
+        for row in 0..raw.size().0 {
+            for column in 0..raw.size().1 {
+                let cell = raw.cell(row, column).unwrap();
+                for ch in cell.contents().chars().filter(|ch| !ch.is_whitespace()) {
+                    logical.push(ch);
+                    positions.extend(std::iter::repeat_n(
+                        (usize::from(row), usize::from(column)),
+                        ch.len_utf8(),
+                    ));
+                }
+            }
+        }
+        let start = logical.rfind("ProseStart").expect("preview body");
+        let end = start
+            + logical[start..]
+                .find("ProseDone.")
+                .expect("complete preview body")
+            + "ProseDone.".len();
+        for (label, role) in [
+            ("LiveStrong", "strong"),
+            ("LiveBoth", "strong_emphasis"),
+            ("LiveRestored", "strong"),
+            ("LiveEmphasis", "emphasis"),
+            ("LiveLink", "link"),
+            ("LiveCode", "inline"),
+            ("ProseDone.", "prose"),
+        ] {
+            let position = start
+                + logical[start..end]
+                    .find(label)
+                    .expect("themed token survives wrapping");
+            let style = &variant["styles"]
+                [usize::try_from(variant["roles"][role].as_u64().unwrap()).unwrap()];
+            for offset in 0..label.len() {
+                let (row, column) = positions[position + offset];
+                check_cell(screen, row, column, style, no_color);
+            }
+        }
+    });
+}
+
+fn exit_preview(session: &mut PtySession) {
+    session.send("\x15/exit").unwrap();
+    common::expect_input_line(session, "/exit", common::DEFAULT_TIMEOUT, "exit input");
+    session.send("\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+#[test]
+fn semantic_theme_survives_live_preview_resize_handoff_and_resume() {
+    let reference: Value =
+        serde_json::from_str(include_str!("fixtures/codex_styles.json")).unwrap();
+    let document = "ProseStart **LiveStrong *LiveBoth* LiveRestored** *LiveEmphasis* [LiveLink](https://example.com/live) `LiveCode` ProseDone.";
+    for (light, truecolor, no_color) in [
+        (false, true, false),
+        (true, true, false),
+        (false, false, false),
+        (true, false, false),
+        (false, true, true),
+    ] {
+        let env = TestEnv::new_mock("semantic-theme-preview");
+        let settings = [
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("COLORFGBG", if light { "0;15" } else { "15;0" }),
+            ("TERM", "xterm-256color"),
+            ("TERM_PROGRAM", "unknown"),
+            ("WT_SESSION", ""),
+            ("VTE_VERSION", ""),
+            ("KONSOLE_VERSION", ""),
+            ("COLORTERM", if truecolor { "truecolor" } else { "" }),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
+        ];
+        let variant = &reference["variants"][format!(
+            "{}-{}",
+            if light { "light" } else { "dark" },
+            if truecolor { "truecolor" } else { "indexed" }
+        )];
+        let mut session = env.spawn_with_env(&["--permission-mode", "read-only"], &settings);
+        session.resize(80, 110).unwrap();
+        common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "initial input");
+        let initial = common::turn_status_marker(&session);
+        let prompt = common::terminal_host::prose_prompt(
+            &env,
+            document,
+            json!({"chunk_chars":1,"delay_ms":2}),
+        );
+        session.send(&format!("{prompt}\r")).unwrap();
+        common::expect_screen(
+            &session,
+            |s| {
+                s.split_whitespace()
+                    .collect::<String>()
+                    .contains("ProseDone.")
+                    && env.workspace_root().join("prose-ready").exists()
+            },
+            common::DEFAULT_TIMEOUT,
+            "themed live preview before EOF",
+        );
+        check_preview_theme(&session, variant, no_color);
+        session.send("theme draft").unwrap();
+        session.resize(80, 48).unwrap();
+        common::expect_screen(
+            &session,
+            |s| {
+                s.split_whitespace()
+                    .collect::<String>()
+                    .contains("ProseDone.")
+                    && common::input_line_of(s) == "theme draft"
+            },
+            common::DEFAULT_TIMEOUT,
+            "resize preserves colored preview and draft",
+        );
+        check_preview_theme(&session, variant, no_color);
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        common::expect_turn_complete_with_input(
+            &session,
+            &initial,
+            "theme draft",
+            common::DEFAULT_TIMEOUT,
+            "finalized themed turn",
+        );
+        check_preview_theme(&session, variant, no_color);
+        exit_preview(&mut session);
+        let mut replay = env.spawn_with_env(
+            &["--resume", "latest", "--permission-mode", "read-only"],
+            &settings,
+        );
+        replay.resize(80, 80).unwrap();
+        common::expect_screen(
+            &replay,
+            |s| {
+                s.split_whitespace()
+                    .collect::<String>()
+                    .contains("ProseDone.")
+                    && s.contains('❯')
+            },
+            common::DEFAULT_TIMEOUT,
+            "resumed themed transcript",
+        );
+        check_preview_theme(&replay, variant, no_color);
+        exit_preview(&mut replay);
+    }
 }
 
 #[test]

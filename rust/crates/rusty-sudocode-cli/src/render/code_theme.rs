@@ -1,22 +1,20 @@
-//! Code colors follow openai/codex at b741e480e203f037ca726bc2a76d99a8e8668e66:
+//! Code assets follow openai/codex at 079e17a422347e49d02501304f79fade7e569362:
 //! tui/src/render/highlight.rs and tui/src/markdown_render.rs. Both renderers
 //! use the same two-face grammar/theme bundle; only the terminal adapter differs.
 //! This is an internal syntax adapter and asset cache, not another UI theme.
-//! Semantic UI color selection belongs to `ColorTheme`. Metadata scope selection
-//! and softening follow Codex a09812981d, tui/src/bottom_pane/status_line_style.rs.
+//! Scope selection, terminal styles and capability policy belong to `ColorTheme`.
 //! See third_party/codex for the upstream Apache-2.0 license.
 
 use std::sync::OnceLock;
 
-use crossterm::style::{Attribute, Color, ContentStyle};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Highlighter, Theme};
+use syntect::highlighting::{Highlighter, Theme};
 use syntect::parsing::{Scope, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedThemeName;
 
 use super::styled_text::StyledText;
-use super::{color_math, ColorSupport};
+use super::{ColorSupport, ColorTheme};
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
@@ -40,50 +38,14 @@ pub(super) fn theme(light: bool) -> &'static Theme {
     selected.get_or_init(|| with_theme(light, Clone::clone))
 }
 
-/// Raw syntax assets; UI roles and terminal fallbacks belong to ColorTheme.
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub(super) enum SyntaxAccent {
-    Inline,
-    Type,
-    String,
-    Number,
-    Function,
-}
-
-pub(super) fn accent(kind: SyntaxAccent, light: bool) -> Option<(u8, u8, u8)> {
-    type Accents = [Option<syntect::highlighting::Color>; 5];
-    static DARK: OnceLock<Accents> = OnceLock::new();
-    static LIGHT: OnceLock<Accents> = OnceLock::new();
-    let colors = if light { &LIGHT } else { &DARK }.get_or_init(|| {
-        with_theme(light, |theme| {
-            let highlighter = Highlighter::new(theme);
-            let scopes: [&[&str]; 5] = [
-                &[
-                    "markup.inline.raw.string.markdown",
-                    "markup.raw.inline.markdown",
-                ],
-                &["entity.name.type", "support.type", "variable"],
-                &["string", "markup.underline.link"],
-                &["constant.numeric", "constant"],
-                &["entity.name.function", "entity.name.tag"],
-            ];
-            scopes.map(|scopes| {
-                scopes.iter().find_map(|name| {
-                    let scope = Scope::new(name).ok()?;
-                    highlighter.style_mod_for_stack(&[scope]).foreground
-                })
-            })
-        })
-    });
-    colors[kind as usize].map(|color| (color.r, color.g, color.b))
-}
-
-fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Color {
-    if support == ColorSupport::Ansi256 {
-        return Color::AnsiValue(super::rgb_to_ansi256(color.r, color.g, color.b));
-    }
-    color_math::foreground((color.r, color.g, color.b), None, support)
+/// Read raw assets only; callers own semantic scopes and terminal presentation.
+pub(super) fn foreground_for_scopes(light: bool, scopes: &[&str]) -> Option<(u8, u8, u8)> {
+    let highlighter = Highlighter::new(theme(light));
+    scopes.iter().find_map(|name| {
+        let scope = Scope::new(name).ok()?;
+        let color = highlighter.style_mod_for_stack(&[scope]).foreground?;
+        Some((color.r, color.g, color.b))
+    })
 }
 
 fn syntax(language: &str) -> Option<&'static SyntaxReference> {
@@ -119,10 +81,7 @@ pub(super) fn highlight(
     light: bool,
     support: ColorSupport,
 ) -> Option<StyledText> {
-    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16)
-        || code.is_empty()
-        || !within_limits(code)
-    {
+    if !ColorTheme::supports_syntax(support) || code.is_empty() || !within_limits(code) {
         return None;
     }
     let mut highlighter = HighlightLines::new(syntax(language)?, theme(light));
@@ -144,14 +103,7 @@ fn highlight_chunk(
     let mut output = StyledText::default();
     for line in LinesWithEndings::from(code) {
         for (style, text) in highlighter.highlight_line(line, syntax_set()).ok()? {
-            let mut content_style = ContentStyle {
-                foreground_color: Some(foreground(style.foreground, support)),
-                ..ContentStyle::default()
-            };
-            if style.font_style.contains(FontStyle::BOLD) {
-                content_style.attributes.set(Attribute::Bold);
-            }
-            output.push(content_style, text);
+            output.push(ColorTheme::syntax_style(style, support), text);
         }
     }
     Some(output)
@@ -188,7 +140,7 @@ impl StreamingCodeHighlighter {
     }
 
     pub(super) fn append(&mut self, prefix: &str, added: &str) -> Option<StyledText> {
-        if matches!(self.support, ColorSupport::NoColor | ColorSupport::Ansi16) {
+        if !ColorTheme::supports_syntax(self.support) {
             return None;
         }
         STREAM_PARSER.with(|cache| {

@@ -31,7 +31,19 @@ fn finish(sess: &mut PtySession) {
     assert_eq!(sess.expect_eof().expect("exit"), 0);
 }
 
-fn showcase(background: &str, link_color: &str, code_color: &str) {
+fn reference_theme(background: &str) -> serde_json::Value {
+    let mut reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/codex_styles.json")).unwrap();
+    reference["variants"][if background == "0;15" {
+        "light-truecolor"
+    } else {
+        "dark-truecolor"
+    }]
+    .take()
+}
+
+fn showcase(background: &str) {
+    let variant = reference_theme(background);
     let env = TestEnv::new("unicode-layout");
     let mut sess = start(&env, background);
     // Live mode asks for the exact document too; both paths exercise the
@@ -114,7 +126,11 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
             value_columns.windows(2).all(|pair| pair[0] == pair[1]),
             "Codex table columns must align for CJK and ASCII: {value_columns:?}"
         );
-        for (label, color) in [("LINK", link_color), ("CODE", code_color)] {
+        for (label, role) in [("LINK", "link"), ("CODE", "inline")] {
+            let color = variant["styles"]
+                [usize::try_from(variant["roles"][role].as_u64().unwrap()).unwrap()]["fg"]
+                .as_str()
+                .unwrap();
             let (row, text) = rows
                 .iter()
                 .enumerate()
@@ -283,12 +299,12 @@ fn resumed_card_layout(is_error: bool) {
 
 #[test]
 fn unicode_columns_and_semantic_colors_dark() {
-    showcase("15;0", "Rgb(99, 168, 248)", "Rgb(166, 227, 161)");
+    showcase("15;0");
 }
 
 #[test]
 fn unicode_columns_and_semantic_colors_light() {
-    showcase("0;15", "Rgb(28, 100, 200)", "Rgb(64, 160, 43)");
+    showcase("0;15");
 }
 
 #[test]

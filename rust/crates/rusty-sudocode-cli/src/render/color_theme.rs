@@ -474,6 +474,16 @@ impl ColorTheme {
         }
     }
 
+    /// A focused choice marker keeps the brand's readable color and neutral bold.
+    #[inline]
+    pub fn choice_marker_style(self, support: ColorSupport) -> ContentStyle {
+        self.overlay(
+            self.selected_style(TextRole::Brand, support),
+            TextRole::Strong,
+            support,
+        )
+    }
+
     /// Resolve a selected label against its painted surface, not the terminal.
     pub fn selected_style(self, role: TextRole, support: ColorSupport) -> ContentStyle {
         let mut style = self.selection_style(support);

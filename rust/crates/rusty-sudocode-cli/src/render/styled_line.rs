@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crossterm::style::{ContentStyle, Stylize};
+use crossterm::style::ContentStyle;
 
 use super::{styled_text::StyledText, theme, TextRole};
 
@@ -33,10 +33,6 @@ impl StyledLine {
     #[inline]
     pub(crate) fn push(&mut self, text: impl AsRef<str>) {
         self.text.push(self.base, text.as_ref());
-    }
-
-    pub(crate) fn push_bold(&mut self, text: impl AsRef<str>) {
-        self.text.push(self.base.bold(), text.as_ref());
     }
 
     /// Quantities use terminal-owned foreground emphasis, not a brand/status

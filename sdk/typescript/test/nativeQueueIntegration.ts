@@ -70,8 +70,8 @@ async function main(): Promise<void> {
     fs.writeFileSync(journal,'');
     const lossLog=path.join(directory,'loss.jsonl');
     const lost=await connectCodexCallback({...base,codexArgv:[...base.codexArgv.slice(0,-1),'loss'],
-      transport:'native-queue',threadId:nativeThread,peers:['allowed-peer'],log:lossLog},notification.sessionId);
-    lost.receive(notification);
+      transport:'native-queue',threadId:nativeThread,peers:['allowed-peer'],log:lossLog},message.sessionId);
+    lost.receive(message);
     const lossEnd=Date.now()+3000;
     while(!fs.readFileSync(lossLog,'utf8').includes('"phase":"pending"')){
       assert.ok(Date.now()<lossEnd,'ambiguous queue callback did not finish');await new Promise(resolve=>setTimeout(resolve,10));

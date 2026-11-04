@@ -311,7 +311,7 @@ async function main() {
   const deliveryJournal=rows().slice(deliveryRows);
   assert.ok(deliveryJournal.some(row=>row.method==='initialize'&&row.peerOwned),'the owned scode hands peer input over');
   assert.ok(!deliveryJournal.some(row=>row.method==='session/prompt'),'no scode model turn for a peer');
-  await owner.close();owner=undefined;
+  await owner.close();owner=undefined;loaded=[legacyId];
 
   // A directory at the log path deterministically refuses append on every OS,
   // including elevated test users. Startup must still fail before admission.

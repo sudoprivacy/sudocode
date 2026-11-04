@@ -90,11 +90,18 @@ fn showcase(light: bool, truecolor: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "paste consumed",
     );
+    let marker = common::turn_status_marker(&sess);
     sess.send("\r").expect("submit");
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "syntax turn completed",
+    );
     common::expect_screen(
         &sess,
-        |s| s.contains("Highlight done.") && s.contains("ctx "),
-        common::LIVE_TURN_BUDGET,
+        |s| s.contains("Highlight done."),
+        common::DEFAULT_TIMEOUT,
         "syntax response completed",
     );
     // Retain cells even if a raw-attribute assertion fails before inspection.

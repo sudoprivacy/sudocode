@@ -862,6 +862,7 @@ async fn ensure_a2a_receiver(
     let Some(mailbox) = mailbox else {
         return;
     };
+    let verified = mailbox.authenticates_senders();
     let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
     else {
         return;
@@ -873,7 +874,10 @@ async fn ensure_a2a_receiver(
         cx.clone(),
         agent,
         session_id.to_owned(),
-        client_owned,
+        PeerRoute {
+            client_owned,
+            verified,
+        },
     ));
 }
 
@@ -882,6 +886,15 @@ type PeerDelivery = (
     std::sync::mpsc::SyncSender<bool>,
 );
 type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
+
+/// Where a session's peer messages go, and what is known about their senders.
+#[derive(Clone, Copy)]
+struct PeerRoute {
+    /// The client owns peer input (`peerInput`): deliver to it, start no turn.
+    client_owned: bool,
+    /// The session's mailbox authenticates every writer.
+    verified: bool,
+}
 
 async fn admit_peer_receiver(
     registry: &SharedSessionRegistry,
@@ -976,8 +989,12 @@ async fn run_peer_receiver(
     cx: ConnectionTo<Client>,
     agent: String,
     mut bound: String,
-    client_owned: bool,
+    route: PeerRoute,
 ) {
+    let PeerRoute {
+        client_owned,
+        verified,
+    } = route;
     let stop = receiver.stop.clone();
     loop {
         // A retried mailbox cursor must refer to the same still-pending input.
@@ -1003,7 +1020,7 @@ async fn run_peer_receiver(
             // session's model. The cursor advances once the notification is
             // written to the transport; a closed client leaves it unread.
             let delivered = cx
-                .send_notification(peer_message_notification(&session_id, &message))
+                .send_notification(peer_message_notification(&session_id, &message, verified))
                 .is_ok();
             let _ = ack.send(delivered);
             if !delivered {
@@ -1015,7 +1032,7 @@ async fn run_peer_receiver(
             let _ = ack.send(false);
             continue;
         };
-        let text = message.to_prompt();
+        let text = message.to_prompt(verified);
         let mut states = driver.input_changes();
         let action = peer_input_action(&message, &text);
         let receipt = tokio::select! {
@@ -1035,7 +1052,7 @@ async fn run_peer_receiver(
         if !committed {
             break;
         }
-        let mut a2a = json!({"from":message.from,"kind":message.kind});
+        let mut a2a = json!({"from":message.from,"kind":message.kind,"verified":verified});
         if let Some(summary) = &message.summary {
             a2a["summary"] = json!(summary);
         }
@@ -1063,14 +1080,15 @@ async fn run_peer_receiver(
 fn peer_message_notification(
     session_id: &str,
     message: &runtime::agent_mailbox::MailboxEnvelope,
+    verified: bool,
 ) -> AgentNotification {
-    let mut a2a = json!({"from": message.from, "kind": message.kind});
+    let mut a2a = json!({"from": message.from, "kind": message.kind, "verified": verified});
     if let Some(summary) = &message.summary {
         a2a["summary"] = json!(summary);
     }
     let payload = serde_json::value::to_raw_value(&json!({
         "sessionId": session_id,
-        "text": message.to_prompt(),
+        "text": message.to_prompt(verified),
         "body": message.body,
         "sudocode": {"a2a": a2a},
     }))

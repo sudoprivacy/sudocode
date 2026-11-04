@@ -775,6 +775,7 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "<mailbox-message from=\"peer-one\">\nFIRST-PEER\n</mailbox-message>\n\n",
             "HUMAN-BETWEEN\n\n",
             "<mailbox-message from=\"peer-two&amp;three\" request-id=\"legacy-42\" summary=\"Legacy &quot;summary&quot; &amp; &#10;more\">\nSECOND-PEER\n</mailbox-message>\n\n",
+            "<mailbox-message from=\"node-peer\" verified=\"true\">\nVERIFIED-PEER\n</mailbox-message>\n\n",
             "HUMAN-AFTER"
         ))
         .unwrap();
@@ -813,6 +814,8 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "│ Summary: Legacy \"summary\" &",
             "│ more",
             "│ SECOND-PEER",
+            "Message from node-peer · verified",
+            "│ VERIFIED-PEER",
             "❯ HUMAN-AFTER",
             "ASSISTANT-REPLY",
         ];
@@ -838,6 +841,10 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
         assert!(text.contains("LITERAL-UNKNOWN"));
         assert!(text.contains("LITERAL-DUPLICATE"));
         assert!(!text.contains("Message from incomplete"));
+        assert!(
+            !text.contains("Message from peer-one · verified"),
+            "an unauthenticated sender is never shown as verified: {text}"
+        );
     });
     expect_replay_input_ready(&mut sess);
     exit(&mut sess);

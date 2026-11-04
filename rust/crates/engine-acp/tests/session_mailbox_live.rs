@@ -334,7 +334,9 @@ fn controller_workflow(compact: bool) {
     let kernel = Arc::new(Kernel::new());
     managed_agent::install_managed_agent_with_spawn(
         &kernel,
-        Arc::new(engine_acp::managed_agent::SudoCodeSpawnAdapter),
+        Arc::new(engine_acp::managed_agent::SudoCodeSpawnAdapter {
+            authenticated_senders: false,
+        }),
     )
     .unwrap();
     common::mount_agent_world(&kernel);

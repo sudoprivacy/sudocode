@@ -3536,7 +3536,10 @@ fn run_repl_iocraft_dispatch(
     // an inbox nothing is polling. `attach` reuses the session's selected
     // mailbox, including a pending binding that this receiver retries.
     let mailbox_abort = runtime::HookAbortSignal::new();
-    let mailbox_receiver = engine_host::peer::attach(&session_agent_name).spawn_receiver(
+    let peer = engine_host::peer::attach(&session_agent_name);
+    // Whether this namespace authenticated the senders it delivers.
+    let peer_verified = peer.mailbox().authenticates_senders();
+    let mailbox_receiver = peer.spawn_receiver(
         mailbox_abort.clone(),
         peer_turn_sink(
             coord_tx.clone(),
@@ -3669,8 +3672,10 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
-                        let prompt =
-                            runtime::agent_mailbox::compose_next_turn_from_envelopes(&[msg]);
+                        let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
+                            &[msg],
+                            peer_verified,
+                        );
                         (
                             prompt.clone(),
                             prompt,

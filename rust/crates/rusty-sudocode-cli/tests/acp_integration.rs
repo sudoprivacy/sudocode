@@ -8132,6 +8132,10 @@ async fn acp_client_owned_peer_input_starts_no_session_turn() {
     assert_eq!(params["sessionId"], session, "{delivered}");
     assert_eq!(params["sudocode"]["a2a"]["from"], PEER, "{delivered}");
     assert_eq!(params["sudocode"]["a2a"]["summary"], "ping", "{delivered}");
+    assert_eq!(
+        params["sudocode"]["a2a"]["verified"], false,
+        "a same-machine pair root does not authenticate senders: {delivered}"
+    );
     let text = params["text"].as_str().expect("the wrapped envelope");
     assert!(
         text.starts_with(&format!("<mailbox-message from=\"{PEER}\"")),

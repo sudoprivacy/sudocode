@@ -92,7 +92,13 @@ impl HostedSessionFactory for Factory {
     }
 }
 
-pub struct SudoCodeSpawnAdapter;
+/// Runs managed sessions as in-process sudocode agents.
+pub struct SudoCodeSpawnAdapter {
+    /// The daemon's auth posture (`ServiceBootCtx::auth_armed`): when armed,
+    /// every conversation writer is authenticated and stamped, so peers'
+    /// senders are verified.
+    pub authenticated_senders: bool,
+}
 
 impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
     for SudoCodeSpawnAdapter
@@ -117,7 +123,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
             .session_endpoint
             .clone()
             .ok_or("managed session has no mailbox endpoint")?;
-        let prepared = prepare_managed_agent(&kernel, &desc, &options)?;
+        let prepared = prepare_managed_agent(&kernel, &desc, &options, self.authenticated_senders)?;
         let peer_mailbox = prepared.mailbox();
         let session_id = prepared.durable_session_id().to_string();
         // This signal terminates the HOST. Turn cancellation belongs to each

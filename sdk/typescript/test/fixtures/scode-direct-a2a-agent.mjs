@@ -66,7 +66,8 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     if (peerOwned) setTimeout(() => { for (const from of ['fixture-peer', 'stranger']) {
       void ctx.client.notify('_sudocode/session/peer_message', { sessionId,
         text: `<mailbox-message from="${from}" summary="greeting">\nhello from ${from}\n</mailbox-message>`,
-        body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting' } } }).catch(() => {});
+        body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting',
+          verified: scenario === 'channel-node-namespace' } } }).catch(() => {});
     } }, 50);
     return {};
   })

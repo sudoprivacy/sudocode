@@ -286,8 +286,12 @@ The `Live Bash process tree` CI job runs this workflow on Linux and Windows for
 main pushes and manual workflow runs, using `SUDOROUTER_CI_API_KEY`.
 
 Incoming peer `user_message_chunk` notifications carry
-`_meta.sudocode.a2a` with `from`, `kind`, and the optional sender-supplied
-`summary`. The full summary also accompanies the body in the persisted model
+`_meta.sudocode.a2a` with `from`, `kind`, `verified`, and the optional
+sender-supplied `summary`. `verified` is true only when the session's mailbox
+authenticates every writer: a node session's certificate-only mTLS connection,
+or a co-host whose daemon arms the stamping hook. A same-machine pair root does
+not, so its `from` is self-reported. The model input marks verified senders
+with `verified="true"` on the `<mailbox-message>` block; a sender cannot set it. The full summary also accompanies the body in the persisted model
 input. Clients can use this metadata for their own message presentation.
 
 ### Client-owned peer input (`clientCapabilities._meta.sudocode.peerInput`)
@@ -297,7 +301,7 @@ A client that is itself the agent its peers address declares
 it in `initialize.result._meta.sudocode.peerInput`. A peer message for one of
 its sessions then arrives as the extension notification
 `_sudocode/session/peer_message` with `{ "sessionId", "text", "body",
-"sudocode": { "a2a": { "from", "kind", "summary"? } } }`, where `text` is the
+"sudocode": { "a2a": { "from", "kind", "verified", "summary"? } } }`, where `text` is the
 same `<mailbox-message>` wrapper a session model reads. It starts no turn of
 the scode session, so one message has one respondent. The mailbox cursor
 advances once the notification is written to the transport; a closed client

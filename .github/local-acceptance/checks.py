@@ -636,7 +636,7 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "8d0b79257f84d52576efd500ad0b49eb02bc8ee977c5e061aa8526f15a93a774",
+        ".github/scripts/local_acceptance.py": "258f9c2200ef8c320f024e60d0bed46306036b5dbd941018fed98b929e70fa0d",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
@@ -646,7 +646,7 @@ def native_guard_files():
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
-        "e2e/local-acceptance/host_lease_acceptance.py": "8183236dea632f0b6854bbda125507310e2a3a27e110c86b82067ad86b4e56f1",
+        "e2e/local-acceptance/host_lease_acceptance.py": "c6eadb50fda038f07b6d1c511f9d6417d2347f3e8caf2d47ae8046d3fee7facf",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
@@ -656,7 +656,7 @@ def native_guard_files():
         "e2e/local-acceptance/publication_acceptance.py": "076b35fcf7a17280ff1e056877eaf91943561d6b82c0cb98a077a30698c0fb2d",
         "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
         "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
-        "e2e/local-acceptance/run.py": "00c48f7d34d774423b63dcefad7984032fdad8d962858c347d8ac9004e035a26",
+        "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -885,7 +885,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
             "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
             "--mount", f"type=volume,source={lease_volume},target=/locks",
-            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image_id,
+            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo",
+            "--env", f"SCODE_RENDERING_PROFILE={rendering_profile()}", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
     if name == "rendering":
@@ -1054,11 +1055,21 @@ def benchmark_storage(name):
     return state / name, state / "target" / name
 
 
+def rendering_profile():
+    """Per-PR acceptance judges `core`. Release acceptance selects `stress`,
+    which adds the foreground/background task and repeated-turn scenarios."""
+    profile = os.environ.get("SCODE_RENDERING_PROFILE", "core")
+    if profile not in {"core", "stress"}:
+        raise RuntimeError(f"Unknown rendering profile: {profile}")
+    return profile
+
+
 def rendering_cases(terminal, arguments, output, command, plan):
     """Finish and judge each complete scenario before admitting the next one."""
     policy_path = terminal / "performance-policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
-    cases = policy["profiles"]["core"]
+    profile = rendering_profile()
+    cases = policy["profiles"][profile]
     if (plan.get("unjudged_warmups") != 0
             or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
@@ -1067,7 +1078,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
     output.mkdir(parents=True, exist_ok=False)
-    report = {"version": 1, "profile": "core", "preview": "0", "policy": policy,
+    report = {"version": 1, "profile": profile, "preview": "0", "policy": policy,
               "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
               "status": "running", "samples": [], "metrics": [], "calibration": [],
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
@@ -1081,7 +1092,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
     for case in cases:
         # Partition the declared scenarios without changing their workloads,
         # paired round policy, interaction samples or budgets.
-        selected = dict(policy, profiles={**policy["profiles"], "core": [case]})
+        selected = dict(policy, profiles={**policy["profiles"], profile: [case]})
         selected_path = output / f"{case}-policy.json"
         selected_path.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
         report["case_policy_sha256"][case] = hashlib.sha256(selected_path.read_bytes()).hexdigest()
@@ -1093,7 +1104,7 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
         succeeded = False
         try:
-            command(*arguments, "--output", str(output / case), "--policy", str(selected_path), "--profile", "core")
+            command(*arguments, "--output", str(output / case), "--policy", str(selected_path), "--profile", profile)
             succeeded = True
         finally:
             child_path = output / case / "report.json"
@@ -1170,7 +1181,7 @@ def benchmark_locked(name, root, output, base, command, target):
         replace_checkout(inputs / label, work / label)
     candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
     terminal = trusted / "e2e/terminal-resize"
-    plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", "core",
+    plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", rendering_profile(),
                        "--policy", str(terminal / "performance-policy.json"))
     render_plan = json.loads(plan_log.read_text(encoding="utf-8"))
     print(f"Required rendering plan: {len(render_plan['cases'])} scenarios, {render_plan['total_samples']} samples. "

@@ -83,7 +83,7 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
 struct GlyphStyle {
     row: u16,
     col: u16,
-    bold: bool,
+    modifiers: (bool, bool, bool, bool),
     foreground: String,
 }
 
@@ -92,7 +92,10 @@ struct StyledSnapshot {
     samples: Vec<Option<GlyphStyle>>,
 }
 
-fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
+fn assert_styles(sess: &PtySession, expected: &[(&str, &str)], no_color: bool) -> String {
+    let reference: Value =
+        serde_json::from_str(include_str!("fixtures/codex_styles.json")).unwrap();
+    let variant = &reference["variants"]["dark-truecolor"];
     let previous = RefCell::new(None);
     let captured = RefCell::new(None);
     // ConPTY can deliver a repaint in several chunks. Observe all sampled
@@ -106,7 +109,7 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
                 let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
                 let samples = expected
                     .iter()
-                    .map(|(needle, _, _)| {
+                    .map(|(needle, _)| {
                         // User input and the running tool's summary may quote
                         // the same Markdown after the document entered history.
                         let row = rows.iter().rposition(|row| {
@@ -121,7 +124,7 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
                         Some(GlyphStyle {
                             row,
                             col,
-                            bold: cell.bold(),
+                            modifiers: (cell.bold(), cell.italic(), cell.underline(), cell.dim()),
                             foreground: format!("{:?}", cell.fgcolor()),
                         })
                     })
@@ -144,12 +147,29 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
     let snapshot = captured.into_inner().unwrap();
     // Assert after releasing the PTY reader's mutex. An assertion failure
     // must not poison that mutex and obscure the original diagnostic.
-    for ((needle, bold, colored), sample) in expected.iter().zip(&snapshot.samples) {
+    for ((needle, role), sample) in expected.iter().zip(&snapshot.samples) {
         let actual = sample.as_ref().unwrap();
-        assert_eq!(actual.bold, *bold, "{needle}: {}", snapshot.contents);
+        let style =
+            &variant["styles"][usize::try_from(variant["roles"][role].as_u64().unwrap()).unwrap()];
+        let attribute = |name| !no_color && style[name].as_bool().unwrap();
         assert_eq!(
-            actual.foreground != "Default",
-            *colored,
+            actual.modifiers,
+            (
+                attribute("bold"),
+                attribute("italic"),
+                attribute("underline"),
+                false
+            ),
+            "{needle}: {}",
+            snapshot.contents
+        );
+        assert_eq!(
+            actual.foreground,
+            if no_color {
+                "Default"
+            } else {
+                style["fg"].as_str().unwrap()
+            },
             "{needle}: {}",
             snapshot.contents
         );
@@ -161,11 +181,12 @@ fn assert_document(sess: &PtySession, no_color: bool) {
     let text = assert_styles(
         sess,
         &[
-            ("Review plan", !no_color, false),
-            ("Verify bold", !no_color, false),
-            ("src/main.rs", false, !no_color),
-            ("Context", !no_color, false),
+            ("Review plan", "h1"),
+            ("Verify bold", "strong"),
+            ("src/main.rs", "inline"),
+            ("Context", "h2"),
         ],
+        no_color,
     );
     let start = text
         .rfind("╭─ Plan · awaiting review")
@@ -435,7 +456,8 @@ fn fuzzy_questions_share_markdown_and_remain_responsive() {
     );
     assert_styles(
         &sess,
-        &[("Verify bold", true, false), ("src/main.rs", false, true)],
+        &[("Verify bold", "strong"), ("src/main.rs", "inline")],
+        false,
     );
     sess.send("Option 12").unwrap();
     common::expect_screen(

@@ -266,7 +266,7 @@ fn main() {
                 if key in theme:
                     theme[key] = variant["roles"]["inline" if key == "inline_foreground" else key]["fg"]
         fixture.update(revision=revision, helper_source_sha256=digest, two_face=versions["two-face"])
-        (args.output.parent / name).write_text(json.dumps(fixture, indent=2) + "\n")
+        (args.output.parent / name).write_text(json.dumps(fixture, indent=2, sort_keys=True) + "\n")
     for variant in variants.values():
         variant["documents"] = variant["documents"][:showcase_count]
         styles = []

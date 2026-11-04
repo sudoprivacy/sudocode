@@ -817,3 +817,103 @@ jobs:
         if: always()
         run: |
           node -e "const dir = process.env.SUDO_CODE_CONFIG_HOME; if (dir) require('fs').rmSync(require('path').join(dir, 'sudocode.json'), { force: true })"
+
+  # Per-PR acceptance (#1215) is input-scoped: rendering judges only `core`,
+  # Cargo/dependency-only changes skip it, and ordinary source PRs skip the
+  # optimized Windows/macOS builds. The explicit release acceptance dispatch
+  # restores that coverage on the candidate as a whole. These jobs share the
+  # dispatch condition only; they receive no credentials and call no models.
+  release-rendering:
+    name: Release rendering stress matrix
+    if: *paid_model_acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the shared native process monitor
+        run: python -m pip install psutil==7.2.2
+      - name: Resolve the previous release
+        id: previous
+        run: echo "tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^)" >> "$GITHUB_OUTPUT"
+      - name: Paired stress rendering matrix against the fixed baseline
+        run: >
+          python .github/local-acceptance/checks.py --native-checks rendering
+          --rendering-profile stress --base "${{ steps.previous.outputs.tag }}"
+          --output "${{ runner.temp }}/release-rendering"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-rendering
+          path: |
+            ${{ runner.temp }}/release-rendering/rendering/*.log
+            ${{ runner.temp }}/release-rendering/rendering/container/rendering/measurements/**/report.json
+            ${{ runner.temp }}/release-rendering/rendering/container/rendering/measurements/**/summary.md
+          retention-days: 30
+
+  release-native:
+    name: Release optimized build (${{ matrix.os }})
+    if: *paid_model_acceptance
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: .
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # Same cache key and test backend as the complementary native hosts.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve the shared native cache paths
+        id: cache_layout
+        run: python .github/local-acceptance/cache_layout.py --source rust --github-output
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.cache_layout.outputs.workspaces }}
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Install acceptance observer dependencies
+        run: python -m pip install psutil jsonschema
+      - name: Resolve the previous release
+        id: previous
+        shell: bash
+        run: echo "tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^)" >> "$GITHUB_OUTPUT"
+      - name: Optimized build, stream/resume journey and 100 ms startup budget
+        env:
+          ACCEPTANCE_NATIVE_CHECKS: native-release
+          ACCEPTANCE_BASE: ${{ steps.previous.outputs.tag }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/release-native
+        run: python .github/local-acceptance/cross_platform.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/release-native
+          retention-days: 30

@@ -20,9 +20,11 @@ import time
 INSTALL = """import runpy, sys, urllib.request
 real_open = urllib.request.urlopen
 official, local, installer, destination = sys.argv[1:]
-def controlled_open(url, *args, **kwargs):
-    assert url == official, url
-    return real_open(local, *args, **kwargs)
+def controlled_open(request, *args, **kwargs):
+    if isinstance(request, str):
+        request = urllib.request.Request(request)
+    assert request.full_url == official, request.full_url
+    return real_open(urllib.request.Request(local, headers=dict(request.header_items())), *args, **kwargs)
 urllib.request.urlopen = controlled_open
 sys.argv = [installer, destination]
 runpy.run_path(installer, run_name='__main__')
@@ -54,7 +56,8 @@ def main():
     with archive.open("rb") as source:
         assert hashlib.file_digest(source, "sha256").hexdigest() == settings["SHA256"]
     official = f"https://update.code.visualstudio.com/commit:{commit}/win32-x64-archive/stable"
-    counts = {"recover": 0, "reject": 0, "concurrent": 0}
+    counts = {"recover": 0, "reject": 0, "resume": 0, "concurrent": 0}
+    ranges = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -63,6 +66,22 @@ def main():
         def do_GET(self):
             label = self.path.strip("/")
             counts[label] += 1
+            if label == "resume":
+                # The first body closes halfway without an HTTP error; the
+                # retry must request and append only the remaining bytes.
+                size = archive.stat().st_size
+                ranges.append(self.headers.get("Range"))
+                offset = int(ranges[-1][len("bytes="):-1]) if ranges[-1] else 0
+                self.send_response(206 if offset else 200)
+                if offset:
+                    self.send_header("Content-Range", f"bytes {offset}-{size - 1}/{size}")
+                self.send_header("Content-Length", str(size - offset))
+                self.end_headers()
+                with archive.open("rb") as source:
+                    source.seek(offset)
+                    self.wfile.write(source.read(size // 2 if not offset else size - offset))
+                self.close_connection = True
+                return
             good = label == "concurrent" or (label == "recover" and counts[label] > 1)
             self.send_response(200)
             self.send_header("Content-Length", str(archive.stat().st_size if good else 7))
@@ -78,7 +97,7 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="scode-terminal-installer-") as temporary:
             root = Path(temporary)
-            for label in ("recover", "reject"):
+            for label in ("recover", "reject", "resume"):
                 destination = root / label
                 proc = subprocess.run(
                     [
@@ -88,8 +107,17 @@ def main():
                     ],
                     capture_output=True, text=True, timeout=120,
                 )
-                assert "checksum mismatch" in proc.stdout, proc.stdout + proc.stderr
                 assert not (destination / "host.partial").exists()
+                if label == "resume":
+                    assert proc.returncode == 0 and counts[label] == 2, proc.stdout + proc.stderr
+                    size = archive.stat().st_size
+                    assert ranges == [None, f"bytes={size // 2}-"], ranges
+                    assert f"retrying from byte {size // 2}" in proc.stdout, proc.stdout
+                    assert (destination / "host.zip").stat().st_size == size
+                    assert (destination / "Code.exe").exists()
+                    print(f"Installer HTTP acceptance passed: {label}, {counts[label]} requests", flush=True)
+                    continue
+                assert "checksum mismatch" in proc.stdout, proc.stdout + proc.stderr
                 if label == "recover":
                     assert proc.returncode == 0 and counts[label] == 2, proc.stdout + proc.stderr
                     with (destination / "Code.exe").open("rb") as executable:

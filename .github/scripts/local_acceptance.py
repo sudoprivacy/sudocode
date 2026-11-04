@@ -730,10 +730,10 @@ def report_plan(plan):
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
-                 "none selected; indirect performance effects outside the selected inputs are not measured."))
+                 "none selected; release acceptance judges indirect performance effects with the stress matrix."))
     release = "native-release" in plan["local_checks"] or any("native-release" in job["checks"] for job in plan["ci"])
     lines.append("Native release build/startup: " + ("selected on the author and complementary native hosts." if release else
-                 "not selected; native optimized stream/resume behavior and the 100 ms startup budget are outside this run's scope.")
+                 "not selected; release acceptance judges native optimized stream/resume behavior and the 100 ms startup budget.")
                  + " Trigger scope: Cargo/build/vendor inputs, CLI entry/startup/parser, runtime config, stream-capture test or startup harness. "
                    "Ordinary functional checks and selected Linux release rendering keep their own scopes.")
     lines.append("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]

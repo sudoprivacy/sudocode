@@ -16,6 +16,7 @@ mailbox = ["dep:a2a", "dep:managed-agent", "dep:kernel"]
 # translates to/from the ACP wire. Runtime remains a dependency for composition
 # and lifecycle operations.
 runtime = { path = "../runtime" }
+tools = { path = "../tools" }
 # The slash-command SSOT (AcpSlashCommandSpec + the command table) the ACP server
 # advertises. `commands` sits below the renderer, so this is a forward edge.
 commands = { path = "../commands" }
@@ -46,7 +47,6 @@ nix = { version = "0.29", features = ["poll", "process"] }
 workspace = true
 
 [dev-dependencies]
-tools = { path = "../tools" }
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 llm-mount = { workspace = true }
 backends = { workspace = true, features = ["driver-anthropic", "driver-openai"] }

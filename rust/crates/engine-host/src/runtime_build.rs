@@ -236,7 +236,7 @@ fn string_list_config(root: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
 /// The agent name a session under `root` answers to: what the configuration
 /// there says, else what [`runtime::mailbox::local_agent_name`] derives from
 /// the directory itself.
-fn agent_name_under(root: &Path) -> String {
+pub fn agent_name_under(root: &Path) -> String {
     let loader = ConfigLoader::default_for(root);
     let configured = loader.load().ok().and_then(|rc| {
         rc.get("agentName")

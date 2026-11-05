@@ -3537,6 +3537,13 @@ fn run_repl_iocraft_dispatch(
     // mailbox, including a pending binding that this receiver retries.
     let mailbox_abort = runtime::HookAbortSignal::new();
     let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
     // Whether this namespace authenticated the senders it delivers.
     let peer_verified = peer.mailbox().authenticates_senders();
     let mailbox_receiver = peer.spawn_receiver(
@@ -3640,7 +3647,7 @@ fn run_repl_iocraft_dispatch(
                             input_queue::QueuedKind::Human => {
                                 echo_submit_to_scrollback(&repl_output, &echo.display);
                             }
-                            input_queue::QueuedKind::Peer => {
+                            input_queue::QueuedKind::Peer | input_queue::QueuedKind::Scheduled => {
                                 echo_peer_to_scrollback(&repl_output, &echo.display);
                             }
                             input_queue::QueuedKind::Subagent
@@ -3672,16 +3679,18 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
+                        // A scheduled job's message arrives through the same
+                        // inbox; only its origin differs.
+                        let kind = if msg.kind == runtime::agent_mailbox::kinds::SCHEDULED {
+                            input_queue::QueuedKind::Scheduled
+                        } else {
+                            input_queue::QueuedKind::Peer
+                        };
                         let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
                             &[msg],
                             peer_verified,
                         );
-                        (
-                            prompt.clone(),
-                            prompt,
-                            input_queue::QueuedKind::Peer,
-                            Some(ack),
-                        )
+                        (prompt.clone(), prompt, kind, Some(ack))
                     }
                     CoordinatorEvent::SubagentCompleted { prompt, display } => {
                         (prompt, display, input_queue::QueuedKind::Subagent, None)

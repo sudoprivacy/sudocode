@@ -1,8 +1,9 @@
 //! `scode cron` — manage scheduled tasks.
 //!
 //! CRUD + lifecycle over the persistent [`CronRegistry`]
-//! (`<config_home>/crons.json`). Firing (`run`/`tick`/`daemon`) is added
-//! in the scheduler step and reuses the one-shot prompt run path.
+//! (`<config_home>/crons.json`), through `runtime::cron_service`. Firing
+//! (`run`/`tick`/`daemon`) goes through `runtime::cron_scheduler`, the same
+//! scheduler the REPL and the ACP server run.
 //!
 //! Usage:
 //! ```text
@@ -16,17 +17,11 @@
 //! ```
 
 use std::error::Error;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use runtime::cron_registry::{CronCreateParams, CronEntry, CronKind, CronRegistry, CronTarget};
-use runtime::cron_schedule;
-use runtime::PermissionMode;
 
-use super::args::{resolve_repl_model, CliOutputFormat};
-use crate::{LiveCli, DEFAULT_MODEL};
-
-/// Seconds between ticks in `scode cron daemon`.
-const DAEMON_TICK_SECS: u64 = 60;
+use super::args::CliOutputFormat;
 
 type CronResult = Result<(), Box<dyn Error>>;
 
@@ -101,12 +96,9 @@ pub(crate) fn run(args: &[String], output_format: CliOutputFormat) -> CronResult
         "remove" | "rm" | "delete" => remove(&reg, rest, output_format),
         "enable" => set_enabled(rest, true, output_format),
         "disable" => set_enabled(rest, false, output_format),
-        "run" => run_now(&reg, rest),
-        "tick" => {
-            tick(&reg);
-            Ok(())
-        }
-        "daemon" => daemon(&reg),
+        "run" => run_now(rest),
+        "tick" => tick(),
+        "daemon" => daemon(),
         other => Err(format!(
             "unknown cron subcommand {other:?}; expected: add | list | remove | enable | disable | run | tick | daemon"
         )
@@ -252,102 +244,44 @@ fn set_enabled(rest: &[String], enabled: bool, output_format: CliOutputFormat) -
     )
 }
 
-/// `scode cron run <id>` — fire one entry immediately (regardless of its
-/// schedule), record the outcome, advance next-run.
-fn run_now(reg: &CronRegistry, rest: &[String]) -> CronResult {
+/// This directory's agent, sending through its peer namespace: the identity
+/// and mailbox a REPL started here would use.
+fn firing() -> runtime::cron_scheduler::Firing {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let agent = engine_host::agent_name_under(&cwd);
+    runtime::cron_scheduler::Firing::new(engine_host::peer::attach(&agent).mailbox())
+}
+
+/// `scode cron run <id>` — fire one entry now, whatever its schedule.
+fn run_now(rest: &[String]) -> CronResult {
     let id = require_id(rest, "run")?;
-    let entry = reg.get(id).ok_or_else(|| format!("cron not found: {id}"))?;
-    let status = fire_and_record(reg, &entry);
+    let status = runtime::cron_scheduler::trigger(id, &firing())?;
     println!("run {id}: {status}");
     Ok(())
 }
 
-/// `scode cron tick` — fire every entry that is due right now (the host /
-/// OS-cron entrypoint). Also the unit the daemon loop calls.
-fn tick(reg: &CronRegistry) {
-    let now = now_secs();
-    let due: Vec<CronEntry> = reg
-        .list(false)
-        .into_iter()
-        .filter(|e| cron_schedule::is_due(e, now))
-        .collect();
-    if due.is_empty() {
-        return;
-    }
-    for entry in &due {
-        let status = fire_and_record(reg, entry);
-        println!("[cron] fired {}: {status}", entry.cron_id);
-    }
-}
-
-/// `scode cron daemon` — tick on a fixed interval forever. sudocode stays
-/// daemonless-by-default; this is the opt-in "set and forget" wrapper (the
-/// host may instead drive `scode cron tick` on its own heartbeat).
-fn daemon(reg: &CronRegistry) -> CronResult {
-    println!("[cron] daemon started (tick every {DAEMON_TICK_SECS}s); Ctrl-C to stop");
-    loop {
-        // Re-open each tick so externally-added/removed crons (another
-        // process editing crons.json) are picked up without a restart.
-        let fresh = open_registry();
-        tick(&fresh);
-        // Keep the caller's handle warm too (tests / single-shot callers).
-        let _ = reg.len();
-        std::thread::sleep(Duration::from_secs(DAEMON_TICK_SECS));
-    }
-}
-
-/// Fire an entry's prompt as one autonomous (yolo) agent turn — the SAME
-/// path as `scode prompt`, in-process — then record the outcome and the
-/// recomputed next-run. One-shot `at` entries self-disable after firing.
-/// Returns the status string (`ok` / `error: …`).
-fn fire_and_record(reg: &CronRegistry, entry: &CronEntry) -> String {
-    let outcome = fire_entry(entry);
-    let now = now_secs();
-    let next = if cron_schedule::is_one_shot(entry) {
-        None
-    } else {
-        cron_schedule::next_run_after(entry, now)
+/// `scode cron tick` — fire what is due now, as the scheduler would. Refuses
+/// while another process holds the scheduler lease, so the two cannot both
+/// fire the same run.
+fn tick() -> CronResult {
+    let Some(_lease) = runtime::cron_scheduler::try_lease() else {
+        println!("[cron] another scode process is running the scheduler; nothing fired");
+        return Ok(());
     };
-    let status = match &outcome {
-        Ok(()) => {
-            let _ = reg.record_result(&entry.cron_id, "ok", None, next);
-            "ok".to_owned()
-        }
-        Err(msg) => {
-            let _ = reg.record_result(&entry.cron_id, "error", Some(msg), next);
-            format!("error: {msg}")
-        }
-    };
-    if cron_schedule::is_one_shot(entry) {
-        let _ = reg.disable(&entry.cron_id);
+    for (id, status) in runtime::cron_scheduler::tick(now_secs(), &firing()) {
+        println!("[cron] fired {id}: {status}");
     }
-    status
+    Ok(())
 }
 
-/// Build a fresh yolo `LiveCli` in the entry's cwd and run its prompt as
-/// one turn — identical machinery to `scode prompt`, so cron reuses the
-/// one agent-run primitive rather than duplicating it.
-fn fire_entry(entry: &CronEntry) -> Result<(), String> {
-    let prev_cwd = std::env::current_dir().ok();
-    if let Some(cwd) = &entry.cwd {
-        std::env::set_current_dir(cwd).map_err(|e| format!("cwd {cwd:?}: {e}"))?;
-    }
-    let model = resolve_repl_model(DEFAULT_MODEL.to_owned());
-    let result = (|| -> Result<(), Box<dyn Error>> {
-        let mut cli = LiveCli::new(
-            &model,
-            None,
-            PermissionMode::DangerFullAccess,
-            None,
-            None,
-            None,
-        )?;
-        cli.run_turn_with_output(&entry.prompt, CliOutputFormat::Text, false)
-    })();
-    if let Some(prev) = prev_cwd {
-        let _ = std::env::set_current_dir(prev);
-    }
-    result.map_err(|e| e.to_string())
+/// `scode cron daemon` — run the scheduler in the foreground, for a machine
+/// with no REPL or desktop host open. It waits for the lease like any other
+/// scheduler process.
+fn daemon() -> CronResult {
+    println!("[cron] scheduler started; Ctrl-C to stop");
+    runtime::cron_scheduler::spawn(firing())
+        .join()
+        .map_err(|_| "cron scheduler stopped unexpectedly".into())
 }
 
 fn require_id<'a>(rest: &'a [String], op: &str) -> Result<&'a str, Box<dyn Error>> {

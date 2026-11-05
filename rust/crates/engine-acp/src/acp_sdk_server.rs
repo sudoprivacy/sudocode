@@ -862,6 +862,10 @@ async fn ensure_a2a_receiver(
     let Some(mailbox) = mailbox else {
         return;
     };
+    if !tools::cron_tools_disabled() {
+        let firing = Arc::clone(&mailbox);
+        runtime::cron_scheduler::start_once(|| runtime::cron_scheduler::Firing::new(firing));
+    }
     let verified = mailbox.authenticates_senders();
     let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
     else {

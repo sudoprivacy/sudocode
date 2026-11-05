@@ -464,12 +464,14 @@ jobs:
       # daemon matching the pin, and a pin between releases has no daemon to match
       # (it fails loud saying so). The tag recorded in the lock must be the tag the
       # manifest asked for.
+      - name: Exercise exact published pin tags and refusal paths
+        run: python3 .github/scripts/nexus_pin_workflow_e2e.py --workflow .github/workflows/rust-ci.yml --output "${{ runner.temp }}/nexus-pin-policy"
       - name: The rev is named once, and the lock agrees
         id: pin
         run: |
           set -euo pipefail
           MANIFEST_TAGS=$(grep 'nexus-vfs' rust/Cargo.toml \
-            | grep -oE 'tag = "[^"]+"' | grep -oE 'v[0-9][0-9.]*' | sort -u)
+            | grep -oE 'tag = "v[0-9][^"]*"' | cut -d '"' -f 2 | sort -u)
           LOCK_PAIRS=$(grep -oE 'nexus-vfs\?tag=[^#]+#[a-f0-9]{40}' rust/Cargo.lock \
             | sed 's/.*tag=//' | sort -u)
           LOCK_TAGS=$(echo "$LOCK_PAIRS" | sed 's/#.*//' | sort -u)

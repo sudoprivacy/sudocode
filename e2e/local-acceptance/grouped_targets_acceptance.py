@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -255,12 +256,13 @@ pub fn record(name: &str) {
     explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
     environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
     try:
-        dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
-        legacy = profiles.workspace_nextest_options(output, False)
+        with patch.dict(os.environ, {"CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]}):
+            dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        legacy = profiles.workspace_nextest_options(output, False, False)
         assert legacy[legacy.index("--test-threads") + 1] == "4"
         os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
         environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
-        limited = profiles.workspace_nextest_options(output, True)
+        limited = profiles.workspace_nextest_options(output, True, False)
         command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
     finally:
         if explicit_workers is None:
@@ -271,7 +273,10 @@ pub fn record(name: &str) {
     actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
     assert "--lib" not in actual and "--bins" not in actual
     assert actual[-len(integration_arguments):] == integration_arguments
-    expected_workers = 8 if (os.cpu_count() or 0) >= 8 else 4
+    cpus = os.cpu_count() or 0
+    hosted_qualified = (os.environ.get("GITHUB_ACTIONS") == "true"
+                        and profiles.supports_hosted_eight_workers(root))
+    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= 4) else 4
     assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
     observed_workers = {}
     for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
@@ -279,6 +284,31 @@ pub fn record(name: &str) {
         observed = output / label / "observed"
         maximum = max(int(path.read_text()) for path in observed.iterdir())
         assert lower <= maximum <= upper, (label, maximum)
+        assert len(list(observed.iterdir())) == 7
+        assert not list((output / label / "active").iterdir()), label
+        observed_workers[label] = maximum
+    # Control reported host inputs, then execute the real native cases with
+    # those selected options after restoring the caller's compiler environment.
+    for label, hosted, cpus, source_ready, limit, expected_count, minimum in [
+        ("hosted-four-core-pool", "true", 4, True, None, 8, 5),
+        ("hosted-unqualified-source", "true", 4, False, None, 4, 1),
+        ("local-four-core-pool", "false", 4, True, None, 4, 1),
+        ("hosted-small-pool", "true", 3, True, None, 4, 1),
+        ("hosted-unknown-pool", "true", None, True, None, 4, 1),
+        ("hosted-explicit-small-pool", "true", 4, True, "2", 2, 1),
+    ]:
+        with patch.object(os, "cpu_count", return_value=cpus), patch.dict(os.environ, {"GITHUB_ACTIONS": hosted}):
+            os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+            if limit is not None:
+                os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = limit
+            controlled = profiles.workspace_nextest_options(
+                output, True, hosted_source_ready=source_ready)
+        assert controlled[controlled.index("--test-threads") + 1] == str(expected_count)
+        environment["SCODE_GROUP_POOL_DIR"] = str(output / label)
+        command(str(executable), "nextest", "run", *controlled, "--workspace", "--locked", *integration_arguments)
+        observed = output / label / "observed"
+        maximum = max(int(path.read_text()) for path in observed.iterdir())
+        assert minimum <= maximum <= expected_count, (label, maximum)
         assert len(list(observed.iterdir())) == 7
         assert not list((output / label / "active").iterdir()), label
         observed_workers[label] = maximum
@@ -348,9 +378,10 @@ pub fn record(name: &str) {
             # Exercise the public planner in a deep output directory without
             # another Cargo build or checkout. All inputs remain Git objects.
             deep = output / "deep-plan"
-            while len(str(deep.resolve())) < 205:
+            while len(str(deep.resolve())) < 221:
                 deep /= "committed-source"
-            command("git", "clone", "--no-checkout", "--shared", str(root), str(deep), cwd=output)
+            command("git", "clone", "--no-checkout", "--shared",
+                    "--separate-git-dir", str(output / "deep-plan-git"), str(root), str(deep), cwd=output)
             deep_text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"),
                                 "plan", "--base", base, "--policy-ref", base,
                                 "--host", "windows", "--architecture", "AMD64", cwd=deep).read_text(encoding="utf-8")

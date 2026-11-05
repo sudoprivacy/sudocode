@@ -337,7 +337,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
 def changed_paths(base, head):
     # --no-renames includes both sides of a rename so moving a file out of a
     # guarded directory cannot make its checks disappear.
-    return git("diff", "--name-only", "--no-renames", "-z", base, head).stdout.decode().split("\0")[:-1]
+    return git("diff", "--name-only", "--no-renames", "-z", base, head, "--").stdout.decode().split("\0")[:-1]
 
 
 def manifest_dependencies(manifest, workspace, kind):
@@ -1147,7 +1147,14 @@ def verify_carried(group, head, base, base_ref, policy_ref, host_info):
         raise RuntimeError("Carried evidence predates attested commands")
     origin_policy = value("rev-parse", payload["commands_ref"])
     if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
-        raise RuntimeError("Carried evidence policy is not an ancestor of the current protected policy")
+        raise RuntimeError(
+            "Carried evidence policy is not an ancestor of the current protected policy: "
+            f"origin={origin_policy}, protected={policy_ref}. "
+            "If this is an earlier unmerged contract update, land its reviewed PR through CI and the merge queue, "
+            "fetch protected main, then rerun the acceptance or push command. "
+            "Otherwise produce fresh evidence under the current protected policy. "
+            "Preserve the original evidence; do not relax the ancestry check."
+        )
     receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=policy_ref,
                               completed_only=payload.get("kind") == "completed-profiles")
     if receipt["host"] != host_info:

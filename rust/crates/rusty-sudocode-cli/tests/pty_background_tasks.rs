@@ -36,7 +36,12 @@ fn task_env(label: &str) -> (TestEnv, ReleaseOnDrop) {
     (env, release)
 }
 
-fn expect_stable_region<F>(session: &PtySession, budget: Duration, context: &str, region: F)
+fn expect_stable_region<F>(
+    session: &PtySession,
+    budget: Duration,
+    context: &str,
+    region: F,
+) -> String
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -61,7 +66,7 @@ where
         },
         budget,
         context,
-    );
+    )
 }
 
 fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
@@ -259,6 +264,20 @@ fn close(mut session: PtySession) {
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
 
+fn detail_frame_region(view: &str) -> Option<String> {
+    let rows = view.lines().collect::<Vec<_>>();
+    let top = rows
+        .iter()
+        .position(|row| row.contains("╭─ Output tail") && row.contains('╮'))?;
+    let bottom = rows
+        .iter()
+        .enumerate()
+        .skip(top + 1)
+        .find(|(_, row)| row.contains('╰') && row.contains('╯'))?
+        .0;
+    Some(format!("{top}:{}", rows[top..=bottom].join("\n")))
+}
+
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
     // Settle every frame corner, row and position while the task's runtime
     // and status animation continue outside this output frame.
@@ -266,19 +285,7 @@ fn assert_detail_frame(session: &PtySession, border_color: &str) {
         session,
         common::DEFAULT_TIMEOUT,
         "output frame rows and corners are stable",
-        |view| {
-            let rows = view.lines().collect::<Vec<_>>();
-            let top = rows
-                .iter()
-                .position(|row| row.contains("╭─ Output tail") && row.contains('╮'))?;
-            let bottom = rows
-                .iter()
-                .enumerate()
-                .skip(top + 1)
-                .find(|(_, row)| row.contains('╰') && row.contains('╯'))?
-                .0;
-            Some(format!("{top}:{}", rows[top..=bottom].join("\n")))
-        },
+        detail_frame_region,
     );
     session.render(|screen| {
         let raw = screen.raw();
@@ -457,18 +464,22 @@ fn background_status_theme(background: &str, no_color: bool) {
             ("COLORTERM", "truecolor"),
         ],
     );
-    let view = common::expect_screen_rows_settled(
+    let view = expect_stable_region(
         &session,
-        |view| {
-            view.lines().any(|line| {
-                line.contains("1 task still running · turn ")
-                    && line.trim_end().ends_with(" finished")
-            }) && view
-                .lines()
-                .any(|line| line.contains("danger-full-access") && line.contains("1 terminal"))
-        },
         common::LIVE_TURN_BUDGET,
         "foreground conclusion and task footer have distinct content",
+        |view| {
+            let (status_row, status) = view.lines().enumerate().find(|(_, line)| {
+                line.contains("1 task still running · turn ")
+                    && line.trim_end().ends_with(" finished")
+            })?;
+            let (footer_row, footer) = view.lines().enumerate().find(|(_, line)| {
+                line.contains("danger-full-access") && line.contains("1 terminal")
+            })?;
+            // The next assertion proves the first four icon cells animate.
+            let metadata = status.chars().skip(4).collect::<String>();
+            Some(format!("{status_row}:{metadata}\n{footer_row}:{footer}"))
+        },
     );
     assert_background_activity(&session, &view, background, no_color);
     open(&mut session);
@@ -884,36 +895,35 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
             json!({"id":"question","name":"AskUserQuestion","input":{"questions":[{"id":"choice","header":"Choice","question":"Select the second answer","options":[{"label":"First","value":"First","description":"First option"},{"label":"Second","value":"Second","description":"Second option"}],"multiSelect":false}]}}),
         ],
     );
-    common::expect_screen_rows_settled(
+    expect_stable_region(
         &session,
-        |_view| {
-            session.render(|screen| {
-                // ConPTY can mark the full-width rule above the question as
-                // wrapped. Inspect physical rows so contents() cannot join it
-                // to the header and hide the visible line boundary.
-                let rows = screen
-                    .raw()
-                    .rows(0, screen.raw().size().1)
-                    .collect::<Vec<_>>();
-                rows.iter().any(|line| {
-                    line.starts_with("1/1") && line.contains("Select the second answer")
-                }) && rows.iter().any(|line| line.contains("[2] Second"))
-            })
-        },
         Duration::from_secs(90),
         "actual question options, rather than the echoed prompt",
+        |view| {
+            // Physical rows preserve a header after a full-width wrapped rule.
+            let (header_row, header) = view.lines().enumerate().find(|(_, line)| {
+                line.starts_with("1/1") && line.contains("Select the second answer")
+            })?;
+            let (option_row, option) = view
+                .lines()
+                .enumerate()
+                .find(|(_, line)| line.contains("[2] Second"))?;
+            Some(format!("{header_row}:{header}\n{option_row}:{option}"))
+        },
     );
     screen(&session, "1 terminal");
     let before = common::turn_status_marker(&session);
     session.send("\x1b[B").unwrap();
-    common::expect_screen_rows_settled(
+    expect_stable_region(
         &session,
-        |view| {
-            view.lines()
-                .any(|line| line.trim_start().starts_with("> [2] Second"))
-        },
         Duration::from_secs(90),
         "second answer selected before confirming",
+        |view| {
+            view.lines()
+                .enumerate()
+                .find(|(_, line)| line.trim_start().starts_with("> [2] Second"))
+                .map(|(row, line)| format!("{row}:{line}"))
+        },
     );
     session.send("\r").unwrap();
     expect_parent_complete(&session, &before);
@@ -979,17 +989,19 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
     screen(&session, "1 terminal");
     open(&mut session);
     screen(&session, "Command:");
-    common::expect_screen_rows_settled(
+    expect_stable_region(
         &session,
-        |view| {
-            view.lines().collect::<Vec<_>>().windows(3).any(|rows| {
-                rows[0].contains("RESIZE_OUTPUT 中文 🚀")
-                    && rows[1].trim().trim_matches('│').trim().is_empty()
-                    && rows[2].contains("AFTER_EMPTY_LINE")
-            })
-        },
         common::DEFAULT_TIMEOUT,
         "output preserves its internal empty row and wide characters",
+        |view| {
+            detail_frame_region(view).filter(|frame| {
+                frame.lines().collect::<Vec<_>>().windows(3).any(|rows| {
+                    rows[0].contains("RESIZE_OUTPUT 中文 🚀")
+                        && rows[1].trim().trim_matches('│').trim().is_empty()
+                        && rows[2].contains("AFTER_EMPTY_LINE")
+                })
+            })
+        },
     );
     assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.resize(30, 45).unwrap();
@@ -997,34 +1009,42 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
     screen(&session, "Command:");
     assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.resize(12, 45).unwrap();
-    common::expect_screen_rows_settled(
+    expect_stable_region(
         &session,
-        |view| {
-            view.contains("AFTER_EMPTY_LINE")
-                && view.contains("k stop")
-                && !view.contains("Runtime:")
-                && !view.contains("Output tail · rows")
-                && !view.contains("Enlarge terminal")
-        },
         common::DEFAULT_TIMEOUT,
         "small detail viewport yields its decoration before controls",
+        |view| {
+            let (before, panel) = view.rsplit_once("Background tasks")?;
+            (panel.contains("AFTER_EMPTY_LINE")
+                && panel.contains("k stop")
+                && !view.contains("Runtime:")
+                && !view.contains("Output tail · rows")
+                && !view.contains("Enlarge terminal"))
+            .then(|| format!("{}:{panel}", before.lines().count()))
+        },
     );
     session.resize(40, 120).unwrap();
     screen(&session, "Full output:");
-    common::expect_screen_rows_settled(
+    expect_stable_region(
         &session,
-        |view| {
-            view.rsplit_once("Background tasks")
-                .is_some_and(|(_, panel)| {
-                    panel
-                        .lines()
-                        .map(str::trim)
-                        .collect::<String>()
-                        .contains("wrapped-command-中文-🚀")
-                })
-        },
         common::DEFAULT_TIMEOUT,
         "resizing preserves the command across its hanging continuation rows",
+        |view| {
+            let rows = view.lines().collect::<Vec<_>>();
+            let top = rows.iter().position(|row| row.starts_with("Command:"))?;
+            let bottom = rows
+                .iter()
+                .enumerate()
+                .skip(top + 1)
+                .find(|(_, row)| row.contains("╭─ Output tail"))?
+                .0;
+            rows[top..bottom]
+                .iter()
+                .map(|row| row.trim())
+                .collect::<String>()
+                .contains("wrapped-command-中文-🚀")
+                .then(|| format!("{top}:{}", rows[top..bottom].join("\n")))
+        },
     );
     assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.send("\x1b").unwrap();
@@ -1439,15 +1459,19 @@ fn completed_task_history_prunes_in_the_open_session_without_losing_running_work
         })
         .collect::<Vec<_>>();
     complete_history_batch(&env, &mut session, &calls);
-    common::expect_screen_rows_settled(
+    expect_stable_region(
         &session,
-        |view| {
-            view.lines().any(|line| {
-                line.contains("danger-full-access") && line.contains("1 terminal · 50 new results")
-            })
-        },
         common::LIVE_TURN_BUDGET,
         "50 completed results plus the original running task",
+        |view| {
+            view.lines()
+                .enumerate()
+                .find(|(_, line)| {
+                    line.contains("danger-full-access")
+                        && line.contains("1 terminal · 50 new results")
+                })
+                .map(|(row, line)| format!("{row}:{line}"))
+        },
     );
     session.send("/ps\r").unwrap();
     screen(&session, "51 in this session");

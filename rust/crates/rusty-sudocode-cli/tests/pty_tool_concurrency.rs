@@ -494,6 +494,11 @@ fn configure_mcp(env: &TestEnv, http: bool) -> Option<Server> {
     let root = env.workspace_root();
     let script = root.join("concurrent_mcp.py");
     std::fs::write(&script, include_str!("fixtures/concurrent_mcp.py")).unwrap();
+    std::fs::write(
+        root.join("loopback_http.py"),
+        include_str!("fixtures/loopback_http.py"),
+    )
+    .unwrap();
     let mut server = http.then(|| {
         Server(
             std::process::Command::new(common::resolve_python())

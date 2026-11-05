@@ -5,6 +5,16 @@
 //! with spinner overlay.  The coordinator thread reads `InputEvent`s from
 //! the returned `ReplHandle` and dispatches turns.
 //!
+//! # Terminal ownership
+//!
+//! The host terminal owns committed history, scrolling and selection. All
+//! runtime output reaches iocraft through `write_iocraft_output`; iocraft
+//! commits that batch before placing the next live editor and its cursor.
+//! The live UI holds only current chrome and unfinished output. Prompt shading
+//! changes presentation without adding a transcript store or scroll position.
+//! A pinned composer while browsing history requires a separate host capability;
+//! capturing wheel input in this main-buffer view would create two scroll owners.
+//!
 //! # ChromeSlot pattern
 //!
 //! The REPL chrome uses named slots with explicit content ownership.
@@ -40,8 +50,6 @@ mod layout;
 mod prompt_text;
 mod queued_message;
 mod tasks;
-mod transcript;
-mod transcript_view;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, RichText};
@@ -49,7 +57,6 @@ use choice_text::ChoiceText;
 pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
-use transcript_view::TextFrame;
 pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
@@ -786,7 +793,7 @@ fn format_question_panel(
 /// (which need a trailing newline) from raw byte chunks (which already
 /// include their own newlines from the markdown renderer).
 enum OutputMsg {
-    /// Semantic user boundary; headers never infer prompts from assistant text.
+    /// User echo formatted identically for live output and session replay.
     UserPrompt(String),
     /// One event's stable history and replacement live prose, in order.
     AssistantUpdate {
@@ -1264,7 +1271,6 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
 
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
-    transcript: Option<Arc<Mutex<transcript::Transcript>>>,
     tasks: Arc<Mutex<TaskBrowser>>,
     prose_preview: Arc<Mutex<ProsePreview>>,
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
@@ -1306,9 +1312,6 @@ pub type UpArrowDequeueHook = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 #[component]
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
-    let transcript = ctx.transcript.clone();
-    let transcript_for_future = transcript.clone();
-    let transcript_for_events = transcript.clone();
     let prose_preview = ctx.prose_preview.clone();
     let prose_preview_for_future = ctx.prose_preview.clone();
     let output_rx = Arc::clone(&ctx.output_rx);
@@ -1387,18 +1390,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 modifiers,
                 ..
             }) if kind != KeyEventKind::Release => {
-                if let Some(transcript) = &transcript_for_events {
-                    let navigation_key = matches!(code, KeyCode::PageUp | KeyCode::PageDown)
-                        || (code == KeyCode::End && modifiers.contains(KeyModifiers::ALT));
-                    if navigation_key && matches!(*input_slot.read(), InputSlot::TextInput)
-                        && tasks_for_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).focus == TaskFocus::Input {
-                        let mut view = transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if code == KeyCode::End { view.latest(); }
-                        else { view.scroll(if code == KeyCode::PageUp { -10 } else { 10 }).expect("scroll transcript"); }
-                        frame.set(frame.get().wrapping_add(1));
-                        return;
-                    }
-                }
                 let current_slot = input_slot.read().clone();
                 if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
                     let question = match &current_slot {
@@ -1816,18 +1807,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     _ => {}
                 }
             }
-            TerminalEvent::FullscreenMouse(event) => {
-                if let Some(transcript) = &transcript_for_events {
-                    let delta = match event.kind {
-                        MouseEventKind::ScrollUp => -3,
-                        MouseEventKind::ScrollDown => 3,
-                        _ => return,
-                    };
-                    transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .scroll(delta).expect("scroll transcript");
-                    frame.set(frame.get().wrapping_add(1));
-                }
-            }
             _ => {}
         }
     });
@@ -1848,7 +1827,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
             let mut is_preview_changed = false;
-            let mut is_transcript_changed = false;
 
             // Drain stderr redirect — route captured text through stdout
             // so it appears in the iocraft scrollback instead of corrupting
@@ -1858,11 +1836,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if let Some(captured) = redir.drain() {
                         write_iocraft_output(
                             &stdout_for_future,
-                            transcript_for_future.as_ref(),
                             &stderr_text.push(&captured),
                             false,
                         );
-                        is_transcript_changed = transcript_for_future.is_some();
                     }
                 }
             }
@@ -1872,10 +1848,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 loop {
                     let (text, terminated) = match rx.try_recv() {
                         Ok(OutputMsg::UserPrompt(display)) => {
-                            if let Some(view) = &transcript_for_future {
-                                view.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .begin_prompt().expect("mark transcript prompt");
-                            }
                             let mut text = crate::cli::format::format_input_echo(&display, crate::render::query_terminal_width()).0;
                             crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
                             (text, false)
@@ -1907,8 +1879,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     };
-                    write_iocraft_output(&stdout_for_future, transcript_for_future.as_ref(), &text, terminated);
-                    is_transcript_changed |= transcript_for_future.is_some();
+                    write_iocraft_output(&stdout_for_future, &text, terminated);
                 }
             }
 
@@ -1945,8 +1916,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         &question.presentation,
                                         crate::render::query_terminal_width(),
                                     );
-                                    write_iocraft_output(&stdout_for_future, transcript_for_future.as_ref(), &document, true);
-                                    is_transcript_changed |= transcript_for_future.is_some();
+                                    write_iocraft_output(&stdout_for_future, &document, true);
                                 }
                             }
                             tasks_for_future
@@ -2122,7 +2092,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 background_tick = Instant::now();
             }
-            if state == EngineState::Running || is_preview_changed || is_transcript_changed {
+            if state == EngineState::Running || is_preview_changed {
                 frame.set(idx.wrapping_add(1));
             }
             if state != EngineState::Idle && turn_result.read().is_some() {
@@ -2493,13 +2463,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     let preview_text = (|| {
-        if transcript.as_ref().is_some_and(|view| {
-            view.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_reading()
-        }) {
-            return None;
-        }
         let mut state = prose_preview
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2510,50 +2473,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         {
             return None;
         }
-        // Leave room for prompt context while an unfinished paragraph fills
-        // the preview. The shared allocator still reserves all input controls.
-        let context_rows = usize::from(transcript.is_some()) * 2;
-        state.layout(w, layout.preview_rows.saturating_sub(context_rows))
+        state.layout(w, layout.preview_rows)
     })();
     let preview_rows = preview_text
         .as_ref()
         .map_or(0, |text| text.text.lines().count());
     let slot_width = Size::Length(u32::from(term_width));
-    let transcript_rows = if transcript.is_some() {
-        (term_height as usize).saturating_sub(
-            1 + preview_rows
-                + layout.pending.rows
-                + layout.status.rows
-                + layout.todo.rows
-                + layout.footer.rows
-                + layout.input_rows
-                + 2 * layout.separators,
-        )
-    } else {
-        0
-    };
-    let transcript_frame = transcript
-        .as_ref()
-        .filter(|_| transcript_rows > 1)
-        .map(|view| {
-            view.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .render(w, transcript_rows)
-                .expect("render transcript")
-        });
-    let input_background = transcript
-        .as_ref()
-        .and_then(|_| crate::render::theme().prompt_style(true).background_color)
+    // Styling changes the existing editor, never the owner of terminal history.
+    let shaded_prompts =
+        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport);
+    let prompt_style = shaded_prompts.then(|| crate::render::theme().prompt_style());
+    let input_background = prompt_style
+        .and_then(|style| style.background_color)
         .and_then(ansi_text::ui_color);
-    let input_foreground = transcript
-        .as_ref()
-        .and_then(|_| crate::render::theme().prompt_style(true).foreground_color)
+    let input_foreground = prompt_style
+        .and_then(|style| style.foreground_color)
         .and_then(ansi_text::ui_color);
-    let header_background = transcript
-        .as_ref()
-        .and_then(|_| crate::render::theme().prompt_style(false).background_color)
-        .and_then(ansi_text::ui_color);
-    let viewport_enabled = transcript.is_some();
     // Present an empty live frame before exiting. iocraft otherwise retains
     // its last canvas, leaving status/todos above the next resumed session.
     // The ordinary history writer has already committed conversation output.
@@ -2562,14 +2497,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
     element! {
         View(width: u32::from(term_width), flex_direction: FlexDirection::Column,
-            height: if viewport_enabled { Size::Length(u32::from(term_height.saturating_sub(1))) } else { Size::Auto },
             max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
-            View(height: row_height(transcript_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                #(transcript_frame.map(|display| element! {
-                    TextFrame(header: display.header, body: display.body,
-                        width: u32::from(term_width), header_background)
-                }))
-            }
             // Keep the preview parent mounted across streaming handoff so it
             // cannot shift the editor's component identity.
             View(flex_direction: FlexDirection::Column, width: slot_width,
@@ -2583,7 +2511,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(row_text("todo", layout.todo.content, layout.todo.rows))
             #((layout.separators > 0).then(|| element! {
                 View(height: row_height(layout.separators), flex_shrink: 0.0, background_color: input_background) {
-                    #((!viewport_enabled).then(|| element! { Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap) }))
+                    #((!shaded_prompts).then(|| element! { Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap) }))
                 }
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
@@ -2628,11 +2556,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 let input_tx_for_edit = input_tx.clone();
                 let on_edit: TextInputEditHandler = Box::new(move |event, current, cursor| {
-                    let navigation_key = matches!(event, TerminalEvent::Key(KeyEvent { code: KeyCode::PageUp | KeyCode::PageDown, .. }))
-                        || matches!(event, TerminalEvent::Key(KeyEvent { code: KeyCode::End, modifiers, .. }) if modifiers.contains(KeyModifiers::ALT));
-                    if viewport_enabled && navigation_key {
-                        return Some(TextInputEdit { value: current.to_string(), cursor_offset: cursor });
-                    }
                     // Read focus at event time: several keys can arrive before
                     // the next render. TextInput remains the only draft editor.
                     let mut browser = tasks_for_edit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2767,7 +2690,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Separator
             #((layout.separators > 0).then(|| element! {
                 View(height: row_height(layout.separators), flex_shrink: 0.0, background_color: input_background) {
-                    #((!viewport_enabled).then(|| element! { Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap) }))
+                    #((!shaded_prompts).then(|| element! { Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap) }))
                 }
             }))
             // FooterSlot
@@ -2777,19 +2700,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 /// Adapt the shared line framing to iocraft for every captured/output stream.
-fn write_iocraft_output(
-    stdout: &StdoutHandle,
-    transcript: Option<&Arc<Mutex<transcript::Transcript>>>,
-    text: &str,
-    terminated: bool,
-) {
-    if let Some(view) = transcript {
-        view.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .append(text, terminated)
-            .expect("spool transcript");
-        return;
-    }
+fn write_iocraft_output(stdout: &StdoutHandle, text: &str, terminated: bool) {
     split_lines(text, terminated, |op| match op {
         OutputOp::Println(line) => stdout.println(line),
         OutputOp::Print(chunk) => stdout.print(chunk),
@@ -2805,7 +2716,6 @@ fn write_iocraft_output(
 pub fn spawn_repl_ui(
     permission_mode: &str,
     startup_banner: &str,
-    startup_prompts: Vec<usize>,
     todo_items: Vec<runtime::Todo>,
     input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
@@ -2815,20 +2725,11 @@ pub fn spawn_repl_ui(
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
     let spinner = ActivityState::new();
-    let transcript = runtime::experiments::is_enabled(
-        runtime::experiments::Experiment::PromptViewport,
-    )
-    .then(|| {
-        Arc::new(Mutex::new(
-            transcript::Transcript::new().expect("create transcript spool"),
-        ))
-    });
 
     let stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>> =
         Arc::new(Mutex::new(None));
 
     let ctx = ReplContext {
-        transcript: transcript.clone(),
         tasks: Arc::new(Mutex::new(TaskBrowser::default())),
         prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
         output_rx: Arc::new(Mutex::new(output_rx)),
@@ -2852,22 +2753,7 @@ pub fn spawn_repl_ui(
             // Print banner before entering the render loop so the user sees
             // session info in the scrollback. iocraft's render_loop enters
             // raw mode immediately, so we print first.
-            if let Some(view) = &transcript {
-                let mut view = view
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mut start = 0;
-                for position in startup_prompts {
-                    view.append(&banner[start..position], false)
-                        .expect("seed transcript");
-                    view.begin_prompt().expect("seed prompt");
-                    start = position;
-                }
-                view.append(&banner[start..], true)
-                    .expect("seed transcript");
-            } else {
-                println!("{banner}");
-            }
+            println!("{banner}");
 
             // Activate stderr redirect before entering raw mode so that
             // any library writing to fd 2 is captured and routed through
@@ -2881,21 +2767,7 @@ pub fn spawn_repl_ui(
                     ReplApp
                 }
             };
-            let render = app.render_loop().ignore_ctrl_c();
-            let render = if transcript.is_some() {
-                // Keep the inline renderer in the main terminal buffer. Mouse
-                // reporting supplies navigation for the conversation viewport.
-                render.enable_mouse_capture()
-            } else {
-                render
-            };
-            smol::block_on(render).expect("iocraft render_loop failed");
-            if let Some(view) = transcript {
-                view.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .replay(&mut io::stdout().lock())
-                    .expect("restore native transcript");
-            }
+            smol::block_on(app.render_loop().ignore_ctrl_c()).expect("iocraft render_loop failed");
         })
         .expect("spawn repl-ui thread");
     // Small delay to let the render loop enter raw mode before the

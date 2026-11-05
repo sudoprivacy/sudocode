@@ -8,6 +8,8 @@ import ssl
 import sys
 from urllib.parse import urlsplit
 
+from loopback_http import LoopbackHTTPServer
+
 
 def main():
     certificate, key, backend_url, ready_path = sys.argv[1:]
@@ -40,7 +42,7 @@ def main():
         def log_message(self, _format, *_args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Gateway)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certificate, key)
     server.socket = context.wrap_socket(server.socket, server_side=True)

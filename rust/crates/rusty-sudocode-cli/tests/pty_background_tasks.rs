@@ -289,13 +289,19 @@ fn assert_detail_frame(session: &PtySession, border_color: &str) {
             .find(|(_, row)| row.contains('╰'))
             .unwrap()
             .0;
-        let column = |row, glyph: &str| {
+        let column = |row: usize, glyph: &str| {
             (0..raw.size().1)
                 .find(|col| {
                     raw.cell(u16::try_from(row).unwrap(), *col)
                         .is_some_and(|cell| cell.contents() == glyph)
                 })
-                .unwrap()
+                .unwrap_or_else(|| {
+                    let cells = (0..raw.size().1)
+                        .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
+                        .map(|cell| cell.contents())
+                        .collect::<Vec<_>>();
+                    panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
+                })
         };
         let left = column(top, "╭");
         let right = column(top, "╮");

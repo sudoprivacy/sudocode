@@ -764,6 +764,48 @@ with one leaked ACP child was refused; the test now awaits its existing shutdown
 helper. Real native process guards observe overlap and explicit four-worker
 limits. Cases, assertions, retries, deadlines and budgets remain unchanged;
 the guards add no e2e coverage credit.</p>
+<p><strong>Bound Docker readiness (2026-11-05).</strong> Before contract
+validation starts its container/native checks, the real Docker Engine version
+request has a 30-second connection deadline and prints recovery steps on
+failure. This avoids leaving the shared host lease held by an unresponsive
+readiness query. The native enforcement guard runs the real Docker CLI against
+a deliberately stalled local HTTP endpoint and checks ordinary client errors.
+The guard image carries the official Docker CLI pinned by image digest so
+these checks also run inside its nested policy fixtures;
+this adds infrastructure fault coverage, not product journey credit. Healthy
+execution still requires the complete container/native validation matrix.</p>
+<p><strong>Run metadata before the host queue (2026-11-06).</strong>
+The managed hook, manual checks and contract updates execute metadata preflight
+before requesting the existing host lease. Revisions selecting only metadata,
+and runs that restore fully verified signed results, finish without that wait.
+Partial signed checkpoints still wait for and execute each missing check.
+Required output prints <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> with the
+selected and pending checks. One shared helper retains source verification,
+signatures, carried results, checkpoint publication and original start times.
+Real Git, SSH signatures and concurrent processes reproduce both old waits and
+verify metadata success/failure, complete/partial resume, FIFO order, nesting
+and recovery after a holder or waiter exits. These are infrastructure controls;
+product journey counts and acceptance budgets retain their current values.
+A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
+of command execution; this is a measured scheduling incident, not a forecast
+of whole-PR savings.</p>
+<p><strong>Preserve full published dependency tags (2026-11-06).</strong>
+CI preflight compares the complete Nexus manifest tag with its unique lockfile
+tag and commit, preserving prerelease and build suffixes. The earlier extraction
+truncated a real <code>v0.8.29-rc.5</code> manifest to <code>v0.8.29</code>, falsely
+refusing a matching lockfile. The same preflight job executes ten real Bash
+workflow-step scenarios, including correct prereleases and genuine mismatch,
+ambiguity and missing-input refusal. This fixes an infrastructure false failure;
+it adds no product journey coverage and removes no product checks.</p>
+<p><strong>Verify completed publisher reruns (2026-11-06).</strong> Merge-queue
+verification binds the trusted publisher's status to its current attempt's
+completed successful jobs, matching source/run identities and execution times.
+GitHub can keep an earlier failed aggregate after all rerun jobs succeed. Old
+jobs and old success statuses cannot approve a pending or failed current
+attempt. The required gate reports the run and recovery command. Real Git,
+SSH signatures, HTTP and independent gate processes cover the observed stale
+aggregate and refusal cases. This restores delivery after metadata inconsistency;
+it adds infrastructure coverage without changing product case counts.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in
@@ -3059,37 +3101,22 @@ namespace for the new TUI work.</p>
 <h4>No alternate-screen / full-screen TUI mode — by rule</h4>
 
 <section id="prompt-viewport-experiment">
-<h5>Bounded inline prompt viewport experiment — 2026-10-27</h5>
-<p><strong>Experimental; off by default.</strong> Reviewing an
-earlier answer while composing a queued follow-up currently moves the editor out
-of view in native terminal scrollback. Evaluate an opt-in inline conversation
-viewport with a fixed composer, a
-contextual prompt header and shaded user messages. The normal REPL, pipes, ACP,
-classic input and worker attach/detach retain their existing behavior. This is
-not approval for dashboards, split panes, a new renderer dependency or a
-<code>--tui</code> command.</p>
+<h5>Native inline prompt surfaces — 2026-10-31</h5>
+<p><strong>Experimental; off by default.</strong> The existing
+<code>promptViewport</code> setting now applies matching shading to the live
+editor and committed prompts. The fixed conversation viewport was removed after
+Windows VS Code testing exposed independent wheel and native scrollbar positions.
+All output uses the existing inline history writer, and the terminal owns
+scrolling and selection.</p>
 <ul>
-  <li>Use the existing iocraft renderer and engine boundary. Register the
-  temporary <code>promptViewport</code> experiment in the existing registry.
-  Stay in the main terminal buffer and reuse its cell-range damage writer;
-  do not enter alternate-screen mode.</li>
-  <li>Keep immutable rendered history in a disposable disk spool, with bounded
-  visible-row caches. Typing must not scan or rewrap accumulated history.</li>
-  <li>Retain unchanged renderer layout and prepared styled-text lines, with
-  explicit cache limits and invalidation for content, styles and width.
-  Measure the enabled feature before and after optimization, as well as
-  enabled/disabled costs; preserve the four visual effects and existing budgets.</li>
-  <li>Anchor reading to content while new output arrives. Keep prompt headers
-  presentation-only and preserve the draft through scroll and resize.</li>
-  <li>Reuse semantic prompt styling and the existing Unicode/ANSI layout code;
-  do not introduce another conversation formatter or model request.</li>
-  <li>Verify wheel/keyboard navigation, selection/copy, Unicode, streaming,
-  terminal handoff, resume and shutdown through real PTYs. Preserve failed
-  measurements. Existing default-mode performance CI does not establish the
-  experiment's performance: compare explicit enabled/disabled workloads too.</li>
-  <li>Do not graduate or enable this viewport by default until terminal behavior,
-  memory and responsiveness meet the existing budgets. Back-to-bottom is a
-  secondary reading-state control.</li>
+  <li>Keep one output path, one replay formatter and one prompt style. Styling
+  must not introduce another transcript store or input/navigation owner.</li>
+  <li>Verify native history growth, actual scrollbar dragging and wheel scrolling,
+  selection, Unicode drafts, resize and resume through real PTYs and browser
+  terminal interaction. Retain enabled/disabled performance budgets.</li>
+  <li>A composer and prompt header that remain visible during native scrollback
+  require terminal-host integration. They are deferred until the host can share
+  its scroll position.</li>
 </ul>
 </section>
 

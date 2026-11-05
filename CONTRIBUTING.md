@@ -281,9 +281,30 @@ do not independently select a base from the event. Queue verification retains
 the merge group's exact base. Git/SSH/process acceptance covers stale API bases
 and refuses a signed receipt for the wrong actual base.
 
-One acceptance runs per host at a time. Every `check`, whether from the hook,
-`contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
-while its profiles run; a later invocation prints the holder from
+CI compares complete published Nexus dependency tags, including prerelease and
+build suffixes, with the lockfile's unique tag and commit. A prerelease such as
+`v0.8.29-rc.5` must not be truncated to `v0.8.29`. The existing preflight job runs
+the actual Bash workflow step against fresh valid, mismatched, ambiguous and
+missing inputs. These infrastructure checks add no product journey coverage.
+
+For a publisher rerun, queue verification checks the current attempt's actual
+completed jobs and binds the success status's creation time to that execution.
+GitHub's aggregate run conclusion can retain an earlier failed attempt. Older
+jobs are excluded; missing, pending, failed or mismatched current jobs and old
+success statuses still block the queue. The gate prints the run and recovery
+command when publication is incomplete. Real Git/SSH/HTTP process fixtures
+exercise both the stale aggregate and these refusals.
+
+Checks that run tests, builds or containers share one host lease.
+Every `check`, whether from the hook, `contract-update` or a manual run,
+executes metadata preflight before joining that queue. Revisions requiring
+only preflight and runs restoring already verified complete results finish
+without waiting for the host. Partial signed progress still waits and executes
+every missing check. Signatures, source bindings, checkpoint validation and
+the earliest recorded start time keep their existing requirements. The required
+command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
+pending checks. Any pending test, build or container profile holds
+`~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
 `host-lease.json` and its queue position. Waiters start in arrival order when the
 holder exits, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
@@ -294,6 +315,16 @@ Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
 fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
+
+Contract validation requires the Docker Engine version API to answer within
+30 seconds before container/native checks start. Its required output names the
+deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on
+failure. The version request avoids optional CLI plugin discovery. A native
+guard uses the real Docker client against a stalled local HTTP endpoint to
+verify the connection deadline. Its container image includes the official
+Docker CLI pinned by image digest for the nested policy checks. The guard
+preserves an ordinary client error as a
+failure. Healthy Engine execution still requires the full container matrix.
 
 On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads

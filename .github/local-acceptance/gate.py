@@ -1,6 +1,7 @@
 """Trusted, read-only metadata gate; candidate sources are never executed here."""
 
 import importlib.util
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,44 @@ def github_event():
     return json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
 
 
+def verify_publisher(repository, identifier, status):
+    """Bind a rerun's status to its completed current jobs despite stale aggregates."""
+    route = f"repos/{repository}/actions/runs/{identifier}"
+    run = api(route)
+    if run["path"].split("@")[0] != ".github/workflows/local-acceptance-publish.yml" or run["event"] != "workflow_run":
+        raise RuntimeError("Acceptance status was not produced by the trusted publisher")
+    attempt = run.get("run_attempt", 1)
+    if type(attempt) is not int or attempt < 1:
+        raise RuntimeError("Invalid acceptance publisher attempt")
+    if attempt == 1:
+        if run["conclusion"] not in (None, "success"):
+            raise RuntimeError("Acceptance status was not produced by the trusted publisher")
+        return
+    # GitHub can retain the first failure in run/attempt aggregates after a
+    # successful rerun. Its latest-jobs response can also include older jobs.
+    jobs = pages(route + "/jobs?filter=latest", "jobs")
+    current = [job for job in jobs if job.get("run_attempt") == attempt]
+    if (any(type(job.get("run_attempt")) is not int or job["run_attempt"] > attempt for job in jobs)
+            or not current or any(job.get("run_id") != int(identifier)
+                or job.get("head_sha") != run["head_sha"]
+                or job.get("status") != "completed" or job.get("conclusion") != "success"
+                for job in current)):
+        raise RuntimeError(f"Acceptance publisher attempt {attempt} has no complete successful current jobs. "
+                           f"Inspect gh run view {identifier}; wait for completion, repair actual failures, "
+                           "then enqueue the PR again with gh pr merge <PR> --merge --auto.")
+    try:
+        created = datetime.fromisoformat(status["created_at"].replace("Z", "+00:00"))
+        windows = [(datetime.fromisoformat(job["started_at"].replace("Z", "+00:00")),
+                    datetime.fromisoformat(job["completed_at"].replace("Z", "+00:00"))) for job in current]
+        belongs = created.tzinfo is not None and any(start <= created <= end for start, end in windows)
+    except (KeyError, TypeError, ValueError):
+        belongs = False
+    if not belongs:
+        raise RuntimeError(f"Acceptance status does not belong to publisher attempt {attempt}. "
+                           f"Inspect gh run view {identifier}; a fresh successful publication is required.")
+    print(f"Verified publisher attempt {attempt} from {len(current)} completed successful jobs")
+
+
 def main():
     event = github_event()
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -95,9 +134,7 @@ def main():
             identifier = status["target_url"][len(prefix):]
             if not identifier.isdecimal():
                 raise RuntimeError("Invalid acceptance publisher run URL")
-            run = api(f"repos/{repository}/actions/runs/{identifier}")
-            if run["path"].split("@")[0] != ".github/workflows/local-acceptance-publish.yml" or run["event"] != "workflow_run" or run["conclusion"] not in (None, "success"):
-                raise RuntimeError("Acceptance status was not produced by the trusted publisher")
+            verify_publisher(repository, identifier, status)
             print(f"Carried PR #{pull['number']} {head[:12]} from publisher run {identifier}")
         subprocess.run([sys.executable, str(ROOT / ".github/scripts/check_pr_history.py"),
                         group["base_sha"], group["head_sha"]], cwd=ROOT, check=True)

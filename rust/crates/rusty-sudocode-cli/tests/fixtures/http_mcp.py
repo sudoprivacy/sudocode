@@ -2,9 +2,10 @@
 
 import json
 import pathlib
-import socketserver
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from loopback_http import LoopbackHTTPServer
 
 proof = pathlib.Path(sys.argv[1])
 token = sys.argv[2]
@@ -45,15 +46,6 @@ class MCP(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class LocalHTTPServer(ThreadingHTTPServer):
-    def server_bind(self):
-        # Loopback fixtures need no reverse DNS; getfqdn can block on loaded
-        # macOS runners before the readiness line is written.
-        socketserver.TCPServer.server_bind(self)
-        self.server_name = "127.0.0.1"
-        self.server_port = self.server_address[1]
-
-
-server = LocalHTTPServer(("127.0.0.1", 0), MCP)
+server = LoopbackHTTPServer(("127.0.0.1", 0), MCP)
 print(f"http://127.0.0.1:{server.server_address[1]}/mcp", flush=True)
 server.serve_forever()

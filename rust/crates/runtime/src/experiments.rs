@@ -47,7 +47,7 @@ pub enum Experiment {
     CacheTtlAdvisor,
     /// Publish short persistent peer descriptions with existing compaction calls.
     PeerDescriptions,
-    /// Bounded transcript viewport with a pinned composer and prompt context.
+    /// Shaded prompt surfaces using the existing native inline history.
     PromptViewport,
 }
 

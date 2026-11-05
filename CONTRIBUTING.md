@@ -295,6 +295,14 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
+Contract validation requires the Docker Engine version API to answer within
+30 seconds before container/native checks start. Its required output names the
+deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on
+failure. The version request avoids optional CLI plugin discovery. A native
+guard uses the real Docker client against a stalled local HTTP endpoint to
+verify the connection deadline and preserves an ordinary client error as a
+failure. Healthy Engine execution still requires the full container matrix.
+
 On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads
 the power source and Foundation's active low-power mode before and after the

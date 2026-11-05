@@ -764,6 +764,14 @@ with one leaked ACP child was refused; the test now awaits its existing shutdown
 helper. Real native process guards observe overlap and explicit four-worker
 limits. Cases, assertions, retries, deadlines and budgets remain unchanged;
 the guards add no e2e coverage credit.</p>
+<p><strong>Bound Docker readiness (2026-11-05).</strong> Before contract
+validation starts its container/native checks, the real Docker Engine version
+request has a 30-second connection deadline and prints recovery steps on
+failure. This avoids leaving the shared host lease held by an unresponsive
+readiness query. The native enforcement guard runs the real Docker CLI against
+a deliberately stalled local HTTP endpoint and checks ordinary client errors;
+this adds infrastructure fault coverage, not product journey credit. Healthy
+execution still requires the complete container/native validation matrix.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

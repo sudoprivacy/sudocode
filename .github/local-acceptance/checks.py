@@ -100,6 +100,19 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
+def docker_engine_probe_command(timeout):
+    """Bound the Engine version request without discovering optional CLI plugins."""
+    script = """import subprocess,sys
+try:
+    result = subprocess.run(sys.argv[2:], timeout=float(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    sys.exit(f"DOCKER_ENGINE_PROBE_TIMEOUT: Docker Engine did not answer within {sys.argv[1]} seconds. Check Docker Desktop and this shell's DOCKER_HOST/context; container/native guards have not started.")
+sys.exit(result.returncode)
+"""
+    return [sys.executable, "-c", script, str(timeout), shutil.which("docker") or "docker",
+            "version", "--format", "{{.Server.Version}}"]
+
+
 def workspace_nextest_options(output, grouped):
     """Raise only the full grouped workspace pool; preserve explicit lower limits."""
     options = nextest_options(output)
@@ -417,7 +430,10 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
                                "then retry this push or the printed acceptance command.")
         try:
-            command("docker", "info", "--format", "{{.ServerVersion}}")
+            print("DOCKER_ENGINE_PROBE: require a server version within 30 seconds before starting "
+                  "container/native validation. Optional CLI plugin discovery is outside this probe.",
+                  flush=True)
+            command(*docker_engine_probe_command(30))
         except (RuntimeError, OSError) as error:
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
@@ -633,7 +649,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
         ".github/local-acceptance/gate.py": "aa14a70ee90b43cb5924e76255636598993145aabb08e5c65337bcee8592ef78",
-        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
+        ".github/local-acceptance/native_guard.py": "ff58fc5dffdb0146b11aaa38571646d217e216c71ec0bd2c1aefd0cb23789abf",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
         ".github/scripts/local_acceptance.py": "6fd29d3cc0e18f2892193adf445ffb12b85dce36fa960c57b01216ed9ec5de1b",
@@ -644,6 +660,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "3249cb47c0dc416c915f3080d27e42184d58566a80ab58433ee03e066ed1aab9",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
         "e2e/local-acceptance/host_lease_acceptance.py": "c6eadb50fda038f07b6d1c511f9d6417d2347f3e8caf2d47ae8046d3fee7facf",

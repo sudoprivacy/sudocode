@@ -278,6 +278,20 @@ fn detail_frame_region(view: &str) -> Option<String> {
     Some(format!("{top}:{}", rows[top..=bottom].join("\n")))
 }
 
+fn detail_command_region(view: &str) -> Option<String> {
+    let rows = view.lines().collect::<Vec<_>>();
+    let top = rows
+        .iter()
+        .position(|row| row.trim_start().starts_with("Command:"))?;
+    let bottom = rows
+        .iter()
+        .enumerate()
+        .skip(top + 1)
+        .find(|(_, row)| row.contains("╭─ Output tail"))?
+        .0;
+    Some(format!("{top}:{}", rows[top..bottom].join("\n")))
+}
+
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
     // Settle every frame corner, row and position while the task's runtime
     // and status animation continue outside this output frame.
@@ -1030,20 +1044,13 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
         common::DEFAULT_TIMEOUT,
         "resizing preserves the command across its hanging continuation rows",
         |view| {
-            let rows = view.lines().collect::<Vec<_>>();
-            let top = rows.iter().position(|row| row.starts_with("Command:"))?;
-            let bottom = rows
-                .iter()
-                .enumerate()
-                .skip(top + 1)
-                .find(|(_, row)| row.contains("╭─ Output tail"))?
-                .0;
-            rows[top..bottom]
-                .iter()
-                .map(|row| row.trim())
-                .collect::<String>()
-                .contains("wrapped-command-中文-🚀")
-                .then(|| format!("{top}:{}", rows[top..bottom].join("\n")))
+            detail_command_region(view).filter(|command| {
+                command
+                    .lines()
+                    .map(str::trim)
+                    .collect::<String>()
+                    .contains("wrapped-command-中文-🚀")
+            })
         },
     );
     assert_detail_frame(&session, "Rgb(158, 158, 158)");

@@ -101,6 +101,6 @@ fn status_reports_the_disk_namespace_and_that_this_session_receives() {
         serde_json::from_slice(&std::fs::read(&reader_path).unwrap()).unwrap();
     assert!(register.get("lease_expires_at").is_none(), "{register}");
     let holder = register["holder"].as_str().unwrap();
-    assert!(!holder.is_empty());
+    assert_ne!(holder, "");
     assert_ne!(holder, "previous-process");
 }

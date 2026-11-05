@@ -1,4 +1,4 @@
-name: Private full native eight-worker comparison
+name: Private full native eight-worker validation
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: a3b8281f17f83d38f4a8f04a6efdcc00f8227cc2
+          ref: a3168b76c7a3b533179e9e1a4a272e67ac7c404a
           path: candidate
           fetch-depth: 0
           persist-credentials: false
@@ -51,7 +51,7 @@ jobs:
           save-if: false
       - name: Install process observer
         run: python -m pip install psutil jsonschema
-      - name: Measure the full eight-worker suite against the required four-worker field
+      - name: Run the complete native suite with eight workers
         run: python driver/.github/diagnostics/ci_worker_probe.py --source candidate --output "${{ runner.temp }}/native-workers"
       - uses: actions/upload-artifact@v4
         if: always()

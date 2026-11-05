@@ -59,9 +59,9 @@ def main():
                    "CARGO_BUILD_JOBS": str((os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1)}
     record = {"head": head, "started_at": datetime.now(timezone.utc).isoformat(),
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
-              "baseline_run": 41450784797,
-              "baseline_job": 125295385626 if platform.system() == "Linux" else None,
-              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Reuse already-required same-source four-worker CI where available instead of repeating it. Different VMs: timings are observations, not a controlled causal speedup. Windows has no same-source four-worker baseline. No acceptance signature or paid API call."}
+              "baseline_run": None,
+              "baseline_job": None,
+              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Current protected main after198 Rust files changed since the prior field. No current same-source four-worker baseline; this is full native suite validation at eight workers, not a speedup measurement. No acceptance signature or paid API call."}
     started = time.monotonic()
 
     def invoke(command, log):
@@ -105,9 +105,9 @@ def main():
                     ignored += 1
                 else:
                     expected.add((identity, name))
-        # Bind this private field to the actual platform inventories of eaae424.
-        inventories = {"Darwin": (1141, 72), "Linux": (1151, 73), "Windows": (1092, 69)}
-        assert (len(expected), ignored) == inventories[platform.system()], (len(expected), ignored)
+        # Current protected helpers select every integration target; the captured
+        # pinned-runner inventory below defines the exact complete case set.
+        assert len(expected) >= 1000 and ignored > 0, (len(expected), ignored)
         paths = set()
 
         def collect(value):

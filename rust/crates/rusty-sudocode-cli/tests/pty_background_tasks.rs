@@ -278,7 +278,7 @@ fn detail_frame_region(view: &str) -> Option<String> {
     Some(format!("{top}:{}", rows[top..=bottom].join("\n")))
 }
 
-fn detail_command_region(view: &str) -> Option<String> {
+fn detail_command_region(view: &str, marker: &str) -> Option<String> {
     let rows = view.lines().collect::<Vec<_>>();
     let top = rows
         .iter()
@@ -289,7 +289,13 @@ fn detail_command_region(view: &str) -> Option<String> {
         .skip(top + 1)
         .find(|(_, row)| row.contains("╭─ Output tail"))?
         .0;
-    Some(format!("{top}:{}", rows[top..bottom].join("\n")))
+    let command = rows[top..bottom].join("\n");
+    command
+        .lines()
+        .map(str::trim)
+        .collect::<String>()
+        .contains(marker)
+        .then(|| format!("{top}:{command}"))
 }
 
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
@@ -1043,15 +1049,7 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
         &session,
         common::DEFAULT_TIMEOUT,
         "resizing preserves the command across its hanging continuation rows",
-        |view| {
-            detail_command_region(view).filter(|command| {
-                command
-                    .lines()
-                    .map(str::trim)
-                    .collect::<String>()
-                    .contains("wrapped-command-中文-🚀")
-            })
-        },
+        |view| detail_command_region(view, "wrapped-command-中文-🚀"),
     );
     assert_detail_frame(&session, "Rgb(158, 158, 158)");
     session.send("\x1b").unwrap();

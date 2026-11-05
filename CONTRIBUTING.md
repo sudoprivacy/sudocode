@@ -281,6 +281,12 @@ do not independently select a base from the event. Queue verification retains
 the merge group's exact base. Git/SSH/process acceptance covers stale API bases
 and refuses a signed receipt for the wrong actual base.
 
+CI compares complete published Nexus dependency tags, including prerelease and
+build suffixes, with the lockfile's unique tag and commit. A prerelease such as
+`v0.8.29-rc.5` must not be truncated to `v0.8.29`. The existing preflight job runs
+the actual Bash workflow step against fresh valid, mismatched, ambiguous and
+missing inputs. These infrastructure checks add no product journey coverage.
+
 For a publisher rerun, queue verification checks the current attempt's actual
 completed jobs and binds the success status's creation time to that execution.
 GitHub's aggregate run conclusion can retain an earlier failed attempt. Older

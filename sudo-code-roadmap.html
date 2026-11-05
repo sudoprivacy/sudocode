@@ -789,6 +789,14 @@ product journey counts and acceptance budgets retain their current values.
 A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
 of command execution; this is a measured scheduling incident, not a forecast
 of whole-PR savings.</p>
+<p><strong>Preserve full published dependency tags (2026-11-06).</strong>
+CI preflight compares the complete Nexus manifest tag with its unique lockfile
+tag and commit, preserving prerelease and build suffixes. The earlier extraction
+truncated a real <code>v0.8.29-rc.5</code> manifest to <code>v0.8.29</code>, falsely
+refusing a matching lockfile. The same preflight job executes ten real Bash
+workflow-step scenarios, including correct prereleases and genuine mismatch,
+ambiguity and missing-input refusal. This fixes an infrastructure false failure;
+it adds no product journey coverage and removes no product checks.</p>
 <p><strong>Verify completed publisher reruns (2026-11-06).</strong> Merge-queue
 verification binds the trusted publisher's status to its current attempt's
 completed successful jobs, matching source/run identities and execution times.

@@ -148,6 +148,7 @@ fn add_text(reg: &CronRegistry, rest: &[String]) -> Result<String, String> {
         name: opts.get("name").map(str::to_owned),
         tz,
         cwd: opts.get("cwd").map(str::to_owned),
+        ..Default::default()
     });
     if let Some(n) = cron_schedule::first_run_at(&entry, now_secs()) {
         let _ = reg.set_next_run(&entry.cron_id, Some(n));
@@ -252,6 +253,7 @@ fn add(reg: &CronRegistry, rest: &[String], output_format: CliOutputFormat) -> C
         name: opts.get("name").map(str::to_owned),
         tz,
         cwd: opts.get("cwd").map(str::to_owned),
+        ..Default::default()
     });
     // Seed the first next-run so `list` shows it immediately and the
     // scheduler considers it without a create/tick race.

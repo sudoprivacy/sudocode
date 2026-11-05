@@ -810,6 +810,22 @@ Required output reports actual execution order. Real Git, SSH signatures and
 child processes prove service failure prevents slow-profile entry, successful
 execution retains every profile, and verified restore repeats no commands.
 These controls add infrastructure coverage without product journey credit.</p>
+<p><strong>Discover signed external outputs (2026-11-06).</strong>
+Explicit <code>--output</code> directories now register one atomic discovery
+reference per source/output. Same-head resume and unchanged-profile carry
+share this discovery path with default outputs. Required output names both the
+reference and original evidence; signatures, source, native host, protected
+commands and original log hashes are still verified before reuse.
+A real historical counterexample had six valid reusable profiles outside the
+registry, and the later run repeated all six. This proves missed discovery;
+it does not establish an average delivery saving.
+<code>index-output --directory PATH --policy-ref origin/main</code> verifies
+older original evidence and registers only its location, without rerunning,
+rewriting or re-signing it. Index I/O failure preserves signed progress and prints
+explicit resume recovery. Real Git, SSH and independent processes cover automatic
+same-head/cross-head reuse, old-evidence adoption, Unicode paths, corrupt
+signatures/logs, invalid references and index I/O failures. These controls add
+infrastructure coverage; product cases and acceptance budgets remain required.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

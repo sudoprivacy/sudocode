@@ -1,5 +1,6 @@
 """Exercise the host acceptance lease through concurrent CLI processes, Git and SSH."""
 
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -99,8 +100,17 @@ def verify_host_lease(directory, source, command, environment):
         return events_log.read_text().splitlines() if events_log.exists() else []
 
     processes = []
+    sources = {}
 
     def start(label, nested=False, root=work, resume=None):
+        # These exercise fresh executions, so each independent contender gets
+        # its own immutable source head. Exact-head reuse is tested separately.
+        if root == work:
+            root = fixture / ("source-" + label)
+            run("git", "worktree", "add", "--detach", root, "feature")
+            (root / "input.txt").write_text("candidate " + label + "\n", encoding="utf-8")
+            run("git", "commit", "-am", "Candidate " + label, cwd=root)
+        sources[label] = root
         log = (fixture / f"{label}.out").open("w")
         env = {**isolated, LEASE_ENV: "enclosing-acceptance"} if nested else isolated
         args = [sys.executable, str(root / ".github/scripts/local_acceptance.py"), "check",
@@ -197,15 +207,25 @@ def verify_host_lease(directory, source, command, environment):
         queued = start("H")
         wait_until(lambda: waiting(queued), "a check to wait behind the next holder")
         # Fully verified exact-head progress needs no native slot to re-sign.
-        restored = start("Reused", resume=fixture / "A")
+        restored = start("Reused", root=sources["A"])
         finished(restored, timeout=15)
         restored_timing = json.loads((fixture / "Reused/attempt.json").read_text())
         assert restored_timing["host_lease_wait_seconds"] == 0, restored_timing
         assert not waiting(restored), restored.log.read_text()
         assert events() == ["start:G"], events()
+        # A later commit retains the original signed native result when only
+        # metadata changed, even though that original output was external.
+        (sources["A"] / "notes.txt").write_text("later metadata\n", encoding="utf-8")
+        run("git", "add", "notes.txt", cwd=sources["A"])
+        run("git", "commit", "-m", "Metadata after external acceptance", cwd=sources["A"])
+        carried = start("Carried", root=sources["A"])
+        finished(carried, timeout=15)
+        carried_receipt = json.loads((fixture / "Carried/receipt.json").read_text(encoding="utf-8"))
+        assert carried_receipt["carried"][0]["profiles"] == ["native-workspace"], carried_receipt
+        assert events() == ["start:G"], events()
         # A signed preflight checkpoint alone cannot skip the pending native step.
         (fixture / "release-Partial").touch()
-        partial = start("Partial", resume=fixture / "E")
+        partial = start("Partial", root=sources["E"], resume=fixture / "E")
         wait_until(lambda: waiting(partial), "partial signed progress to retain native serialization")
         assert not (fixture / "Partial/envelope.json").exists()
         assert events() == ["start:G"], events()
@@ -221,7 +241,7 @@ def verify_host_lease(directory, source, command, environment):
               "release on abrupt holder or waiter exit; metadata-only completion and mixed-plan preflight success/failure and verified full/partial resume scheduling")
     finally:
         # A negative control must release its own private waits as well.
-        for label in ["A", "B", "X", "Y", "C", "D", "E", "F", "G", "H", "Metadata", "Bad", "Reused", "Partial"]:
+        for label in ["A", "B", "X", "Y", "C", "D", "E", "F", "G", "H", "Metadata", "Bad", "Reused", "Carried", "Partial"]:
             (fixture / f"release-{label}").touch()
         for process in processes:
             if process.poll() is None:
@@ -230,7 +250,79 @@ def verify_host_lease(directory, source, command, environment):
                 except subprocess.TimeoutExpired:
                     process.terminate()
                     process.wait(timeout=10)
+    verify_external_index(fixture, sources["A"], isolated)
     verify_service_order(fixture, run, isolated)
+
+
+def verify_external_index(fixture, source, environment):
+    """Adopt immutable old evidence and refuse corrupt copies through real CLI calls."""
+    home = fixture / "index-home"
+    home.mkdir()
+    env = {**environment, "HOME": str(home), "USERPROFILE": str(home)}
+    original = fixture / "A"
+    receipt = json.loads((original / "receipt.json").read_text(encoding="utf-8"))
+    legacy = fixture / "legacy-external-已签名"
+    shutil.copytree(original, legacy)
+    original_bytes = {path.relative_to(legacy).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in legacy.rglob("*") if path.is_file()}
+
+    def invoke(label, *arguments, success=True, settings=env):
+        result = subprocess.run([sys.executable, str(source / ".github/scripts/local_acceptance.py"),
+                                 *map(str, arguments)], cwd=source, env=settings, capture_output=True, timeout=30)
+        data = result.stdout + result.stderr
+        (fixture / (label + ".log")).write_bytes(data)
+        assert (result.returncode == 0) == success, data.decode(errors="replace")
+        return data.decode("utf-8", errors="replace")
+
+    invoke("index-legacy", "index-output", "--directory", legacy, "--policy-ref", "main")
+    parent = home / ".nexus/local-acceptance/results" / receipt["head"]
+    references = list(parent.glob("external-*.json"))
+    assert len(references) == 1
+    assert Path(json.loads(references[0].read_bytes())["directory"]) == legacy.resolve()
+    assert {path.relative_to(legacy).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in legacy.rglob("*") if path.is_file()} == original_bytes
+    # Bad locators cannot turn another output into this source's progress.
+    (parent / "external-malformed.json").write_text("[]", encoding="utf-8")
+    (parent / "external-wrong-head.json").write_text(json.dumps({
+        "version": 1, "head": "0" * 40, "directory": str(legacy),
+    }), encoding="utf-8")
+    events = fixture / "events.log"
+    before = events.read_bytes()
+    (fixture / "release-RecoveredExternal").touch()
+    recovered = fixture / "RecoveredExternal"
+    invoke("recover-indexed-ancestor", "check", "--base", "main", "--policy-ref", "main", "--output", recovered)
+    carried = json.loads((recovered / "receipt.json").read_bytes())
+    assert carried["carried"][0]["head"] == receipt["head"]
+    assert carried["carried"][0]["profiles"] == ["native-workspace"]
+    assert events.read_bytes() == before
+    indexed_before = set(parent.glob("external-*.json"))
+    for label in ["bad-log", "bad-signature"]:
+        damaged = fixture / label
+        shutil.copytree(original, damaged)
+        if label == "bad-log":
+            (damaged / "native-workspace/000.log").write_text("tampered\n", encoding="utf-8")
+        else:
+            envelope = json.loads((damaged / "envelope.json").read_bytes())
+            envelope["signature"] = "YmFkIHNpZ25hdHVyZQ=="
+            (damaged / "envelope.json").write_text(json.dumps(envelope), encoding="utf-8")
+        text = invoke(label, "index-output", "--directory", damaged, "--policy-ref", "main", success=False)
+        assert ("Indexed log missing or changed" if label == "bad-log" else "Invalid SSH acceptance signature") in text, text
+        assert set(parent.glob("external-*.json")) == indexed_before
+    # The index is a cache: a real I/O failure cannot invalidate signed results.
+    blocked_home = fixture / "index-unavailable-home"
+    blocked = blocked_home / ".nexus/local-acceptance/results" / carried["head"]
+    blocked.parent.mkdir(parents=True)
+    blocked.write_text("controlled index collision\n", encoding="utf-8")
+    blocked_env = {**environment, "HOME": str(blocked_home), "USERPROFILE": str(blocked_home)}
+    retained = fixture / "IndexUnavailable"
+    text = invoke("index-io-failure-preserves-proof", "check", "--base", "main", "--policy-ref", "main",
+                  "--resume-from", recovered, "--output", retained, settings=blocked_env)
+    assert "LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE" in text, text
+    assert (retained / "envelope.json").is_file()
+    assert events.read_bytes() == before
+    invoke("explicit-index-io-failure-refused", "index-output", "--directory", retained,
+           "--policy-ref", "main", settings=blocked_env, success=False)
+    print("PASS: original external proof adoption, Unicode paths, wrong locators and corrupt log/signature refusal; index I/O failure retains verified progress")
 
 
 def verify_service_order(fixture, run, environment):

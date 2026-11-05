@@ -18,7 +18,7 @@
 use std::error::Error;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runtime::cron_registry::{CronCreateParams, CronEntry, CronKind, CronRegistry};
+use runtime::cron_registry::{CronCreateParams, CronEntry, CronKind, CronRegistry, CronTarget};
 use runtime::cron_schedule;
 use runtime::PermissionMode;
 
@@ -37,9 +37,57 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Open the persistent registry at `<config_home>/crons.json`.
+/// The shared store, through the one cron service every surface uses.
 pub(crate) fn open_registry() -> CronRegistry {
-    CronRegistry::open(runtime::default_config_home().join("crons.json"))
+    runtime::cron_service::registry()
+}
+
+/// `--prompt`, exactly one of `--schedule` / `--every` / `--at`, and the
+/// optional `--tz --name --description --cwd --agent --delivery`. Shared by
+/// `scode cron add` and `/cron add`; `command` names the surface in errors.
+fn params_from_flags(opts: &FlagMap, command: &str) -> Result<CronCreateParams, String> {
+    let prompt = opts
+        .get("prompt")
+        .ok_or_else(|| format!("`{command}` requires --prompt <text>"))?
+        .to_owned();
+    let (kind, schedule) = match (opts.get("schedule"), opts.get("every"), opts.get("at")) {
+        (Some(s), None, None) => (CronKind::Cron, s.to_owned()),
+        (None, Some(s), None) => (CronKind::Every, s.to_owned()),
+        (None, None, Some(s)) => (CronKind::At, s.to_owned()),
+        (None, None, None) => {
+            return Err(format!(
+                "`{command}` requires one of --schedule <cron> | --every <secs> | --at <unix_ts>"
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "`{command}` accepts exactly one of --schedule | --every | --at"
+            ))
+        }
+    };
+    let delivery = match opts.get("delivery") {
+        None => None,
+        Some("queue") => Some(runtime::turn_input::InputDelivery::Queue),
+        Some("steer") => Some(runtime::turn_input::InputDelivery::Steer),
+        Some(other) => return Err(format!("--delivery must be queue or steer, not {other:?}")),
+    };
+    let target = opts
+        .get("agent")
+        .map_or(CronTarget::NewSession, |name| CronTarget::Agent {
+            name: name.to_owned(),
+        });
+    Ok(CronCreateParams {
+        schedule,
+        kind,
+        prompt,
+        description: opts.get("description").map(str::to_owned),
+        name: opts.get("name").map(str::to_owned),
+        tz: opts.get("tz").map(str::to_owned),
+        cwd: opts.get("cwd").map(str::to_owned),
+        target,
+        delivery,
+        ..Default::default()
+    })
 }
 
 pub(crate) fn run(args: &[String], output_format: CliOutputFormat) -> CronResult {
@@ -49,10 +97,10 @@ pub(crate) fn run(args: &[String], output_format: CliOutputFormat) -> CronResult
     let reg = open_registry();
     match sub {
         "list" | "ls" => list(&reg, output_format),
-        "add" | "create" => add(&reg, rest, output_format),
+        "add" | "create" => add(rest, output_format),
         "remove" | "rm" | "delete" => remove(&reg, rest, output_format),
-        "enable" => set_enabled(&reg, rest, true, output_format),
-        "disable" => set_enabled(&reg, rest, false, output_format),
+        "enable" => set_enabled(rest, true, output_format),
+        "disable" => set_enabled(rest, false, output_format),
         "run" => run_now(&reg, rest),
         "tick" => {
             tick(&reg);
@@ -78,26 +126,16 @@ pub(crate) fn run_slash(args: Option<&str>) -> Result<String, String> {
     let reg = open_registry();
     match sub {
         "" | "list" | "ls" => Ok(list_text(&reg)),
-        "add" | "create" => add_text(&reg, rest),
+        "add" | "create" => add_text(rest),
         "remove" | "rm" | "delete" => {
             let id = slash_id(rest)?;
             reg.delete(id)?;
             Ok(format!("removed cron {id}"))
         }
-        "enable" => {
+        "enable" | "disable" => {
             let id = slash_id(rest)?;
-            reg.set_enabled(id, true)?;
-            if let Some(e) = reg.get(id) {
-                if let Some(n) = cron_schedule::first_run_at(&e, now_secs()) {
-                    let _ = reg.set_next_run(id, Some(n));
-                }
-            }
-            Ok(format!("enabled cron {id}"))
-        }
-        "disable" => {
-            let id = slash_id(rest)?;
-            reg.set_enabled(id, false)?;
-            Ok(format!("disabled cron {id}"))
+            runtime::cron_service::set_enabled(id, sub == "enable")?;
+            Ok(format!("{sub}d cron {id}"))
         }
         "run" | "tick" | "daemon" => Ok(format!(
             "run `scode cron {sub}` from the shell — firing from inside a REPL session isn't supported"
@@ -121,39 +159,9 @@ fn list_text(reg: &CronRegistry) -> String {
         .join("\n")
 }
 
-fn add_text(reg: &CronRegistry, rest: &[String]) -> Result<String, String> {
-    let opts = FlagMap::parse(rest);
-    let prompt = opts
-        .get("prompt")
-        .ok_or("`/cron add` requires --prompt <text>")?
-        .to_owned();
-    let (kind, schedule) = match (opts.get("schedule"), opts.get("every"), opts.get("at")) {
-        (Some(s), None, None) => (CronKind::Cron, s.to_owned()),
-        (None, Some(s), None) => (CronKind::Every, s.to_owned()),
-        (None, None, Some(s)) => (CronKind::At, s.to_owned()),
-        (None, None, None) => {
-            return Err("`/cron add` requires one of --schedule | --every | --at".to_owned())
-        }
-        _ => {
-            return Err("`/cron add` accepts exactly one of --schedule | --every | --at".to_owned())
-        }
-    };
-    let tz = opts.get("tz").map(str::to_owned);
-    cron_schedule::validate(kind, &schedule, tz.as_deref())?;
-    let entry = reg.create_full(CronCreateParams {
-        schedule,
-        kind,
-        prompt,
-        description: opts.get("description").map(str::to_owned),
-        name: opts.get("name").map(str::to_owned),
-        tz,
-        cwd: opts.get("cwd").map(str::to_owned),
-        ..Default::default()
-    });
-    if let Some(n) = cron_schedule::first_run_at(&entry, now_secs()) {
-        let _ = reg.set_next_run(&entry.cron_id, Some(n));
-    }
-    let entry = reg.get(&entry.cron_id).unwrap_or(entry);
+fn add_text(rest: &[String]) -> Result<String, String> {
+    let entry =
+        runtime::cron_service::create(params_from_flags(&FlagMap::parse(rest), "/cron add")?)?;
     Ok(format!("created: {}", format_entry_line(&entry)))
 }
 
@@ -222,45 +230,9 @@ fn list(reg: &CronRegistry, output_format: CliOutputFormat) -> CronResult {
     Ok(())
 }
 
-fn add(reg: &CronRegistry, rest: &[String], output_format: CliOutputFormat) -> CronResult {
-    let opts = FlagMap::parse(rest);
-    let prompt = opts
-        .get("prompt")
-        .ok_or("`cron add` requires --prompt <text>")?
-        .to_owned();
-
-    // Exactly one of --schedule (cron) / --every <secs> / --at <ts>.
-    let (kind, schedule) = match (opts.get("schedule"), opts.get("every"), opts.get("at")) {
-        (Some(s), None, None) => (CronKind::Cron, s.to_owned()),
-        (None, Some(s), None) => (CronKind::Every, s.to_owned()),
-        (None, None, Some(s)) => (CronKind::At, s.to_owned()),
-        (None, None, None) => {
-            return Err(
-                "`cron add` requires one of --schedule <cron> | --every <secs> | --at <unix_ts>"
-                    .into(),
-            )
-        }
-        _ => return Err("`cron add` accepts exactly one of --schedule | --every | --at".into()),
-    };
-    let tz = opts.get("tz").map(str::to_owned);
-    cron_schedule::validate(kind, &schedule, tz.as_deref())?;
-
-    let entry = reg.create_full(CronCreateParams {
-        schedule,
-        kind,
-        prompt,
-        description: opts.get("description").map(str::to_owned),
-        name: opts.get("name").map(str::to_owned),
-        tz,
-        cwd: opts.get("cwd").map(str::to_owned),
-        ..Default::default()
-    });
-    // Seed the first next-run so `list` shows it immediately and the
-    // scheduler considers it without a create/tick race.
-    if let Some(next) = cron_schedule::first_run_at(&entry, now_secs()) {
-        let _ = reg.set_next_run(&entry.cron_id, Some(next));
-    }
-    let entry = reg.get(&entry.cron_id).unwrap_or(entry);
+fn add(rest: &[String], output_format: CliOutputFormat) -> CronResult {
+    let entry =
+        runtime::cron_service::create(params_from_flags(&FlagMap::parse(rest), "cron add")?)?;
     emit_entry("created", &entry, output_format)
 }
 
@@ -270,23 +242,9 @@ fn remove(reg: &CronRegistry, rest: &[String], output_format: CliOutputFormat) -
     emit_entry("removed", &removed, output_format)
 }
 
-fn set_enabled(
-    reg: &CronRegistry,
-    rest: &[String],
-    enabled: bool,
-    output_format: CliOutputFormat,
-) -> CronResult {
+fn set_enabled(rest: &[String], enabled: bool, output_format: CliOutputFormat) -> CronResult {
     let id = require_id(rest, if enabled { "enable" } else { "disable" })?;
-    reg.set_enabled(id, enabled)?;
-    // Re-seed next-run when (re-)enabling so it fires on schedule again.
-    if enabled {
-        if let Some(entry) = reg.get(id) {
-            if let Some(next) = cron_schedule::first_run_at(&entry, now_secs()) {
-                let _ = reg.set_next_run(id, Some(next));
-            }
-        }
-    }
-    let entry = reg.get(id).ok_or_else(|| format!("cron not found: {id}"))?;
+    let entry = runtime::cron_service::set_enabled(id, enabled)?;
     emit_entry(
         if enabled { "enabled" } else { "disabled" },
         &entry,

@@ -15,6 +15,10 @@ import threading
 import time
 
 
+# The actual installer before native preparation support, not a simulated reply.
+LEGACY_INSTALLER_BLOB = "20829f60e316bfc2fe07e3d75959be304f57e0cf"
+
+
 # Redirect only the download boundary; run the unchanged installer entry point
 # in a child process with actual HTTP, ZIP extraction and filesystem writes.
 INSTALL = """import runpy, sys, urllib.request
@@ -193,7 +197,10 @@ def main():
                     # the new option. Even existing sidecars must not let its
                     # missing preparation observation qualify a new invocation.
                     legacy = root / "legacy-installer.py"
-                    legacy.write_text("print('Verified terminal host: legacy')\n", encoding="utf-8")
+                    legacy.write_bytes(subprocess.check_output(
+                        ["git", "show", LEGACY_INSTALLER_BLOB],
+                        cwd=Path(__file__).resolve().parents[2],
+                    ))
                     ignored = subprocess.run(
                         [sys.executable, str(legacy), str(destination), "--native-target", str(native_target)],
                         capture_output=True, text=True, timeout=10,

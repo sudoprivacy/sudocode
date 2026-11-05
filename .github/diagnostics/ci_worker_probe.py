@@ -1,4 +1,4 @@
-"""Private paired CI trial; no signing, acceptance status or policy change."""
+"""Private full native worker validation; no signing, acceptance status or policy change."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -61,7 +61,7 @@ def main():
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
               "baseline_run": None,
               "baseline_job": None,
-              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Current protected main after198 Rust files changed since the prior field. No current same-source four-worker baseline; this is full native suite validation at eight workers, not a speedup measurement. No acceptance signature or paid API call."}
+              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Candidate includes the complete background-row stability fix. The preceding Linux full field passed 1,166 cases; required Linux CI covers the changed module. This follow-up completes macOS/Windows full fields after their earlier failure/cancellation. No current same-source four-worker baseline; this validates eight-worker compatibility without claiming a speedup. No acceptance signature or paid API call."}
     started = time.monotonic()
 
     def invoke(command, log):

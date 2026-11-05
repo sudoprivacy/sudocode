@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: a3168b76c7a3b533179e9e1a4a272e67ac7c404a
+          ref: a12483cb37d48eacfe872c4ec5f490df35e05def
           path: candidate
           fetch-depth: 0
           persist-credentials: false

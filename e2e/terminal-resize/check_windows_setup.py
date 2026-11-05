@@ -163,6 +163,33 @@ def main():
                             host.wait(timeout=10)
                             host.stderr.close()
                     print("Installer in-use concurrent cache acceptance passed", flush=True)
+                    # Ordinary Rust drivers load ConPTY beside their executable.
+                    # Exercise repair and in-use provisioning against the same
+                    # real verified distribution, retaining mapped file identity.
+                    native_target = root / "native-target"
+                    native_command = [sys.executable, str(installer), str(destination),
+                                      "--native-target", str(native_target), "--native-arch", "x64"]
+                    native = subprocess.run(native_command, capture_output=True, text=True, timeout=120)
+                    assert native.returncode == 0, native.stdout + native.stderr
+                    print(native.stdout, end="", flush=True)
+                    identities = [json.loads(line.removeprefix("NATIVE_CONPTY_HOST="))
+                                  for line in native.stdout.splitlines() if line.startswith("NATIVE_CONPTY_HOST=")]
+                    assert len(identities) == 1 and identities[0]["archive_sha256"] == settings["SHA256"]
+                    files = [Path(entry["path"]) for entry in identities[0]["files"]]
+                    assert {file.name for file in files} == {"conpty.dll", "OpenConsole.exe"}
+                    assert all(file.parent == native_target / "debug/deps" for file in files)
+                    original = {file: (hashlib.sha256(file.read_bytes()).hexdigest(), file.stat().st_mtime_ns)
+                                for file in files}
+                    with files[0].open("rb") as data, mmap.mmap(data.fileno(), 0, access=mmap.ACCESS_READ):
+                        run_concurrent_installers(native_command)
+                    assert original == {file: (hashlib.sha256(file.read_bytes()).hexdigest(), file.stat().st_mtime_ns)
+                                        for file in files}
+                    files[0].write_bytes(b"corrupt native host")
+                    repaired = subprocess.run(native_command, capture_output=True, text=True, timeout=120)
+                    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+                    assert all(hashlib.sha256(file.read_bytes()).hexdigest() == original[file][0] for file in files)
+                    assert counts[label] == 2, "Native host provisioning must reuse the verified archive"
+                    print("Native ConPTY mapped identity and corrupted-sidecar recovery passed", flush=True)
                     # Corrupted cache entries also fail closed, without being
                     # silently accepted or initiating an unobserved download.
                     (destination / "host.zip").write_bytes(b"corrupt")

@@ -40,6 +40,23 @@ workspace. `SCODE_CONPTY_BACKEND=system` runs the strict system-host diagnostic;
 it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
 
+The author hook and complementary Windows jobs also install that distribution's
+`conpty.dll` and `OpenConsole.exe` beside ordinary Rust test drivers. `portable-pty`
+loads those compatibility exports from the driver's directory. Both native PTY
+paths therefore share this installer's commit and archive checksums. Each native
+profile records `NATIVE_CONPTY_HOST`, including member hashes, architecture and
+the actual driver directory. x64 and ARM64 sidecars have separate verified
+archives at the same distribution commit; the Electron observer retains its
+existing x64 ABI. ARM64 archive/header verification is independent of native
+ARM64 journey execution.
+
+The OS-bundled ConPTY remains available through the explicit `system` diagnostic.
+Its legacy combining-character widths can disagree with the frontend, including
+an input-row offset after wrapped text. [Microsoft documents the legacy width
+behavior](https://github.com/microsoft/terminal/wiki/Console%3A-Potential-Breaking-Changes).
+Native source qualification uses the fixed distribution. Interactive grapheme
+layout requires a current terminal host such as Windows Terminal or VS Code.
+
 The shared-budget workflow folds Todo/status/footer details around a long draft,
 restores them on growth, hides an undersized editor without losing its middle
 cursor, rejects invisible edits, and submits every retained draft byte through

@@ -191,6 +191,12 @@ require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
+the visual and performance journeys. The shared installer provisions native
+sidecars beside the dev-profile test drivers and reports their exact hashes;
+the explicit system-host diagnostic retains its legacy compatibility findings.
+See [the terminal host contract](e2e/terminal-resize/README.md) for scope and
+architecture details.
 Pre-merge co-host acceptance uses the workspace dev profile with the deployed
 `daemon,driver-ai,egress-gate-presidio` features and runs the resulting binary to
 verify its exact source revision stamp. This avoids a separate optimized build

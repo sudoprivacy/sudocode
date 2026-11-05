@@ -337,7 +337,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
 def changed_paths(base, head):
     # --no-renames includes both sides of a rename so moving a file out of a
     # guarded directory cannot make its checks disappear.
-    return git("diff", "--name-only", "--no-renames", "-z", base, head).stdout.decode().split("\0")[:-1]
+    return git("diff", "--name-only", "--no-renames", "-z", base, head, "--").stdout.decode().split("\0")[:-1]
 
 
 def manifest_dependencies(manifest, workspace, kind):

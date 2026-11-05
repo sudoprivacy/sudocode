@@ -256,7 +256,8 @@ pub fn record(name: &str) {
     explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
     environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
     try:
-        dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        with patch.dict(os.environ, {"CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]}):
+            dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
         legacy = profiles.workspace_nextest_options(output, False, False)
         assert legacy[legacy.index("--test-threads") + 1] == "4"
         os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
@@ -377,7 +378,7 @@ pub fn record(name: &str) {
             # Exercise the public planner in a deep output directory without
             # another Cargo build or checkout. All inputs remain Git objects.
             deep = output / "deep-plan"
-            while len(str(deep.resolve())) < 205:
+            while len(str(deep.resolve())) < 221:
                 deep /= "committed-source"
             command("git", "clone", "--no-checkout", "--shared",
                     "--separate-git-dir", str(output / "deep-plan-git"), str(root), str(deep), cwd=output)

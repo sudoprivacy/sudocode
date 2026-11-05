@@ -1083,16 +1083,23 @@ def verify(head, base, policy_ref, note_ref=NOTE_REF, signers_ref=None):
     raise RuntimeError("No current valid local acceptance: " + ("; ".join(errors) or "signed note missing"))
 
 
+def remote_note_tip(remote):
+    existing = value("ls-remote", remote, NOTE_REF).split()
+    return existing[0] if existing else ""
+
+
 def publish(head, envelope, remote):
     # Use a private temporary notes ref. Fetch+lease retries preserve evidence
     # another author publishes concurrently; never overwrite their notes tree.
     temporary = f"refs/notes/scode-publish-{os.getpid()}"
     try:
         for _attempt in range(5):
-            existing = value("ls-remote", remote, NOTE_REF).split()
-            previous = existing[0] if existing else ""
+            previous = remote_note_tip(remote)
             if previous:
                 git("fetch", "--no-tags", remote, f"+{NOTE_REF}:{temporary}")
+                # The fetch may observe a newer tip than the preceding query.
+                # Lease exactly the notes tree this attempt actually extends.
+                previous = value("rev-parse", temporary)
             else:
                 git("update-ref", "-d", temporary)
             notes = read_note(head, temporary)
@@ -1102,7 +1109,10 @@ def publish(head, envelope, remote):
                          f"{temporary}:{NOTE_REF}", check=False)
             if result.returncode == 0:
                 return
-            if "stale info" not in result.stderr.decode(errors="replace"):
+            # Both client-side stale leases and receive-pack transaction races
+            # mean the remote advanced. Compare state instead of Git's wording;
+            # unrelated failures with an unchanged ref remain immediate errors.
+            if remote_note_tip(remote) == previous:
                 raise RuntimeError(result.stderr.decode(errors="replace"))
         raise RuntimeError("Concurrent acceptance publishers: retry the push")
     finally:

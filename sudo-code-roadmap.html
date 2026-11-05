@@ -834,6 +834,17 @@ explicit resume recovery. Real Git, SSH and independent processes cover automati
 same-head/cross-head reuse, old-evidence adoption, Unicode paths, corrupt
 signatures/logs, invalid references and index I/O failures. These controls add
 infrastructure coverage; product cases and acceptance budgets remain required.</p>
+<p><strong>Count the entire delivery clock (2026-11-06).</strong>
+Through November 5, 20:20 UTC, 26 merged Rust source/build PRs average 51.452
+minutes from final-candidate CI to merge, versus the historical 185.261 minutes
+(27.8%). From the first observed PR CI across all heads, including later repairs,
+validation, idle and queues, the mean is 199.509 versus 1,036.282 minutes (19.3%).
+Initial author-local time remains outside those hosted clocks. Five strictly
+associated local histories add a mean 94.513 initial minutes and average 236.969
+minutes from observed local start to merge; this subset cannot replace the whole
+source cohort. Unknown local histories and unfinished work remain explicit.
+The 10% delivery goal is not met. These rollout observations establish no causal
+speedup for one change; case and coverage counts retain their declared scopes.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

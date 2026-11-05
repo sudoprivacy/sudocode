@@ -379,7 +379,8 @@ pub fn record(name: &str) {
             deep = output / "deep-plan"
             while len(str(deep.resolve())) < 205:
                 deep /= "committed-source"
-            command("git", "clone", "--no-checkout", "--shared", str(root), str(deep), cwd=output)
+            command("git", "clone", "--no-checkout", "--shared",
+                    "--separate-git-dir", str(output / "deep-plan-git"), str(root), str(deep), cwd=output)
             deep_text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"),
                                 "plan", "--base", base, "--policy-ref", base,
                                 "--host", "windows", "--architecture", "AMD64", cwd=deep).read_text(encoding="utf-8")

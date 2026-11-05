@@ -260,9 +260,18 @@ fn close(mut session: PtySession) {
 }
 
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
+    // Wait for every corner the assertions read: a terminal can settle on a
+    // frame whose right edge is not drawn yet (seen on Windows ConPTY).
     common::expect_screen_rows_settled(
         session,
-        |view| view.contains("╭─ Output tail") && view.contains('╰'),
+        |view| {
+            let rows = view.lines().collect::<Vec<_>>();
+            rows.iter()
+                .any(|row| row.contains("╭─ Output tail") && row.contains('╮'))
+                && rows
+                    .iter()
+                    .any(|row| row.contains('╰') && row.contains('╯'))
+        },
         common::DEFAULT_TIMEOUT,
         "output is inside the detail frame",
     );
@@ -280,13 +289,19 @@ fn assert_detail_frame(session: &PtySession, border_color: &str) {
             .find(|(_, row)| row.contains('╰'))
             .unwrap()
             .0;
-        let column = |row, glyph: &str| {
+        let column = |row: usize, glyph: &str| {
             (0..raw.size().1)
                 .find(|col| {
                     raw.cell(u16::try_from(row).unwrap(), *col)
                         .is_some_and(|cell| cell.contents() == glyph)
                 })
-                .unwrap()
+                .unwrap_or_else(|| {
+                    let cells = (0..raw.size().1)
+                        .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
+                        .map(|cell| cell.contents().to_string())
+                        .collect::<Vec<_>>();
+                    panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
+                })
         };
         let left = column(top, "╭");
         let right = column(top, "╮");

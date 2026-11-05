@@ -495,9 +495,10 @@ setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
 Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces default to eight test workers on hosts with at least eight
-logical CPUs; smaller/unknown hosts, older ungrouped sources, isolated targets
-and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
+grouped workspaces retain eight workers on hosts with at least eight logical
+CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
+resume-test source fingerprint; old/unknown source retains four. Smaller/unknown hosts,
+older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
 pool explicitly. Compiler jobs stay at one locally, with only compiler workers
 at BelowNormal priority; test processes stay Normal. A matched Windows run on
 20 logical CPUs passed the same 1,089 integration cases and 69 ignored markers:
@@ -507,6 +508,27 @@ and does not establish whole-PR or cross-hardware savings. A test that previousl
 left its ACP child holding output pipes now awaits its existing shutdown helper.
 Native guards run actual case processes, observe overlap and enforce an explicit
 four-worker limit; they add no product journey coverage.
+The four-core hosted increase checks the canonical resume-test source fingerprint,
+normalizing CRLF. Older branches can retain four without merging main. A later
+fixture edit conservatively restores four until separately qualified; required
+CLI output reports this source decision. Existing eight-core behavior is retained.
+One exact protected recipe pair retains earlier signed native workspace results
+with their recorded commands and worker counts. Explicit lower counts remain
+allowed; local thresholds, cases, assertions and deadlines are unchanged.
+Earlier execution is never relabelled as an eight-worker field. Changed
+source, signatures, logs, forged recipe maps and later criteria still refuse
+reuse. Pending unmerged origin policies retain strict refusal and print the
+origin/current policy and reviewed-merge recovery on the required interface.
+A single ordered four-then-eight comparison reused identical captured binaries
+and complete case inventories on each hosted VM. Windows (four CPUs, 1,104 cases)
+took 600.998/438.974 seconds; macOS (five CPUs, 1,157 cases) took
+868.141/459.716 seconds. Ignored cases, assertions and deadlines were unchanged.
+These test-stage observations exclude setup/build/queue time and do not establish
+population or whole-PR savings. Separate full eight-worker fields also passed on
+Linux, Windows and macOS. The cold-resume test uses the existing acknowledged-input
+helper before recognizing a new turn; its actual-provider-request and persisted
+result byte assertions remain required. Native controls execute real cases for
+hosted/local CPU thresholds, unknown CPU counts and explicit lower concurrency.
 The runner lives in a private acceptance cache; it does not
 replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo

@@ -260,20 +260,25 @@ fn close(mut session: PtySession) {
 }
 
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
-    // Wait for every corner the assertions read: a terminal can settle on a
-    // frame whose right edge is not drawn yet (seen on Windows ConPTY).
-    common::expect_screen_rows_settled(
+    // Settle every frame corner, row and position while the task's runtime
+    // and status animation continue outside this output frame.
+    expect_stable_region(
         session,
+        common::DEFAULT_TIMEOUT,
+        "output frame rows and corners are stable",
         |view| {
             let rows = view.lines().collect::<Vec<_>>();
-            rows.iter()
-                .any(|row| row.contains("╭─ Output tail") && row.contains('╮'))
-                && rows
-                    .iter()
-                    .any(|row| row.contains('╰') && row.contains('╯'))
+            let top = rows
+                .iter()
+                .position(|row| row.contains("╭─ Output tail") && row.contains('╮'))?;
+            let bottom = rows
+                .iter()
+                .enumerate()
+                .skip(top + 1)
+                .find(|(_, row)| row.contains('╰') && row.contains('╯'))?
+                .0;
+            Some(format!("{top}:{}", rows[top..=bottom].join("\n")))
         },
-        common::DEFAULT_TIMEOUT,
-        "output is inside the detail frame",
     );
     session.render(|screen| {
         let raw = screen.raw();

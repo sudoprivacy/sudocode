@@ -672,7 +672,7 @@ def native_guard_files():
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
         "e2e/local-acceptance/publication_acceptance.py": "209ca63435e8e42d2c15d90f0f3c4f93fa17f0e74ca615e7b0eecf9746f05120",
         "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
-        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
         "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",

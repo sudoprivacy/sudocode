@@ -32,6 +32,26 @@ export interface ScodeQuestionResponse {
   answers: Array<{ id: string; value: string; label?: string | null }>;
 }
 
+/** A peer message delivered to a client that owns peer input. */
+export interface ScodePeerMessage {
+  sessionId: string;
+  /** The `<mailbox-message>` wrapper a session model would have read. */
+  text: string;
+  body: string;
+  /** `verified` is scode's fact: the reading mailbox authenticated the sender. */
+  sudocode: { a2a: { from: string; kind?: string; summary?: string; verified?: boolean } };
+}
+
+function parsePeerMessage(value: unknown): ScodePeerMessage {
+  const message = value as Partial<ScodePeerMessage> | null;
+  const from = message?.sudocode?.a2a?.from;
+  if (!message || typeof message.sessionId !== 'string' || typeof message.text !== 'string'
+      || typeof message.body !== 'string' || typeof from !== 'string' || !from) {
+    throw new Error('Invalid _sudocode/session/peer_message notification');
+  }
+  return message as ScodePeerMessage;
+}
+
 export function validateScodePermissionResponse(request: acp.RequestPermissionRequest, response: acp.RequestPermissionResponse): void {
   const outcome = response?.outcome;
   if (!outcome || !['cancelled','selected'].includes(outcome.outcome)) {
@@ -76,6 +96,10 @@ export interface ScodeAcpConfig {
   onError?: (error: unknown) => void;
   onPermission?: (request: acp.RequestPermissionRequest, signal: AbortSignal) => Promise<acp.RequestPermissionResponse>;
   onQuestion?: (request: ScodeQuestionRequest, signal: AbortSignal) => Promise<ScodeQuestionResponse>;
+  /** This client is the agent its peers address: their messages arrive here
+   * and never start a turn of the scode session. Requires a scode that echoes
+   * `peerInput`; an older one would answer every peer itself, so it is refused. */
+  onPeerMessage?: (message: ScodePeerMessage) => void;
 }
 
 export interface ScodeConnection {
@@ -249,6 +273,11 @@ export async function connectScode(
     .onNotification(acp.methods.client.session.update, ctx => {
       try { onNotification(ctx.params); } catch (error) { report(error); }
     });
+  if (config.onPeerMessage) {
+    app.onNotification('_sudocode/session/peer_message', parsePeerMessage, ctx => {
+      try { config.onPeerMessage!(ctx.params); } catch (error) { report(error); }
+    });
+  }
   if (config.onQuestion) {
     app.onRequest('_scode/ask_user_question', parseQuestion, ctx =>
       abortable(signal => config.onQuestion!(ctx.params, signal), [ctx.signal,closing.signal]).then(response => {
@@ -301,8 +330,13 @@ export async function connectScode(
   try {
     const initialized = await timeout(request<acp.InitializeResponse>(acp.methods.agent.initialize, {
       protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
+        ...(config.onPeerMessage ? { _meta: { sudocode: { peerInput: { version: 1 } } } } : {}) },
     }), startupMs, 'ACP initialize');
+    const peerInput = (initialized._meta?.sudocode as { peerInput?: { version?: number } } | undefined)?.peerInput;
+    if (config.onPeerMessage && !(typeof peerInput?.version === 'number' && peerInput.version >= 1)) {
+      throw new Error('This scode does not support client-owned peer input; refusing a connection whose peers would be answered twice');
+    }
     if (config.acpSessionId) {
       if (!initialized.agentCapabilities?.loadSession) {
         throw new Error('Agent cannot load the supplied native session; refusing fresh-session fallback');

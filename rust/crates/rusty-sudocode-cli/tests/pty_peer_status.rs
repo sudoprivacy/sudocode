@@ -21,7 +21,7 @@ const PEER: &str = "status-peer";
 fn screen_shows_all(sess: &mut pty_expect::PtySession, needles: &[&str], budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         if needles.iter().all(|needle| screen.contains(needle)) {
             return true;
         }
@@ -95,7 +95,7 @@ fn status_reports_the_disk_namespace_and_that_this_session_receives() {
     assert!(
         reported,
         "/status never reported {expected:?}\nscreen:\n{}",
-        session.render(|s| s.contents())
+        session.render(common::screen_contents)
     );
     let register: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&reader_path).unwrap()).unwrap();

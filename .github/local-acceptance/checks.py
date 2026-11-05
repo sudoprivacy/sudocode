@@ -1,25 +1,149 @@
 """Real acceptance commands shared by the author's hook and opposite-OS CI."""
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 
 
+def nextest_binary(output):
+    """Use a pinned, checksum-verified tool without replacing a user's installation."""
+    version = '0.9.150'
+    architecture = platform.machine().lower()
+    system = platform.system()
+    if system == 'Darwin' and architecture in {'arm64', 'aarch64', 'x86_64', 'amd64'}:
+        triplet = 'universal-apple-darwin'
+    else:
+        architecture = {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(architecture, architecture)
+        suffix = {'Windows': 'pc-windows-msvc', 'Linux': 'unknown-linux-gnu'}.get(system)
+        if suffix is None:
+            raise RuntimeError(f'No verified nextest binary for {system}/{architecture}')
+        triplet = f'{architecture}-{suffix}'
+    hashes = {
+        'x86_64-pc-windows-msvc': '6fd8f9ba48c946a79a5bcdd35bf4f922447b149f7ca6c3ff7f39e12f32ef78db',
+        'aarch64-pc-windows-msvc': '812da1f75a1a18911d8aeb74e2b75caa95e652bfd210a46527de7d5f0776f22e',
+        'x86_64-unknown-linux-gnu': 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f',
+        'aarch64-unknown-linux-gnu': '9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8',
+        'universal-apple-darwin': '82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a',
+    }
+    if triplet not in hashes:
+        raise RuntimeError(f'No pinned nextest checksum for {triplet}')
+    extension = 'zip' if system == 'Windows' else 'tar.gz'
+    filename = f'cargo-nextest-{version}-{triplet}.{extension}'
+    source = f'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-{version}/{filename}'
+    cache = Path.home() / '.cache/sudocode-local-acceptance/tools/nextest' / version / triplet
+    cache.mkdir(parents=True, exist_ok=True)
+    archive = cache / filename
+    if not archive.exists():
+        with tempfile.NamedTemporaryFile(dir=cache, suffix='.download', delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            urllib.request.urlretrieve(source, temporary_path)
+            if hashlib.sha256(temporary_path.read_bytes()).hexdigest() != hashes[triplet]:
+                raise RuntimeError(f'nextest archive checksum mismatch: {source}')
+            os.replace(temporary_path, archive)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    contents = archive.read_bytes()
+    if hashlib.sha256(contents).hexdigest() != hashes[triplet]:
+        raise RuntimeError(f'Cached nextest archive checksum mismatch: {archive}')
+    name = 'cargo-nextest.exe' if system == 'Windows' else 'cargo-nextest'
+    if system == 'Windows':
+        with zipfile.ZipFile(io.BytesIO(contents)) as bundle:
+            members = [item for item in bundle.infolist() if not item.is_dir() and Path(item.filename).name == name]
+            if len(members) != 1:
+                raise RuntimeError('Expected exactly one nextest executable in the verified archive')
+            executable_bytes = bundle.read(members[0])
+    else:
+        with tarfile.open(fileobj=io.BytesIO(contents), mode='r:gz') as bundle:
+            members = [item for item in bundle.getmembers() if item.isfile() and Path(item.name).name == name]
+            if len(members) != 1:
+                raise RuntimeError('Expected exactly one nextest executable in the verified archive')
+            executable_bytes = bundle.extractfile(members[0]).read()
+    executable = cache / name
+    if executable.exists():
+        if executable.read_bytes() != executable_bytes:
+            raise RuntimeError(f'Cached nextest executable differs from the verified archive: {executable}')
+    else:
+        executable.write_bytes(executable_bytes)
+        executable.chmod(0o755)
+    (output / 'nextest-source.json').write_text(json.dumps({
+        'version': version, 'url': source, 'archive_sha256': hashes[triplet],
+        'executable_sha256': hashlib.sha256(executable_bytes).hexdigest(),
+    }, indent=2))
+    return executable
+
+
+def nextest_options(output):
+    """Keep retry/filter/fail-fast behavior independent of ambient user settings."""
+    configuration = output / 'nextest.toml'
+    configuration.write_text('[profile.default]\nretries = 0\nfail-fast = { max-fail = 1, terminate = "wait" }\n')
+    workers = int(os.environ.get('SCODE_ACCEPTANCE_TEST_THREADS', '4'))
+    if not 1 <= workers <= 4:
+        raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
+    return ['--config-file', str(configuration), '--profile', 'default', '--ignore-default-filter',
+            '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
+
+
+def workspace_nextest_options(output, grouped):
+    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+    options = nextest_options(output)
+    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+        options[options.index('--test-threads') + 1] = '8'
+    print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
+          + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
+          'counts, legacy/isolated/other profiles retain four.',
+          flush=True)
+    return options
+
+
+def committed_git(root, *arguments):
+    """Inspect this checkout independently of caller Git bindings."""
+    return subprocess.check_output(
+        ["git", *arguments], cwd=root,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        stderr=subprocess.PIPE)
+
+
+def committed_input_paths(root, base):
+    """Read this checkout's committed inputs independently of caller Git bindings."""
+    if not base:
+        raise ValueError("No committed base")
+    return committed_git(root, "diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD").decode().split("\0")[:-1]
+
+
+def compiler_context_driver_present(root):
+    """Permit genuine older source, but refuse removal of an introduced journey."""
+    relative = "e2e/compiler-context/run.py"
+    if (root / relative).is_file():
+        return True
+    if committed_git(root, "rev-parse", "--is-shallow-repository").strip() != b"false":
+        raise RuntimeError("Cannot prove historical compiler-driver absence from shallow Git history")
+    if committed_git(root, "log", "-1", "--format=%H", "HEAD", "--", relative).strip():
+        raise RuntimeError("Required compiler context acceptance driver is missing from this source")
+    return False
+
+
 def changed_cli_test_targets(root, base):
     """Scope isolated test edits; any shared or production input keeps the full suite."""
-    changed = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
-                                      cwd=root).decode().split("\0")[:-1]
+    # Complementary CI can pass newer main; exclude changes outside this branch.
+    changed = committed_input_paths(root, base)
     # External specs/fixtures can affect unchanged tests too. Only known docs
     # may accompany an isolated integration module without widening acceptance.
     inputs = [path for path in changed if path != "README.md"
@@ -28,6 +152,237 @@ def changed_cli_test_targets(root, base):
     if not inputs or any(not re.fullmatch(pattern, path) or not (root / path).is_file() for path in inputs):
         return None
     return sorted({Path(path).stem for path in inputs})
+
+
+def native_cli_test_package_args(root, base):
+    """Match the native workspace's package selection, including feature union."""
+    try:
+        isolated = changed_cli_test_targets(root, base) is not None
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        isolated = False
+    arguments = ["-p", "rusty-sudocode-cli"] if isolated else ["--workspace"]
+    print("NATIVE_CLI_TEST_GRAPH=" + json.dumps({"packages": arguments, "isolated_cli_tests": isolated}), flush=True)
+    return arguments
+
+
+def native_resize_test_targets(*, windows):
+    """Share the real terminal target inventory with its Cargo graph guard."""
+    targets = ["pty_chrome_resize", "pty_prose_preview", "pty_streaming_code", "pty_review_scrollback"]
+    if not windows:
+        targets.append("pty_codex_colors")
+    return targets
+
+
+def test_group_source(names):
+    """Keep opt-in wrappers declarative so selection cannot hide extra Rust code."""
+    return ("//! Opt-in acceptance target; original individual Cargo test targets stay available.\n\n"
+            + '#![allow(\n    clippy::duplicate_mod,\n'
+              '    reason = "Original test modules keep their own helper namespaces."\n)]\n\n'
+            + "\n\n".join(f'#[path = "../{name}.rs"]\nmod {name};' for name in names) + "\n")
+
+
+def grouped_workspace_test_targets(root, metadata):
+    """Replace only validated original integration targets with opt-in wrappers."""
+    packages = [package for package in metadata["packages"] if package["id"] in metadata["workspace_members"]]
+    groups, covered, targets = {}, set(), []
+    for package in packages:
+        directory = Path(package["manifest_path"]).parent.resolve()
+        group_directory = directory / "tests/acceptance_groups"
+        declarations = {Path(target["src_path"]) for target in package["targets"]
+                        if target["kind"] == ["test"] and Path(target["src_path"]).parent == group_directory}
+        if set(group_directory.glob("*.rs")) != declarations:
+            raise RuntimeError(f"Every acceptance wrapper must have an explicit Cargo test target: {group_directory}. "
+                               "Register each wrapper with matching name/path and test=false, or remove the obsolete wrapper; "
+                               "individual ungrouped tests are selected automatically.")
+        original = {target["name"]: target for target in package["targets"]
+                    if target["kind"] == ["test"] and target["test"]}
+        for target in package["targets"]:
+            if target["kind"] != ["test"]:
+                continue
+            path = Path(target["src_path"])
+            if path.parent != group_directory:
+                continue
+            if target["test"] or target["name"] != path.stem:
+                raise RuntimeError(f"Acceptance wrapper must keep its name and test=false: {path}")
+            if any((directory / "tests" / candidate).exists()
+                   for candidate in [target["name"] + ".rs", target["name"] + "/main.rs"]):
+                raise RuntimeError(f"Acceptance wrapper shadows an individual Cargo target: {path}. "
+                                   "Choose an unused group name so the original target remains available.")
+            if (checkout_link(path) or not path.resolve().is_relative_to(directory)
+                    or not directory.is_relative_to(root.resolve())):
+                raise RuntimeError(f"Acceptance test wrapper escaped its package: {path}")
+            if target.get("required-features"):
+                raise RuntimeError(f"Acceptance wrapper must not conditionally omit its modules: {path}")
+            source = path.read_text(encoding="utf-8")
+            names = re.findall(r'^#\[path = "\.\./([A-Za-z_][A-Za-z0-9_]*)\.rs"\]\nmod \1;$', source, re.MULTILINE)
+            if not names or source.strip() != test_group_source(names).strip():
+                raise RuntimeError(f"Acceptance wrapper must contain only canonical path modules: {path}")
+            members = []
+            for name in names:
+                identity = (package["id"], name)
+                if (name not in original or identity in covered
+                        or Path(original[name]["src_path"]).resolve() != directory / "tests" / (name + ".rs")):
+                    raise RuntimeError(f"Missing, duplicate or redirected acceptance test module {name}: {path}")
+                covered.add(identity)
+                members.append(name)
+            groups[(package["id"], target["name"])] = members
+    if not groups:
+        return [], {"mode": "original-workspace", "groups": []}
+    for package in packages:
+        for target in package["targets"]:
+            identity = (package["id"], target["name"])
+            if target["kind"] == ["test"] and ((target["test"] and identity not in covered) or identity in groups):
+                targets.append(target["name"])
+            elif target["test"] and target["kind"] not in [["test"], ["lib"], ["bin"], ["proc-macro"]]:
+                raise RuntimeError(f"Unsupported enabled test target kind: {target}")
+            elif not target["test"] and target["kind"] in [["lib"], ["bin"], ["proc-macro"]]:
+                raise RuntimeError(f"Grouped workspace selection requires an explicit disabled library/bin plan: {target}")
+    if len(targets) != len(set(targets)) or any(name in targets for _, name in covered):
+        raise RuntimeError("Test target names overlap packages; keep the overlapping module standalone")
+    arguments = ["--lib", "--bins"]
+    for name in sorted(targets):
+        arguments += ["--test", name]
+    return arguments, {"mode": "grouped-workspace", "covered_original_targets": len(covered),
+                       "selected_integration_targets": len(targets),
+                       "groups": [{"package": package, "target": name, "modules": members}
+                                  for (package, name), members in sorted(groups.items())]}
+
+
+def workspace_integration_test_targets(targets):
+    """Retire grouped unit harnesses; preserve older Cargo default exclusions."""
+    if not targets:
+        # An explicit glob enables test=false targets and can force inactive
+        # required-features. Older sources keep their complete default suite.
+        return []
+    if targets[:2] != ["--lib", "--bins"]:
+        raise RuntimeError("Unexpected grouped workspace target plan; no tests started")
+    selected = targets[2:]
+    if not selected or len(selected) % 2 or any(selected[index] != "--test" for index in range(0, len(selected), 2)):
+        raise RuntimeError("Integration target selection must retain explicit nonempty test names")
+    return selected
+
+
+def performance_low_power_mode():
+    """Use Foundation's active mode, including desktops without a pmset setting."""
+    import ctypes
+
+    ctypes.CDLL("/System/Library/Frameworks/Foundation.framework/Foundation")
+    objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+    objc.objc_getClass.argtypes, objc.objc_getClass.restype = [ctypes.c_char_p], ctypes.c_void_p
+    objc.sel_registerName.argtypes, objc.sel_registerName.restype = [ctypes.c_char_p], ctypes.c_void_p
+    pointer = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    boolean = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    responds = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    info = pointer(objc.objc_getClass(b"NSProcessInfo"), objc.sel_registerName(b"processInfo"))
+    selector = objc.sel_registerName(b"isLowPowerModeEnabled")
+    if not info or not responds(info, objc.sel_registerName(b"respondsToSelector:"), selector):
+        raise RuntimeError("Foundation cannot report the active low-power mode")
+    return boolean(info, selector)
+
+
+def performance_power_state():
+    """Read native macOS power settings without changing the user's configuration."""
+    source = subprocess.check_output(["/usr/bin/pmset", "-g", "ps"], text=True, timeout=5)
+    sources = re.findall(r"^Now drawing from '([^']+)'", source, re.MULTILINE)
+    if len(sources) != 1 or sources[0] not in {"AC Power", "Battery Power"}:
+        raise RuntimeError("Cannot determine macOS power source; no timing acceptance granted")
+    return {"source": sources[0], "low_power_mode": performance_low_power_mode()}
+
+
+def stable_performance_power(output):
+    """Create the timing context only when a profile actually uses it."""
+    @contextmanager
+    def monitor_window():
+        """Refuse unqualified macOS timing windows; keep every observation for diagnosis."""
+        if platform.system() != "Darwin":
+            yield
+            return
+        import threading
+
+        evidence = output / "host-power.json"
+        observations, failures = [], []
+        stopped = threading.Event()
+
+        def sample():
+            row = {"at": time.time()}
+            try:
+                row.update(performance_power_state())
+                if row["source"] != "AC Power" or row["low_power_mode"]:
+                    failures.append("Timing acceptance requires external AC power with low-power mode disabled")
+            except Exception as error:
+                row["error"] = str(error)
+                failures.append(str(error))
+            observations.append(row)
+            staged = evidence.with_suffix(".json.stage")
+            staged.write_text(json.dumps({
+                "kind": "native-performance-power-observations", "poll_interval_seconds": 1,
+                "observations": observations, "invalid": bool(failures),
+            }, indent=2) + "\n")
+            staged.replace(evidence)
+
+        def require_stable():
+            if failures:
+                raise RuntimeError(f"{failures[0]}. Power evidence: {evidence}. "
+                                   "No settings were changed; preserve this attempt and connect AC power before a new run.")
+
+        sample()
+        require_stable()
+        print(f"Performance host: external AC, low-power mode disabled; monitoring each second: {evidence}", flush=True)
+
+        def monitor():
+            while not stopped.wait(1):
+                try:
+                    sample()
+                except Exception as error:
+                    failures.append(f"Cannot retain native power observations: {error}")
+                    return
+
+        worker = threading.Thread(target=monitor, name="acceptance-power", daemon=True)
+        worker.start()
+        try:
+            yield
+        except BaseException:
+            # Preserve the original command failure; the sidecar still records any
+            # power problem. A failed command can never become a passing profile.
+            raise
+        else:
+            stopped.set()
+            worker.join()
+            sample()
+            require_stable()
+        finally:
+            stopped.set()
+            worker.join()
+    return monitor_window()
+
+
+def prepare_windows_terminal(root, output, execute):
+    """Retain the actual installer command/log for the selected resize receipt."""
+    output.mkdir(parents=True, exist_ok=True)
+    terminal = Path.home() / ".cache/sudocode-terminal-host"
+    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+
+
+def terminal_installer_scope(root, base):
+    """Retain fault injection for unknown inputs; Rust-only edits keep real setup."""
+    try:
+        paths = committed_input_paths(root, base)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return {"resolved": False, "fault_injection_required": True, "changed_control_inputs": None}
+    controls = [path for path in paths if not path.startswith("rust/")
+                and path not in {"README.md", "CONTRIBUTING.md", "sudo-code-roadmap.html"}
+                and not (path.startswith("docs/") and path.endswith(".md"))]
+    return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
+
+
+def prepare_native_checks(names, root, output, execute):
+    """Install selected Windows terminal inputs before long native compilation."""
+    prepared = {}
+    if os.name == "nt" and "native-resize" in names:
+        print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
+              "before compilation; original installer checks and terminal tests remain required.", flush=True)
+        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+    return prepared
 
 
 def run(name, root, output, base, execute):
@@ -45,12 +400,48 @@ def run(name, root, output, base, execute):
     def cargo(*args, **kwargs):
         return command("cargo", *args, cwd=rust, **kwargs)
 
+    def native_tests(*args):
+        return command(str(nextest_binary(output)), "nextest", "run",
+                       *nextest_options(output), *args, cwd=rust)
+
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
-        command(sys.executable, ".github/scripts/check_pr_history.py", base, "HEAD")
+        entry = stage_preflight_executor(root, execution_policy_ref(), output / "history-policy")
+        print("History preflight uses the protected policy checker; the author branch stays unchanged.", flush=True)
+        command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
-        command(sys.executable, "e2e/local-acceptance/run.py")
+        print("Local contract validation: full private Docker matrix, with Git/signature checks before Cargo; "
+              "then author-host native recovery, nextest, release, grouping and example guards. "
+              "No product build or benchmark lease.", flush=True)
+        if not shutil.which("docker"):
+            raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
+                               "then retry this push or the printed acceptance command.")
+        try:
+            command("docker", "info", "--format", "{{.ServerVersion}}")
+        except (RuntimeError, OSError) as error:
+            raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
+                               "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
+                               f"guard log above. Native smoke and matrix have not started: {error}") from error
+        policy_ref = execution_policy_ref()
+        entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
+        contract_container(root, output, command)
+        command(sys.executable, str(entry), "--repository", str(root),
+                "--output", str(output / "native-guard"),
+                "--executable", str(nextest_binary(output)),
+                "--source-receipt", str(output / "nextest-source.json"),
+                "--options", json.dumps(nextest_options(output)))
+    elif name == "native-sdk":
+        sdk = root / "sdk/typescript"
+        command("node", "--version", cwd=sdk)
+        command("npm", "ci", cwd=sdk)
+        command("npm", "test", cwd=sdk)
+        command("npm", "run", "pack:runtime", cwd=sdk)
     elif name == "native-workspace":
+        if os.name == "nt" and not shutil.which("pwsh.exe"):
+            raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
+                               "Add your existing PowerShell 7 directory to PATH, or install it with "
+                               "`winget install --id Microsoft.PowerShell --exact --source winget`, "
+                               "then rerun the same acceptance command. No workspace compilation started.")
         cargo("fmt", "--all", "--check")
         tests = changed_cli_test_targets(root, base)
         (output / "test-scope.json").write_text(json.dumps({
@@ -58,46 +449,109 @@ def run(name, root, output, base, execute):
             "targets": tests,
         }, indent=2))
         if tests is not None:
-            arguments = ["test", "--locked", "-p", "rusty-sudocode-cli", "--features", "engine-acp/mailbox"]
+            arguments = ["--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
-            cargo(*arguments)
+            print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
+            cargo("clippy", *arguments, "--", "-D", "warnings")
+            native_tests(*arguments)
         else:
             command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
             command(sys.executable, "scripts/check_cache_usage_fixtures.py")
+            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
+            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
+            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
+            print("Native workspace target selection: " + json.dumps(selection), flush=True)
+            print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
+                  "targets, examples and benches before long builds and PTY execution. "
+                  "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
+            if targets:
+                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                      "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
+            else:
+                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
+            lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
+            cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
+                  "--", "-D", "warnings")
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
-            cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox")
-            cargo("clippy", "--workspace", "--locked")
+            command(str(nextest_binary(output)), "nextest", "run",
+                    *workspace_nextest_options(output, bool(targets)),
+                    "--workspace", "--locked", "--features", "engine-acp/mailbox",
+                    *workspace_integration_test_targets(targets), cwd=rust)
+            # Stable nextest excludes doctests; retain Cargo's separate path.
+            cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
+    elif name == "native-examples":
+        print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
+              "This profile never runs example entry points.", flush=True)
+        cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
     elif name == "native-resize":
+        installer_scope = {**terminal_installer_scope(root, base), "windows_host": os.name == "nt"}
+        (output / "installer-scope.json").write_text(json.dumps(installer_scope, indent=2), encoding="utf-8")
+        print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            command(sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal))
-            command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            try:
+                prepared = run.prepared_native.get(name)
+            except AttributeError:
+                prepared = None
+            if prepared:
+                # These are actual commands from this invocation, not a cached
+                # successful profile. Append them to the normal signed receipt.
+                results.extend(prepared)
+            else:
+                results.append(prepare_windows_terminal(root, output, execute))
+            if installer_scope["fault_injection_required"]:
+                command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
+            else:
+                print("Installer code/executor inputs unchanged: skipping artificial HTTP/cache corruption checks; "
+                      "actual checksum-pinned setup and every real terminal test remain required.", flush=True)
             env.update({"SCODE_TERMINAL_HOST": str(terminal / "Code.exe"),
                         "SCODE_TERMINAL_MODULES": str(terminal / "07f806f999/resources/app/node_modules.asar")})
         else:
             command("npm", "ci", "--prefix", "e2e/terminal-resize")
         env["SCODE_TERMINAL_LOG_DIR"] = str(output / "terminal")
-        tests = ["pty_chrome_resize", "pty_prose_preview", "pty_review_scrollback"]
-        if os.name != "nt":
-            tests.append("pty_codex_colors")
+        tests = native_resize_test_targets(windows=os.name == "nt")
+        print("Native resize uses the workspace dev/mailbox graph. Cargo verifies current source; "
+              "all selected ignored cases and original budgets remain. The standalone default-feature "
+              "debug graph is outside this profile's coverage.", flush=True)
+        package_args = native_cli_test_package_args(root, base)
         for test in tests:
-            cargo("test", "--locked", "-p", "rusty-sudocode-cli", "--test", test,
+            cargo("test", "--locked", *package_args, "--features", "engine-acp/mailbox", "--test", test,
                   "--", "--ignored", "--nocapture")
     elif name == "native-release":
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
         binary = output / ("scode" + suffix)
         shutil.copy2(target / "release" / ("scode" + suffix), binary)
         env["SCODE_TEST_BIN"] = str(binary)
-        cargo("test", "--release", "--locked", "-p", "rusty-sudocode-cli", "--test", "pty_model_stream_close",
+        # Reuse the native workspace's test graph. Only the driver is debug;
+        # SCODE_TEST_BIN still launches the copied normal release executable.
+        print("Release acceptance: the native test driver launches the copied release scode; "
+              "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
+        cargo("test", "--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
               "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
-        command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
-                "--report", str(output / "startup.json"))
+        with stable_performance_power(output):
+            command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
+                    "--report", str(output / "startup.json"))
+        if compiler_context_driver_present(root):
+            command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
+                    "--directory", str(output / "compiler-context"))
+        else:
+            print("This historical source predates the host-context compiler driver; "
+                  "its existing native release checks remain required.", flush=True)
     elif name == "native-services":
-        cargo("build", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
+        # Cargo's test graph unifies dev-dependency features. A normal build
+        # after workspace tests recompiles the CLI and its shared dependencies.
+        # Keep Cargo's freshness check, without executing the driver twice.
+        print("Native service acceptance: reusing the workspace dev/mailbox feature graph; "
+              "Cargo still builds missing/stale inputs. Both original service journeys remain required. "
+              "The standalone default-feature debug graph is outside this profile's coverage.", flush=True)
+        cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
@@ -106,8 +560,8 @@ def run(name, root, output, base, execute):
         if not bash:
             raise RuntimeError("Git Bash is required for shared-service credential acceptance")
         command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                'python e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"))
+                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
+                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -124,28 +578,199 @@ def run(name, root, output, base, execute):
                     stream.extractall(folder)
                 executable.chmod(0o755)
             env["PROTOC"] = str(executable)
-        profile = "cohost-release-windows" if os.name == "nt" else "cohost-release"
+        print("Native cohost acceptance uses the workspace dev graph with daemon, model and egress features. "
+              "Optimized builds and platform size budgets run on nexusd-cohost release tags.", flush=True)
         version = "local-" + subprocess.check_output(["git", "rev-parse", "--short=12", "HEAD"], cwd=root).decode().strip()
         env["NEXUSD_BUILD_VERSION"] = version
-        cargo("build", "--locked", "--profile", profile, "-p", "nexusd-cohost", "--features",
+        cargo("build", "--locked", "--profile", "dev", "-p", "nexusd-cohost", "--features",
               "daemon,driver-ai,egress-gate-presidio", "--bin", "nexusd-cohost")
-        binary = target / profile / ("nexusd-cohost" + suffix)
+        binary = target / "debug" / ("nexusd-cohost" + suffix)
         path = command(str(binary), "--version")
         if version not in path.read_text(errors="replace"):
             raise RuntimeError("Co-host build version stamp was lost")
-        limits = {"Windows": 42, "Darwin": 45 if platform.machine().lower() == "arm64" else 46, "Linux": 55}
-        if binary.stat().st_size > limits[platform.system()] * 1024 * 1024:
-            raise RuntimeError("Co-host exceeds the existing platform release size budget")
     elif name in {"rendering", "browser"}:
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
             benchmark(name, root, output, base, command, target)
         else:
-            container(name, root, output, base, command, execute)
+            try:
+                policy_ref, candidate_ref = run.execution_refs
+            except AttributeError:
+                policy_ref = candidate_ref = None
+            if name == "rendering":
+                with stable_performance_power(output):
+                    container(name, root, output, base, command, execute,
+                              policy_ref=policy_ref, candidate_ref=candidate_ref)
+            else:
+                # The browser smoke checks behaviour, not timing.
+                container(name, root, output, base, command, execute,
+                          policy_ref=policy_ref, candidate_ref=candidate_ref)
     else:
         raise RuntimeError(f"Unknown mandatory acceptance check: {name}")
     if not results:
         raise RuntimeError(f"No command ran for required check: {name}")
     return results
+
+
+def execution_policy_ref():
+    """Use the dispatcher's frozen policy even for an older author checkout."""
+    try:
+        policy_ref, _ = run.execution_refs
+    except AttributeError:
+        policy_ref = None
+    return policy_ref or "origin/main"
+
+
+def preflight_guard_files():
+    """Keep the history checker independent of unrelated native fixture pins."""
+    return {".github/scripts/check_pr_history.py": "1c0117d2045f6ac6c44ea327b08f9c08b30bad0b734381592458d39259f0dab7"}
+
+
+def native_guard_files():
+    """Bind external tool bytes through the existing executable fingerprint format."""
+    return {
+        **preflight_guard_files(),
+        ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
+        ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
+        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
+        ".github/local-acceptance/gate.py": "aa14a70ee90b43cb5924e76255636598993145aabb08e5c65337bcee8592ef78",
+        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
+        ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
+        ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
+        ".github/scripts/local_acceptance.py": "6fd29d3cc0e18f2892193adf445ffb12b85dce36fa960c57b01216ed9ec5de1b",
+        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
+        ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
+        ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
+        ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
+        "e2e/local-acceptance/carryover_acceptance.py": "3249cb47c0dc416c915f3080d27e42184d58566a80ab58433ee03e066ed1aab9",
+        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
+        "e2e/local-acceptance/host_lease_acceptance.py": "c6eadb50fda038f07b6d1c511f9d6417d2347f3e8caf2d47ae8046d3fee7facf",
+        "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
+        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
+        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
+        "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
+        "e2e/local-acceptance/publication_acceptance.py": "b814cf43d3322c2edc50ff015beddfca8d356e7553b6a560e2fa35888bc61e76",
+        "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
+        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
+        "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
+        "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
+    }
+
+
+def stage_executor_files(root, policy_ref, files, policy_root):
+    """Copy the selected protected bytes with one shared path and SHA256 check."""
+    for relative, expected in files.items():
+        destination = (policy_root / relative).resolve()
+        if not destination.is_relative_to(policy_root.resolve()):
+            raise RuntimeError("Executor input escaped its policy snapshot")
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"Native guard input {relative} changed: SHA256 {actual}. "
+                               "Update its protected pin before running acceptance.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+
+
+def stage_preflight_executor(root, policy_ref, policy_root):
+    """Stage only the protected history checker for metadata preflight."""
+    files = preflight_guard_files()
+    stage_executor_files(root, policy_ref, files, policy_root)
+    return policy_root / next(iter(files))
+
+
+def stage_profile_executor(root, policy_ref, name, policy_root):
+    """Materialize one hash-bound native tool set without changing the candidate."""
+    if name == "preflight":
+        return stage_preflight_executor(root, policy_ref, policy_root)
+    if name != "guard-contract":
+        raise RuntimeError(f"No policy-owned native executor for {name}")
+    stage_executor_files(root, policy_ref, native_guard_files(), policy_root)
+    # The grouping fixture needs actual protected selection rules. Bind only
+    # those fields: approval maps contain these recipe hashes and cannot be
+    # included in their own input digest. Signer data is not used by the planner.
+    policy = json.loads(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:spec/local_acceptance.json"], cwd=root))
+    selection = {key: policy[key] for key in ["version", "repository", "checks"]}
+    data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
+    actual_scope = hashlib.sha256(data).hexdigest()
+    if actual_scope != "6353d4b13ab2a119e502dc0748a8b01479860223027b17bcb44cc82ea3619f54":
+        raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
+                           "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
+                           "then rerun contract-update through the installed hook. No grouping guard has started.")
+    policy_file = policy_root / "spec/local_acceptance.json"
+    policy_file.parent.mkdir(parents=True, exist_ok=True)
+    policy_file.write_bytes(data)
+    # The release fixture imports this module. Bind the exact branch it executes
+    # without a cyclic byte hash of a file containing its own execution pins.
+    spec = importlib.util.spec_from_file_location("guard_authority", policy_root / ".github/scripts/local_acceptance.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    helper.ROOT = root
+    expected = "7bf79728e2ec8d1115fb357ead698f0b24ab9bbb8bda6c3972fce89d188bafbf"
+    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
+        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
+        ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
+    return policy_root / ".github/local-acceptance/native_guard.py"
+
+
+def container_image_tag(repository, digest):
+    """Keep each build's image reference owned until its caller finishes using it."""
+    import uuid
+
+    return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
+
+
+def contract_container(root, output, command):
+    """Keep the full decision matrix local without serial Windows Git startup costs."""
+    try:
+        policy_ref, candidate_ref = run.execution_refs
+    except AttributeError:
+        policy_ref = candidate_ref = None
+    def revision(ref):
+        return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
+    protected = revision(policy_ref or "origin/main")
+    candidate = revision(candidate_ref or "HEAD")
+    context = output / "guard-image"
+    context.mkdir()
+    inputs_hash = hashlib.sha256()
+    # Keep image bindings inside the existing executable fingerprint format.
+    # A changed image/entrypoint must update its pin before any Docker work.
+    pins = {
+        "Dockerfile.guard": "6e43e2b96e7da5bc4515fce3579a91e3ceab7da0a29894dd52d52f8694b8bad7",
+        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+    }
+    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
+        contents = subprocess.check_output(["git", "show", f"{protected}:.github/local-acceptance/{name}"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != pins[name]:
+            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its contract_container pin "
+                               "with the reviewed input, then rerun acceptance; no image build started.")
+        (context / destination).write_bytes(contents)
+        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    image_receipt = output / "guard-image-id.txt"
+    image_tag = container_image_tag("sudocode-contract-guard", inputs_hash.hexdigest())
+    command("docker", "build", "--iidfile", str(image_receipt), "--tag",
+            image_tag, str(context),
+            extra={"DOCKER_BUILDKIT": "1"})
+    image = image_receipt.read_text().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise RuntimeError("Contract image build did not return an immutable image ID")
+    inputs = output / "guard-inputs"
+    snapshot(root, candidate, inputs)
+    (output / "guard-provenance.json").write_text(json.dumps({
+        "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
+        "context_sha256": inputs_hash.hexdigest()}, indent=2))
+    # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
+    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
+            "--mount", f"type=bind,source={inputs},target=/inputs,readonly", image)
 
 
 def snapshot(root, ref, destination):
@@ -159,14 +784,40 @@ def snapshot(root, ref, destination):
             stream.extractall(destination, filter="data")
 
 
-def container(name, root, output, base, command, execute):
-    state = Path.home() / ".cache/sudocode-local-acceptance/linux"
+def container_storage():
+    return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
+
+
+def container_profile_output(evidence, name):
+    """Map the mounted evidence root to the container entrypoint's profile output."""
+    return evidence / "container" / name
+
+
+def container(name, root, output, base, command, execute, policy_ref, candidate_ref):
+    import hashlib
+
+    state, lease_volume = container_storage()
     state.mkdir(parents=True, exist_ok=True)
-    image = "sudocode-local-acceptance:1"
-    # Each checkout has its own Cargo directory; Cargo must never reuse a
-    # same-version path crate compiled from another source checkout.
-    protected = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=root).decode().strip()
+    # Keep active Cargo/npm state on Docker's Linux filesystem. The previous
+    # host cache stays read-only and seeds the volume under the same lease.
+    def revision(ref):
+        return subprocess.check_output(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).decode().strip()
+
+    protected = revision(policy_ref or "origin/main")
+    candidate = revision(candidate_ref or "HEAD")
+    snapshots = {"candidate": candidate}
+    if name == "rendering":
+        # The paired matrix compares the candidate with the policy's fixed
+        # baseline, using the trusted driver and harness.
+        policy = json.loads(subprocess.check_output(
+            ["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
+        snapshots.update(baseline=revision(policy["baseline_commit"]), trusted=protected)
+    sources = output / "inputs"
+    sources.mkdir()
+    for label, ref in snapshots.items():
+        snapshot(root, ref, sources / label)
     context = output / "image-context"
+    context_hash = hashlib.sha256()
     for source, destination in [
         (".github/local-acceptance/Dockerfile", "Dockerfile"),
         ("e2e/terminal-resize/package.json", "e2e/terminal-resize/package.json"),
@@ -174,102 +825,473 @@ def container(name, root, output, base, command, execute):
     ]:
         path = context / destination
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root))
-    command("docker", "build", "--tag", image, str(context), extra={"DOCKER_BUILDKIT": "1"})
-    policy = json.loads(subprocess.check_output(["git", "show", f"{protected}:e2e/terminal-resize/performance-policy.json"], cwd=root))
-    reference = policy["baseline_commit"] if name == "rendering" else base
-    sources = output / "inputs"
-    sources.mkdir()
-    snapshot(root, "HEAD", sources / "candidate")
-    snapshot(root, reference, sources / "baseline")
-    snapshot(root, protected, sources / "trusted")
+        contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
+        path.write_bytes(contents)
+        context_hash.update(destination.encode() + b"\0" + contents + b"\0")
+    image_receipt = output / "image-id.txt"
+    # Only a successful rendering call in this process can authorize reuse.
+    try:
+        invocations = container.invocations
+    except AttributeError:
+        invocations = {}
+    key = (str(output.parent.resolve()), candidate, protected, context_hash.hexdigest())
+    previous = invocations.get(key) if name == "browser" else None
+    image = (previous["image_tag"] if previous is not None
+             else container_image_tag("sudocode-local-acceptance", context_hash.hexdigest()))
+    if previous is None:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag", image, str(context),
+                extra={"DOCKER_BUILDKIT": "1"})
+    else:
+        image_receipt.write_text(previous["image_id"] + "\n", encoding="utf-8")
+        print("Browser smoke reuses this invocation's measured rendering image and release: "
+              f"{previous['image_id']}", flush=True)
+    image_id = image_receipt.read_text().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError(f"Docker build did not produce an immutable image ID: {image_receipt}")
+    identity = {
+        **snapshots, "policy": protected,
+        "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
+        "rendering_release_reused": previous is not None,
+    }
+    (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
+    (sources / "identity.json").write_text(json.dumps(identity, indent=2))
+    if previous is not None:
+        binary = previous["binary"]
+        if checkout_link(binary) or hashlib.sha256(binary.read_bytes()).hexdigest() != previous["sha256"]:
+            raise RuntimeError("Measured rendering release changed before browser reuse")
+        reused = sources / "candidate-release"
+        reused.mkdir()
+        shutil.copy2(binary, reused / "scode")
+        (reused / "identity.json").write_text(json.dumps({
+            **identity, "version": 1, "sha256": previous["sha256"],
+        }, indent=2))
+        verified_candidate_release(sources)
     runner = sources / "runner/.github"
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
+    if name == "browser":
+        # The executor owns this harness, including for candidates that predate
+        # it. Stage only its Python imports/policy, not another source checkout.
+        for relative in ["e2e/terminal-resize/gui-smoke.py", "e2e/terminal-resize/benchmark.py",
+                         "e2e/terminal-resize/gui-policy.json"]:
+            path = sources / "runner" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
-            "--mount", f"type=bind,source={state},target=/state",
-            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo", image,
+            "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
+            "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
+            "--mount", f"type=volume,source={lease_volume},target=/locks",
+            "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo",
+            "--env", f"SCODE_RENDERING_PROFILE={rendering_profile()}", image_id,
             "/inputs/runner/.github/local-acceptance/checks.py", "--container-check", name,
             "--base", base)
+    if name == "rendering":
+        profile_output = container_profile_output(output, name)
+        binary = profile_output / "scode-candidate"
+        report = json.loads((profile_output / "measurements/report.json").read_text())
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        if report["status"] != "passed" or report["candidate_sha256"] != digest or checkout_link(binary):
+            raise RuntimeError("Rendering candidate binary does not match its completed measurements")
+        invocations[key] = {"binary": binary, "sha256": digest, "image_id": image_id, "image_tag": image}
+        container.invocations = invocations
+
+
+def verified_candidate_release(inputs):
+    """Verify the read-only release promoted by this invocation's rendering."""
+    directory = inputs / "candidate-release"
+    if not directory.exists():
+        return None
+    binary, receipt = directory / "scode", directory / "identity.json"
+    if any(checkout_link(path) for path in [directory, binary, receipt]) or not binary.is_file():
+        raise RuntimeError("Reused rendering release must contain regular files")
+    expected = json.loads((inputs / "identity.json").read_text())
+    observed = json.loads(receipt.read_text())
+    if observed.get("version") != 1 or any(observed.get(name) != expected[name]
+            for name in ["candidate", "policy", "image_id", "context_sha256"]):
+        raise RuntimeError("Reused rendering release belongs to different source, policy or image")
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != observed.get("sha256"):
+        raise RuntimeError("Reused rendering release bytes changed")
+    return binary
+
+
+def copy_checkout_file(source, destination):
+    """Keep identical inputs stable and give changed bytes fresh Cargo mtimes."""
+    source, destination = Path(source), Path(destination)
+    if checkout_link(destination):
+        raise RuntimeError(f"Expected a regular benchmark input, found a link: {destination}")
+    if (destination.is_file() and source.stat().st_size == destination.stat().st_size
+            and stat.S_IMODE(source.stat().st_mode) == stat.S_IMODE(destination.stat().st_mode)):
+        # Compare bytes on every invocation. filecmp caches same-size/mtime
+        # comparisons and can miss a changed cached file with restored times.
+        with source.open("rb") as expected, destination.open("rb") as cached:
+            while True:
+                first, second = expected.read(1024 * 1024), cached.read(1024 * 1024)
+                if first != second:
+                    break
+                if not first:
+                    return destination
+    shutil.copyfile(source, destination)
+    shutil.copymode(source, destination)
+    return destination
+
+
+def checkout_link(path):
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def remove_checkout_entry(path, root):
+    """Remove an entry inside the leased checkout without traversing cache links."""
+    if not path.parent.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError(f"Benchmark cache entry escaped its checkout: {path}")
+    if path.is_symlink() or not path.is_dir():
+        path.unlink()
+    elif hasattr(path, "is_junction") and path.is_junction():
+        os.rmdir(path)
+    else:
+        shutil.rmtree(path)
+
+
+def replace_checkout(source, destination, *, root=None):
+    """Synchronize the exact snapshot while preserving unchanged compiler inputs."""
+    source, destination = Path(source), Path(destination)
+    if checkout_link(destination):
+        raise RuntimeError(f"Benchmark checkout root must be a real directory: {destination}")
+    root = destination if root is None else root
+    destination.mkdir(parents=True, exist_ok=True)
+    for cached in destination.iterdir():
+        original = source / cached.name
+        if not original.exists() and not original.is_symlink():
+            remove_checkout_entry(cached, root)
+    for original in source.iterdir():
+        cached = destination / original.name
+        if original.is_dir():
+            if checkout_link(cached) or (cached.exists() and not cached.is_dir()):
+                remove_checkout_entry(cached, root)
+            replace_checkout(original, cached, root=root)
+            shutil.copymode(original, cached)
+        else:
+            if checkout_link(cached) or (cached.exists() and not cached.is_file()):
+                remove_checkout_entry(cached, root)
+            copy_checkout_file(original, cached)
+
+
+@contextmanager
+def exclusive_benchmark_state(directory=Path("/locks")):
+    """Serialize the Linux container's mutable sources, npm trees and targets."""
+    import fcntl
+
+    # Docker Desktop bind mounts do not provide reliable flock exclusion.
+    # The shared named volume keeps this inode on the Linux filesystem.
+    with (directory / "benchmark.lock").open("a") as lease:
+        started = time.monotonic()
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"Waiting for the local benchmark cache lease: {directory / 'benchmark.lock'}. "
+                  "Another local acceptance owns the shared checkout and compiler outputs.", flush=True)
+            if directory == Path("/locks"):
+                print("Inspect contenders on the host: docker ps --filter volume=sudocode-acceptance-benchmark-lease", flush=True)
+            fcntl.flock(lease, fcntl.LOCK_EX)
+        print(f"Acquired local benchmark cache lease after {time.monotonic() - started:.3f}s", flush=True)
+        yield
 
 
 def benchmark(name, root, output, base, command, target):
-    # Reuse the fixed existing workload, A/A calibration, paired A/B rounds,
-    # budget and sample assertions. Changing execution host changes none of them.
-    inputs = Path("/inputs")
-    work = Path("/state") / name
-    work.mkdir(exist_ok=True)
+    with exclusive_benchmark_state():
+        migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
+        benchmark_locked(name, root, output, base, command, target)
+
+
+def migrate_benchmark_cache(legacy, state):
+    """Seed the Linux volume without changing canonical paths or Cargo mtimes."""
+    marker = state / ".host-cache-migration-v1.json"
+    if checkout_link(marker):
+        raise RuntimeError(f"Benchmark cache migration receipt must be a regular file: {marker}")
+    if marker.is_file():
+        receipt = json.loads(marker.read_text(encoding="utf-8"))
+        if receipt.get("version") != 1 or receipt.get("status") != "complete":
+            raise RuntimeError(f"Invalid benchmark cache migration receipt: {marker}")
+        return
+    if not legacy.is_dir() or checkout_link(legacy) or checkout_link(state):
+        raise RuntimeError("Benchmark cache migration requires real legacy/state directories")
+    started = time.monotonic()
+    copied = []
+    print("Preparing Linux benchmark cache under the shared lease. "
+          "Existing host cache stays read-only; source/target paths and timestamps are preserved. "
+          "This one-time copy counts toward local acceptance time.", flush=True)
+    # Ignore pre-lease disposable checkouts. Both profiles already share these
+    # canonical paths; preserving them keeps existing Cargo dep-info reusable.
+    for name in ["cargo", "leased-benchmarks-v1"]:
+        source = legacy / name
+        if checkout_link(source):
+            raise RuntimeError(f"Unexpected benchmark cache root: {source}")
+        if not source.exists():
+            continue
+        destination = state / name
+        if checkout_link(source) or checkout_link(destination) or not source.is_dir():
+            raise RuntimeError(f"Unexpected benchmark cache root: {source}")
+        destination.mkdir(parents=True, exist_ok=True)
+        print(f"Copying existing {name} cache to Linux storage; no compiler runs during migration.", flush=True)
+        # cp -a retains nanosecond mtimes, modes and internal Cargo links. A
+        # failed/interrupted copy leaves no completion marker and is retried.
+        subprocess.run(["nice", "-n", "10", "cp", "-a", "--", str(source) + "/.", str(destination)], check=True)
+        copied.append(name)
+    receipt = {"version": 1, "status": "complete", "copied": copied,
+               "elapsed_seconds": round(time.monotonic() - started, 3)}
+    temporary = marker.with_suffix(".tmp")
+    temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(marker)
+    print(f"Linux benchmark cache ready after {receipt['elapsed_seconds']:.3f}s; "
+          f"reused directories: {copied}. Full command logs remain in the host evidence directory.", flush=True)
+
+
+def benchmark_storage(name):
+    """Keep leased state disjoint from still-running pre-lease executors."""
+    state = Path("/state/leased-benchmarks-v1")
+    return state / name, state / "target" / name
+
+
+def rendering_profile():
+    """Per-PR acceptance judges `core`. Release acceptance selects `stress`,
+    which adds the foreground/background task and repeated-turn scenarios."""
+    profile = os.environ.get("SCODE_RENDERING_PROFILE", "core")
+    if profile not in {"core", "stress"}:
+        raise RuntimeError(f"Unknown rendering profile: {profile}")
+    return profile
+
+
+def rendering_cases(terminal, arguments, output, command, plan):
+    """Finish and judge each complete scenario before admitting the next one."""
+    policy_path = terminal / "performance-policy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    profile = rendering_profile()
+    cases = policy["profiles"][profile]
+    if (plan.get("unjudged_warmups") != 0
+            or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
+            or plan["cases"] != cases):
+        raise RuntimeError("Rendering policy changed after its pre-build validation")
+    if not cases or len(cases) != len(set(cases)) or any(
+            not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
+        raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
+    output.mkdir(parents=True, exist_ok=False)
+    report = {"version": 1, "profile": profile, "preview": "0", "policy": policy,
+              "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
+              "status": "running", "samples": [], "metrics": [], "calibration": [],
+              "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
+              "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
+              "unjudged_warmups": 0}
+    metadata = None
+
+    def save():
+        (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    for case in cases:
+        # Partition the declared scenarios without changing their workloads,
+        # paired round policy, interaction samples or budgets.
+        selected = dict(policy, profiles={**policy["profiles"], profile: [case]})
+        selected_path = output / f"{case}-policy.json"
+        selected_path.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
+        report["case_policy_sha256"][case] = hashlib.sha256(selected_path.read_bytes()).hexdigest()
+        report["active_case"] = case
+        save()
+        print(f"Rendering scenario {len(report['completed_cases']) + 1}/{len(cases)}: {case}. "
+              f"Paired rounds: {policy.get('case_rounds', {}).get(case, policy['rounds'])}; no unjudged warm-ups. "
+              f"Complete paired result: {output / case / 'report.json'}. "
+              "A failed scenario stops this matrix and releases the benchmark lease.", flush=True)
+        succeeded = False
+        try:
+            command(*arguments, "--output", str(output / case), "--policy", str(selected_path), "--profile", profile)
+            succeeded = True
+        finally:
+            child_path = output / case / "report.json"
+            try:
+                if child_path.exists():
+                    child = json.loads(child_path.read_text(encoding="utf-8"))
+                    if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
+                        raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
+                        raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
+                                           f"required {plan['samples'][case]} judged observations and no extra warm-ups")
+                    if succeeded and child["status"] == "passed":
+                        observed = [{key: row[key] for key in ["stage", "round", "side"]} for row in child["samples"]]
+                        if observed != plan["pairs"][case]:
+                            raise RuntimeError(f"Rendering scenario {case} paired sample inventory differs from its declared rounds")
+                    for key in ["base_sha256", "candidate_sha256", "driver_sha256", "harness_sha256"]:
+                        if key in report and report[key] != child[key]:
+                            raise RuntimeError(f"Rendering {key} changed between scenarios")
+                        report[key] = child[key]
+                    for sample in child["samples"]:
+                        observed = sample["data"]["metadata"]
+                        if metadata is not None and metadata != observed:
+                            raise RuntimeError("Rendering terminal observer/platform changed between scenarios")
+                        metadata = observed
+                        report["samples"].append({**sample, "path": f"{case}/{sample['path']}"})
+                    for key in ["metrics", "calibration"]:
+                        report[key].extend(child.get(key, []))
+                    report["failures"] = child.get("failures", [])
+                    if succeeded and child["status"] == "passed":
+                        report["completed_cases"].append(case)
+                        report["remaining_cases"].remove(case)
+                    else:
+                        report["status"] = child["status"] if child["status"] in {"failed", "noisy", "invalid"} else "invalid"
+                else:
+                    report.update(status="invalid", failures=[f"{case}: no completed scenario report; see command log"])
+            except (KeyError, ValueError, TypeError, OSError, RuntimeError) as error:
+                report.update(status="invalid", failures=[str(error)])
+                raise
+            finally:
+                save()
+        if not succeeded or report["status"] != "running":
+            raise RuntimeError(f"Rendering scenario {case} did not pass; scenarios without a pass: "
+                               f"{report['remaining_cases']}. See {output / 'report.json'}")
+    if len(report["samples"]) != plan["total_samples"]:
+        report.update(status="invalid", failures=["Rendering matrix did not execute its complete declared sample count"])
+        save()
+        raise RuntimeError("Rendering matrix did not execute its complete declared sample count")
+    report.update(status="passed", active_case=None)
+    save()
+
+
+def benchmark_driver_package(source):
+    """Older candidate snapshots retain their original CLI test targets."""
+    if (source / "rust/crates/scode-benchmark-drivers/Cargo.toml").is_file():
+        print("Benchmark drivers use scode-benchmark-drivers and the copied normal release; "
+              "Cargo does not rebuild an unused CLI binary for these targets.", flush=True)
+        return "scode-benchmark-drivers"
+    print("This source predates the standalone benchmark driver package; "
+          "using its original CLI test targets with the same copied release and observers.", flush=True)
+    return "rusty-sudocode-cli"
+
+
+def benchmark_locked(name, root, output, base, command, target):
+    if name == "browser":
+        browser_smoke(root.parent, output, command)
+        return
+    # Run the declared workload and paired sampling policy. Moving execution
+    # hosts does not change budgets or per-run interaction assertions.
+    inputs = root.parent
+    work, targets = benchmark_storage(name)
+    work.mkdir(parents=True, exist_ok=True)
     for label in ["candidate", "baseline", "trusted"]:
-        destination = work / label
         # Sources are disposable copies from this invocation's exact Git archive.
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(inputs / label, destination)
+        replace_checkout(inputs / label, work / label)
     candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
-    driver_source = trusted if name == "rendering" else candidate
-    terminal = driver_source / "e2e/terminal-resize"
+    terminal = trusted / "e2e/terminal-resize"
+    plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", rendering_profile(),
+                       "--policy", str(terminal / "performance-policy.json"))
+    render_plan = json.loads(plan_log.read_text(encoding="utf-8"))
+    print(f"Required rendering plan: {len(render_plan['cases'])} scenarios, {render_plan['total_samples']} samples. "
+          "Each scenario's judged metrics and budgets remain required. Malformed plans fail before npm or Cargo.",
+          flush=True)
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
-    driver_name = "pty_render_performance" if name == "rendering" else "pty_hyperlinks"
     for label, source in [("baseline", baseline), ("candidate", candidate)]:
         command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", f"/state/target/{name}/{label}", "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(f"/state/target/{name}/{label}/release/scode", output / f"scode-{label}")
-    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(driver_source / "rust/Cargo.toml"),
-                  "--target-dir", f"/state/target/{name}/driver", "-p", "rusty-sudocode-cli", "--test", driver_name,
-                  "--no-run", "--message-format=json-render-diagnostics")
-    messages = []
+                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+    # The copied production binaries above stay fixed when dev features build the driver.
+    package, prefix = benchmark_driver_targets(trusted)
+    driver = f"{prefix}_render_performance"
+    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
+                  "--target-dir", str(targets / "driver"), "-p", package,
+                  "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
+    drivers = compiled_drivers(log, [driver])
+    args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
+            "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
+    expected_driver = hashlib.sha256(Path(drivers[driver]).read_bytes()).hexdigest()
+
+    def measured_command(*args):
+        return command(*args, extra={"SCODE_EXPECTED_DRIVER_SHA256": expected_driver})
+
+    rendering_cases(terminal, args, output / "measurements", measured_command, render_plan)
+
+
+def benchmark_driver_targets(source):
+    """The driver package and its target-name prefix for this source snapshot."""
+    package = benchmark_driver_package(source)
+    return package, "benchmark" if package == "scode-benchmark-drivers" else "pty"
+
+
+def compiled_drivers(log, names):
+    """The single test executable Cargo reported for each requested target."""
+    found = {name: [] for name in names}
     for line in log.read_text(errors="replace").splitlines():
         if line.startswith("{"):
-            messages.append(json.loads(line))
-    drivers = [row["executable"] for row in messages if row.get("reason") == "compiler-artifact"
-               and row.get("target", {}).get("name") == driver_name and row.get("executable")]
-    if len(drivers) != 1:
-        raise RuntimeError(f"Expected exactly one compiled {driver_name} driver: {drivers}")
-    script = terminal / ("benchmark.py" if name == "rendering" else "gui-benchmark.py")
-    args = [sys.executable, str(script), "--driver", drivers[0], "--base", str(output / "scode-baseline"),
-            "--candidate", str(output / "scode-candidate"), "--output", str(output / "measurements")]
-    if name == "rendering":
-        args += ["--policy", str(terminal / "performance-policy.json"), "--profile", "core"]
-    command(*args)
-    if name == "browser":
-        # Move the existing viewport gates too; deleting the old release job
-        # must not silently drop its headless/browser CPU and painting checks.
-        manifest = str(candidate / "rust/Cargo.toml")
-        viewport_target = "/state/target/browser/viewport-driver"
-        viewport_env = {"SCODE_TEST_BIN": str(output / "scode-candidate"),
-                        "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")}
-        log = command("cargo", "test", "--release", "--locked", "--manifest-path", manifest,
-                      "--target-dir", viewport_target, "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport",
-                      "--no-run", "--message-format=json-render-diagnostics", extra=viewport_env)
-        records = [json.loads(line) for line in log.read_text(errors="replace").splitlines() if line.startswith("{")]
-        drivers = [row["executable"] for row in records if row.get("reason") == "compiler-artifact"
-                   and row.get("target", {}).get("name") == "pty_prompt_viewport" and row.get("executable")]
-        if len(drivers) != 1:
-            raise RuntimeError("Missing viewport measurement driver")
-        command("cargo", "test", "--release", "--locked", "--manifest-path", manifest, "--target-dir", viewport_target,
-                "-p", "rusty-sudocode-cli", "--test", "pty_prompt_viewport", "viewport_browser_interaction",
-                "--", "--ignored", "--exact", "--nocapture", extra=viewport_env)
-        for observer in ["headless", "browser"]:
-            arguments = [sys.executable, str(candidate / "scripts/benchmark_prompt_viewport.py"),
-                         "--driver", drivers[0], "--binary", str(output / "scode-candidate"),
-                         "--output", str(output / ("viewport-" + observer))]
-            if observer == "browser":
-                arguments += ["--observer", "browser"]
-            command(*arguments, extra=viewport_env)
+            row = json.loads(line)
+            target = row.get("target", {}).get("name")
+            if row.get("reason") == "compiler-artifact" and target in found and row.get("executable"):
+                found[target].append(row["executable"])
+    if any(len(executables) != 1 for executables in found.values()):
+        raise RuntimeError(f"Expected exactly one compiled driver per target: {found}")
+    return {name: executables[0] for name, executables in found.items()}
 
+
+def browser_viewport_cases():
+    """Required native viewport journeys for browser execution and its build fixture."""
+    return ("viewport_browser_interaction", "viewport_browser_resource_exit")
+
+
+def browser_smoke(inputs, output, command):
+    """Painted-terminal behaviour against the measured release or a dev build.
+
+    Typing latency is judged by scoped local rendering; this pass checks
+    what only a real browser terminal shows: clickable links, native selection
+    surviving streaming, viewport wheel and selection, and an idle terminal.
+    """
+    reused = verified_candidate_release(inputs)
+    work, targets = benchmark_storage("rendering" if reused is not None else "browser")
+    work.mkdir(parents=True, exist_ok=True)
+    # Rendering has finished with this mutable checkout. Synchronize the actual
+    # candidate, then let normal Cargo dependency tracking validate every input.
+    candidate = work / ("trusted" if reused is not None else "candidate")
+    replace_checkout(inputs / "candidate", candidate)
+    terminal = candidate / "e2e/terminal-resize"
+    command("npm", "ci", "--prefix", str(terminal))
+    manifest = str(candidate / "rust/Cargo.toml")
+    build = str(targets / ("driver" if reused is not None else "candidate"))
+    profile = ["--release"] if reused is not None else []
+    binary = output / "scode-candidate"
+    # Copy before the drivers build: their dev features rebuild the shared graph.
+    if reused is None:
+        command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                "-p", "rusty-sudocode-cli", "--bin", "scode")
+        shutil.copy2(targets / "candidate/debug/scode", binary)
+    else:
+        shutil.copy2(reused, binary)
+        print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
+              "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
+    expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    package, prefix = benchmark_driver_targets(candidate)
+    links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
+    log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
+                  "-p", package, "--test", links, "--test", viewport,
+                  "--no-run", "--message-format=json-render-diagnostics")
+    drivers = compiled_drivers(log, [links, viewport])
+    smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
+    command(sys.executable, str(smoke), "--driver", drivers[links],
+            "--candidate", str(binary), "--output", str(output / "smoke"),
+            extra={"SCODE_EXPECTED_CANDIDATE_SHA256": expected_digest,
+                   "SCODE_EXPECTED_DRIVER_SHA256": hashlib.sha256(Path(drivers[links]).read_bytes()).hexdigest()})
+    for case in browser_viewport_cases():
+        log = command(drivers[viewport], case, "--ignored", "--exact", "--nocapture",
+                      extra={"SCODE_TEST_BIN": str(binary), "SCODE_VIEWPORT_MEASURE_DIR": str(output / "viewport-paint")})
+        counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed;", log.read_text(errors="replace"))
+        if not counts or sum(int(passed) for passed, _ in counts) == 0 or any(int(failed) for _, failed in counts):
+            raise RuntimeError(f"No actual passing viewport lifecycle test: {case}")
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != expected_digest:
+        raise RuntimeError("Browser candidate changed after validation")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--container-check", choices=["rendering", "browser"])
     parser.add_argument("--native-checks", nargs="*")
     parser.add_argument("--base", required=True)
-    parser.add_argument("--output", type=Path, default=Path("/evidence/container"))
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     runner = Path(__file__).resolve().parents[2]
     root = Path("/inputs/candidate") if args.container_check else runner
@@ -278,8 +1300,9 @@ def main():
     spec.loader.exec_module(helper)
     names = [args.container_check] if args.container_check else args.native_checks
     for name in names:
-        results = run(name, root, args.output / name, args.base, helper.run_command)
-        (args.output / name / "commands.json").write_text(json.dumps(results, indent=2))
+        output = args.output / name if args.output is not None else container_profile_output(Path("/evidence"), name)
+        results = run(name, root, output, args.base, helper.run_command)
+        (output / "commands.json").write_text(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

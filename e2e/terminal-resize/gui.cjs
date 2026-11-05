@@ -5,11 +5,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { performance } = require('node:perf_hooks');
-const { resources: processResource } = require('./resources.cjs');
+const { resources: processResource, createBrowserSampler } = require('./resources.cjs');
 const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
+const { launchBrowser } = require('./browser.cjs');
 const { WebSocketServer } = require('ws');
 const { launch } = require('./host.cjs');
+const { terminalPainter } = require('./paint.cjs');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const p95 = values => [...values].sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
@@ -39,7 +41,7 @@ async function run(config) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const websocket = new WebSocketServer({ server });
   let child, exitCode, browser, page, cdp, wireBytes = 0;
-  const wire = [], processCpu = new Map();
+  const wire = [];
   websocket.on('connection', socket => {
     child = launch({ ...config, env: { TERM_PROGRAM: 'vscode', TMUX: '', STY: '', ...config.env } }, { cols: config.cols, rows: config.rows });
     child.onData(data => {
@@ -59,10 +61,11 @@ async function run(config) {
     });
   });
   try {
-    browser = await chromium.launch({ headless: process.env.SCODE_GUI_HEADED !== '1' });
-    cdp = await browser.newBrowserCDPSession();
+    const observer = await launchBrowser(chromium, { headless: process.env.SCODE_GUI_HEADED !== '1' });
+    ({ browser, cdp } = observer);
+    const sampleBrowser = createBrowserSampler(cdp);
     page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1 });
-    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling };
+    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs, sampling, observer: observer.environment };
     report.browser = await browser.version();
     report.xterm = require('@xterm/xterm/package.json').version;
     await page.goto(`http://127.0.0.1:${server.address().port}/?options=${encodeURIComponent(JSON.stringify({ cols: config.cols, rows: config.rows }))}`);
@@ -78,25 +81,18 @@ async function run(config) {
       && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
       && fixture.viewport().split('\n').some(row => /^\s*⏵⏵ danger-full-access(?:\s|$)/u.test(row))
       && performance.now() - fixture.lastData >= 300, config.cols);
-    const screen = page.locator('.xterm-screen');
-    const painted = async () => {
-      await page.evaluate(() => fixture.frame());
-      // Capture the terminal pixels without locator.screenshot's extra
-      // actionability/stability wait, which is unrelated to terminal painting.
-      return page.screenshot({ clip: await screen.boundingBox(), animations: 'disabled' });
-    };
+    const painter = await terminalPainter(page);
+    const painted = painter.capture;
+    report.environment.pngReadback = painter.environment;
+    report.paint_observations = painter.observations;
     const progress = label => fs.writeFileSync(path.join(config.logRoot, 'progress.txt'), label);
     const resources = async label => {
       progress(label);
-      const processes = (await cdp.send('SystemInfo.getProcessInfo')).processInfo;
-      const terminal = processes.map(p => {
-        try { return { id: p.id, type: p.type, ...processResource(p.id), cpu_ms: p.cpuTime * 1000 }; }
-        catch (error) { if (!fs.existsSync(`/proc/${p.id}`) && process.platform === 'linux') return null; throw error; }
-      }).filter(Boolean);
-      for (const p of terminal) processCpu.set(p.id, Math.max(processCpu.get(p.id) || 0, p.cpu_ms));
+      const sampled = await sampleBrowser(label);
+      const terminal = sampled.processes;
       const scode = processResource(child.pid);
-      const value = { label, scode, terminal, terminal_cpu_ms: [...processCpu.values()].reduce((sum, cpu) => sum + cpu, 0),
-        terminal_rss_mib: terminal.reduce((sum, p) => sum + p.rss_mib, 0) };
+      const value = { label, scode, terminal, terminal_cpu_ms: sampled.cpu_ms,
+        terminal_rss_mib: sampled.rss_mib, exited_processes: sampled.exited_processes };
       report.resources.push(value); return value;
     };
     const baseline = await resources('ready');
@@ -153,9 +149,9 @@ async function run(config) {
       assert(!output.includes('\x1b]8;;file:'), 'file destination promoted');
       assert(!output.includes(`\x1b]8;;https://example.com/${'x'.repeat(40)}`), 'oversized destination emitted');
     }
-    async function drag(count) {
-      const start = await reveal('DragStart');
-      const end = await page.evaluate(() => fixture.locate('DragEnd'));
+    async function drag(count, startLabel = 'DragStart', endLabel = 'DragEnd', last = false, screenshot = 'selection.png') {
+      const start = await reveal(startLabel, last);
+      const end = await page.evaluate(({ label, last }) => fixture.locate(label, last), { label: endLabel, last });
       const a = await point(start, 'start');
       const beforeDrag = await page.evaluate(() => fixture.activated.length);
       const dragSamples = [];
@@ -178,16 +174,49 @@ async function run(config) {
       }
       await page.mouse.up();
       const selected = await page.evaluate(() => fixture.terminal.getSelection());
-      assert(selected.startsWith('DragStart') && selected.endsWith('DragEnd'), `selection: ${selected}`);
+      assert(selected.startsWith(startLabel) && selected.endsWith(endLabel), `selection: ${selected}`);
       assert(selected.includes('👩🏽‍💻') && selected.includes('中文界') && selected.includes('é'), 'drag broke Unicode');
       assert(!selected.includes('\x1b') && !selected.includes('https://'), 'selection contains hidden metadata');
-      fs.writeFileSync(path.join(config.logRoot, 'selection.png'), pixels);
+      fs.writeFileSync(path.join(config.logRoot, screenshot), pixels);
       assert.equal(await page.evaluate(() => fixture.activated.length), beforeDrag, 'drag activated a link');
       return { selected, samples: dragSamples };
     }
-    const selection = await drag(sampling.drag_steps);
-    report.samples.drag_frame_ms = selection.samples;
+    // With twelve points, nearest-rank P95 is the gesture's maximum. Repeat
+    // complete native gestures and retain every observation, including spikes.
+    const gestures = [];
+    for (let burst = 0; burst < sampling.drag_bursts; burst++) {
+      gestures.push(await drag(sampling.drag_steps));
+    }
+    const selection = gestures[0];
+    assert(gestures.every(gesture => gesture.selected === selection.selected), 'repeated drags changed copied source');
+    report.drag_gestures = gestures;
+    report.samples.drag_frame_ms = gestures.flatMap(gesture => gesture.samples);
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
+    const streamWindows = inputDelaysMs.length * (sampling.parsed_bursts + sampling.painted_bursts) + 2;
+    const streamDirectory = path.dirname(config.streamWindowPlan);
+    fs.mkdirSync(streamDirectory, { recursive: true });
+    fs.writeFileSync(config.streamWindowPlan, JSON.stringify({ windows: streamWindows }));
+    report.stream_windows = [];
+    let streamWindow = 0, sentChunks = 0;
+    function releaseStreamWindow() {
+      assert(streamWindow < streamWindows, 'more input windows than planned');
+      const index = streamWindow++;
+      fs.writeFileSync(path.join(streamDirectory, `permit-${index}`), 'release');
+      return { index, released_at: performance.now(), wire_before: wireBytes };
+    }
+    async function finishStreamWindow(window) {
+      const sent = path.join(streamDirectory, `sent-${window.index}`);
+      const deadline = performance.now() + 30000;
+      while (!fs.existsSync(sent)) {
+        assert.equal(exitCode, undefined);
+        assert(performance.now() < deadline, 'stream window did not send its deltas');
+        await sleep(10);
+      }
+      const chunks = Number(fs.readFileSync(sent, 'utf8'));
+      assert(Number.isSafeInteger(chunks) && chunks > sentChunks, 'stream window contained no deltas');
+      sentChunks = chunks;
+      report.stream_windows.push({ ...window, finished_at: performance.now(), chunks, wire_after: wireBytes });
+    }
     async function keys(phase) {
       progress(`typing:${phase}`);
       await page.bringToFront();
@@ -209,6 +238,7 @@ async function run(config) {
             const delay = inputDelaysMs[(key + burst) % inputDelaysMs.length];
             draft += 'x';
             await page.evaluate(draft => fixture.armInput(draft), draft);
+            const stream = phase === 'stream' ? releaseStreamWindow() : null;
             if (delay) await sleep(delay);
             const began = performance.now();
             await page.keyboard.type('x');
@@ -223,6 +253,9 @@ async function run(config) {
             } else {
               parseSamples.push(events.parsed - events.keydown);
             }
+            // Outside the input timer: require real network progress before
+            // another key, without racing screenshots against a finite EOF.
+            if (stream) await finishStreamWindow(stream);
           }
           await page.keyboard.press('Control+u');
           await wait(() => fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
@@ -243,12 +276,17 @@ async function run(config) {
     await keys('wait');
     fs.writeFileSync(path.join(config.root, 'stream-release'), 'release');
     const duringStream = await drag(1);
-    await sleep(150);
+    const headingsBefore = await page.evaluate(() => fixture.lines().join('\n').split('LinkHeading').length);
+    const selectionWindow = releaseStreamWindow();
+    await finishStreamWindow(selectionWindow);
+    await page.waitForFunction(count => fixture.lines().join('\n').split('LinkHeading').length > count, headingsBefore);
     assert.equal(await page.evaluate(() => fixture.terminal.getSelection()), duringStream.selected, 'streaming changed the selected history');
     report.streaming_selection_preserved = true;
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
     await keys('stream');
     assert(!fs.existsSync(path.join(config.root, 'prose-ready')), 'stream completed before typing samples');
+    await finishStreamWindow(releaseStreamWindow());
+    assert.equal(streamWindow, streamWindows, 'stream/input window plan was not exhausted');
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await wait(() => fixture.viewport().includes('ctx ') && fixture.lines().join('\n').split('LinkBodyEND.').length >= 3);
     await resources('stream');
@@ -289,6 +327,14 @@ async function run(config) {
     report.metrics.scode_rss_growth_mib = Math.max(0, after.scode.rss_mib - baseline.scode.rss_mib);
     report.metrics.terminal_rss_growth_mib = Math.max(0, after.terminal_rss_mib - baseline.terminal_rss_mib);
     report.metrics.wire_kib = wireBytes / 1024;
+    // Extra feature acceptance follows the paired measurement window: an older
+    // baseline has no Write body to drag, so candidate-only gestures must not
+    // contaminate CPU/RSS or input/drag regression comparisons.
+    if (config.expectFilePreview) {
+      report.file_preview = await drag(3, 'WriteDragStart', 'WriteDragEnd', true, 'file-selection.png');
+      report.file_preview.excluded_from_resource_window = true;
+      await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
+    }
     report.selected = selection.selected;
     report.status = 'passed';
     child.write('\x15');

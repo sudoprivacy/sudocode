@@ -5,9 +5,6 @@
 
 mod common;
 
-#[path = "support/terminal_palette.rs"]
-mod terminal_palette;
-
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -67,7 +64,7 @@ fn exit_with_context(sess: &mut PtySession, context: &str) {
     let code = sess.expect_eof().unwrap_or_else(|error| {
         // The method item cannot satisfy render's higher-ranked Screen lifetime.
         #[allow(clippy::redundant_closure_for_method_calls)]
-        let screen = sess.render(|screen| screen.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
     assert_eq!(code, 0, "{context} should exit successfully");
@@ -411,8 +408,7 @@ fn queued_and_offline_messages_survive_receiver_restart() {
         }
     }
     exit_with_context(&mut resumed, "recovered receiver");
-    // TestEnv defaults to the synchronous REPL, where Ctrl-D edits a nonempty
-    // draft. Keep the A2A receiver's queue mode across this second restart.
+    // Keep the A2A receiver's queue mode across this second restart.
     let mut replay = env.spawn_with_env(
         &["--resume", "latest", "--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
@@ -454,7 +450,10 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let colors = if no_color {
         ["Default".to_owned(), "Default".to_owned()]
     } else {
-        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
+        [
+            "Rgb(118, 118, 118)".to_owned(),
+            "Rgb(158, 158, 158)".to_owned(),
+        ]
     };
     let muted = &colors[usize::from(background == "15;0")];
     let vars = [
@@ -776,6 +775,7 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "<mailbox-message from=\"peer-one\">\nFIRST-PEER\n</mailbox-message>\n\n",
             "HUMAN-BETWEEN\n\n",
             "<mailbox-message from=\"peer-two&amp;three\" request-id=\"legacy-42\" summary=\"Legacy &quot;summary&quot; &amp; &#10;more\">\nSECOND-PEER\n</mailbox-message>\n\n",
+            "<mailbox-message from=\"node-peer\" verified=\"true\">\nVERIFIED-PEER\n</mailbox-message>\n\n",
             "HUMAN-AFTER"
         ))
         .unwrap();
@@ -814,6 +814,8 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "│ Summary: Legacy \"summary\" &",
             "│ more",
             "│ SECOND-PEER",
+            "Message from node-peer · verified",
+            "│ VERIFIED-PEER",
             "❯ HUMAN-AFTER",
             "ASSISTANT-REPLY",
         ];
@@ -839,6 +841,10 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
         assert!(text.contains("LITERAL-UNKNOWN"));
         assert!(text.contains("LITERAL-DUPLICATE"));
         assert!(!text.contains("Message from incomplete"));
+        assert!(
+            !text.contains("Message from peer-one · verified"),
+            "an unauthenticated sender is never shown as verified: {text}"
+        );
     });
     expect_replay_input_ready(&mut sess);
     exit(&mut sess);

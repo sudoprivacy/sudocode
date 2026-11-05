@@ -21,17 +21,17 @@ use agent_client_protocol::{
     Dispatch, Error, Handled, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
-    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
-    CancelNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, ExtRequest, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
-    SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
-    StopReason, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-    UnstructuredCommandInput, Usage,
+    AgentCapabilities, AgentNotification, AvailableCommand, AvailableCommandInput,
+    AvailableCommandsUpdate, CancelNotification, ClientRequest, CloseSessionRequest,
+    CloseSessionResponse, ContentBlock, ContentChunk, ExtNotification, ExtRequest, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
+    SessionUpdate, SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput, Usage,
 };
 use engine_core::engine_events::CompletionAction;
 use engine_core::{AuthMode, DirectToolError, EngineDelegate, EngineEvent};
@@ -181,7 +181,7 @@ impl AcpError {
                 raw_message.chars().take(100).collect::<String>()
             )
         } else {
-            format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message)
+            format!("发生错误：{raw_message}\n\n请尝试简化输入或稍后重试。")
         }
     }
 }
@@ -280,6 +280,12 @@ pub(crate) struct ResumeToolsRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct ResumeToolsResponse {}
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeStatusRequest {
+    pub session_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Custom extension: _sudocode/a2a/* (direct A2A requests)
 // ---------------------------------------------------------------------------
@@ -287,6 +293,7 @@ pub(crate) struct ResumeToolsResponse {}
 // Served from the catch-all dispatch rather than as typed handlers: every typed
 // handler nests the server's type one level deeper, and the chain is already at
 // the depth the compiler lays out by default in every crate that runs it.
+const RUNTIME_STATUS_METHOD: &str = "_sudocode/session/status";
 const DIRECT_SEND_METHOD: &str = "_sudocode/a2a/send";
 const DIRECT_AGENT_LIST_METHOD: &str = "_sudocode/a2a/agent_list";
 
@@ -345,6 +352,24 @@ fn subagent_events_version(meta: Option<&agent_client_protocol_schema::Meta>) ->
         .get("version")?
         .as_u64()?;
     (version >= 1).then_some(version.min(SUBAGENT_EVENTS_VERSION))
+}
+
+/// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
+/// echoes in the `initialize` result) when the client itself is the agent its
+/// peers address. A peer message then reaches the client as
+/// `_sudocode/session/peer_message` and does not start a turn of this session,
+/// so one message never has two respondents.
+pub const PEER_INPUT_META_KEY: &str = "peerInput";
+
+/// Whether the client asked to own peer input
+/// (`clientCapabilities._meta.sudocode.peerInput.version >= 1`). Anything
+/// malformed is "not asked".
+fn peer_input_owned(meta: Option<&agent_client_protocol_schema::Meta>) -> bool {
+    meta.and_then(|meta| meta.get("sudocode"))
+        .and_then(|sudocode| sudocode.get(PEER_INPUT_META_KEY))
+        .and_then(|peer_input| peer_input.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|version| version >= 1)
 }
 
 /// ACP presentation subscriptions and durable wire delivery. All lifecycle
@@ -586,10 +611,7 @@ async fn drive_prompt(
     cx: ConnectionTo<Client>,
 ) -> Result<(PromptResponse, String), AcpError> {
     let (prompt_text, images) = extract_content_from_blocks(&req.prompt)?;
-    let trace_id = req
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("traceId").and_then(|v| v.as_str().map(String::from)));
+    let trace_id = prompt_trace_id(&req);
     let sid = req.session_id.to_string();
     let admitted_engine = registry
         .engine(&sid)
@@ -631,16 +653,7 @@ async fn drive_prompt(
     if let Some(subagents) = &subagents {
         subagents.set_connection(cx_inner.clone());
     }
-    let expected = req
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("sudocode"))
-        .and_then(|m| m.get("expectedContext"))
-        .map(|value| {
-            serde_json::from_value::<engine_core::engine_events::ContextRef>(value.clone())
-        })
-        .transpose()
-        .map_err(|e| AcpError::invalid_params(e.to_string()))?;
+    let expected = expected_prompt_context(&req)?;
     let is_slash_command = prompt_text.starts_with('/');
     let holds_cwd_lease =
         is_slash_command && session_ops::slash_command_holds_cwd_lease(&prompt_text);
@@ -655,9 +668,6 @@ async fn drive_prompt(
         .driver(&sid)
         .ok_or_else(|| AcpError::internal("missing engine session driver"))?;
     let (_listener, mut events) = driver.listen(cx_inner.clone());
-    let mut assistant_text = String::new();
-    let mut committed_context = None;
-    let result: Result<(StopReason, Option<PromptUsage>), AcpError>;
     let _cwd_guard = if holds_cwd_lease {
         let cwd = session_cwd.clone().unwrap_or_else(|| PathBuf::from("."));
         Some(
@@ -669,83 +679,25 @@ async fn drive_prompt(
     } else {
         None
     };
-    {
-        let mut blocks: Vec<_> = images
-            .into_iter()
-            .map(
-                |(data, mime_type)| engine_core::engine_events::ContentBlock::Image {
-                    data,
-                    mime_type,
-                },
-            )
-            .collect();
-        let prompt_text_for_management = prompt_text.clone();
-        blocks.push(engine_core::engine_events::ContentBlock::Text { text: prompt_text });
+    let progress = {
         let context = Some(engine_core::PromptContext {
             trace_id: trace_id.clone().unwrap_or_default(),
             expected_context: expected,
             image_policy: engine_core::engine_events::ImageInputPolicy::DescribeUnsupported,
             input_views: Vec::new(),
         });
-        let command = if is_management {
-            engine_core::EngineCommand::Management {
-                line: prompt_text_for_management,
-                context,
-                build: engine_core::engine_events::ManagementContext {
-                    agent_version: config.agent_version.clone(),
-                    git_sha: config.git_sha.clone(),
-                    build_target: config.build_target.clone(),
-                },
-            }
-        } else {
-            engine_core::EngineCommand::Prompt { blocks, context }
-        };
+        let command = prompt_engine_command(prompt_text, images, context, is_management, &config);
         driver.send(command).map_err(AcpError::internal)?;
-        result = loop {
-            tokio::select! {
-                biased;
-                event = events.recv() => match event {
-                    Some(EngineEvent::TextDelta { text }) => assistant_text.push_str(&text),
-                    Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
-                    Some(EngineEvent::TurnComplete(complete)) => {
-                        let auto_compacted = complete.auto_compaction.as_ref().is_some_and(|event| event.removed_message_count > 0 || event.report.as_ref().is_none_or(|report| report.outcome == runtime::CompactionOutcome::TargetMet));
-                        if !is_management { session_ops::record_turn_usage(&engine, &complete); }
-                        let usage = if is_management { None } else { session_ops::build_prompt_usage(&engine, &complete, auto_compacted) };
-                        break Ok((if complete.cancelled { StopReason::Cancelled } else { StopReason::EndTurn }, usage));
-                    }
-                    Some(EngineEvent::PromptRejected { message }) => break Err(AcpError::invalid_params(message)),
-                    Some(EngineEvent::TurnFailed { message, context_window }) => break Err(AcpError::Turn { message, context_window }),
-                    Some(EngineEvent::Error { message }) => break Err(AcpError::internal(message)),
-                    Some(_) => {}
-                    None => break Err(AcpError::internal("engine session closed before turn completion")),
-                }
-            }
-        };
-    }
-
-    let context = committed_context;
+        collect_prompt_events(&mut events, &engine, is_management).await
+    };
+    let PromptEventResult {
+        result,
+        assistant_text,
+        context,
+    } = progress;
     match result {
         Ok((stop_reason, prompt_usage)) => {
-            let mut response = PromptResponse::new(stop_reason);
-            if let Some(u) = prompt_usage {
-                let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
-                let mut meta = Map::new();
-                meta.insert("sudocode".to_string(), json!(sudocode_meta));
-                response = response
-                    .usage(
-                        Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
-                            .cached_read_tokens(u.cache_read_tokens)
-                            .cached_write_tokens(u.cache_write_tokens),
-                    )
-                    .meta(Some(meta));
-            }
-            if let Some(context) = context {
-                let meta = response.meta.get_or_insert_with(Map::new);
-                let ns = meta
-                    .entry("sudocode".to_string())
-                    .or_insert_with(|| json!({}));
-                ns["contextRef"] = json!(context);
-            }
+            let response = complete_prompt_response(stop_reason, prompt_usage, context);
             Ok((response, assistant_text))
         }
         Err(error) => {
@@ -765,6 +717,124 @@ async fn drive_prompt(
     }
 }
 
+fn prompt_trace_id(req: &PromptRequest) -> Option<String> {
+    req.meta
+        .as_ref()
+        .and_then(|m| m.get("traceId").and_then(|v| v.as_str().map(String::from)))
+}
+
+fn expected_prompt_context(
+    req: &PromptRequest,
+) -> Result<Option<engine_core::engine_events::ContextRef>, AcpError> {
+    req.meta
+        .as_ref()
+        .and_then(|m| m.get("sudocode"))
+        .and_then(|m| m.get("expectedContext"))
+        .map(|value| {
+            serde_json::from_value::<engine_core::engine_events::ContextRef>(value.clone())
+        })
+        .transpose()
+        .map_err(|e| AcpError::invalid_params(e.to_string()))
+}
+
+fn prompt_engine_command(
+    prompt_text: String,
+    images: Vec<(String, String)>,
+    context: Option<engine_core::PromptContext>,
+    is_management: bool,
+    config: &SdkAcpConfig,
+) -> engine_core::EngineCommand {
+    let mut blocks: Vec<_> = images
+        .into_iter()
+        .map(
+            |(data, mime_type)| engine_core::engine_events::ContentBlock::Image { data, mime_type },
+        )
+        .collect();
+    let prompt_text_for_management = prompt_text.clone();
+    blocks.push(engine_core::engine_events::ContentBlock::Text { text: prompt_text });
+    if is_management {
+        engine_core::EngineCommand::Management {
+            line: prompt_text_for_management,
+            context,
+            build: engine_core::engine_events::ManagementContext {
+                agent_version: config.agent_version.clone(),
+                git_sha: config.git_sha.clone(),
+                build_target: config.build_target.clone(),
+            },
+        }
+    } else {
+        engine_core::EngineCommand::Prompt { blocks, context }
+    }
+}
+
+struct PromptEventResult {
+    result: Result<(StopReason, Option<PromptUsage>), AcpError>,
+    assistant_text: String,
+    context: Option<engine_core::engine_events::ContextRef>,
+}
+
+async fn collect_prompt_events(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
+    engine: &SessionEngine,
+    is_management: bool,
+) -> PromptEventResult {
+    let mut assistant_text = String::new();
+    let mut committed_context = None;
+    let result = loop {
+        tokio::select! {
+            biased;
+            event = events.recv() => match event {
+                Some(EngineEvent::TextDelta { text }) => assistant_text.push_str(&text),
+                Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
+                Some(EngineEvent::TurnComplete(complete)) => {
+                    let auto_compacted = complete.auto_compaction.as_ref().is_some_and(|event| event.removed_message_count > 0 || event.report.as_ref().is_none_or(|report| report.outcome == runtime::CompactionOutcome::TargetMet));
+                    if !is_management { session_ops::record_turn_usage(engine, &complete); }
+                    let usage = if is_management { None } else { session_ops::build_prompt_usage(engine, &complete, auto_compacted) };
+                    break Ok((if complete.cancelled { StopReason::Cancelled } else { StopReason::EndTurn }, usage));
+                }
+                Some(EngineEvent::PromptRejected { message }) => break Err(AcpError::invalid_params(message)),
+                Some(EngineEvent::TurnFailed { message, context_window }) => break Err(AcpError::Turn { message, context_window }),
+                Some(EngineEvent::Error { message }) => break Err(AcpError::internal(message)),
+                Some(_) => {}
+                None => break Err(AcpError::internal("engine session closed before turn completion")),
+            }
+        }
+    };
+    PromptEventResult {
+        result,
+        assistant_text,
+        context: committed_context,
+    }
+}
+
+fn complete_prompt_response(
+    stop_reason: StopReason,
+    prompt_usage: Option<PromptUsage>,
+    context: Option<engine_core::engine_events::ContextRef>,
+) -> PromptResponse {
+    let mut response = PromptResponse::new(stop_reason);
+    if let Some(u) = prompt_usage {
+        let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
+        let mut meta = Map::new();
+        meta.insert("sudocode".to_string(), json!(sudocode_meta));
+        response = response
+            .usage(
+                Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
+                    .cached_read_tokens(u.cache_read_tokens)
+                    .cached_write_tokens(u.cache_write_tokens),
+            )
+            .meta(Some(meta));
+    }
+    if let Some(context) = context {
+        let meta = response.meta.get_or_insert_with(Map::new);
+        let ns = meta
+            .entry("sudocode".to_string())
+            .or_insert_with(|| json!({}));
+        ns["contextRef"] = json!(context);
+    }
+    response
+}
+
 /// Deliver peer input through the same engine queue as human input.
 /// The mailbox cursor advances at the durable input-commit boundary. The bound
 /// controller receives streaming output, approval requests and questions.
@@ -778,6 +848,7 @@ async fn ensure_a2a_receiver(
     cx: &ConnectionTo<Client>,
     _config: &SdkAcpConfig,
     session_id: &str,
+    client_owned: bool,
 ) {
     let Some(agent) = registry.agent_of(session_id) else {
         return;
@@ -791,7 +862,47 @@ async fn ensure_a2a_receiver(
     let Some(mailbox) = mailbox else {
         return;
     };
-    let (receiver, mut rx) = loop {
+    let verified = mailbox.authenticates_senders();
+    let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
+    else {
+        return;
+    };
+    tokio::spawn(run_peer_receiver(
+        receiver,
+        rx,
+        Arc::clone(registry),
+        cx.clone(),
+        agent,
+        session_id.to_owned(),
+        PeerRoute {
+            client_owned,
+            verified,
+        },
+    ));
+}
+
+type PeerDelivery = (
+    runtime::agent_mailbox::MailboxEnvelope,
+    std::sync::mpsc::SyncSender<bool>,
+);
+type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
+
+/// Where a session's peer messages go, and what is known about their senders.
+#[derive(Clone, Copy)]
+struct PeerRoute {
+    /// The client owns peer input (`peerInput`): deliver to it, start no turn.
+    client_owned: bool,
+    /// The session's mailbox authenticates every writer.
+    verified: bool,
+}
+
+async fn admit_peer_receiver(
+    registry: &SharedSessionRegistry,
+    agent: &str,
+    mailbox: &Arc<runtime::mailbox::Mailbox>,
+    session_id: &str,
+) -> Option<(Arc<PeerReceiver>, PeerInbox)> {
+    loop {
         let admission = {
             // Closing the last session and admitting its replacement use this
             // same lock order. A stopped receiver stays registered until its
@@ -799,181 +910,238 @@ async fn ensure_a2a_receiver(
             // unlock attempts. A failed unlock still relies on backend TTL.
             let sessions = registry.lock_sessions();
             if !sessions.contains_key(session_id) {
-                return;
+                return None;
             }
             let mut receivers = registry.lock_peer_receivers();
-            if let Some(previous) = receivers.get(&agent) {
+            if let Some(previous) = receivers.get(agent) {
                 if !previous.stop.is_aborted() {
-                    return;
+                    return None;
                 }
                 Err(Arc::clone(previous))
             } else {
                 let stop = HookAbortSignal::new();
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(
-                    runtime::agent_mailbox::MailboxEnvelope,
-                    std::sync::mpsc::SyncSender<bool>,
-                )>();
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
                 let callback_stop = stop.clone();
                 let worker = runtime::mailbox::spawn_inbox_poller(
-                    Arc::clone(&mailbox),
+                    Arc::clone(mailbox),
                     200,
                     "acp-peer",
                     stop.clone(),
-                    move |message| {
-                        if message.body.trim().is_empty() {
-                            return true;
-                        }
-                        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-                        if tx.send((message.clone(), ack_tx)).is_err() {
-                            return false;
-                        }
-                        while !callback_stop.is_aborted() {
-                            match ack_rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                                Ok(handled) => return handled,
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                    return false
-                                }
-                            }
-                        }
-                        false
-                    },
+                    move |message| deliver_peer_envelope(message, &tx, &callback_stop),
                 );
                 let receiver = Arc::new(PeerReceiver {
                     stop,
                     worker: Mutex::new(PeerReceiverWorker::Running(worker)),
                 });
-                receivers.insert(agent.clone(), Arc::clone(&receiver));
+                receivers.insert(agent.to_owned(), Arc::clone(&receiver));
                 Ok((receiver, rx))
             }
         };
         match admission {
-            Ok(started) => break started,
+            Ok(started) => return Some(started),
             Err(previous) => {
                 let joining = Arc::clone(&previous);
                 match tokio::task::spawn_blocking(move || joining.stop_and_join()).await {
                     Ok(Ok(())) => {}
                     error => {
                         eprintln!("[acp-peer] previous receiver teardown failed: {error:?}");
-                        return;
+                        return None;
                     }
                 }
                 let mut receivers = registry.lock_peer_receivers();
                 if receivers
-                    .get(&agent)
+                    .get(agent)
                     .is_some_and(|entry| Arc::ptr_eq(entry, &previous))
                 {
-                    receivers.remove(&agent);
+                    receivers.remove(agent);
                 }
             }
         }
-    };
+    }
+}
+
+fn deliver_peer_envelope(
+    message: &runtime::agent_mailbox::MailboxEnvelope,
+    tx: &tokio::sync::mpsc::UnboundedSender<PeerDelivery>,
+    callback_stop: &HookAbortSignal,
+) -> bool {
+    if message.body.trim().is_empty() {
+        return true;
+    }
+    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+    if tx.send((message.clone(), ack_tx)).is_err() {
+        return false;
+    }
+    while !callback_stop.is_aborted() {
+        match ack_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(handled) => return handled,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+    false
+}
+
+async fn run_peer_receiver(
+    receiver: Arc<PeerReceiver>,
+    mut rx: PeerInbox,
+    registry: SharedSessionRegistry,
+    cx: ConnectionTo<Client>,
+    agent: String,
+    mut bound: String,
+    route: PeerRoute,
+) {
+    let PeerRoute {
+        client_owned,
+        verified,
+    } = route;
     let stop = receiver.stop.clone();
-    let registry = Arc::clone(registry);
-    let cx = cx.clone();
-    let mut bound = session_id.to_string();
-    tokio::spawn(async move {
-        loop {
-            let inbound = tokio::select! {
-                () = stop.cancelled() => break,
-                inbound = rx.recv() => inbound,
-            };
-            let Some((message, ack)) = inbound else {
-                break;
-            };
-            // The session this agent's messages go to: the one bound so far
-            // while it lives, else another session of the same agent.
-            let Some(session_id) = registry.session_of_agent(&agent, &bound) else {
-                let _ = ack.send(false);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                continue;
-            };
-            bound.clone_from(&session_id);
-            if registry
-                .engine(&session_id)
-                .is_some_and(|engine| engine.tool_control().1)
-            {
-                let _ = ack.send(false);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                continue;
-            }
-            let Some(driver) = registry.driver(&session_id) else {
-                let _ = ack.send(false);
-                continue;
-            };
-            let text = message.to_prompt();
-            // A retried mailbox cursor must refer to the same still-pending input.
-            use std::hash::{Hash, Hasher};
-            let mut digest = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_string(&message)
-                .unwrap_or_default()
-                .hash(&mut digest);
-            let client_id = format!("peer:{:016x}", digest.finish());
-            let mut states = driver.input_changes();
-            let action = engine_core::engine_events::InputAction::Submit {
-                client_id,
-                draft: None,
-                input: engine_core::engine_events::TurnInput {
-                    id: 0,
-                    text: text.clone(),
-                    display: text.clone(),
-                    source: engine_core::engine_events::InputSource::Peer,
-                    attachments: Vec::new(),
-                },
-                delivery: message.delivery,
-                context: None,
-            };
-            let receipt = tokio::select! {
-                () = stop.cancelled() => { let _ = ack.send(false); break; },
-                receipt = driver.input(action, cx.clone()) => receipt,
-            };
-            let Ok(receipt) = receipt else {
-                let _ = ack.send(false);
-                continue;
-            };
-            let Some(id) = receipt["id"].as_u64() else {
-                let _ = ack.send(false);
-                continue;
-            };
-            let committed = loop {
-                let consumed = states
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|state| !state.pending.iter().any(|input| input.id == id));
-                if consumed {
-                    break true;
-                }
-                tokio::select! {
-                    () = stop.cancelled() => break false,
-                    changed = states.changed() => { if changed.is_err() { break false; } },
-                }
-            };
-            let _ = ack.send(committed);
-            if !committed {
+    loop {
+        // A retried mailbox cursor must refer to the same still-pending input.
+
+        let inbound = tokio::select! {
+            () = stop.cancelled() => break,
+            inbound = rx.recv() => inbound,
+        };
+        let Some((message, ack)) = inbound else {
+            break;
+        };
+        // The session this agent's messages go to: the one bound so far
+        // while it lives, else another session of the same agent.
+        // A refusal leaves the message unread; the mailbox receiver backs off
+        // and hands it over again. The engine owns the operator's pause gate.
+        let Some(session_id) = registry.session_of_agent(&agent, &bound) else {
+            let _ = ack.send(false);
+            continue;
+        };
+        bound.clone_from(&session_id);
+        if client_owned {
+            // The client is the agent: hand it the message instead of this
+            // session's model. The cursor advances once the notification is
+            // written to the transport; a closed client leaves it unread.
+            let delivered = cx
+                .send_notification(peer_message_notification(&session_id, &message, verified))
+                .is_ok();
+            let _ = ack.send(delivered);
+            if !delivered {
                 break;
             }
-            let mut a2a = json!({"from":message.from,"kind":message.kind});
-            if let Some(summary) = &message.summary {
-                a2a["summary"] = json!(summary);
-            }
-            let notification = SessionNotification::new(
-                session_id.clone(),
-                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(&text),
-                ))),
-            )
-            .meta(Map::from_iter([(
-                String::from("sudocode"),
-                json!({"a2a":a2a}),
-            )]));
-            let _ = cx.send_notification(notification);
+            continue;
         }
-        stop.abort();
-        match tokio::task::spawn_blocking(move || receiver.stop_and_join()).await {
-            Ok(Ok(())) => {}
-            error => eprintln!("[acp-peer] receiver teardown failed: {error:?}"),
+        let Some(driver) = registry.driver(&session_id) else {
+            let _ = ack.send(false);
+            continue;
+        };
+        let text = message.to_prompt(verified);
+        let mut states = driver.input_changes();
+        let action = peer_input_action(&message, &text);
+        let receipt = tokio::select! {
+            () = stop.cancelled() => { let _ = ack.send(false); break; },
+            receipt = driver.input(action, cx.clone()) => receipt,
+        };
+        let Ok(receipt) = receipt else {
+            let _ = ack.send(false);
+            continue;
+        };
+        let Some(id) = receipt["id"].as_u64() else {
+            let _ = ack.send(false);
+            continue;
+        };
+        let committed = wait_peer_input_commit(&mut states, id, &stop).await;
+        let _ = ack.send(committed);
+        if !committed {
+            break;
         }
-    });
+        let mut a2a = json!({"from":message.from,"kind":message.kind,"verified":verified});
+        if let Some(summary) = &message.summary {
+            a2a["summary"] = json!(summary);
+        }
+        let notification = SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(&text),
+            ))),
+        )
+        .meta(Map::from_iter([(
+            String::from("sudocode"),
+            json!({"a2a":a2a}),
+        )]));
+        let _ = cx.send_notification(notification);
+    }
+    stop.abort();
+    match tokio::task::spawn_blocking(move || receiver.stop_and_join()).await {
+        Ok(Ok(())) => {}
+        error => eprintln!("[acp-peer] receiver teardown failed: {error:?}"),
+    }
+}
+
+/// A peer message for a client that owns peer input: the same wrapper a session
+/// model would read, plus the sender fields a client routes and replies on.
+fn peer_message_notification(
+    session_id: &str,
+    message: &runtime::agent_mailbox::MailboxEnvelope,
+    verified: bool,
+) -> AgentNotification {
+    let mut a2a = json!({"from": message.from, "kind": message.kind, "verified": verified});
+    if let Some(summary) = &message.summary {
+        a2a["summary"] = json!(summary);
+    }
+    let payload = serde_json::value::to_raw_value(&json!({
+        "sessionId": session_id,
+        "text": message.to_prompt(verified),
+        "body": message.body,
+        "sudocode": {"a2a": a2a},
+    }))
+    .expect("peer message projection is serializable");
+    AgentNotification::ExtNotification(ExtNotification::new(
+        "_sudocode/session/peer_message",
+        payload.into(),
+    ))
+}
+
+async fn wait_peer_input_commit(
+    states: &mut tokio::sync::watch::Receiver<Option<engine_core::engine_events::InputState>>,
+    id: u64,
+    stop: &HookAbortSignal,
+) -> bool {
+    loop {
+        let consumed = states
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| !state.pending.iter().any(|input| input.id == id));
+        if consumed {
+            return true;
+        }
+        tokio::select! {
+            () = stop.cancelled() => return false,
+            changed = states.changed() => { if changed.is_err() { return false; } },
+        }
+    }
+}
+
+fn peer_input_action(
+    message: &runtime::agent_mailbox::MailboxEnvelope,
+    text: &str,
+) -> engine_core::engine_events::InputAction {
+    use std::hash::{Hash, Hasher};
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&message)
+        .unwrap_or_default()
+        .hash(&mut digest);
+    let client_id = format!("peer:{:016x}", digest.finish());
+    engine_core::engine_events::InputAction::Submit {
+        client_id,
+        draft: None,
+        input: engine_core::engine_events::TurnInput {
+            id: 0,
+            text: text.to_owned(),
+            display: text.to_owned(),
+            source: engine_core::engine_events::InputSource::Peer,
+            attachments: Vec::new(),
+        },
+        delivery: message.delivery,
+        context: None,
+    }
 }
 
 /// The `session/update` notification advertising `specs` to the client
@@ -1017,6 +1185,8 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("hostContext".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
@@ -1072,8 +1242,52 @@ fn session_response_meta(
 
 /// `_meta.sudocode` key: replace the built-in static system-prompt blocks.
 pub const SYSTEM_PROMPT_META_KEY: &str = "systemPrompt";
-/// `_meta.sudocode` key: append a trailing dynamic system-prompt block.
+/// `_meta.sudocode` key: append a trailing static system-prompt block.
 pub const APPEND_SYSTEM_PROMPT_META_KEY: &str = "appendSystemPrompt";
+
+fn host_context_from_meta(
+    meta: Option<&agent_client_protocol_schema::Meta>,
+) -> Result<bool, AcpError> {
+    let Some(value) = meta
+        .and_then(|meta| meta.get("sudocode"))
+        .and_then(|ns| ns.get("hostContext"))
+    else {
+        return Ok(false);
+    };
+    if value == &json!({ "version": 1 }) {
+        Ok(true)
+    } else {
+        Err(AcpError::invalid_params(
+            "_meta.sudocode.hostContext must be {version:1}",
+        ))
+    }
+}
+
+/// Caller context is resolved at execution, never at input admission. A failed,
+/// disconnected or malformed provider cannot fall back to an older snapshot.
+pub(crate) async fn resolve_host_context(
+    session_id: &str,
+    cx: ConnectionTo<Client>,
+) -> Result<String, String> {
+    let params = json!({ "sessionId": session_id });
+    let request = ClientRequest::ExtMethodRequest(ExtRequest::new(
+        "_sudocode/session/host_context",
+        StdArc::from(serde_json::value::to_raw_value(&params).map_err(|error| error.to_string())?),
+    ));
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        cx.send_request(request).block_task(),
+    )
+    .await
+    .map_err(|_| "Host context resolution timed out".to_string())?
+    .map_err(|error| format!("Host context resolution failed: {error}"))?;
+    response
+        .get("appendSystemPrompt")
+        .and_then(|value| value.as_str())
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "Host context response must contain non-empty appendSystemPrompt".into())
+}
 
 /// Read `_meta.sudocode.systemPrompt` / `_meta.sudocode.appendSystemPrompt`
 /// from a `session/new` or `session/load` request.
@@ -1486,7 +1700,7 @@ pub trait HostedSessionFactory: Send + Sync {
         None
     }
     fn close(&self) {}
-    fn state_changed(&self, _state: engine_core::EngineState, _reason: Option<String>) {}
+    fn state_changed(&self, _state: engine_core::EngineState) {}
     fn open(
         &self,
         requested_id: Option<&str>,
@@ -1542,6 +1756,14 @@ impl CompletionRoute {
         self.driver.strong_count() > 0 || !self.retirement.wait(std::time::Duration::ZERO)
     }
 }
+
+/// Resources retained until close telemetry and receiver shutdown finish.
+type ClosedSession = (
+    Arc<SessionEngine>,
+    std::time::Instant,
+    Arc<crate::session_driver::SessionDriver>,
+    Option<Arc<PeerReceiver>>,
+);
 
 impl SessionRegistry {
     fn completion_route_slot(&self, session_id: &str) -> Result<CompletionRouteSlot<'_>, AcpError> {
@@ -1877,15 +2099,7 @@ impl SessionRegistry {
     /// Remove a session after `session/close`, returning its engine + the time
     /// it was registered so the caller can record the close telemetry before the
     /// last `Arc` drops.
-    fn take(
-        &self,
-        session_id: &str,
-    ) -> Option<(
-        Arc<SessionEngine>,
-        std::time::Instant,
-        Arc<crate::session_driver::SessionDriver>,
-        Option<Arc<PeerReceiver>>,
-    )> {
+    fn take(&self, session_id: &str) -> Option<ClosedSession> {
         let taken = self.lock_sessions().remove(session_id)?;
         let receiver = self.stop_unused_peer_receiver(&taken.agent);
         Some((taken.engine, taken.started_at, taken.driver, receiver))
@@ -2203,6 +2417,23 @@ pub(crate) fn answer_permission(
 }
 
 /// The session, tool and tool input a direct A2A request asks for.
+/// Observe one engine through its command lane without acquiring a turn
+/// listener or the session lock, including while input or tools are pending.
+async fn read_runtime_status(
+    registry: Arc<SessionRegistry>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    let request: RuntimeStatusRequest = serde_json::from_value(params)
+        .map_err(|error| Error::invalid_params().data(error.to_string()))?;
+    let driver = registry
+        .driver(&request.session_id)
+        .ok_or_else(|| Error::invalid_params().data("Unknown session"))?;
+    driver
+        .runtime_status()
+        .await
+        .map_err(|error| Error::internal_error().data(error))
+}
+
 fn direct_a2a_call(
     message: agent_client_protocol::UntypedMessage,
 ) -> Result<(String, &'static str, serde_json::Value), DirectToolError> {
@@ -2399,6 +2630,7 @@ pub(crate) async fn run_acp_on_transport(
     // Per connection: whether this client opted into sub-agent events at
     // `initialize`. Sessions it creates or loads get a sub-agent route.
     let subagent_events = Arc::new(AtomicBool::new(false));
+    let peer_input_client = Arc::new(AtomicBool::new(false));
     let subagent_completions = Arc::new(AtomicBool::new(false));
     let task_completions = Arc::new(AtomicBool::new(false));
 
@@ -2412,6 +2644,7 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_events = Arc::clone(&subagent_events);
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
+                let peer_input_client = Arc::clone(&peer_input_client);
                 async move |req: InitializeRequest,
                             responder: Responder<InitializeResponse>,
                             _cx: ConnectionTo<Client>| {
@@ -2432,6 +2665,15 @@ pub(crate) async fn run_acp_on_transport(
                             ));
                     subagent_completions.store(completion_version, Ordering::SeqCst);
                     let mut meta = initialize_meta(subagent_version);
+                    // Hosted sessions have no client of their own to own peer
+                    // input; their host already routes it.
+                    let owns_peer_input =
+                        !hosted && peer_input_owned(req.client_capabilities.meta.as_ref());
+                    peer_input_client.store(owns_peer_input, Ordering::SeqCst);
+                    if owns_peer_input {
+                        meta.get_mut("sudocode").unwrap()[PEER_INPUT_META_KEY] =
+                            json!({"version": 1});
+                    }
                     if completion_version {
                         meta.get_mut("sudocode").unwrap()[if tasks {
                             subagent_completions::TASK_META_KEY
@@ -2470,9 +2712,17 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_events = Arc::clone(&subagent_events);
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
+                let peer_input_client = Arc::clone(&peer_input_client);
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    let host_context = match host_context_from_meta(req.meta.as_ref()) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            responder.respond_with_error(acp_error_to_sdk(&error))?;
+                            return Ok(());
+                        }
+                    };
                     let prompt_overrides =
                         match system_prompt_overrides_from_meta(req.meta.as_ref()) {
                             Ok(v) => v,
@@ -2499,6 +2749,7 @@ pub(crate) async fn run_acp_on_transport(
                     let config = config.clone();
                     let commands = session_ops::available_commands();
                     let peer_config = config.clone();
+                    let client_owns_peer_input = peer_input_client.load(Ordering::SeqCst);
                     let cx_notify = cx.clone();
                     let completions_enabled = subagent_completions.load(Ordering::SeqCst);
                     let tasks_enabled = task_completions.load(Ordering::SeqCst);
@@ -2536,15 +2787,15 @@ pub(crate) async fn run_acp_on_transport(
                                     &config,
                                     &source,
                                     &build_registry,
-                                    req.cwd,
-                                    mcp_servers,
+                                    &req.cwd,
+                                    &mcp_servers,
                                     prompt_overrides,
                                     memory,
                                 )?,
                                 None => session_ops::build_new_session(
                                     &config,
-                                    req.cwd,
-                                    mcp_servers,
+                                    &req.cwd,
+                                    &mcp_servers,
                                     prompt_overrides,
                                     memory,
                                 )?,
@@ -2557,6 +2808,7 @@ pub(crate) async fn run_acp_on_transport(
 
                         match result {
                             Ok((engine, session_id, cwd)) => {
+                                engine.require_host_context(host_context);
                                 let completion = if completions_enabled {
                                     match registry.completion_route(
                                         &engine.session_snapshot(),
@@ -2619,6 +2871,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &cx_notify,
                                     &peer_config,
                                     &session_id,
+                                    client_owns_peer_input,
                                 )
                                 .await;
                             }
@@ -2688,7 +2941,9 @@ pub(crate) async fn run_acp_on_transport(
                                 if let Some(tracer) = engine.session_tracer() {
                                     let usage = engine.usage_snapshot();
                                     let cumulative = usage.cumulative_usage();
-                                    let duration_ms = started_at.elapsed().as_millis() as u64;
+                                    let duration_ms =
+                                        u64::try_from(started_at.elapsed().as_millis())
+                                            .unwrap_or(u64::MAX);
                                     tracer.record_usage(
                                         "session_summary".to_string(),
                                         cumulative.input_tokens,
@@ -2815,9 +3070,17 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_events = Arc::clone(&subagent_events);
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
+                let peer_input_client = Arc::clone(&peer_input_client);
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    let host_context = match host_context_from_meta(req.meta.as_ref()) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            responder.respond_with_error(acp_error_to_sdk(&error))?;
+                            return Ok(());
+                        }
+                    };
                     let prompt_overrides =
                         match system_prompt_overrides_from_meta(req.meta.as_ref()) {
                             Ok(v) => v,
@@ -2837,6 +3100,7 @@ pub(crate) async fn run_acp_on_transport(
                     let config = config.clone();
                     let commands = session_ops::available_commands();
                     let peer_config = config.clone();
+                    let client_owns_peer_input = peer_input_client.load(Ordering::SeqCst);
                     let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
@@ -2898,7 +3162,7 @@ pub(crate) async fn run_acp_on_transport(
                                 &config,
                                 &load_registry,
                                 &sid,
-                                cwd,
+                                &cwd,
                                 mcp_servers,
                                 prompt_overrides,
                                 memory,
@@ -2912,6 +3176,7 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((engine, session_id, cwd)) => {
                                 // A reload of a live session keeps its route, so
+                                engine.require_host_context(host_context);
                                 // background agents it already spawned still
                                 // reach the client.
                                 let completion = if completions_enabled {
@@ -2992,6 +3257,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &cx_notify,
                                     &peer_config,
                                     &session_id,
+                                    client_owns_peer_input,
                                 )
                                 .await;
                             }
@@ -3329,7 +3595,7 @@ pub(crate) async fn run_acp_on_transport(
                 let registry = Arc::clone(&registry);
                 async move |req: CancelSubagentRequest,
                             responder: Responder<CancelSubagentResponse>,
-                            _cx: ConnectionTo<Client>| {
+                            cx: ConnectionTo<Client>| {
                     let Some(_subagents) = registry.subagents(&req.session_id) else {
                         responder.respond_with_error(acp_error_to_sdk(
                             &AcpError::invalid_params(format!(
@@ -3345,10 +3611,10 @@ pub(crate) async fn run_acp_on_transport(
                         ))?;
                         return Ok(());
                     };
-                    _cx.spawn(async move {
+                    cx.spawn(async move {
                         match driver.cancel_subagent(req.agent_id).await {
                             Ok(cancelled) => {
-                                responder.respond(CancelSubagentResponse { cancelled })?
+                                responder.respond(CancelSubagentResponse { cancelled })?;
                             }
                             Err(error) => responder.respond_with_error(acp_error_to_sdk(
                                 &AcpError::invalid_params(error),
@@ -3361,11 +3627,23 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
-        // --- catch-all: direct A2A requests, then unhandled methods ---
+        // Extensions share the existing dispatch to keep the SDK handler type bounded.
         .on_receive_dispatch(
             {
                 let registry = Arc::clone(&registry);
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
+                    Dispatch::Request(message, responder)
+                        if message.method() == RUNTIME_STATUS_METHOD =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let (_, params) = message.into_parts();
+                        cx.spawn(async move {
+                            responder
+                                .respond_with_result(read_runtime_status(registry, params).await)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
                     Dispatch::Request(message, responder)
                         if crate::input_control::InputRequest::matches_method(message.method()) =>
                     {

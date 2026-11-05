@@ -5,9 +5,13 @@
 use std::sync::Arc;
 
 use crate::render::styled_text::StyledText;
-use crossterm::style::{Attribute, Color as TerminalColor, ContentStyle};
+#[cfg(test)]
+use crossterm::style::ContentStyle;
+use crossterm::style::{Attribute, Color as TerminalColor};
 use iocraft::prelude::*;
 
+/// Renders raw ANSI the way scrollback does; tests use it to check overlays.
+#[cfg(test)]
 #[derive(Default, Props)]
 pub(in crate::repl_ui) struct AnsiTextProps {
     pub content: String,
@@ -15,6 +19,7 @@ pub(in crate::repl_ui) struct AnsiTextProps {
     pub width: Size,
 }
 
+#[cfg(test)]
 #[component]
 pub(in crate::repl_ui) fn AnsiText(props: &AnsiTextProps) -> impl Into<AnyElement<'static>> {
     let text = StyledText::from_ansi_with_style(&props.content, props.initial_style);

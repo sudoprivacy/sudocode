@@ -322,9 +322,9 @@ mod tests {
             return;
         }
         let manifest = extract_manifest(&paths).expect("manifest should load");
-        assert!(!manifest.commands.entries().is_empty());
-        assert!(!manifest.tools.entries().is_empty());
-        assert!(!manifest.bootstrap.phases().is_empty());
+        assert_ne!(manifest.commands.entries(), []);
+        assert_ne!(manifest.tools.entries(), []);
+        assert_ne!(manifest.bootstrap.phases(), []);
     }
 
     #[test]

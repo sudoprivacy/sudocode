@@ -194,11 +194,7 @@ fn startup_and_resume_with_credential(has_credential: bool) {
         let log_text = log.to_string_lossy();
         // A saved multi-agent choice must keep this Box rather than provision a
         // second service when the configured one is temporarily unreachable.
-        std::fs::write(
-            env.config_home().join("runtime-profile.json"),
-            r#"{"schemaVersion":1,"mode":"shared"}"#,
-        )
-        .unwrap();
+        seed_shared_runtime_profile(&env);
         let services = env.workspace_root().join("unexpected-services");
         let services_env = services.to_string_lossy();
         let vars = [
@@ -222,14 +218,7 @@ fn startup_and_resume_with_credential(has_credential: bool) {
             Duration::from_secs(30),
             &format!("offline {mode} fresh"),
         );
-        expect_receiver_diagnostic(
-            &mut fresh,
-            if has_credential {
-                "connect"
-            } else {
-                "ask the node owner to mint"
-            },
-        );
+        expect_receiver_diagnostic(&mut fresh, receiver_failure_message(has_credential));
         check_draft(&mut fresh);
         fresh
             .send(&format!("{prompt}\r"))
@@ -275,14 +264,7 @@ fn startup_and_resume_with_credential(has_credential: bool) {
             Duration::from_secs(30),
             &format!("offline {mode} resume"),
         );
-        expect_receiver_diagnostic(
-            &mut resumed,
-            if has_credential {
-                "connect"
-            } else {
-                "ask the node owner to mint"
-            },
-        );
+        expect_receiver_diagnostic(&mut resumed, receiver_failure_message(has_credential));
         check_draft(&mut resumed);
         resumed.send("/exit\r").expect("exit resumed session");
         assert_eq!(resumed.expect_eof().expect("resumed session exits"), 0);
@@ -298,7 +280,7 @@ fn startup_and_resume_with_credential(has_credential: bool) {
 /// assertions, not an increased budget for those assertions. A node operation
 /// has its own transport deadline; do not exit the child before observing it.
 fn wait_for_receiver_diagnostic(log: &Path, has_credential: bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let records: Vec<serde_json::Value> = std::fs::read_to_string(log)
             .unwrap_or_default()
@@ -725,5 +707,21 @@ fn expect_receiver_state(session: &mut pty_expect::PtySession, state: &str, budg
             "receiver never became {state}: {screen}"
         );
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn seed_shared_runtime_profile(env: &TestEnv) {
+    std::fs::write(
+        env.config_home().join("runtime-profile.json"),
+        r#"{"schemaVersion":1,"mode":"shared"}"#,
+    )
+    .unwrap();
+}
+
+fn receiver_failure_message(has_credential: bool) -> &'static str {
+    if has_credential {
+        "connect"
+    } else {
+        "ask the node owner to mint"
     }
 }

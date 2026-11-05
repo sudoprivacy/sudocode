@@ -1,11 +1,11 @@
 //! One bounded footer: permission, background work, and one contextual tip.
 use super::tasks::{TaskBrowser, TaskFocus};
+use crate::render::TextRole;
 use crate::render::{
     styled_text::StyledText,
     text_layout::{display_width, truncate_to_width},
     theme, ColorSupport,
 };
-use crossterm::style::ContentStyle;
 use engine_core::{Tip, TipPriority};
 use std::collections::BTreeMap;
 
@@ -149,13 +149,8 @@ impl FooterTips {
             .filter(|_| remaining >= 8)
             .map(|tip| (tip, truncate_to_width(&tip.message, remaining)));
         let support = ColorSupport::detect();
-        let colors = support != ColorSupport::NoColor;
         let palette = theme();
-        let style = |color| ContentStyle {
-            foreground_color: colors.then_some(color),
-            ..ContentStyle::default()
-        };
-        let muted = style(palette.muted);
+        let muted = palette.style_for(TextRole::Secondary, support);
         let mut result = StyledText::default();
         result.push(muted, &base);
         if !task.is_empty() {
@@ -169,17 +164,41 @@ impl FooterTips {
         }
         if let Some((tip, text)) = tip {
             result.push(muted, sep);
-            let color = match tip.priority {
-                TipPriority::Urgent => palette.warning,
-                TipPriority::Important => palette.primary,
-                TipPriority::Normal => palette.muted,
+            let role = match tip.priority {
+                TipPriority::Urgent => TextRole::Warning,
+                TipPriority::Important => TextRole::Notice,
+                TipPriority::Normal => TextRole::Secondary,
             };
             if tip_focused {
                 result.push(palette.selection_style(support), &text);
+            } else if std::ptr::eq(tip, &raw const filler) {
+                self.append_position(&mut result, &text);
             } else {
-                result.push(style(color), &text);
+                result.push(palette.style(role), &text);
             }
         }
+
         result
+    }
+    /// Style only the locally owned workspace prefix; advice is never parsed.
+    fn append_position(&self, result: &mut StyledText, text: &str) {
+        let palette = theme();
+        let Some(position) = &self.position else {
+            result.push(palette.style(TextRole::Secondary), text);
+            return;
+        };
+        let mut end = position.len().min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let prefix = &text[..end];
+        if let Some((path, branch)) = prefix.split_once(" ⎇ ") {
+            result.push(palette.style(TextRole::Path), path);
+            result.push(palette.style(TextRole::Secondary), " ⎇ ");
+            result.push(palette.style(TextRole::Branch), branch);
+        } else {
+            result.push(palette.style(TextRole::Path), prefix);
+        }
+        result.push(palette.style(TextRole::Secondary), &text[end..]);
     }
 }

@@ -680,13 +680,10 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         (None, _, Some(error)) => format!("unavailable: {error}"),
         (None, _, None) => "unavailable".to_string(),
     };
-    let receiver = match (peer.receiver, peer.delivery) {
-        ("receiving", "next_prompt") => {
-            "receiving; waiting messages run at the next prompt (press Enter)"
-        }
-        ("receiving", _) => "receiving",
-        ("standby", _) => "standing by: waiting for the receiver seat",
-        ("unavailable", _) => "unavailable; ordinary session remains usable",
+    let receiver = match peer.receiver {
+        "receiving" => "receiving",
+        "standby" => "standing by: waiting for the receiver seat",
+        "unavailable" => "unavailable; ordinary session remains usable",
         _ => "not running in this process",
     };
     let cursor = match peer.cursor {
@@ -1339,7 +1336,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
     if config
         .auth_modes
         .get("proxy")
-        .is_none_or(|accounts| accounts.is_empty())
+        .is_none_or(std::collections::BTreeMap::is_empty)
     {
         return DiagnosticCheck::new(
             "Account",
@@ -1373,11 +1370,7 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
 
 #[allow(clippy::too_many_lines)]
 fn check_auth_health() -> DiagnosticCheck {
-    let env_present = |key: &str| {
-        env::var(key)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    };
+    let env_present = |key: &str| env::var(key).is_ok_and(|value| !value.trim().is_empty());
     let anthropic_api_key_present = env_present("ANTHROPIC_API_KEY");
     let anthropic_auth_token_present = env_present("ANTHROPIC_AUTH_TOKEN");
     let api_key_present = anthropic_api_key_present || anthropic_auth_token_present;

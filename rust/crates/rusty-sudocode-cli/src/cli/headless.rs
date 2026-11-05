@@ -279,7 +279,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
             .map(crate::load_session_reference)
             .transpose()?;
         let cli = LiveCli::new(
-            options.model,
+            &options.model,
             options.allowed_tools,
             options.permission_mode,
             options.reasoning_effort,
@@ -398,6 +398,17 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                             "tool_use_id":id, "tool_name":name,
                             "input":serde_json::from_str::<Value>(&input).unwrap_or(Value::Null), "reason":reason,
                         }));
+                    }
+                    EngineEvent::HostContextRequest { id } => {
+                        cli.engine_handle
+                            .commands
+                            .send(EngineCommand::HostContextAnswer {
+                            id,
+                            context: Err(
+                                "No host context provider is configured for the headless renderer"
+                                    .into(),
+                            ),
+                        })?;
                     }
                     EngineEvent::QuestionRequest { id, .. } => {
                         needs_input = true;

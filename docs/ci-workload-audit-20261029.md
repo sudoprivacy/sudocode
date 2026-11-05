@@ -37,6 +37,75 @@ debug assertions. Their shared environment keeps Cargo cache inputs aligned.
 Release resource acceptance retains its normal release profile. Browser
 measurements run through the changed-input local Docker profile.
 
+## End-to-end acceptance metric
+
+The primary clock starts at the first recorded local validation/acceptance
+operation and ends at the first local or hosted failure, or at merge. Include
+local setup, compilation, test execution, benchmark-lock waiting, publication,
+hosted queueing, retries and merge queue. Keep both whole-PR and final-head
+series. Moving work onto the author's box is not a reduction in total time.
+Runner-minutes and execution counts are supporting measurements.
+
+`check` writes `attempt.json` for running, successful and failed attempts and
+prints `LOCAL_ACCEPTANCE_TIMING` on the mandatory interface. Signed full receipts
+and completed-profile checkpoints retain the local start and earliest recorded
+start from a verified resume chain. `LOCAL_ACCEPTANCE_OPERATION_TIMING` also
+covers the outer push/contract operation, including authority checks and Git
+publication; explicit output directories retain it as `operation.json`.
+Use the earliest applicable timestamp when joining local records to hosted PR
+outcomes. Do not add overlapping operation/check intervals together.
+Abrupt termination can leave a running record without an end; keep it censored.
+Older or manual attempts can be unknown. Missing local history must not be
+replaced with zero or silently included in a complete end-to-end average.
+
+The provisional September 29–October 29 Rust source/build cohort contains 419
+failed candidate heads averaging 32.252 minutes to first failure and 200 merged
+PRs averaging 185.261 minutes from their final candidate's CI trigger to merge.
+The corresponding hosted-clock reference targets are 3.225 and 18.526 minutes.
+Historical local timing was not collected, so these are conservative reference
+thresholds, not a measured historical total-time baseline. Scope comes from final
+PR diffs; open outcomes are censored and same-head human idle time remains in
+merge elapsed time. These are elapsed means, not the older completion medians.
+
+Early post-rollout observations through October 30 00:29 UTC contain 17 merged
+CI/test/documentation heads averaging 4.215 minutes and seven failed heads
+averaging 1.488 minutes. There is no comparable completed production Rust sample
+in that cohort. This does not establish the overall target. One subsequent
+local acceptance waited 6,913.983 seconds for the benchmark lease and eventually
+failed a real terminal exit check; that incomplete run is not a fast pass.
+
+## Browser build reuse and selected execution evidence
+
+Rendering and browser profiles share the candidate's canonical source checkout
+and Cargo output directory. Browser drivers use that same candidate tree too;
+the independent baselines and rendering's trusted driver stay separate. Copy
+production binaries before test builds, because dev dependency features can
+change the CLI binary in Cargo's output directory. This reduces the original
+seven target trees across both profiles to four (from five after the first reuse
+change). The existing exclusive lease still covers mutation, compilation and
+measurement, so another head cannot replace inputs mid-run. Full-profile savings still need
+measurement. No workloads, sample counts, budgets or product cases are removed.
+
+`benchmark_targets_acceptance.py` executes both production builders with
+real Cargo, npm and native fixture drivers in private state. It checks distinct
+baseline/candidate results, dev feature unification, immutable measured binaries,
+both observer stages and Cargo-fresh viewport dependencies. The complete
+rendering-to-browser sequence must keep the same normal candidate bytes and
+reuse the candidate build without compilation; restoring separate candidate
+paths/targets makes the real Cargo regression fail. CI runs it only for changed executor,
+image, fixture or workflow inputs on the PR; queue/main reuse that execution.
+These are infrastructure checks and earn no product journey coverage credit.
+
+Selected execution fingerprints retain module import effects, process execution,
+images and the helpers reached by the selected dispatcher. Reflection or a
+rewritten profile parameter retains the complete module conservatively. A
+browser-only helper edit can therefore preserve unchanged native evidence.
+New receipts bind both fingerprint recipes to an immutable `commands_ref` and
+the complete signed command hash. Existing recipes are recovered only from their
+actual attested source. Real Git pushes and SSH notes exercise old/new receipt
+formats, unused and transitive helpers, changed shared/executor/image inputs,
+required profiles, reflection, malformed hashes and invalid source references.
+
 ## Measured timing and duplicate-test review
 
 The month contains 540 successful PR heads with all three original native
@@ -96,6 +165,37 @@ Workflow-only changes unrelated to `ci-dependency-cache.yml` do not start its
 three host jobs. Rust pushes still check for a new dependency/toolchain/image
 key, and changes to the publisher still exercise it. Cache-hit correctness and
 source validation are unchanged.
+
+Local benchmark checkouts preserve the mtimes of identical source bytes and
+executable modes, so Cargo can reuse valid artifacts at their existing canonical
+source/target paths. Changed bytes receive fresh mtimes even when their Git archive
+is old. Unexpected cached sources are removed and cached entry links are replaced
+without traversing them. The existing exclusive Linux lease and separate legacy
+namespace continue to protect shared state. Blocked callers now print the lock
+path and report their acquisition wait in the execution log.
+
+The mandatory real Git/Cargo fixture verifies unchanged-input freshness, changed
+old archives, same-size/mtime tampering, and an injected-source compiler failure
+followed by successful cleanup. Linux also checks executable permissions, links
+outside the cached checkout and two processes competing for the actual lease.
+These are infrastructure acceptance checks, not additional product journey credit.
+Actual multi-PR waiting-time savings still require observation.
+
+On a cache miss, the publisher compiles library/bin test targets with the same
+mailbox feature, retaining normal and dev dependencies. It omits standalone
+integration executables: the default cache action removes workspace artifacts
+before saving them, so those links do not warm an additional dependency. Native
+acceptance still builds and runs the complete selected journeys. Production
+release dependency warming, all three host pools and the 10 GB quota remain.
+See the action's [cache contract](https://github.com/Swatinem/rust-cache#cache-details).
+
+A real Windows Cargo fixture built both selections from separate empty targets.
+The reduced selection retained an integration-only dev dependency outside the
+workspace and the enabled library feature, while eliminating five integration
+executables. The fixture validates selection, not a percentage of cloud savings.
+Previously measured 139 CLI integration compilations consumed 302.26 compiler
+seconds in one single-worker desktop build; this is an opportunity estimate,
+not a hosted latency reduction. Existing cache hits skip compilation already.
 
 Complementary native jobs use the same cache environment as the main publisher.
 `rust-cache` always fingerprints `CARGO*` variables and adds `env-vars` to its
@@ -295,6 +395,27 @@ Full rendering A/A/A-B and painted-browser/viewport measurements move to local
 Docker without changing their existing sampling or budgets. Tagged production
 artifact publishing retains its multi-platform builds.
 
+Each invocation resolves its candidate, PR base and authorized policy to fixed
+Git commits before running profiles. Docker inputs use that policy commit for
+the observer, image context and rendering baseline selection. A maintainer's
+authorized contract update therefore executes its selected candidate tools;
+ordinary acceptance continues to use protected-main tools. Later fetches cannot
+silently change these inputs. Docker runs use the image ID written by the actual
+build, rather than resolving a mutable tag again. `container-provenance.json`
+records the candidate, baseline, policy, context digest and image identity.
+The dispatcher keeps its existing API. Comparing the actual Git-tracked command
+recipes preserves all eight non-container profiles and invalidates only
+`rendering` and `browser`; unrelated native evidence need not be repeated for
+this container implementation change.
+
+The existing Git/SSH guard exercises a real signed check while its policy/base
+refs change. The container infrastructure E2E executes real Docker builds and
+runs, moves Git refs and replaces a tag, and requires a wrong-policy run to fail.
+It uses private fixture storage and a labelled lease; no production benchmark
+state is mounted. Relevant executor changes select this fixture once in the PR
+preflight, with no queue/main repeat or extra job. These fixtures add no product
+coverage and remove no workload, measurement, assertion or deadline.
+
 Static cloud workspace cadence is now two executions per ready Windows/Mac PR
 lifecycle, versus four after cleanup one and eight originally; a third execution
 is native on the author's machine. Co-host PR builds use the author host plus
@@ -423,10 +544,79 @@ capacity unused. See [GitHub-hosted runner specifications](https://docs.github.c
 
 ## ACP package runs
 
-Keep integration and portable installed-package journeys on all four PR hosts.
+The initial consolidation kept integration and portable installed-package
+journeys on all four PR hosts. This duplicated the author's local platform and
+left SDK execution outside the signed local profile. The subsequent SDK
+integration fixes that gap: `native-sdk` is mandatory for SDK inputs, its actual
+commands run before push, and the shared acceptance plan schedules only missing
+targets in CI. Linux x64 and ARM64 remain distinct required targets; macOS and
+Windows use OS-level source coverage. SDK-only jobs need Node, not a Rust setup.
 Main still builds and packs its exact merged revision on each host, retaining
 the commit-bound manifest, archive integrity receipt and uploaded artifacts.
 It does not repeat the same integration journeys. As with native queue reuse,
 an interaction unique to merged changes is outside that repeated runtime
-coverage. Explicit runs retain integration; a new PR/ref head cancels an
-obsolete package run. No scenario or distribution platform is deleted.
+coverage. Explicit runs retain integration; a new PR/ref head cancels obsolete
+acceptance runs. No scenario or distribution platform is deleted.
+
+The plan is printed by the hook (including when reusing a valid receipt), signed
+with the command results, and reused by both the read-only CI gate and status
+publisher. CI summaries show each check/target assignment; `Local acceptance`'s
+status description exposes the host split to `gh` and API clients directly.
+Missing SDK commands and mismatched signed plans are refusals. A passing source
+receipt explicitly leaves installation and deployed-system acceptance unproven.
+
+## Detect real conflicts before local builds
+
+The Nexus workline's `5e191b85` SudoCode acceptance passed its eight profiles in
+9,043.535 seconds, then discovered three merge conflicts. Those same paths already
+conflicted with `b885db9f`, the protected main revision at the start of that run.
+The old history checker accepts this pair; the new actual-Git preflight reports
+the conflicts in 1.038 seconds. This is a replay of the known inputs, not a measured
+production rollout saving. The full run and its timing remain in the record.
+
+History preflight now checks both its supplied target and fetched `origin/main`,
+because local acceptance supplies an ancestral diff base. Git's merge-tree leaves
+the checkout and index untouched. Its required output lists exact paths and the
+next step, including machine-readable `LOCAL_ACCEPTANCE_MERGE_CONFLICTS`. Clean
+branches behind main remain valid; changes landing after this check can still
+introduce conflicts. Provenance and conflict-marker checks remain.
+The protected dispatcher stages the hash-pinned checker from its frozen policy
+instead of executing the older copy in an author branch. Real native-process/Git
+acceptance exercises that old checkout with a deliberately unusable local checker;
+the protected checker runs and the author HEAD, index and source remain unchanged.
+
+The Git-only `e2e/pr-history/run.py` regression remains mandatory in CI preflight.
+Editing that exact fixture alone no longer selects unrelated native product
+builds on the author host and both complementary CI hosts. Public-planner Git
+regressions retain native validation for mixed source, unknown fixtures and
+renames crossing this boundary. Product scenarios and their assertions stay.
+
+## Development-only Cargo inputs
+
+Normal release/service/cohost selection and the daemon CI selector now share a
+Git/TOML comparison. It removes only unchanged workspace metadata or existing
+crate manifests whose differences are confined to dev dependencies, plus lock
+changes preserving all existing packages and normal/build edges. Added versions
+of an existing name, removed nodes, features, normal/build declarations,
+workspace changes and invalid data retain the ordinary scope. Sources and
+release/service assertions keep their existing path rules. Native tests/lint,
+provider, resize and performance scopes do not use this filter.
+
+For helper source `0d1619aa` against `238692c8`, actual locked Cargo normal/build
+graphs and features matched for CLI and cohost on Windows, Linux and macOS.
+The static planner drops only cohost: one author and two complementary profile
+executions. Other seven profiles stay selected. This is a scope comparison, not
+a measured PR latency saving; another observed Windows cohost build took 23.55
+minutes, but cache/source conditions differ.
+
+Actual Git/Cargo fixtures enable a dev-only feature, execute its native case,
+then verify the normal canary's output and bytes remain unchanged. Windows uses
+reproducible linking only for this private canary because an identical relink
+otherwise changes COFF/debug timestamps and its PDB GUID. Product flags stay.
+The native historical-runner probe and portable protected-policy transitions
+exercise real signed full notes and checkpoints. Earlier broader completed
+evidence is reusable without rewriting it; new required checks and required
+normal-input failures remain blocking. Old failed logs and first timing remain.
+The guard runs these fixtures automatically, including from Docker's snapshot
+without repository history. The overall 10% target still needs comparable
+whole-lifecycle observations.

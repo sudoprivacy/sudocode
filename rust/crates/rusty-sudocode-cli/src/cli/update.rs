@@ -268,7 +268,7 @@ fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
 fn client() -> R<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_mins(2))
         .build()?)
 }
 
@@ -506,8 +506,7 @@ fn restart(exe: &Path, args: &[std::ffi::OsString]) -> R<()> {
 /// treated as "no" — use `--yes` to update unattended.
 fn confirm(prompt: &str) -> R<bool> {
     let line = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        crate::prompt_choice_via_shared_editor(&format!("{prompt} [y/N] "))
-            .map_err(std::io::Error::other)?
+        crate::prompt_choice_line(&format!("{prompt} [y/N] ")).map_err(std::io::Error::other)?
     } else {
         print!("{prompt} [y/N] ");
         std::io::stdout().flush()?;
@@ -524,7 +523,6 @@ fn confirm(prompt: &str) -> R<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     #[test]
     fn version_comparison() {

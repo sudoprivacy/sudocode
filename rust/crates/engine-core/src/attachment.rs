@@ -157,6 +157,15 @@ impl DeferredDelegate {
 }
 
 impl EngineDelegate for DeferredDelegate {
+    fn requires_host_context(&self) -> bool {
+        self.get()
+            .is_ok_and(|delegate| delegate.requires_host_context())
+    }
+    fn apply_host_context(&self, text: String) -> Result<(), RuntimeError> {
+        self.get()
+            .map_err(RuntimeError::new)?
+            .apply_host_context(text)
+    }
     fn run_turn(
         &self,
         blocks: Vec<ContentBlock>,

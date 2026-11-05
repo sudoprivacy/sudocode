@@ -18,8 +18,8 @@ pub enum QueueMode {
 impl QueueMode {
     /// Resolve from `SUDOCODE_INTERRUPT_QUEUE_MODE`. Case-insensitive.
     /// Default is `Queue` — message queue ON, matching Claude Code parity.
-    /// In the async REPL, Enter steers independently of the queue setting.
-    /// Startup `off` instead selects the legacy synchronous REPL.
+    /// Enter steers independently of the queue setting; `off` starts the REPL
+    /// with the queue disabled, as `/config set queue off` does.
     /// Esc flushes pending input;
     /// Ctrl+C always cancels through the engine control channel.
     #[must_use]
@@ -351,6 +351,7 @@ impl<R> TurnInputCoordinator<R> {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn peek_display(&self) -> Vec<String> {
         self.queue.iter().map(|q| q.input.display.clone()).collect()
     }
@@ -484,7 +485,7 @@ mod queue_docs {
         let mut c = TurnInputCoordinator::<()>::new();
         let next = c.submit_when_idle(human("hello"));
         assert_eq!(next.prompt, "hello");
-        assert!(next.echoes.is_empty());
+        assert_eq!(next.echoes, [] as [engine_events::InputView; 0]);
         assert_eq!(next.consumed, 1);
         assert_eq!(c.pending(), 0);
     }

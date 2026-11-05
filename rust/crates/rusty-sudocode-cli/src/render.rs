@@ -1,14 +1,14 @@
-use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crossterm::style::{Color, ContentStyle, Stylize};
+use crossterm::style::{Color, ContentStyle};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 pub(crate) mod activity;
+pub(crate) mod code_preview;
 mod code_theme;
 mod color_math;
 mod color_theme;
@@ -21,56 +21,16 @@ pub(crate) mod output;
 pub(crate) mod spinner_progress;
 use spinner_progress::SpinnerProgress;
 pub(crate) mod terminal_palette;
-pub use color_theme::{theme, ColorTheme};
+pub use color_theme::{theme, ColorTheme, TextRole};
 
 mod styled_line;
 pub(crate) mod styled_text;
+mod table;
 pub(crate) mod text_layout;
+mod word_wrap;
 
-/// Shared prompt surfaces for live input, committed prompts and context headers.
-/// Resolve the terminal palette once, outside redraw and typing hot paths.
-pub(crate) fn prompt_style(live: bool) -> ContentStyle {
-    static STYLES: std::sync::OnceLock<[ContentStyle; 2]> = std::sync::OnceLock::new();
-    STYLES.get_or_init(|| {
-        let support = ColorSupport::detect();
-        if support == ColorSupport::NoColor {
-            return [ContentStyle::default(); 2];
-        }
-        let light = theme().light_background;
-        let fallback = if light { (255, 255, 255) } else { (24, 24, 24) };
-        let (r, g, b) = terminal_palette::background().unwrap_or(fallback);
-        [false, true].map(|live| {
-            let alpha: u16 = if light {
-                if live {
-                    8
-                } else {
-                    4
-                }
-            } else if live {
-                16
-            } else {
-                10
-            };
-            let target: u16 = if light { 0 } else { 255 };
-            let blend = |channel: u8| {
-                u8::try_from((u16::from(channel) * (100 - alpha) + target * alpha) / 100)
-                    .expect("blended channel")
-            };
-            ContentStyle {
-                // A fallback background must remain legible when the terminal
-                // cannot report its default foreground on Windows.
-                foreground_color: Some(if light { Color::Black } else { Color::White }),
-                background_color: Some(support.color(Color::Rgb {
-                    r: blend(r),
-                    g: blend(g),
-                    b: blend(b),
-                })),
-                ..ContentStyle::default()
-            }
-        })
-    })[usize::from(live)]
-}
 pub(crate) use styled_line::StyledLine;
+use styled_text::StyledText;
 use text_layout::display_width as visible_width;
 
 /// Terminal color capability tier, detected from environment variables.
@@ -115,10 +75,13 @@ impl ColorSupport {
     /// could ever be read.
     #[must_use]
     pub fn detect() -> Self {
-        Self::detect_from_env(
-            |key| std::env::var(key).ok(),
-            crate::windows_console::vt_processing_enabled(),
-        )
+        static SUPPORT: std::sync::OnceLock<ColorSupport> = std::sync::OnceLock::new();
+        *SUPPORT.get_or_init(|| {
+            Self::detect_from_env(
+                |key| std::env::var(key).ok(),
+                crate::windows_console::vt_processing_enabled(),
+            )
+        })
     }
 
     /// `vt_enabled` is the host console's virtual-terminal state, injected so
@@ -195,7 +158,7 @@ pub fn ansi_fg(color: Color) -> String {
         Color::White => "\x1b[97m".to_string(),
         Color::AnsiValue(n) => format!("\x1b[38;5;{n}m"),
         Color::Rgb { r, g, b } => format!("\x1b[38;2;{r};{g};{b}m"),
-        _ => String::new(),
+        Color::Reset => String::new(),
     }
 }
 
@@ -212,20 +175,17 @@ pub const DIM: &str = "\x1b[2m";
 /// ANSI bold.
 pub const BOLD: &str = "\x1b[1m";
 
-/// The REPL prompt glyph (`❯`). Single source of truth: the live input line,
-/// the resumed-history echo, and any other prompt reprint all reference this so
+/// The REPL prompt glyph (`❯`) and the space after it — the exact prefix a
+/// prompt line starts with. Single source of truth: the live input line, the
+/// resumed-history echo, and any other prompt reprint all reference this so
 /// they can never drift (a past bug rendered resumed messages with `›` while
 /// the live prompt used `❯`).
-pub const PROMPT_GLYPH: &str = "\u{276f}";
-/// The prompt glyph followed by one space — the exact prefix a prompt line
-/// starts with.
 pub const PROMPT_PREFIX: &str = "\u{276f} ";
 
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
 #[derive(Clone)]
 pub struct SpinnerRef {
-    pb: ProgressBar,
     progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -238,7 +198,6 @@ impl SpinnerRef {
     /// for the iocraft REPL path, sharing the same activity clock.
     pub fn from_activity_state(state: &activity::ActivityState) -> Self {
         Self {
-            pb: ProgressBar::hidden(),
             progress: Arc::clone(&state.progress),
             is_thinking: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
@@ -305,8 +264,6 @@ pub struct SpinnerHandle {
     token_budget: Option<u32>,
     label: String,
     model: Option<String>,
-    #[allow(dead_code)]
-    theme: ColorTheme,
     start_time: Instant,
     stop: Arc<AtomicBool>,
     updater: Option<std::thread::JoinHandle<()>>,
@@ -314,12 +271,7 @@ pub struct SpinnerHandle {
 
 impl SpinnerHandle {
     #[must_use]
-    pub fn new(
-        label: &str,
-        model: Option<&str>,
-        theme: &ColorTheme,
-        token_budget: Option<u32>,
-    ) -> Self {
+    pub fn new(label: &str, model: Option<&str>, token_budget: Option<u32>) -> Self {
         let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
         pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
 
@@ -338,7 +290,6 @@ impl SpinnerHandle {
             token_budget,
             label: label.to_string(),
             model: model.map(ToString::to_string),
-            theme: *theme,
             start_time: Instant::now(),
             stop,
             updater: None,
@@ -351,7 +302,6 @@ impl SpinnerHandle {
     #[must_use]
     pub fn spinner_ref(&self) -> SpinnerRef {
         SpinnerRef {
-            pb: self.pb.clone(),
             progress: Arc::clone(&self.progress),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
@@ -420,17 +370,10 @@ impl SpinnerHandle {
         self.pb.finish_and_clear();
     }
 
-    pub fn finish(&mut self, label: &str) {
-        self.stop_updater();
-        self.pb.finish_and_clear();
-        let success = ansi_fg(theme().success);
-        println!("{success}✔ {label}{RESET}");
-    }
-
     pub fn fail(&mut self, label: &str) {
         self.stop_updater();
         self.pb.finish_and_clear();
-        let error = ansi_fg(theme().error);
+        let error = theme().fg_seq(TextRole::Error);
         println!("{error}✘ {label}{RESET}");
     }
 }
@@ -489,6 +432,11 @@ fn parse_budget_token(token: &str) -> Option<u32> {
         _ => return None,
     };
     let value: f64 = num_str.parse().ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Budget literals truncate fractional tokens and saturate at u32 bounds."
+    )]
     let result = (value * multiplier) as u32;
     (result > 0).then_some(result)
 }
@@ -499,20 +447,21 @@ enum ListKind {
     Ordered { next_index: u64 },
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct TableState {
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
-    current_row: Vec<String>,
-    current_cell: String,
+    alignments: Vec<pulldown_cmark::Alignment>,
+    headers: Vec<StyledText>,
+    rows: Vec<Vec<StyledText>>,
+    current_row: Vec<StyledText>,
+    current_cell: StyledText,
     in_head: bool,
 }
 
 impl TableState {
     fn push_cell(&mut self) {
-        let cell = self.current_cell.trim().to_string();
-        self.current_row.push(cell);
-        self.current_cell.clear();
+        self.current_cell.trim();
+        self.current_row
+            .push(std::mem::take(&mut self.current_cell));
     }
 
     fn finish_row(&mut self) {
@@ -534,13 +483,11 @@ impl TableState {
 /// paragraph the way GitHub / CC render it.
 const TOP_LEVEL_LIST_INDENT: usize = 2;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct RenderState {
     code_block_complete: bool,
-    emphasis: usize,
-    strong: usize,
-    strikethrough: usize,
-    heading_level: Option<u8>,
+    base_style: ContentStyle,
+    inline_styles: Vec<ContentStyle>,
     quote: usize,
     list_stack: Vec<ListKind>,
     /// Column where markers of the list at each `list_stack` level start.
@@ -564,66 +511,70 @@ struct RenderState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LinkState {
     destination: String,
-    text: String,
+    text: StyledText,
 }
 
 impl RenderState {
     /// Close the current list line while its semantic content column is known.
     /// This handles terminal soft wraps as well as authored Markdown breaks.
-    fn wrap_list_line(&self, output: &mut String) {
-        if self.list_stack.is_empty() || output.ends_with('\n') {
+    fn wrap_list_line(&self, output: &mut StyledText) {
+        if self.list_stack.is_empty() || output.text.ends_with('\n') {
             return;
         }
-        let start = output.rfind('\n').map_or(0, |pos| pos + 1);
-        let line = &output[start..];
-        if text_layout::display_width(line) <= self.max_width {
+        let start = output.text.rfind('\n').map_or(0, |pos| pos + 1);
+        if text_layout::display_width(&output.text[start..]) <= self.max_width {
             return;
         }
-        let wrapped =
-            text_layout::wrap_ansi_with_indent(line, self.max_width, self.item_content_col)
-                .join("\n");
+        let rows = text_layout::wrap_line_with_indent(
+            output,
+            start..output.text.len(),
+            self.max_width,
+            0,
+            self.item_content_col,
+        );
         output.truncate(start);
-        output.push_str(&wrapped);
+        for (index, (row, _)) in rows.iter().enumerate() {
+            if index > 0 {
+                output.plain("\n");
+            }
+            output.append(row);
+        }
     }
 
-    fn text_style(&self, theme: &ColorTheme) -> ContentStyle {
-        // Codex Markdown uses terminal foreground and typographic hierarchy.
-        let mut style = ContentStyle::default();
-        if matches!(self.heading_level, Some(1..=3)) || self.strong > 0 {
-            style = style.bold();
-        }
-        if self.heading_level == Some(1) {
-            style = style.underlined();
-        }
-        if matches!(self.heading_level, Some(3..=6)) || self.emphasis > 0 {
-            style = style.italic();
-        }
-        if self.strikethrough > 0 {
-            style = style.crossed_out();
-        }
-        if self.quote > 0 {
-            style = style.with(theme.quote);
-        }
-        style
+    #[inline]
+    fn text_style(&self) -> ContentStyle {
+        self.inline_styles
+            .last()
+            .copied()
+            .unwrap_or(self.base_style)
     }
 
-    fn style_text(&self, text: &str, theme: &ColorTheme) -> String {
-        self.text_style(theme).apply(text).to_string()
+    fn push_style(&mut self, theme: ColorTheme, support: ColorSupport, role: TextRole) {
+        self.inline_styles
+            .push(theme.overlay(self.text_style(), role, support));
     }
 
-    fn append_raw(&mut self, output: &mut String, text: &str) {
+    fn destination<'a>(&'a mut self, output: &'a mut StyledText) -> &'a mut StyledText {
         if let Some(link) = self.link_stack.last_mut() {
-            link.text.push_str(text);
+            &mut link.text
         } else if let Some(table) = self.table.as_mut() {
-            table.current_cell.push_str(text);
+            &mut table.current_cell
         } else {
-            output.push_str(text);
+            output
         }
     }
 
-    fn append_styled(&mut self, output: &mut String, text: &str, theme: &ColorTheme) {
-        let styled = self.style_text(text, theme);
-        self.append_raw(output, &styled);
+    fn append_text(&mut self, output: &mut StyledText, text: &str) {
+        self.append_style(output, text, self.text_style());
+    }
+
+    fn append_style(&mut self, output: &mut StyledText, text: &str, style: ContentStyle) {
+        let target = self.destination(output);
+        if StyledText::needs_decoding(text) {
+            target.append(&StyledText::from_ansi_with_style(text, style));
+        } else {
+            target.push(style, text);
+        }
     }
 }
 
@@ -637,7 +588,7 @@ pub struct TerminalRenderer {
 impl Default for TerminalRenderer {
     fn default() -> Self {
         Self {
-            color_theme: ColorTheme::default(),
+            color_theme: *theme(),
             color_support: ColorSupport::detect(),
             link_display: hyperlink::LinkDisplay::detect(),
         }
@@ -651,11 +602,6 @@ impl TerminalRenderer {
     }
 
     #[must_use]
-    pub fn color_theme(&self) -> &ColorTheme {
-        &self.color_theme
-    }
-
-    #[must_use]
     pub fn color_support(&self) -> ColorSupport {
         self.color_support
     }
@@ -666,13 +612,8 @@ impl TerminalRenderer {
         self
     }
 
-    #[must_use]
-    pub fn render_markdown(&self, markdown: &str) -> String {
-        self.render_markdown_with_width(markdown, query_terminal_width())
-    }
-
     /// Adapt prompt content through the same Markdown engine as answers,
-    /// transcript replay and peer messages. Decode styles once for UI reuse.
+    /// transcript replay and peer messages. Keep styles structured for UI reuse.
     #[must_use]
     pub(crate) fn render_prompt_text(
         &self,
@@ -681,10 +622,11 @@ impl TerminalRenderer {
     ) -> styled_text::StyledText {
         match content {
             runtime::PromptText::Plain(text) => styled_text::StyledText::from_ansi(text),
-            runtime::PromptText::Markdown(text) => styled_text::StyledText::from_ansi(
-                self.render_markdown_with_width(text, width)
-                    .trim_end_matches('\n'),
-            ),
+            runtime::PromptText::Markdown(text) => {
+                let mut rendered = self.render_markdown_styled_with_width(text, width);
+                rendered.truncate(rendered.text.trim_end_matches('\n').len());
+                rendered
+            }
         }
     }
 
@@ -701,7 +643,7 @@ impl TerminalRenderer {
             runtime::QuestionPresentation::Question => {
                 let rendered = self.render_prompt_text(content, width);
                 let mut text = String::new();
-                rendered.write_ansi(0..rendered.text.len(), &mut text);
+                rendered.write_ansi_lines(&mut text);
                 text
             }
             runtime::QuestionPresentation::PlanReview { plan_file } => {
@@ -721,7 +663,7 @@ impl TerminalRenderer {
     ) -> String {
         let rendered = self.render_prompt_text(content, left_frame::body_width(width));
         let mut text = String::new();
-        rendered.write_ansi(0..rendered.text.len(), &mut text);
+        rendered.write_ansi_lines(&mut text);
         let path = format!("File: {plan_file}");
         format!(
             "\n{}\n",
@@ -731,16 +673,31 @@ impl TerminalRenderer {
                     .into_iter()
                     .skip(if plan_file.is_empty() { 2 } else { 0 }),
                 width,
-                theme().tool_borders().running,
+                theme().color(TextRole::Brand),
             )
         )
     }
 
     #[must_use]
     pub(crate) fn render_markdown_with_width(&self, markdown: &str, width: usize) -> String {
-        let normalized = normalize_nested_fences(markdown);
+        let rendered = self.render_markdown_styled_with_width(markdown, width);
         let mut output = String::new();
+        rendered.write_ansi_lines(&mut output);
+        output
+    }
+
+    pub(crate) fn render_markdown_styled_with_width(
+        &self,
+        markdown: &str,
+        width: usize,
+    ) -> StyledText {
+        let normalized = normalize_nested_fences(markdown);
+        let normalized = markdown_source(&normalized);
+        let mut output = StyledText::default();
         let mut state = RenderState {
+            base_style: self
+                .color_theme
+                .style_for(TextRole::Body, self.color_support),
             max_width: width.max(1),
             ..RenderState::default()
         };
@@ -788,19 +745,9 @@ impl TerminalRenderer {
         }
 
         if self.color_support == ColorSupport::NoColor {
-            let mut text = styled_text::StyledText::from_ansi(&output);
-            text.clear_styles();
-            output.clear();
-            text.write_ansi(0..text.text.len(), &mut output);
-            output
-        } else {
-            output
+            output.clear_styles();
         }
-    }
-
-    #[must_use]
-    pub fn markdown_to_ansi(&self, markdown: &str) -> String {
-        self.render_markdown(markdown)
+        output
     }
 
     /// Whether the source has a blank line immediately before byte offset
@@ -828,48 +775,54 @@ impl TerminalRenderer {
         &self,
         event: Event<'_>,
         state: &mut RenderState,
-        output: &mut String,
+        output: &mut StyledText,
         code_buffer: &mut String,
         code_language: &mut String,
         in_code_block: &mut bool,
     ) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                Self::start_heading(state, level as u8, output);
+                state.inline_styles.push(self.color_theme.heading_style(
+                    level,
+                    self.color_support,
+                    state.text_style(),
+                ));
+                Self::start_heading(output);
             }
             Event::End(TagEnd::Paragraph) => {
                 if state.list_stack.is_empty() {
-                    output.push_str("\n\n");
+                    output.plain("\n\n");
                 }
                 // Inside a list, End(Item) handles the newline.
             }
             Event::Start(Tag::BlockQuote(..)) => self.start_quote(state, output),
             Event::End(TagEnd::BlockQuote(..)) => {
                 state.quote = state.quote.saturating_sub(1);
-                output.push('\n');
+                state.inline_styles.pop();
+                output.plain("\n");
             }
             Event::End(TagEnd::Heading(..)) => {
-                state.heading_level = None;
-                output.push_str("\n\n");
+                state.inline_styles.pop();
+                output.plain("\n\n");
             }
             Event::End(TagEnd::Item) => {
                 // A nested list that just closed inside this item already
                 // ends with its own newline; pushing another here opened a
                 // blank hole between the nested items and the next sibling.
-                if !output.ends_with('\n') {
+                if !output.text.ends_with('\n') {
                     state.wrap_list_line(output);
-                    state.append_raw(output, "\n");
+                    state.append_text(output, "\n");
                 }
                 state.item_content_col = state.parent_item_cols.pop().unwrap_or(0);
             }
             Event::SoftBreak | Event::HardBreak => {
                 state.wrap_list_line(output);
-                state.append_raw(output, "\n");
+                state.append_text(output, "\n");
                 // Inside a list item, align the continuation line under the
                 // item's text — without this it landed at column 0, hanging
                 // left of the marker.
                 if !state.list_stack.is_empty() && state.item_content_col > 0 {
-                    state.append_raw(output, &" ".repeat(state.item_content_col));
+                    state.append_text(output, &" ".repeat(state.item_content_col));
                 }
             }
             Event::Start(Tag::List(first_item)) => {
@@ -880,8 +833,8 @@ impl TerminalRenderer {
                     // author wrote them adjacent. `bind_top_level_list` is
                     // decided from the source text by the driver loop, so an
                     // author-written blank line is never collapsed.
-                    if state.bind_top_level_list && output.ends_with("\n\n") {
-                        output.truncate(output.len() - 1);
+                    if state.bind_top_level_list && output.text.ends_with("\n\n") {
+                        output.truncate(output.text.len() - 1);
                     }
                     TOP_LEVEL_LIST_INDENT
                 } else {
@@ -889,9 +842,9 @@ impl TerminalRenderer {
                     // still on the current line, and only `End(Item)` emits a
                     // break — so without this the child items rendered inline
                     // after their parent ("• outer  • inner" on one row).
-                    if !output.ends_with('\n') {
+                    if !output.text.ends_with('\n') {
                         state.wrap_list_line(output);
-                        output.push('\n');
+                        output.plain("\n");
                     }
                     // Nested markers start at the parent item's content
                     // column, aligning under its text whatever the parent
@@ -914,7 +867,7 @@ impl TerminalRenderer {
                 // `End(Item)` — emitting one here as well stacked up into
                 // blank lines in the middle of the outer list.
                 if state.list_stack.is_empty() {
-                    output.push('\n');
+                    output.plain("\n");
                 }
             }
             Event::Start(Tag::Item) => self.start_item(state, output),
@@ -932,61 +885,85 @@ impl TerminalRenderer {
                 code_language.clear();
                 code_buffer.clear();
             }
-            Event::Start(Tag::Emphasis) => state.emphasis += 1,
-            Event::End(TagEnd::Emphasis) => state.emphasis = state.emphasis.saturating_sub(1),
-            Event::Start(Tag::Strong) => state.strong += 1,
-            Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
-            Event::Start(Tag::Strikethrough) => state.strikethrough += 1,
-            Event::End(TagEnd::Strikethrough) => {
-                state.strikethrough = state.strikethrough.saturating_sub(1);
+            Event::Start(Tag::Emphasis) => {
+                state.push_style(self.color_theme, self.color_support, TextRole::Emphasis);
+            }
+            Event::Start(Tag::Strong) => {
+                state.push_style(self.color_theme, self.color_support, TextRole::ProseStrong);
+            }
+            Event::Start(Tag::Strikethrough) => state.push_style(
+                self.color_theme,
+                self.color_support,
+                TextRole::Strikethrough,
+            ),
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
+                state.inline_styles.pop();
             }
             Event::Code(code) => {
-                let style = state
-                    .text_style(&self.color_theme)
-                    .with(self.color_theme.inline_code_color(self.color_support));
-                state.append_raw(output, &style.apply(code).to_string());
+                let style = self.color_theme.overlay(
+                    state.text_style(),
+                    TextRole::Code,
+                    self.color_support,
+                );
+                state.append_style(output, &code, style);
             }
-            Event::Rule => output.push_str("---\n"),
+            Event::Rule => output.push(
+                self.color_theme
+                    .style_for(TextRole::Border, self.color_support),
+                "---\n",
+            ),
             Event::Text(text) => {
                 self.push_text(text.as_ref(), state, output, code_buffer, *in_code_block);
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                state.append_raw(output, &html);
+                state.append_text(output, &html);
             }
             Event::FootnoteReference(reference) => {
-                state.append_raw(output, &format!("[{reference}]"));
+                state.append_text(output, &format!("[{reference}]"));
             }
             Event::TaskListMarker(done) => {
-                state.append_raw(output, if done { "[x] " } else { "[ ] " });
+                state.append_text(output, if done { "[x] " } else { "[ ] " });
             }
             Event::InlineMath(math) | Event::DisplayMath(math) => {
-                state.append_raw(output, &math);
+                state.append_text(output, &math);
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 state.link_stack.push(LinkState {
                     destination: dest_url.to_string(),
-                    text: String::new(),
+                    text: StyledText::default(),
                 });
             }
             Event::End(TagEnd::Link) => {
                 if let Some(link) = state.link_stack.pop() {
-                    let rendered = self.render_link(&link);
-                    state.append_raw(output, &rendered);
+                    let rendered = self.render_link(&link, state.text_style());
+                    state.destination(output).append(&rendered);
                 }
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
-                let rendered = format!(
-                    "{}",
-                    format!("[image:{dest_url}]")
-                        .with(self.color_support.color(self.color_theme.link))
+                state.append_style(
+                    output,
+                    &format!("[image:{dest_url}]"),
+                    self.color_theme
+                        .style_for(TextRole::Accent, self.color_support),
                 );
-                state.append_raw(output, &rendered);
             }
-            Event::Start(Tag::Table(..)) => state.table = Some(TableState::default()),
+            Event::Start(Tag::Table(alignments)) => {
+                state.table = Some(TableState {
+                    alignments,
+                    ..TableState::default()
+                });
+            }
             Event::End(TagEnd::Table) => {
                 if let Some(table) = state.table.take() {
-                    output.push_str(&self.render_table(&table));
-                    output.push_str("\n\n");
+                    output.append(&table::render(
+                        &table.headers,
+                        &table.rows,
+                        &table.alignments,
+                        state.max_width,
+                        self.color_theme,
+                        self.color_support,
+                    ));
+                    output.plain("\n\n");
                 }
             }
             Event::Start(Tag::TableHead) => {
@@ -1026,8 +1003,8 @@ impl TerminalRenderer {
         }
     }
 
-    fn render_link(&self, link: &LinkState) -> String {
-        let label = styled_text::StyledText::from_ansi(&link.text);
+    fn render_link(&self, link: &LinkState, base_style: ContentStyle) -> StyledText {
+        let label = &link.text;
         let destination = &link.destination;
         let local = destination.starts_with('/')
             || destination.starts_with("~/")
@@ -1036,51 +1013,60 @@ impl TerminalRenderer {
             || destination.starts_with("file://")
             || destination.starts_with("\\\\")
             || matches!(destination.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
+        let mut rendered = StyledText::default();
         if local {
-            let target = ContentStyle::default()
-                .with(self.color_theme.inline_code_color(self.color_support))
-                .apply(destination);
+            let style = self
+                .color_theme
+                .overlay(base_style, TextRole::Code, self.color_support);
             let name = label.text.trim();
-            if name.is_empty() || name == destination || destination.ends_with(&format!("/{name}"))
+            if !name.is_empty()
+                && name != destination
+                && !destination.ends_with(&format!("/{name}"))
             {
-                return target.to_string();
+                rendered.append(label);
+                rendered.push(base_style, " (");
+                rendered.push(style, destination);
+                rendered.push(base_style, ")");
+            } else {
+                rendered.push(style, destination);
             }
-            return format!("{} ({target})", link.text);
+            return rendered;
         }
         let target = self
             .link_display
             .enabled()
             .then(|| hyperlink::destination(destination))
             .flatten();
-        let mut rendered = styled_text::StyledText::default();
-        let foreground = self.color_support.color(self.color_theme.link);
         for (style, text) in label.spans(0..label.text.len()) {
-            rendered.push_link(style.with(foreground).underlined(), text, target.as_ref());
+            rendered.push_link(
+                self.color_theme
+                    .overlay(style, TextRole::Link, self.color_support),
+                text,
+                target.as_ref(),
+            );
         }
-        // Keep the destination usable in terminals without hyperlink support.
         if label.text != *destination
             && (target.is_none() || self.link_display.show_destination() || label.text.is_empty())
         {
-            let style = ContentStyle::default().with(foreground).underlined();
+            let style = self
+                .color_theme
+                .style_for(TextRole::Link, self.color_support);
             if label.text.is_empty() {
                 rendered.push_link(style, destination, target.as_ref());
             } else {
-                rendered.push(ContentStyle::default(), " (");
+                rendered.push(base_style, " (");
                 rendered.push_link(style, destination, target.as_ref());
-                rendered.push(ContentStyle::default(), ")");
+                rendered.push(base_style, ")");
             }
         }
-        let mut output = String::new();
-        rendered.write_ansi(0..rendered.text.len(), &mut output);
-        output
+        rendered
     }
 
-    fn start_heading(state: &mut RenderState, level: u8, output: &mut String) {
-        state.heading_level = Some(level);
-        if output.is_empty() {
+    fn start_heading(output: &mut StyledText) {
+        if output.text.is_empty() {
             return;
         }
-        if output.ends_with('\n') {
+        if output.text.ends_with('\n') {
             // Normalise to exactly one blank line before the heading.
             //
             // Pushing a newline unconditionally used to stack on top of the
@@ -1088,26 +1074,31 @@ impl TerminalRenderer {
             // `End(Paragraph)` writes `\n\n`, and a list writes `\n` from
             // `End(Item)` plus `\n` from `End(List)` — so every heading ended
             // up preceded by `\n\n\n`, i.e. two blank lines.
-            let content_len = output.trim_end_matches('\n').len();
+            let content_len = output.text.trim_end_matches('\n').len();
             output.truncate(content_len);
-            output.push_str("\n\n");
+            output.plain("\n\n");
         } else {
             // Mid-line (e.g. after a blockquote's "│ " prefix): just break
             // the line, exactly as before — normalising here would insert a
             // blank row that never used to exist.
-            output.push('\n');
+            output.plain("\n");
         }
     }
 
-    fn start_quote(&self, state: &mut RenderState, output: &mut String) {
+    fn start_quote(&self, state: &mut RenderState, output: &mut StyledText) {
         state.quote += 1;
-        let _ = write!(output, "{}", "> ".with(self.color_theme.quote));
+        state.push_style(self.color_theme, self.color_support, TextRole::Quote);
+        output.push(
+            self.color_theme
+                .style_for(TextRole::Quote, self.color_support),
+            "> ",
+        );
     }
 
-    fn start_item(&self, state: &mut RenderState, output: &mut String) {
+    fn start_item(&self, state: &mut RenderState, output: &mut StyledText) {
         state.parent_item_cols.push(state.item_content_col);
         let indent = state.list_indents.last().copied().unwrap_or(0);
-        output.push_str(&" ".repeat(indent));
+        output.plain(&" ".repeat(indent));
 
         let marker = match state.list_stack.last_mut() {
             Some(ListKind::Ordered { next_index }) => {
@@ -1126,15 +1117,15 @@ impl TerminalRenderer {
         // continuation lines align to this. `chars().count()` is the right
         // width here — both marker shapes are single-column characters.
         state.item_content_col = indent + marker.chars().count();
-        if matches!(state.list_stack.last(), Some(ListKind::Ordered { .. })) {
-            let _ = write!(
-                output,
-                "{}",
-                marker.with(self.color_theme.ordered_list_marker)
-            );
+        let role = if matches!(state.list_stack.last(), Some(ListKind::Ordered { .. })) {
+            TextRole::OrderedListMarker
         } else {
-            output.push_str(&marker);
-        }
+            TextRole::UnorderedListMarker
+        };
+        output.push(
+            self.color_theme.style_for(role, self.color_support),
+            &marker,
+        );
     }
 
     fn finish_code_block(
@@ -1142,9 +1133,9 @@ impl TerminalRenderer {
         code_buffer: &str,
         code_language: &str,
         state: &RenderState,
-        output: &mut String,
+        output: &mut StyledText,
     ) {
-        if mermaid::is_mermaid(code_language) {
+        if fence_presentation(code_language) == FencePresentation::Mermaid {
             let prefix = format!(
                 "{}{}",
                 "> ".repeat(state.quote),
@@ -1153,166 +1144,92 @@ impl TerminalRenderer {
             let width = state.max_width.saturating_sub(visible_width(&prefix));
             let rendered = state
                 .code_block_complete
-                .then(|| mermaid::render(code_buffer, width, &self.color_theme));
+                .then(|| mermaid::render(code_buffer, width, self.color_theme, self.color_support));
             let block = match rendered {
                 Some(Ok(diagram)) => diagram,
                 result => {
-                    let mut fallback = String::new();
+                    let mut fallback = StyledText::default();
                     if let Some(Err(error)) = result {
-                        let notice = format!("Mermaid source shown: {error}.");
-                        for line in text_layout::wrap_ansi_with_indent(&notice, width.max(1), 0) {
-                            let _ = writeln!(fallback, "{}", line.with(self.color_theme.border));
+                        let mut notice = StyledText::default();
+                        notice.push(
+                            self.color_theme
+                                .style_for(TextRole::Secondary, self.color_support),
+                            &format!("Mermaid source shown: {error}."),
+                        );
+                        for (row, _) in
+                            text_layout::wrap_line(&notice, 0..notice.text.len(), width.max(1), 0)
+                        {
+                            fallback.append(&row);
+                            fallback.plain("\n");
                         }
                     }
-                    fallback.push_str(
-                        &self.highlight_code(&mermaid::safe_source(code_buffer), code_language),
+                    fallback.append(
+                        &self.highlight_styled(&mermaid::safe_source(code_buffer), code_language),
                     );
                     fallback
                 }
             };
             if !prefix.is_empty()
-                && output.ends_with(&prefix)
-                && output.rsplit('\n').next() == Some(prefix.as_str())
+                && output.text.ends_with(&prefix)
+                && output.text.rsplit('\n').next() == Some(prefix.as_str())
             {
-                output.truncate(output.len() - prefix.len());
+                output.truncate(output.text.len() - prefix.len());
             }
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
+            if !output.text.is_empty() && !output.text.ends_with('\n') {
+                output.plain("\n");
             }
-            for line in block.lines() {
-                output.push_str(&prefix);
-                output.push_str(line);
-                output.push('\n');
+            let mut offset = 0;
+            for line in block.text.lines() {
+                output.plain(&prefix);
+                output.append_range(&block, offset..offset + line.len());
+                output.plain("\n");
+                offset += line.len() + 1;
             }
         } else {
-            output.push_str(&self.highlight_code(code_buffer, code_language));
+            output.append(&self.highlight_styled(code_buffer, code_language));
         }
-        if !output.ends_with('\n') {
-            output.push('\n');
+        if !output.text.ends_with('\n') {
+            output.plain("\n");
         }
-        output.push('\n');
+        output.plain("\n");
     }
 
     fn push_text(
         &self,
         text: &str,
         state: &mut RenderState,
-        output: &mut String,
+        output: &mut StyledText,
         code_buffer: &mut String,
         in_code_block: bool,
     ) {
         if in_code_block {
             code_buffer.push_str(text);
         } else {
-            state.append_styled(output, text, &self.color_theme);
+            state.append_text(output, text);
         }
     }
 
-    fn render_table(&self, table: &TableState) -> String {
-        let mut rows = Vec::new();
-        if !table.headers.is_empty() {
-            rows.push(table.headers.clone());
-        }
-        rows.extend(table.rows.iter().cloned());
-
-        if rows.is_empty() {
-            return String::new();
-        }
-
-        let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let widths = (0..column_count)
-            .map(|column| {
-                rows.iter()
-                    .filter_map(|row| row.get(column))
-                    .map(|cell| visible_width(cell))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect::<Vec<_>>();
-
-        let border = format!("{}", "│".with(self.color_theme.border));
-        let separator = widths
-            .iter()
-            .map(|width| "─".repeat(*width + 2))
-            .collect::<Vec<_>>()
-            .join(&format!("{}", "┼".with(self.color_theme.border)));
-        let separator = format!("{border}{separator}{border}");
-
-        let mut output = String::new();
-        if !table.headers.is_empty() {
-            output.push_str(&self.render_table_row(&table.headers, &widths, true));
-            output.push('\n');
-            output.push_str(&separator);
-            if !table.rows.is_empty() {
-                output.push('\n');
-            }
-        }
-
-        for (index, row) in table.rows.iter().enumerate() {
-            output.push_str(&self.render_table_row(row, &widths, false));
-            if index + 1 < table.rows.len() {
-                output.push('\n');
-            }
-        }
-
-        output
-    }
-
-    fn render_table_row(&self, row: &[String], widths: &[usize], is_header: bool) -> String {
-        let border = format!("{}", "│".with(self.color_theme.border));
-        let mut line = String::new();
-        line.push_str(&border);
-
-        for (index, width) in widths.iter().enumerate() {
-            let cell = row.get(index).map_or("", String::as_str);
-            line.push(' ');
-            if is_header {
-                let _ = write!(line, "{}", cell.bold());
-            } else {
-                line.push_str(cell);
-            }
-            let padding = width.saturating_sub(visible_width(cell));
-            line.push_str(&" ".repeat(padding + 1));
-            line.push_str(&border);
-        }
-
-        line
-    }
-
-    #[must_use]
-    pub fn highlight_code(&self, code: &str, language: &str) -> String {
-        let Some(highlighted) = code_theme::highlight(
+    fn highlight_styled(&self, code: &str, language: &str) -> StyledText {
+        code_theme::highlight(
             code,
             language,
             self.color_theme.light_background,
             self.color_support,
-        ) else {
-            return code.to_string();
-        };
-        let mut output = String::new();
-        let mut offset = 0;
-        // Each source line must carry its own style escapes: tool cards add
-        // frame/prompt prefixes with resets between lines after highlighting.
-        for line in highlighted.text.split_inclusive('\n') {
-            let end = offset + line.len();
-            highlighted.write_ansi(offset..end, &mut output);
-            offset = end;
-        }
-        output
+        )
+        .unwrap_or_else(|| StyledText::from_ansi(code))
     }
 
-    pub fn stream_markdown(&self, markdown: &str, out: &mut impl Write) -> io::Result<()> {
-        let rendered_markdown = self.markdown_to_ansi(markdown);
-        write!(out, "{rendered_markdown}")?;
-        if !rendered_markdown.ends_with('\n') {
-            writeln!(out)?;
-        }
-        out.flush()
+    #[must_use]
+    pub fn highlight_code(&self, code: &str, language: &str) -> String {
+        let highlighted = self.highlight_styled(code, language);
+        let mut output = String::new();
+        highlighted.write_ansi_lines(&mut output);
+        output
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct MarkdownStreamState {
+pub(crate) struct MarkdownStreamState {
     pending: String,
 }
 
@@ -1322,27 +1239,61 @@ impl MarkdownStreamState {
     }
 
     #[must_use]
-    pub fn push(&mut self, renderer: &TerminalRenderer, delta: &str) -> Option<String> {
+    pub(crate) fn push(&mut self, renderer: &TerminalRenderer, delta: &str) -> Option<StyledText> {
         self.pending.push_str(delta);
         let split = find_stream_safe_boundary(&self.pending)?;
-        let ready = self.pending[..split].to_string();
+        let ready = renderer.render_markdown_styled_with_width(
+            &self.pending[..split],
+            query_terminal_width().saturating_sub(2),
+        );
         self.pending.drain(..split);
-        Some(renderer.render_markdown_with_width(&ready, query_terminal_width().saturating_sub(2)))
+        Some(ready)
     }
 
     #[must_use]
-    pub fn flush(&mut self, renderer: &TerminalRenderer) -> Option<String> {
+    pub(crate) fn flush(&mut self, renderer: &TerminalRenderer) -> Option<StyledText> {
         if self.pending.trim().is_empty() {
             self.pending.clear();
             None
         } else {
             let pending = std::mem::take(&mut self.pending);
-            Some(
-                renderer
-                    .render_markdown_with_width(&pending, query_terminal_width().saturating_sub(2)),
-            )
+            Some(renderer.render_markdown_styled_with_width(
+                &pending,
+                query_terminal_width().saturating_sub(2),
+            ))
         }
     }
+}
+
+/// Ordinary source stays borrowed; Mermaid owns its diagnostic escaping.
+#[inline]
+fn markdown_source(markdown: &str) -> std::borrow::Cow<'_, str> {
+    if StyledText::needs_decoding(markdown) {
+        std::borrow::Cow::Owned(decode_markdown_source(markdown))
+    } else {
+        std::borrow::Cow::Borrowed(markdown)
+    }
+}
+
+/// Preserve diagram source until its validator can reject and visibly escape
+/// unsafe labels. Only control-bearing documents need this additional parse.
+#[cold]
+fn decode_markdown_source(markdown: &str) -> String {
+    let mut output = String::with_capacity(markdown.len());
+    let mut offset = 0;
+    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
+        let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = event else {
+            continue;
+        };
+        if !mermaid::is_mermaid(&info) {
+            continue;
+        }
+        output.push_str(&StyledText::plain_source(&markdown[offset..range.start]));
+        output.push_str(&markdown[range.clone()]);
+        offset = range.end;
+    }
+    output.push_str(&StyledText::plain_source(&markdown[offset..]));
+    output
 }
 
 /// Pre-process raw markdown so that fenced code blocks whose body contains
@@ -1554,6 +1505,22 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
     mermaid::stream_boundary(markdown, last_boundary)
 }
 
+/// Shared presentation choice for canonical blocks and disposable live previews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FencePresentation {
+    Source,
+    Mermaid,
+}
+
+#[inline]
+fn fence_presentation(info: &str) -> FencePresentation {
+    if mermaid::is_mermaid(info) {
+        FencePresentation::Mermaid
+    } else {
+        FencePresentation::Source
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FenceMarker {
     character: char,
@@ -1596,9 +1563,10 @@ fn line_closes_fence(line: &str, opener: FenceMarker) -> bool {
 
 /// Stateful processor that prefixes the first line with • (bold) and indents
 /// all continuation lines by two spaces so that column 0 is reserved
-/// exclusively for status glyphs. Hard-wraps text at the terminal width so the
-/// terminal never soft-wraps into column 0. Pure terminal-UI state — shared by
-/// the streaming renderers.
+/// exclusively for status glyphs. A reasoning block leads with its own dim ✻
+/// instead, and leaves the • for the answer. Hard-wraps text at the terminal
+/// width so the terminal never soft-wraps into column 0. Pure terminal-UI
+/// state — shared by the streaming renderers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ResponsePosition {
     is_started: bool,
@@ -1607,10 +1575,10 @@ pub(crate) struct ResponsePosition {
 
 pub(crate) struct ResponseGlyphState {
     started: bool,
+    /// Inside a reasoning block: `Some(false)` until its ✻ lead is drawn.
+    reasoning: Option<bool>,
     pub(crate) visible_col: usize,
     max_col: usize,
-    decoder: styled_text::AnsiDecoder,
-    parser: vte::Parser,
 }
 
 impl ResponseGlyphState {
@@ -1631,12 +1599,22 @@ impl ResponseGlyphState {
     pub(crate) fn new(terminal_width: usize) -> Self {
         Self {
             started: false,
+            reasoning: None,
             visible_col: 0,
             // Ensure at least 4 columns to avoid degenerate wrapping.
             max_col: terminal_width.max(4),
-            decoder: styled_text::AnsiDecoder::new(),
-            parser: vte::Parser::new(),
         }
+    }
+
+    /// The rows that follow are reasoning. Its first row leads with ✻ — the
+    /// mark that this is the model thinking, which the spinner's "Thinking..."
+    /// says only while it streams — and the response's • stays for the answer.
+    pub(crate) fn begin_reasoning(&mut self) {
+        self.reasoning = Some(false);
+    }
+
+    pub(crate) fn end_reasoning(&mut self) {
+        self.reasoning = None;
     }
 
     /// Apply the current viewport before emitting the next response chunk.
@@ -1644,58 +1622,84 @@ impl ResponseGlyphState {
         self.max_col = terminal_width.max(4);
     }
 
-    /// Process a rendered ANSI text chunk. Returns the wrapped+margined output.
-    pub(crate) fn apply(&mut self, rendered: &str) -> String {
-        if rendered.is_empty() {
+    /// Serialize structured response text with its shared wrapping and margin.
+    pub(crate) fn apply(&mut self, text: &StyledText) -> String {
+        if text.text.is_empty() {
             return String::new();
         }
+        let (laid_out, first_glyph) = self.layout_styled(text);
+        let mut output = String::with_capacity(laid_out.text.len() + 64);
+        // Only direct terminal writes erase the old cursor row. A live canvas
+        // consumes the same text/layout without embedding terminal controls.
+        if let Some(offset) = first_glyph {
+            laid_out.write_ansi(0..offset, &mut output);
+            output.push_str("\r\x1b[2K");
+            laid_out.write_ansi(offset..laid_out.text.len(), &mut output);
+        } else {
+            laid_out.write_ansi(0..laid_out.text.len(), &mut output);
+        }
+        output
+    }
 
-        let mut out = String::with_capacity(rendered.len() + 64);
+    pub(crate) fn apply_styled(&mut self, text: &StyledText) -> StyledText {
+        self.layout_styled(text).0
+    }
 
-        self.decoder.advance(&mut self.parser, rendered);
-        let text = std::mem::take(&mut self.decoder.output);
+    fn layout_styled(&mut self, text: &StyledText) -> (StyledText, Option<usize>) {
+        let mut out = StyledText::default();
+        let mut first_glyph = None;
         let mut offset = 0;
         for line in text.text.split_inclusive(['\n', '\r']) {
             let body = line.trim_end_matches(['\n', '\r']);
             if !body.is_empty() {
                 let rows = text_layout::wrap_line(
-                    &text,
+                    text,
                     offset..offset + body.len(),
                     self.max_col - 2,
                     self.visible_col.saturating_sub(2),
                 );
                 for (index, (row, col)) in rows.into_iter().enumerate() {
                     if index > 0 {
-                        out.push('\n');
+                        out.plain("\n");
                         self.visible_col = 0;
                     }
                     if self.visible_col == 0 {
-                        if self.started {
-                            out.push_str("  ");
+                        let lead = match &mut self.reasoning {
+                            Some(led) if !*led => {
+                                *led = true;
+                                Some((TextRole::Reasoning, "✻"))
+                            }
+                            Some(_) => None,
+                            None if self.started => None,
+                            None => {
+                                self.started = true;
+                                Some((TextRole::Strong, "•"))
+                            }
+                        };
+                        if let Some((role, glyph)) = lead {
+                            first_glyph = Some(out.text.len());
+                            out.push(theme().style(role), glyph);
+                            out.plain(" ");
                         } else {
-                            self.started = true;
-                            out.push_str(&format!("\r\x1b[2K{BOLD}•{RESET} "));
+                            out.plain("  ");
                         }
                     }
-                    row.write_ansi(0..row.text.len(), &mut out);
+                    out.append(&row);
                     self.visible_col = col + 2;
                 }
             }
             if body.len() < line.len() {
-                out.push_str(&line[body.len()..]);
+                out.plain(&line[body.len()..]);
                 self.visible_col = 0;
             }
             offset += line.len();
         }
-
-        out
+        (out, first_glyph)
     }
 }
 
 pub(crate) fn query_terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80)
+    crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize)
 }
 
 #[cfg(test)]

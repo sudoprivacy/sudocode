@@ -29,7 +29,7 @@ pub struct SessionStore {
     fs: Arc<dyn FsBackend>,
     /// The owning agent's name, when known (co-hosted / managed agents). When
     /// set, creating a session also plants the `/agents/{name}/sessions/<sid>`
-    /// DT_LINK enum-index via [`FsBackend::link`]. `None` for standalone
+    /// `DT_LINK` enum-index via [`FsBackend::link`]. `None` for standalone
     /// (single implicit profile, no agent namespace). Left unset, the link
     /// step is skipped.
     agent_name: Option<String>,
@@ -56,8 +56,7 @@ impl SessionStore {
         // fails (e.g. the directory doesn't exist yet).
         let canonical_cwd = fs
             .canonicalize(&cwd.to_string_lossy())
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| cwd.to_path_buf());
+            .map_or_else(|_| cwd.to_path_buf(), PathBuf::from);
         // The session root swaps WITH the backend: nexus imposes a flat
         // `/sessions/` namespace (no workspace_hash); host backends use the
         // workspace-fingerprinted local partition. Asking the backend (rather
@@ -100,8 +99,7 @@ impl SessionStore {
         // across equivalent path representations.
         let canonical_workspace = fs
             .canonicalize(&workspace_root.to_string_lossy())
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| workspace_root.to_path_buf());
+            .map_or_else(|_| workspace_root.to_path_buf(), PathBuf::from);
         // Backend-imposed session namespace (nexus /sessions/) wins; else the
         // data-dir's workspace-fingerprinted partition.
         let sessions_root = match fs.managed_root(crate::fs_backend::ManagedRoot::Sessions) {
@@ -123,7 +121,7 @@ impl SessionStore {
     }
 
     /// Bind this store to an owning agent name. New sessions then plant the
-    /// `/agents/{name}/sessions/<sid>` DT_LINK enum-index (via
+    /// `/agents/{name}/sessions/<sid>` `DT_LINK` enum-index (via
     /// [`FsBackend::link`]) so a nexus-backed co-host gets cross-agent
     /// enumeration automatically — no separate wiring to remember when the
     /// backend is swapped. No-op effect on host backends (`link` is a no-op).
@@ -633,7 +631,7 @@ fn session_summary(session: &Session) -> Option<String> {
                 _ => None,
             })
         })
-        .map(|text| text.to_string())
+        .cloned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -879,8 +877,7 @@ fn workspace_roots_match(left: &Path, right: &Path, fs: &dyn FsBackend) -> bool 
 
 fn canonicalize_for_compare(path: &Path, fs: &dyn FsBackend) -> PathBuf {
     fs.canonicalize(&path.to_string_lossy())
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| path.to_path_buf())
+        .map_or_else(|_| path.to_path_buf(), PathBuf::from)
 }
 
 fn path_is_within_workspace(path: &Path, workspace_root: &Path, fs: &dyn FsBackend) -> bool {
@@ -976,7 +973,7 @@ mod tests {
         let real = persist_session(&root, "real work");
         // An empty (0-message) shell created *afterwards* — newer updated_at —
         // must still sink below the real session so "latest" is never empty.
-        let empty = Session::new().with_workspace_root(root.to_path_buf());
+        let empty = Session::new().with_workspace_root(root.clone());
         let handle = create_managed_session_handle_for(&root, &empty.session_id)
             .expect("handle should build");
         let empty = empty.with_persistence_path(handle.path.clone());

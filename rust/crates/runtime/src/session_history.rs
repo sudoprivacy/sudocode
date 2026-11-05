@@ -572,6 +572,7 @@ fn replay_checkpoint(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum Selection<'a> {
     Latest,
     Head(Option<&'a str>),

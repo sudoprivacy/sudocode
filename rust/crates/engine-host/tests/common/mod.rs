@@ -62,10 +62,10 @@ pub fn agent_workspace(pid: &str) -> String {
     format!("/proc/{pid}/workspace")
 }
 
-/// Give the pair's transcript the shape the DAEMON gives it: a DT_STREAM.
+/// Give the pair's transcript the shape the DAEMON gives it: a `DT_STREAM`.
 ///
 /// `Mailbox::ensure_conversation` asks for one with `io_profile = "wal"`, which
-/// needs federation, and degrades to a DT_REG when there is none. A bare kernel
+/// needs federation, and degrades to a `DT_REG` when there is none. A bare kernel
 /// has no federation, so without this the harness would run the whole co-host on
 /// the JSONL fallback — a transcript with no record framing and no
 /// `stream_next_offset` — and prove nothing about the path production takes.
@@ -86,7 +86,7 @@ pub fn provision_stream_transcript(kernel: &Kernel, path: &str) {
         .sys_setattr(
             path,
             &ctx,
-            DT_STREAM as i32,
+            i32::from(DT_STREAM),
             "",
             None,
             None,
@@ -113,7 +113,7 @@ pub fn provision_stream_transcript(kernel: &Kernel, path: &str) {
 /// Send one message to `to`, through the sender production uses.
 ///
 /// A `Mailbox`, not a hand-rolled `sys_write`: the transcript's shape decides
-/// how a message is framed (a DT_STREAM record, or a newline-terminated JSONL
+/// how a message is framed (a `DT_STREAM` record, or a newline-terminated JSONL
 /// line), and a writer that bypasses that put an unterminated object in front of
 /// the agent's reply — one line neither side could parse. Writing through the
 /// real sender is also the only way a harness can claim the receiving half works.

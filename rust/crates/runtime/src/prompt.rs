@@ -497,6 +497,12 @@ impl SystemPromptBuilder {
         // themselves make redundant; `# Runtime config` named the settings file
         // that had been loaded, which the model can neither read nor change.
         dynamic_sections.push(self.environment_section());
+        if let Some(language) = self.config.as_ref().and_then(RuntimeConfig::language) {
+            dynamic_sections.push(format!(
+                "# Language\nReply to the user in {language}. Code, identifiers, commands \
+                 and quoted text keep their original form."
+            ));
+        }
         if let Some(project_context) = &self.project_context {
             if !project_context.instruction_files.is_empty() {
                 dynamic_sections.push(render_instruction_files(&project_context.instruction_files));
@@ -1368,6 +1374,35 @@ mod tests {
         // model not to write memories into it), which is not this leak.
         assert!(!prompt.contains("permissionMode"));
         assert!(!prompt.contains(&settings_path.display().to_string()));
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    /// `language` reaches the model as an instruction; unset, no section.
+    #[test]
+    fn language_setting_asks_for_replies_in_that_language() {
+        let root = temp_dir();
+        let settings = root.join(".nexus").join("sudocode");
+        fs::create_dir_all(&settings).expect("scode dir");
+        fs::write(settings.join("settings.json"), r#"{"language":"简体中文"}"#)
+            .expect("write settings");
+        let config = |root: &std::path::Path| {
+            ConfigLoader::new(root, root.join("missing-home"))
+                .load()
+                .expect("config should load")
+        };
+        let prompt = SystemPromptBuilder::new()
+            .with_runtime_config(config(&root))
+            .render();
+        assert!(
+            prompt.contains("# Language\nReply to the user in 简体中文."),
+            "{prompt}"
+        );
+
+        fs::write(settings.join("settings.json"), "{}").expect("clear settings");
+        let prompt = SystemPromptBuilder::new()
+            .with_runtime_config(config(&root))
+            .render();
+        assert!(!prompt.contains("# Language"));
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 

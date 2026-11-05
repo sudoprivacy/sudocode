@@ -500,7 +500,10 @@ mod tests {
 
         // then
         assert!(result.is_ok());
-        assert!(result.warnings.is_empty());
+        assert_eq!(
+            result.warnings,
+            [] as [crate::config_validate::ConfigDiagnostic; 0]
+        );
     }
 
     #[test]

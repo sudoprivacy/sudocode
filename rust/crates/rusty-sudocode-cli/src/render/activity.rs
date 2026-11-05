@@ -1,18 +1,19 @@
 //! Foreground activity projection. Engine lifecycle owns busy/input/idle;
 //! animation and temporary output suspension never change that lifecycle.
 
+use crate::render::TextRole;
 use std::{
     fmt::Write,
     sync::{Arc, Mutex},
     time::Instant,
 };
 
-use crossterm::style::SetForegroundColor;
 use engine_events::EngineState;
 
-use super::{spinner_progress::SpinnerProgress, text_layout, theme, RESET};
+use super::{spinner_progress::SpinnerProgress, text_layout};
 
 mod brand_spinner;
+pub(crate) use brand_spinner::frame as spinner_frame;
 
 pub(crate) const WORKING_LABEL: &str = "Working...";
 pub(super) const THINKING_LABEL: &str = "Thinking...";
@@ -264,17 +265,23 @@ pub(super) fn progress_line(
     warning: bool,
 ) -> String {
     let details = progress_details(values);
-    let logo = brand_spinner::frame(frame_index);
+    let logo = spinner_frame(frame_index);
     let reserved = metric.width(logo) + 1 + metric.width(&details);
     let label = text_layout::single_line(label);
     let label = metric.truncate(&label, width.saturating_sub(reserved));
-    let colors = theme().activity_colors(warning);
-    let line = format!(
-        "{}{logo}{} {label}{}{details}{RESET}",
-        SetForegroundColor(colors.logo),
-        SetForegroundColor(colors.label),
-        SetForegroundColor(colors.metadata),
+
+    let mut spans = crate::render::StyledLine::muted();
+    spans.push_role(logo, TextRole::Brand);
+    spans.push_role(
+        format!(" {label}"),
+        if warning {
+            TextRole::Warning
+        } else {
+            TextRole::Body
+        },
     );
+    spans.push(&details);
+    let line = spans.to_string();
     // On extremely narrow terminals even metadata cannot fit. Keep one row.
     if reserved > width {
         metric.truncate(&line, width)

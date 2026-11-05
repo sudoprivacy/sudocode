@@ -1,9 +1,9 @@
 //! Drive one provider response and its tool lifetimes together.
 use super::{
     build_assistant_message, notify_tool_result, runtime_observer_mut, tool_execution, ApiClient,
-    AssistantEvent, AssistantEventStream, ContentBlock, ConversationMessage, ConversationRuntime,
-    PermissionPrompter, RuntimeError, RuntimeObserver, ToolDispatchContext, ToolExecutor,
-    INTERRUPT_MESSAGE,
+    AssistantEvent, AssistantEventStream, BuiltAssistantMessage, ContentBlock, ConversationMessage,
+    ConversationRuntime, PermissionPrompter, RuntimeError, RuntimeObserver, ToolDispatchContext,
+    ToolExecutor, INTERRUPT_MESSAGE,
 };
 use futures::StreamExt;
 use std::sync::Arc;
@@ -119,6 +119,58 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         Ok(())
     }
 
+    fn new_response_scheduler<'a>(
+        &self,
+        executor: &'a T,
+        abort: crate::HookAbortSignal,
+    ) -> tool_execution::ToolScheduler<'a, T> {
+        tool_execution::ToolScheduler::new(
+            executor,
+            self.hook_runner.clone(),
+            self.permission_policy.clone(),
+            abort,
+            self.hook_progress_reporter.clone(),
+        )
+    }
+
+    /// Persist the complete tool block before the scheduler can execute it.
+    fn checkpoint_tool_parent(
+        &mut self,
+        events: &[AssistantEvent],
+        event: AssistantEvent,
+        assistant_index: &mut Option<usize>,
+    ) -> Result<ConversationMessage, RuntimeError> {
+        let mut prefix = events.to_vec();
+        prefix.push(event);
+        prefix.push(AssistantEvent::MessageStop);
+        let BuiltAssistantMessage {
+            message: mut parent,
+            ..
+        } = build_assistant_message(prefix).expect("complete tool block supplies content");
+        parent.model = Some(self.running_model().to_string());
+        self.checkpoint_assistant(assistant_index, parent.clone())?;
+        parent.history.clone_from(
+            &self.session.messages[assistant_index.expect("checkpointed assistant")].history,
+        );
+        Ok(parent)
+    }
+
+    fn checkpoint_stopped_assistant(
+        &mut self,
+        events: &[AssistantEvent],
+        assistant_index: &mut Option<usize>,
+    ) -> Result<(), RuntimeError> {
+        if assistant_index.is_some() {
+            if let Ok(BuiltAssistantMessage { mut message, .. }) =
+                build_assistant_message(events.to_vec())
+            {
+                message.model = Some(self.running_model().to_string());
+                self.checkpoint_assistant(assistant_index, message)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Poll the provider and the same tool lifecycle together. A provider error
     /// after dispatch is never retried as an empty response: retain completed
     /// outputs and close every remaining tool id before returning the error.
@@ -137,13 +189,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let executor = executor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut scheduler = tool_execution::ToolScheduler::new(
-            &*executor,
-            self.hook_runner.clone(),
-            self.permission_policy.clone(),
-            abort.clone(),
-            self.hook_progress_reporter.clone(),
-        );
+        let mut scheduler = self.new_response_scheduler(&*executor, abort.clone());
         let mut events = Vec::new();
         let mut stream = Some(stream);
         let mut ended = false;
@@ -183,13 +229,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                         // Preserve the entire consecutive thinking sequence. A
                         // non-thinking start can yield before tool admission;
                         // unfinished tool JSON has caused no external effects.
-                        match &event {
-                            AssistantEvent::ThinkingStart | AssistantEvent::Thinking { .. }
-                            | AssistantEvent::RedactedThinking { .. } => at_boundary = false,
-                            AssistantEvent::ResponseBlockStart | AssistantEvent::TextDelta(_)
-                            | AssistantEvent::ToolUse { .. } | AssistantEvent::MessageStop => at_boundary = true,
-                            _ => {}
-                        }
+                        at_boundary = next_response_boundary(&event, at_boundary);
                         if let AssistantEvent::ToolUse { id, name, input, .. } = &event {
                             if !allow_tools {
                                 error = Some(RuntimeError::new("model requested tools after the computation step limit was reached"));
@@ -198,25 +238,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                             if assistant_index.is_none() {
                                 scheduler.initialize_context(self.dispatch_context(observer, prompter));
                             }
-                            let mut prefix = events.clone();
-                            prefix.push(event.clone());
-                            prefix.push(AssistantEvent::MessageStop);
-                            let (mut parent, ..) = build_assistant_message(prefix).expect("complete tool block supplies content");
-                            parent.model = Some(self.running_model().to_string());
-                            if let Err(failure) = self.checkpoint_assistant(&mut assistant_index, parent.clone()) { error = Some(failure); break; }
-                            parent.history.clone_from(&self.session.messages[assistant_index.expect("checkpointed assistant")].history);
-                            if let Err(failure) = scheduler.enqueue(id.clone(), name.clone(), input.clone(), Some(parent)) {
-                                error = Some(failure); break;
-                            }
+                            let dispatched = self.checkpoint_tool_parent(&events, event.clone(), &mut assistant_index)
+                                .and_then(|parent| scheduler.enqueue(id.clone(), name.clone(), input.clone(), Some(parent)));
+                            if let Err(failure) = dispatched { error = Some(failure); break; }
                         }
                         observe_assistant_event(observer, &event);
                         let stopped = matches!(event, AssistantEvent::MessageStop);
                         events.push(event);
-                        if stopped && assistant_index.is_some() {
-                            if let Ok((mut message, ..)) = build_assistant_message(events.clone()) {
-                                message.model = Some(self.running_model().to_string());
-                                if let Err(failure) = self.checkpoint_assistant(&mut assistant_index, message) { error = Some(failure); break; }
-                            }
+                        if stopped {
+                            if let Err(failure) = self.checkpoint_stopped_assistant(&events, &mut assistant_index) { error = Some(failure); break; }
                         }
                     }
                     Some(Err(failure)) => { error = Some(failure); break; }
@@ -409,5 +439,19 @@ fn observe_assistant_event(
                 obs.on_message_stop();
             }
         }
+    }
+}
+
+/// Metadata preserves the previous boundary; a consecutive thinking block does not.
+fn next_response_boundary(event: &AssistantEvent, previous: bool) -> bool {
+    match event {
+        AssistantEvent::ThinkingStart
+        | AssistantEvent::Thinking { .. }
+        | AssistantEvent::RedactedThinking { .. } => false,
+        AssistantEvent::ResponseBlockStart
+        | AssistantEvent::TextDelta(_)
+        | AssistantEvent::ToolUse { .. }
+        | AssistantEvent::MessageStop => true,
+        _ => previous,
     }
 }

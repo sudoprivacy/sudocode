@@ -23,9 +23,9 @@ fn windows_startup_does_not_solicit_color_replies_into_the_input_draft() {
                         "args": ["--permission-mode", "read-only"],
                         "root": env.workspace_root(), "configHome": env.config_home(),
                         "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
-                        "backend": backend, "env": {"COLORFGBG": background},
+                        "backend": backend, "env": {"COLORFGBG": background, "COLORTERM": "truecolor"},
                         "replyTiming": reply_timing,
-                        "expectedMuted": if background == "0;15" {241} else {247},
+                        "expectedMuted": if background == "0;15" {[118, 118, 118]} else {[158, 158, 158]},
                     }))
                     .unwrap(),
                 )

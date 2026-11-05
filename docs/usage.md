@@ -97,9 +97,9 @@ human messages before history, leaving inbound peer messages queued.
 
 ## Steering, queueing and cancellation
 
-These controls apply to the default asynchronous REPL. Starting with
-`SUDOCODE_INTERRUPT_QUEUE_MODE=off` selects the legacy synchronous REPL,
-which retains turn-boundary delivery.
+These controls apply to the REPL. Starting with
+`SUDOCODE_INTERRUPT_QUEUE_MODE=off`, like `/config set queue off`, disables
+the queue: a message that would wait for the next turn is refused instead.
 
 While the model or tools are working:
 
@@ -318,8 +318,9 @@ command names, model aliases, permission modes, and recent session IDs.
 
 The live status follows the foreground engine lifecycle. A four-cell amber
 animation approximates the rotating Sudoprivacy logo in one row, using twelve
-precomputed frames. Model work shows `Thinking...` or `Reasoning...`.
-The activity label uses the theme's info/warning color; model, elapsed time and
+precomputed frames. Model work shows `Working...` or `Thinking...`.
+The activity label uses the terminal foreground, with the theme's warning color
+for retries or stalled output; model, elapsed time and
 tokens use its muted color so they remain secondary to the activity.
 Elapsed time and ETA refresh in whole seconds; tokens and the brand animation
 remain live. Final turn statistics retain their precise duration.
@@ -328,7 +329,8 @@ tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
-footer return. Background work keeps its separate task summary in the footer.
+footer return. Remaining background work uses the same status row as described
+under [Background tasks](#background-tasks-in-the-repl).
 
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
@@ -348,14 +350,16 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
-Unfinished ordinary paragraphs stream above the live status area by default.
+Unfinished ordinary paragraphs and top-level fenced code stream above the live status area by default.
 Finalized text
 moves into native scrollback in the same presentation as preview removal,
 and a draft typed during the response stays available. Parallel tool output
 keeps unfinished Markdown formatting intact. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
-Code, tables, lists, headings and emoji with ambiguous terminal widths use
+Complete code lines retain syntax parser state across deltas; the unfinished
+last line stays literal until its newline arrives. Finalization uses the same
+highlighter as replay. Nested/indented fences, Mermaid diagrams, tables, lists, headings and emoji with ambiguous terminal widths use
 the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
@@ -384,9 +388,14 @@ hooks, approval, or an execution slot; amber while running; the code theme's
 green on success; and red on failure. Frame strokes use normal weight without
 dimming so corners align with vertical borders across terminal fonts.
 Colors adapt to dark/light backgrounds and terminal
-color depth. `ColorTheme` is the single semantic color interface; its `info`
-role (including Thinking/Reasoning) and successful tool borders share one
-soft-green definition. Syntax-backed colors load on demand and stay cached.
+color depth. `ColorTheme` resolves semantic text roles into complete styles for
+transcript, chrome and input surfaces. Brand accents and the activity logo use
+Sudoprivacy amber (#F59E0B), with a darker shade on light backgrounds. Error and
+success roles use the terminal's regular red and green slots, as Codex does;
+the emulator owns their exact RGB values. Informational marks and successful
+tool borders share the syntax theme's soft green. Thinking/Reasoning labels use
+the terminal foreground; stalled activity uses the warning role. Syntax-backed
+roles and terminal capabilities are resolved once and cached.
 Tool names use the shared Codex blue accent. Titles occupy one
 row and use an ellipsis when they exceed the available width. Running titles
 reflow on resize; completed titles remain as printed in terminal scrollback.
@@ -419,11 +428,15 @@ mutating flags remain serial.
 
 `AskUserQuestion` can wait alongside independent reads. Questions and permission
 requests share one input queue, so only one prompt owns the editor at a time;
-other results continue to render while it waits. MCP tools
+other results continue to render while it waits. When one call asks several
+questions, ← or Shift+Tab returns to the previous question with its answer
+selected, so an answer can be changed before the last one is given. MCP tools
 can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
 other MCP transports and resource/prompt wrappers remain serial. A visible
 tool card may still be queued: the amber border marks actual execution.
 Completed results appear immediately, even while another call is still running.
+Captured stdout/stderr belongs to that Bash invocation; a concurrently spawned
+sibling cannot keep its output pipes open after the command exits.
 Cancellation or a broken provider stream stops unfinished calls and preserves
 finished outputs. An interrupted provider response is not automatically replayed
 once tools have started. Streamed calls are saved before dispatch; append-log
@@ -457,33 +470,53 @@ labels and punctuation, with every count in bold terminal foreground, including
 zero. Ordinary task descriptions also retain the terminal foreground instead
 of a slot-wide grey; active labels remain bold and completed labels retain dim
 strikethrough. Amber is reserved for accent/activity, not neutral quantities.
-Per-turn status uses the same
-theme-selected muted foreground without an additional dim attribute; cache
-health indicators keep their semantic colors. Emphasis and color are scoped
+Per-turn status uses syntax-derived accents for the model and usage, with
+secondary labels and separators. The footer's workspace path and branch use
+accents from that same syntax asset. Cache health indicators keep their semantic
+colors. None of these accents adds a dim attribute. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
 Ordinary footer tips use the theme's readable muted foreground, actionable
-recommendations use its primary accent, and urgent tips use its warning role,
+recommendations use its subdued notice role, and urgent tips use its warning role,
 without an additional dim attribute; separators use the border role. The input draft
 retains the terminal foreground. A slot's initial color is decoded as text
 state, not applied again as a fallback to every span: ANSI foreground/full
 resets restore the terminal default instead of silently inheriting a parent
 color. The same structured spans feed the live UI and transcript adapters.
-No-color chrome does not force a palette color.
+No-color chrome does not force a palette color. Secondary text blends the
+reported terminal foreground and background and maintains readable contrast.
+On explicit selection surfaces, role colors are checked against the selected
+background. ANSI status colors remain terminal-owned.
+
+Markdown, code, links, tables and chrome share structured text runs. Live prose
+and question documents consume those runs directly; native scrollback serializes
+ANSI only at the terminal boundary. External program output still has one ANSI
+decoder. There is no second Markdown implementation for the live canvas, and
+these presentation changes do not alter stored messages or model input.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
+Write and Edit share numbered, syntax-highlighted source previews. New files
+show added lines; replacements show removed/added lines with nearby context.
+Running Write previews show the submitted content; completed cards use the
+tool's returned content. Preview lines and characters are bounded before
+highlighting, with explicit omission notices. The complete source is preserved
+in the session and file. Markdown files keep literal Markdown source in these
+tool cards rather than becoming rendered documents.
+When a large tool result is offloaded, the card labels its retained request
+content as an input preview instead of claiming an empty file or guessing
+whether the operation created or replaced it. Replay uses the recorded request;
+the complete tool result remains available through the session's output record.
 On Unix, the default REPL queries the terminal palette once at startup, with
 a shared 250 ms deadline and preservation of queued keys and pastes. Windows
 does not send OSC 10/11 color queries: some console hosts deliver replies as
 input, so startup uses `COLORFGBG` instead (dark if absent or invalid). This
 also avoids treating ConPTY's backing-console colors as the visible theme.
 Unsupported Unix queries use the same fallback. `NO_COLOR` skips the query and
-colors; noninteractive commands do not query the terminal. The legacy REPL
-uses `COLORFGBG`. Running tool previews cache syntax highlighting; repainting
+colors; noninteractive commands do not query the terminal. Running tool previews cache syntax highlighting; repainting
 or editing input does not reparse their code. Output stays in native terminal
 scrollback, with no alternate screen. Terminal theme changes take effect on
 the next launch.
@@ -492,6 +525,11 @@ Markdown uses Codex's typographic hierarchy: headings and emphasis keep the
 terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
+Tables follow Codex's column allocation: paths and long tokens surrender width
+before prose and compact values. Cells wrap with their styles and links;
+tables that cannot remain readable become labeled key/value records. Layout
+uses the available width when rendering, including replay and plan review.
+Already printed native scrollback keeps the terminal's own resize/reflow behavior.
 
 Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
 show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);
@@ -696,6 +734,15 @@ and agents automatically moved to the background use the same view. It shows
 running terminal/agent counts and unread completion results. When neither
 exists, the entry is hidden; no additional permanent row is reserved.
 
+After the foreground turn finishes, the status row shows outstanding work, for
+example `1 task still running · turn 549 finished`. Running or stopping tasks
+use the amber activity accent and the same logo at a slower 400 ms cadence;
+the completed-turn suffix uses the muted theme color and stays fixed. Unconfirmed
+or failed tasks take priority with static warning/error text. Foreground work
+and input questions retain priority. Animation stops when the row is hidden or
+no work remains. The status and footer consume the same task-event projection;
+the animation does not indicate new task output or advance elapsed counters.
+
 The task summary normally shows just the counts. With an empty prompt, press
 **↓** to focus it; **Enter to view** then appears. Press **Enter** to open the task list.
 **↑/↓** selects a task, **Enter** opens its details, and **k** stops the selected
@@ -706,11 +753,22 @@ the footer entry disappears. Existing `/tasks list|get|stop` commands remain
 available for persisted agent manifests.
 
 Shell details update while the parent is idle and include stdout/stderr,
-elapsed time, status, and the actual exit code. The preview retains at most
+labelled runtime, status, and the actual exit code. Long commands wrap across
+up to three preview rows. Output sits in a theme-colored frame that shrinks
+with the terminal; its row range refers to the wrapped, retained output tail.
+Internal blank lines and output colors are preserved, and the stop hint only
+appears for active tasks. The preview retains at most
 24 KiB per task; complete shell output is stored in the private temporary log
 shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
 directory after completion. The session retains at most 50 completed tasks
-in memory. Agent details show current activity and recent output, then their
+in memory, plus active work. The list shows its current entry count. Finishing a
+task or opening its details makes it recently used; when the history exceeds
+50 entries, the least recently used result leaves automatically, without a
+restart. Selecting a list row, repainting, status queries and output updates do
+not extend retention. A long-running task enters history when it finishes.
+There is no age-based expiration within this limit. This does not delete their
+complete logs. Agent details use the same layout,
+showing current activity and recent output, then their
 final result. These are tasks owned by this session, not a view of other agents
 on the machine.
 
@@ -972,6 +1030,10 @@ steps with the user. This final answer is an additional model request, outside
 the execution budget. Each new user turn gets a fresh budget. Already-started
 background work is not cancelled by this limit.
 
+Subagents (`Agent`, `agent_spawn`) get the same budget for each of their turns
+and wind down the same way, returning what they found as a completed result.
+Without `maxSteps`, a subagent turn is limited to 100 steps.
+
 ## Editing files
 
 `edit_file` requires a nonempty `old_string`. By default it must match exactly
@@ -992,9 +1054,8 @@ scode --model <vision-model> 'Describe @"screenshots/home page.png"'
 In the REPL, paste a clipboard image with **Alt+V**, with **Ctrl+V** where the
 terminal passes it through, or with the terminal's own paste (Cmd+V on macOS)
 when the clipboard holds only an image. On Windows Terminal, Ctrl+V is the
-terminal's text paste, so use Alt+V there. The image shows as `[Image #N]` in
-the default REPL and as its `@"path"` reference in the classic synchronous REPL,
-and it is attached on submit exactly like a typed reference: a copied image file
+terminal's text paste, so use Alt+V there. The image shows as `[Image #N]`, and
+it is attached on submit exactly like a typed reference: a copied image file
 is referenced where it is, and pasted image data is stored in the image cache
 first. For scripts and tests, `SUDOCODE_CLIPBOARD_IMAGE=<file>` stands in for
 the system clipboard, which is then never read: the clipboard holds only the

@@ -90,13 +90,12 @@ mod platform {
 /// Win32 stderr cannot be made nonblocking like a Unix pipe. One reader drains
 /// the real pipe into a bounded queue; the UI tick never waits for pipe IO.
 /// Pipe creation reuses the PTY dependency. Standard-handle ownership uses std
-/// OwnedHandle and the existing Win32 wrapper crate, without pipe-type probes.
+/// `OwnedHandle` and the existing Win32 wrapper crate, without pipe-type probes.
 #[cfg(windows)]
 mod platform {
     use std::io::{self, Read};
     use std::os::windows::io::{AsHandle, OwnedHandle};
     use std::sync::mpsc::{self, Receiver};
-    use std::sync::{Arc, OnceLock};
     use std::thread::JoinHandle;
 
     use filedescriptor::Pipe;
@@ -110,7 +109,6 @@ mod platform {
         active: bool,
         captured: Option<Receiver<Vec<u8>>>,
         reader: Option<JoinHandle<()>>,
-        wake: Arc<OnceLock<std::thread::Thread>>,
     }
 
     impl StderrRedirect {
@@ -122,8 +120,6 @@ mod platform {
             let writer: OwnedHandle = write.as_file().ok()?.into();
             drop(write);
             let (tx, rx) = mpsc::sync_channel(CAPTURE_CHUNKS);
-            let wake = Arc::new(OnceLock::<std::thread::Thread>::new());
-            let notify = Arc::clone(&wake);
             let reader = std::thread::Builder::new()
                 .name("repl-stderr".into())
                 .spawn(move || {
@@ -135,9 +131,6 @@ mod platform {
                                 if tx.send(buf[..n].to_vec()).is_err() {
                                     break;
                                 }
-                                if let Some(worker) = notify.get() {
-                                    worker.unpark();
-                                }
                             }
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                             Err(_) => break,
@@ -145,14 +138,11 @@ mod platform {
                     }
                 })
                 .ok()?;
-            let previous = match redirect(&writer) {
-                Ok(previous) => previous,
-                Err(_) => {
-                    drop(writer);
-                    drop(rx);
-                    let _ = reader.join();
-                    return None;
-                }
+            let Ok(previous) = redirect(&writer) else {
+                drop(writer);
+                drop(rx);
+                let _ = reader.join();
+                return None;
             };
             Some(Self {
                 original: previous.unwrap_or(original),
@@ -160,15 +150,7 @@ mod platform {
                 active: true,
                 captured: Some(rx),
                 reader: Some(reader),
-                wake,
             })
-        }
-
-        /// Classic output waits on its forwarding thread; iocraft retains its
-        /// existing UI tick. Both drain the same bounded capture queue.
-        #[inline]
-        pub fn wake_on_data(&self, worker: std::thread::Thread) {
-            let _ = self.wake.set(worker);
         }
 
         #[inline]

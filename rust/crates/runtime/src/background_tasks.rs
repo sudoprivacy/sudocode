@@ -5,7 +5,7 @@
 
 use crate::HookAbortSignal;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -99,6 +99,17 @@ pub enum BackgroundTaskEvent {
     Removed(String),
 }
 
+/// Lightweight work metadata, without cloning task output or installing a sink.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackgroundTaskSummary {
+    pub terminals: usize,
+    pub agents: usize,
+    pub execution_unconfirmed: usize,
+    /// Actual workers, including work whose caller has already been cancelled.
+    /// This is independent of the number of background task records.
+    pub tool_operations: usize,
+}
+
 type TaskSink = Arc<dyn Fn(BackgroundTaskEvent) + Send + Sync>;
 struct Record {
     task: BackgroundTask,
@@ -109,12 +120,98 @@ struct Record {
 #[derive(Default)]
 struct Registry {
     tasks: BTreeMap<String, Record>,
+    // Oldest first. IDs only: task state and output live exclusively in tasks.
+    history: VecDeque<String>,
     sink: Option<TaskSink>,
     changed: Arc<Condvar>,
     closing: bool,
     paused: bool,
     pause_epoch: u64,
     operations: usize,
+}
+
+impl Registry {
+    fn emit(&self, event: BackgroundTaskEvent) {
+        if let Some(sink) = &self.sink {
+            sink(event);
+        }
+    }
+
+    fn insert(&mut self, record: Record) {
+        let history_id = (!record.task.status.is_active()).then(|| record.task.id.clone());
+        self.emit(BackgroundTaskEvent::Updated(record.task.clone()));
+        if let Some(previous) = self.tasks.insert(record.task.id.clone(), record) {
+            self.forget_history(&previous.task.id);
+        }
+        if let Some(id) = history_id {
+            self.retain_finished(id);
+        }
+    }
+
+    fn forget_history(&mut self, id: &str) {
+        if let Some(index) = self.history.iter().position(|entry| entry == id) {
+            self.history.remove(index);
+        }
+    }
+
+    fn remove(&mut self, id: String) {
+        self.forget_history(&id);
+        if self.tasks.remove(&id).is_some() {
+            self.emit(BackgroundTaskEvent::Removed(id));
+        }
+    }
+
+    fn retain_finished(&mut self, id: String) {
+        self.history.push_back(id);
+        if self.history.len() > COMPLETED_TASK_LIMIT {
+            let oldest = self
+                .history
+                .pop_front()
+                .expect("history exceeded its limit");
+            self.remove(oldest);
+        }
+    }
+
+    fn status_changed(
+        &mut self,
+        id: &str,
+        previous: BackgroundTaskStatus,
+        current: BackgroundTaskStatus,
+    ) {
+        // Output, activity and changes between terminal statuses do not touch
+        // retention. Only entering/leaving the inactive history changes it.
+        if previous.is_active() != current.is_active() {
+            if current.is_active() {
+                self.forget_history(id);
+            } else {
+                self.retain_finished(id.to_owned());
+            }
+        }
+    }
+
+    fn inspect(&mut self, id: &str) {
+        let Some(index) = self.history.iter().position(|entry| entry == id) else {
+            return;
+        };
+        if index + 1 < self.history.len() {
+            let id = self.history.remove(index).expect("history entry found");
+            self.history.push_back(id);
+        }
+    }
+
+    fn clear_results(&mut self) {
+        // The journal can purge stored results while workers still own tasks.
+        // Keep unconfirmed execution just as before, and publish all removals.
+        let obsolete: Vec<_> = self
+            .history
+            .iter()
+            .filter(|id| self.tasks[*id].task.status != BackgroundTaskStatus::ExecutionUnconfirmed)
+            .cloned()
+            .collect();
+        for id in obsolete {
+            self.remove(id);
+        }
+    }
 }
 
 /// Retained by the actual tool worker, including after its caller is cancelled.
@@ -282,12 +379,7 @@ impl BackgroundTasks {
                         let mut registry = registry
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        // This registry also owns cancellation. Purging stored
-                        // results must retain unfinished process ownership.
-                        registry.tasks.retain(|_, record| {
-                            record.task.status.is_active()
-                                || record.task.status == BackgroundTaskStatus::ExecutionUnconfirmed
-                        });
+                        registry.clear_results();
                         registry.changed.notify_all();
                     }
                 });
@@ -354,7 +446,7 @@ impl BackgroundTasks {
         // Replay under the producer lock so a snapshot cannot overtake a newer
         // update. Renderers opt in: an idle non-subscribing consumer queues no logs.
         for record in registry.tasks.values() {
-            Self::emit(&registry, BackgroundTaskEvent::Updated(record.task.clone()));
+            registry.emit(BackgroundTaskEvent::Updated(record.task.clone()));
         }
     }
 
@@ -380,17 +472,12 @@ impl BackgroundTasks {
             task.status = BackgroundTaskStatus::Stopping;
         }
         let signal = abort.clone();
-        Self::emit(&registry, BackgroundTaskEvent::Updated(task.clone()));
-        registry.tasks.insert(
-            task.id.clone(),
-            Record {
-                task,
-                abort,
-                started: Instant::now(),
-                last_emit: Instant::now(),
-            },
-        );
-        Self::prune(&mut registry);
+        registry.insert(Record {
+            task,
+            abort,
+            started: Instant::now(),
+            last_emit: Instant::now(),
+        });
         registry.changed.notify_all();
         drop(registry);
         if should_stop {
@@ -416,6 +503,7 @@ impl BackgroundTasks {
         truncate_tail(&mut record.task.output);
         record.task.elapsed_ms =
             u64::try_from(record.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = record.task.status;
         // Shell producers already sample at 200ms. Coalesce agent token updates;
         // lifecycle, first output and activity changes remain immediate.
         if previous
@@ -430,10 +518,19 @@ impl BackgroundTasks {
         {
             record.last_emit = Instant::now();
             let event = BackgroundTaskEvent::Updated(record.task.clone());
-            Self::emit(&registry, event);
+            registry.emit(event);
         }
+        registry.status_changed(id, previous.0, status);
         registry.changed.notify_all();
-        Self::prune(&mut registry);
+    }
+
+    /// Retain an explicitly inspected result more recently. Passive reads and
+    /// output updates do not affect history, and active/missing tasks are no-ops.
+    pub fn inspect(&self, id: &str) {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .inspect(id);
     }
 
     #[must_use]
@@ -478,6 +575,33 @@ impl BackgroundTasks {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> BackgroundTaskSummary {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut summary = BackgroundTaskSummary {
+            tool_operations: registry.operations,
+            ..BackgroundTaskSummary::default()
+        };
+        for record in registry
+            .tasks
+            .values()
+            .filter(|record| record.task.background)
+        {
+            if record.task.status == BackgroundTaskStatus::ExecutionUnconfirmed {
+                summary.execution_unconfirmed += 1;
+            } else if record.task.status.is_active() {
+                match record.task.kind {
+                    BackgroundTaskKind::Terminal => summary.terminals += 1,
+                    BackgroundTaskKind::Agent => summary.agents += 1,
+                }
+            }
+        }
+        summary
     }
 
     #[must_use]
@@ -539,7 +663,7 @@ impl BackgroundTasks {
                 record.task.status = BackgroundTaskStatus::Stopping;
                 signals.push(record.abort.clone());
                 let event = BackgroundTaskEvent::Updated(record.task.clone());
-                Self::emit(&registry, event);
+                registry.emit(event);
             }
         }
         drop(registry);
@@ -572,28 +696,6 @@ impl BackgroundTasks {
             && self.snapshots().iter().any(|task| task.status.is_active())
         {
             std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn emit(registry: &Registry, event: BackgroundTaskEvent) {
-        if let Some(sink) = &registry.sink {
-            sink(event);
-        }
-    }
-
-    fn prune(registry: &mut Registry) {
-        // Prune on completion as well as insertion: a large burst cannot leave
-        // an unbounded finished history when no further tasks are launched.
-        let mut completed: Vec<_> = registry
-            .tasks
-            .values()
-            .filter(|r| !r.task.status.is_active())
-            .map(|r| (r.task.started_ms, r.task.id.clone()))
-            .collect();
-        completed.sort();
-        for (_, id) in completed.into_iter().rev().skip(COMPLETED_TASK_LIMIT) {
-            registry.tasks.remove(&id);
-            Self::emit(registry, BackgroundTaskEvent::Removed(id));
         }
     }
 }

@@ -146,6 +146,7 @@ pub struct CompactionOutcome {
 }
 
 pub struct SessionEngine {
+    host_context_required: std::sync::atomic::AtomicBool,
     background_tasks: runtime::background_tasks::BackgroundTasks,
     /// A cancellation endpoint that stays accessible while compaction holds
     /// the session mutex for its model request and receipt finalization.
@@ -172,9 +173,17 @@ pub struct SessionEngine {
     /// Whether this runtime can select a different durable transcript.
     allows_session_replacement: bool,
     lifetime_guard: std::sync::Mutex<Option<Box<dyn Send>>>,
+    /// The final save made when the engine closed, reported by later saves
+    /// instead of the closed writer's refusal.
+    closing_save: std::sync::Mutex<Option<Result<(), String>>>,
 }
 
 impl SessionEngine {
+    /// Configure a caller-owned context provider while opening/loading a session.
+    pub fn require_host_context(&self, is_required: bool) {
+        self.host_context_required
+            .store(is_required, std::sync::atomic::Ordering::SeqCst);
+    }
     pub(crate) fn with_lifetime_guard(self, guard: impl Send + 'static) -> Self {
         *self
             .lifetime_guard
@@ -196,6 +205,36 @@ impl SessionEngine {
             .enable_all()
             .build()
             .map_err(|error| format!("failed to create engine tokio runtime: {error}"))
+    }
+
+    /// Initialize engine-owned state after the host has prepared its session.
+    /// Auth overrides and transcript replacement remain explicit host policy.
+    #[inline]
+    fn from_session(
+        session: AcpCliSession,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+        reasoning_effort: Option<String>,
+        auth_mode: Option<AuthMode>,
+        host_prompt_sections: Vec<String>,
+        allows_session_replacement: bool,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            host_context_required: std::sync::atomic::AtomicBool::new(false),
+            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
+            compaction_abort_signal: session.abort_signal.clone(),
+            session: std::sync::Mutex::new(session),
+            tokio_runtime: Some(Self::build_async_runtime()?),
+            allowed_tools,
+            permission_mode: std::sync::Mutex::new(permission_mode),
+            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
+            auth_mode: std::sync::Mutex::new(auth_mode),
+            host_prompt_sections,
+            allows_session_replacement,
+            lifetime_guard: std::sync::Mutex::default(),
+            closing_save: std::sync::Mutex::default(),
+        })
     }
 
     /// Adopt a session prepared by a host, retaining its filesystem and writer
@@ -236,30 +275,26 @@ impl SessionEngine {
         )
         .map_err(|e| format!("build hosted session engine: {e}"))?;
         let cwd = host.shell_root.clone();
-        Ok(Self {
-            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
-            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
-            compaction_abort_signal: abort_signal.clone(),
-            session: std::sync::Mutex::new(AcpCliSession {
-                cwd,
-                host,
-                handle,
-                runtime,
-                abort_signal,
-                started_at: Instant::now(),
-                session_mcp_servers: mcp_servers,
-                prompt_overrides,
-                memory,
-            }),
-            tokio_runtime: Some(Self::build_async_runtime()?),
+        let session = AcpCliSession {
+            cwd,
+            host,
+            handle,
+            runtime,
+            abort_signal,
+            started_at: Instant::now(),
+            session_mcp_servers: mcp_servers,
+            prompt_overrides,
+            memory,
+        };
+        Self::from_session(
+            session,
             allowed_tools,
-            permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: std::sync::Mutex::new(None),
-            auth_mode: std::sync::Mutex::new(Some(auth_mode)),
+            permission_mode,
+            None,
+            Some(auth_mode),
             host_prompt_sections,
-            allows_session_replacement: false,
-            lifetime_guard: std::sync::Mutex::default(),
-        })
+            false,
+        )
     }
 
     /// Build a single-session engine for `cwd`. Ports `AcpCliAgent::build_session`.
@@ -274,8 +309,8 @@ impl SessionEngine {
         prompt_overrides: runtime::SystemPromptOverrides,
         memory: runtime::memory::MemoryMode,
         system_prompt: SystemPrompt,
-        model: String,
-        model_flag_raw: Option<String>,
+        model: &str,
+        model_flag_raw: Option<&str>,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode_override: Option<PermissionMode>,
         reasoning_effort: Option<String>,
@@ -284,9 +319,9 @@ impl SessionEngine {
         let cwd = canonical_session_cwd(cwd)?;
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let resolved_model = if model_flag_raw.is_some() {
-            model.clone()
+            model.to_owned()
         } else {
-            resolve_repl_model(model.clone())
+            resolve_repl_model(model.to_owned())
         };
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let session_state =
@@ -334,20 +369,15 @@ impl SessionEngine {
             prompt_overrides,
             memory,
         };
-        Ok(Self {
-            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
-            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
-            compaction_abort_signal: session.abort_signal.clone(),
-            session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(Self::build_async_runtime()?),
+        Self::from_session(
+            session,
             allowed_tools,
-            permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
-            auth_mode: std::sync::Mutex::new(auth_mode),
-            host_prompt_sections: Vec::new(),
-            allows_session_replacement: true,
-            lifetime_guard: std::sync::Mutex::default(),
-        })
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+            Vec::new(),
+            true,
+        )
     }
 
     /// Build a single-session engine wrapping an **already-persisted**
@@ -366,8 +396,8 @@ impl SessionEngine {
         prompt_overrides: runtime::SystemPromptOverrides,
         memory: runtime::memory::MemoryMode,
         system_prompt: SystemPrompt,
-        model: String,
-        model_flag_raw: Option<String>,
+        model: &str,
+        model_flag_raw: Option<&str>,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode_override: Option<PermissionMode>,
         reasoning_effort: Option<String>,
@@ -377,7 +407,7 @@ impl SessionEngine {
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         // Model resolution on resume follows Claude Code: the config is the
         // single source of truth. See [`resume_model_from_config_ssot`].
-        let resolved_model = resume_model_from_config_ssot(model_flag_raw.as_deref(), &model);
+        let resolved_model = resume_model_from_config_ssot(model_flag_raw, model);
         session.model = Some(resolved_model.clone());
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
@@ -420,20 +450,15 @@ impl SessionEngine {
             prompt_overrides,
             memory,
         };
-        Ok(Self {
-            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
-            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
-            compaction_abort_signal: session.abort_signal.clone(),
-            session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(Self::build_async_runtime()?),
+        Self::from_session(
+            session,
             allowed_tools,
-            permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
-            auth_mode: std::sync::Mutex::new(auth_mode),
-            host_prompt_sections: Vec::new(),
-            allows_session_replacement: true,
-            lifetime_guard: std::sync::Mutex::default(),
-        })
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+            Vec::new(),
+            true,
+        )
     }
 
     /// Apply session/load options to this live context without acquiring a
@@ -506,7 +531,9 @@ impl SessionEngine {
         // not carried — a rebuild is where it legitimately changes.
         let inherited_known_date = session.runtime.prompt_known_date().map(str::to_string);
         if new_session.model.is_none() {
-            new_session.model = session.runtime.session().model.clone();
+            new_session
+                .model
+                .clone_from(&session.runtime.session().model);
         }
         let model = new_session.model.clone().unwrap_or_default();
         let permission_mode = self.locked_permission_mode();
@@ -592,10 +619,18 @@ impl SessionEngine {
     /// Config keys ∪ discovery ids, `current` pinned first — the model list the
     /// seam's `ModelChanged` carries and `/model` (no arg) shows.
     fn available_models(&self, current: &str) -> Vec<String> {
-        let catalog = self.lock_session().runtime.api_client().model_catalog();
-        if let Some(catalog) = &catalog {
+        if let Some(catalog) = self.lock_session().runtime.api_client().model_catalog() {
             catalog.refresh_in_background();
         }
+        self.known_models(current)
+    }
+
+    /// [`Self::available_models`] from what is already known: config keys and
+    /// the cached (or bundled) catalog, without starting a discovery refresh.
+    /// Cheap enough for UI paths such as Tab completion; a refresh starts a
+    /// thread with its own runtime and HTTP client.
+    fn known_models(&self, current: &str) -> Vec<String> {
+        let catalog = self.lock_session().runtime.api_client().model_catalog();
         let _catalog_scope = catalog
             .as_ref()
             .map(runtime::model_discovery::ModelCatalog::enter);
@@ -1041,7 +1076,43 @@ impl Drop for SessionEngine {
     }
 }
 
+/// With `autoCompactEnabled = false`, a prompt that still fits is sent as
+/// it is and one that does not is refused, leaving compaction to `/compact`.
+fn require_fit_without_compaction(
+    budget: &runtime::ContextBudget,
+    tokens: usize,
+) -> Result<(), runtime::RuntimeError> {
+    if budget.fits_buffered(tokens) {
+        Ok(())
+    } else {
+        Err(runtime::RuntimeError::auto_compaction_off())
+    }
+}
+
 impl engine_core::EngineDelegate for SessionEngine {
+    fn requires_host_context(&self) -> bool {
+        self.host_context_required
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn apply_host_context(&self, text: String) -> Result<(), runtime::RuntimeError> {
+        if text.trim().is_empty() {
+            return Err(runtime::RuntimeError::new("host context must be non-empty"));
+        }
+        let mut session = self.lock_session();
+        if session.prompt_overrides.append_system_prompt.as_ref() == Some(&text) {
+            return Ok(());
+        }
+        let previous = session.prompt_overrides.append_system_prompt.replace(text);
+        let snapshot = session.runtime.session().clone();
+        let handle = session.handle.clone();
+        if let Err(error) = self.rebuild_locked(&mut session, snapshot, handle) {
+            session.prompt_overrides.append_system_prompt = previous;
+            return Err(runtime::RuntimeError::new(error));
+        }
+        Ok(())
+    }
+
     fn prepare_prompt(
         &self,
         blocks: Vec<runtime::ContentBlock>,
@@ -1119,7 +1190,10 @@ impl engine_core::EngineDelegate for SessionEngine {
             .set_compaction_pending_input_tokens(prompt_tokens);
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let mut pre_send_compaction = None;
-        if estimated_tokens + prompt_tokens > history_budget {
+        let is_over_budget = estimated_tokens + prompt_tokens > history_budget;
+        if is_over_budget && !session.runtime.is_auto_compaction_enabled() {
+            require_fit_without_compaction(&budget, estimated_tokens + prompt_tokens)?;
+        } else if is_over_budget {
             Self::record_pre_send_compaction_check(
                 &session.runtime,
                 estimated_tokens,
@@ -1302,10 +1376,22 @@ impl engine_core::EngineDelegate for SessionEngine {
         let session = self.lock_session();
         session.runtime.api_client().flush_response_captures();
         let path = session.handle.path.clone();
-        if session.runtime.ensure_session_persistence_allowed().is_ok() {
-            let _ = session.runtime.session().save_to_path(&path);
-        }
+        let saved = session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                session
+                    .runtime
+                    .session()
+                    .save_to_path(&path)
+                    .map_err(|error| error.to_string())
+            });
         session.runtime.session().close_persistence();
+        *self
+            .closing_save
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(saved);
         drop(session);
         self.lifetime_guard
             .lock()
@@ -1462,6 +1548,11 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn available_models(&self) -> Vec<String> {
         vec![self.current_model()]
     }
+    /// The models known without starting discovery (see
+    /// [`SessionEngine::known_models`]).
+    fn known_models(&self) -> Vec<String> {
+        vec![self.current_model()]
+    }
     fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
         None
     }
@@ -1495,6 +1586,8 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn effort_options(&self, model: &str) -> Result<(String, Vec<String>), String>;
     /// Apply effort without rebuilding the prompt or changing signed history.
     fn set_effort(&self, level: &str) -> Result<(), String>;
+    /// Persist `autoCompactEnabled` and apply it from the next request.
+    fn set_auto_compaction(&self, is_enabled: bool) -> Result<(), String>;
     /// Pin the auth mode (engine SSOT) and rebuild so it takes effect.
     fn set_auth(&self, mode: AuthMode) -> Result<(), String>;
     /// Switch the active permission mode (engine SSOT) in place.
@@ -1539,6 +1632,9 @@ impl SessionLifecycle for SessionEngine {
     fn available_models(&self) -> Vec<String> {
         SessionEngine::available_models(self, &self.session_model())
     }
+    fn known_models(&self) -> Vec<String> {
+        SessionEngine::known_models(self, &self.session_model())
+    }
     fn session_snapshot(&self) -> runtime::Session {
         self.lock_session().runtime.session().clone()
     }
@@ -1549,6 +1645,15 @@ impl SessionLifecycle for SessionEngine {
 
     fn persist(&self) -> Result<(), String> {
         let session = self.lock_session();
+        // After close, the writer is released: report the close's own save.
+        if let Some(saved) = self
+            .closing_save
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return saved;
+        }
         session
             .runtime
             .ensure_session_persistence_allowed()
@@ -1733,6 +1838,14 @@ impl SessionLifecycle for SessionEngine {
         Ok(())
     }
 
+    fn set_auto_compaction(&self, is_enabled: bool) -> Result<(), String> {
+        let mut session = self.lock_session();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        tools::set_config_setting("autoCompactEnabled", &is_enabled.to_string())?;
+        session.runtime.set_auto_compaction(is_enabled);
+        Ok(())
+    }
+
     fn set_auth(&self, mode: AuthMode) -> Result<(), String> {
         let mut session = self.lock_session();
         session
@@ -1782,7 +1895,7 @@ impl SessionLifecycle for SessionEngine {
         loaded.mode = runtime::SessionMode::Interactive;
         // Keep the current effective model (REPL parity: the runtime model is
         // config-driven, not adopted from the resumed session).
-        loaded.model = session.runtime.session().model.clone();
+        loaded.model.clone_from(&session.runtime.session().model);
         self.rebuild_locked(&mut session, loaded, handle.clone())?;
         Ok((handle, message_count))
     }

@@ -57,6 +57,7 @@ pub(crate) fn select_memory(
             custom_input_hint: None,
             force_fuzzy_select: true,
             back_value: None,
+            initial_value: None,
         },
         values,
         move |value, cli, out| {

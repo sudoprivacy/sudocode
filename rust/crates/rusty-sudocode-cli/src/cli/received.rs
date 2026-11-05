@@ -4,6 +4,7 @@
 //! and peer inputs were batched. Decode only complete, top-level envelopes;
 //! examples inside code blocks and malformed wrappers remain ordinary input.
 
+use crate::render::TextRole;
 use pulldown_cmark::{Event, Parser, Tag};
 
 use crate::render::{
@@ -13,6 +14,8 @@ use crate::render::{
 
 struct EnvelopeHeader {
     sender: String,
+    /// The reading mailbox authenticated the sender (`verified="true"`).
+    verified: bool,
     summary: Option<String>,
     tag: &'static str,
     kind: &'static str,
@@ -42,6 +45,7 @@ fn envelope_header(line: &str) -> Option<EnvelopeHeader> {
         return None;
     }
     let mut has_request_id = false;
+    let mut verified = false;
     let mut summary = None;
     while !rest.is_empty() {
         let (name, value) = rest.strip_prefix(' ')?.split_once("=\"")?;
@@ -51,6 +55,7 @@ fn envelope_header(line: &str) -> Option<EnvelopeHeader> {
         }
         match name {
             "request-id" if !has_request_id => has_request_id = true,
+            "verified" if !verified && value == "true" => verified = true,
             "summary" if summary.is_none() => summary = Some(decode_attribute(value)),
             _ => return None,
         }
@@ -58,6 +63,7 @@ fn envelope_header(line: &str) -> Option<EnvelopeHeader> {
     }
     Some(EnvelopeHeader {
         sender: decode_attribute(sender),
+        verified,
         summary,
         tag,
         kind,
@@ -134,16 +140,19 @@ impl ReceivedMessage<'_> {
         let sender = StyledText::from_ansi(&self.header.sender)
             .text
             .replace(['\r', '\n', '\t'], " ");
-        let suffix = if self.header.kind.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", self.header.kind)
-        };
+        let mut suffix = String::new();
+        if self.header.verified {
+            suffix.push_str(" · verified");
+        }
+        if !self.header.kind.is_empty() {
+            suffix.push_str(" · ");
+            suffix.push_str(self.header.kind);
+        }
         format!(
             "{RESET}{}Message from {RESET}{}{sender}{RESET}{}{suffix}{RESET}",
-            theme().muted_fg(),
-            theme().peer_sender_fg(),
-            theme().muted_fg(),
+            theme().fg_seq(TextRole::Secondary),
+            theme().fg_seq(TextRole::Accent),
+            theme().fg_seq(TextRole::Secondary),
         )
     }
 
@@ -162,7 +171,7 @@ impl ReceivedMessage<'_> {
                 .into_iter()
                 .chain(std::iter::once(body.trim_end_matches('\n'))),
             width,
-            theme().muted,
+            theme().color(TextRole::Secondary),
         );
         if renderer.color_support() == ColorSupport::NoColor {
             StyledText::from_ansi(&output).text
@@ -176,11 +185,11 @@ impl ReceivedMessage<'_> {
 pub(crate) fn render_prompt(text: &str, width: usize, renderer: &TerminalRenderer) -> String {
     let mut output = String::new();
     for part in prompt_parts(text) {
-        let rendered = match part {
+        let formatted_text = match part {
             PromptPart::Human(text) => super::format::format_input_echo(text, width).0,
             PromptPart::Peer(message) => message.render(width, renderer),
         };
-        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
+        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &formatted_text);
     }
     output
 }

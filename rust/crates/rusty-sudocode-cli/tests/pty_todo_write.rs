@@ -1,6 +1,6 @@
 //! PTY tests for the `TodoWrite` tool — the CC-parity todo checklist.
 //!
-//! Coverage target: roadmap row "TodoWrite + auto-verification streak nudge".
+//! Coverage target: roadmap row "`TodoWrite` + auto-verification streak nudge".
 //! `TodoWrite` takes the whole list and replaces the previous one (no per-item
 //! id, no partial update), so these tests drive it through the deterministic
 //! mock scenarios and assert the terminal + persisted store.
@@ -18,7 +18,7 @@ use common::TestEnv;
 // 1. A single TodoWrite round-trips: tool call → result → final text
 // ──────────────────────────────────────────────────────────────────────
 
-/// The model opens a two-item todo list via TodoWrite; the tool call and its
+/// The model opens a two-item todo list via `TodoWrite`; the tool call and its
 /// result surface in the terminal and the turn exits 0.
 #[test]
 fn todo_write_roundtrips_a_list() {
@@ -74,8 +74,8 @@ fn todo_write_roundtrips_a_list() {
 //    list wipes it — whole-list replace semantics on disk.
 // ──────────────────────────────────────────────────────────────────────
 
-/// After a TodoWrite the store file contains the exact list; a subsequent
-/// empty TodoWrite clears the store to `[]`. Both are verified by pointing
+/// After a `TodoWrite` the store file contains the exact list; a subsequent
+/// empty `TodoWrite` clears the store to `[]`. Both are verified by pointing
 /// `SUDOCODE_TODO_STORE` at a temp file and reading it after the turn.
 #[test]
 fn todo_write_persists_then_empty_wipes_store() {
@@ -135,4 +135,65 @@ fn todo_write_persists_then_empty_wipes_store() {
             "empty TodoWrite must wipe the store to []; got: {wiped}"
         );
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 3. The header counts each item once: open means pending only
+// ──────────────────────────────────────────────────────────────────────
+
+/// Seed a list and read the header the panel paints at startup.
+fn seeded_header(name: &str, todos: &str) -> String {
+    let env = TestEnv::new(name);
+    let store = env.workspace_root().join("todos.json");
+    std::fs::write(&store, todos).expect("seed todo store");
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_TODO_STORE", store.to_str().unwrap())],
+    );
+    sess.expect("❯").expect("input ready");
+    let screen = common::expect_screen(
+        &sess,
+        |screen| screen.contains(" todos ("),
+        env.timeout(),
+        "todo header painted",
+    );
+    sess.send("/exit\r").unwrap();
+    let _ = sess.expect_eof();
+    screen
+        .lines()
+        .find(|line| line.contains(" todos ("))
+        .expect("header line")
+        .trim()
+        .to_string()
+}
+
+fn todo(content: &str, status: &str) -> String {
+    format!(r#"{{"content":"{content}","status":"{status}","activeForm":"Doing {content}"}}"#)
+}
+
+#[test]
+fn todo_header_counts_in_progress_once_and_open_as_pending() {
+    let mixed = format!(
+        "[{},{},{}]",
+        todo("parse", "completed"),
+        todo("render", "in_progress"),
+        todo("ship", "pending")
+    );
+    assert_eq!(
+        seeded_header("todo-header-mixed", &mixed),
+        "3 todos (1 done, 1 in progress, 1 open)"
+    );
+
+    // The reported case: everything but the in-progress item is done.
+    let mut items: Vec<String> = (1..=8)
+        .map(|n| todo(&format!("step {n}"), "completed"))
+        .collect();
+    items.push(todo("ship", "in_progress"));
+    assert_eq!(
+        seeded_header(
+            "todo-header-last-in-progress",
+            &format!("[{}]", items.join(","))
+        ),
+        "9 todos (8 done, 1 in progress, 0 open)"
+    );
 }

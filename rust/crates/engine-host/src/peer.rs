@@ -161,7 +161,7 @@ impl Peer {
                 sink,
             ),
             Self::Disk(name) => runtime::mailbox::spawn_local_poller(
-                runtime::mailbox::local_pair_root(),
+                &runtime::mailbox::local_pair_root(),
                 name.clone(),
                 abort,
                 sink,
@@ -211,9 +211,12 @@ pub fn node(agent: &str) -> Option<Arc<Node>> {
             state: Mutex::new(NodeState::Pending { endpoint, error }),
         });
         let resolving = Arc::clone(&binding);
-        let mailbox = Arc::new(Mailbox::daemon_resolving(agent.to_string(), move || {
-            resolving.backend()
-        }));
+        // The binding is a certificate-only mTLS connection: the node
+        // authenticated every writer and stamped each `from`.
+        let mailbox = Arc::new(
+            Mailbox::daemon_resolving(agent.to_string(), move || resolving.backend())
+                .with_authenticated_senders(true),
+        );
         Some(Arc::new(Node { binding, mailbox }))
     };
     nodes.insert(agent.to_string(), decided.clone());

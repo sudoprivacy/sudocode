@@ -26,12 +26,12 @@ fn closed_engine_releases_native_writer_and_fences_retained_snapshots() {
     .unwrap();
     let engine = SessionEngine::build(
         workspace.path(),
-        &Default::default(),
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        "claude-sonnet".into(),
-        Some("claude-sonnet".into()),
+        &std::collections::BTreeMap::default(),
+        runtime::SystemPromptOverrides::default(),
+        runtime::memory::MemoryMode::default(),
+        runtime::SystemPrompt::default(),
+        "claude-sonnet",
+        Some("claude-sonnet"),
         None,
         None,
         None,

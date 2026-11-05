@@ -210,12 +210,9 @@ pub fn load_md_agent_from_str(contents: &str, source_path: &Path) -> Option<Cust
 }
 
 fn find_named_agent_in_dir(dir: &Path, name: &str) -> Option<CustomAgentDefinition> {
-    for agent in load_md_agents(dir) {
-        if agent.name == name {
-            return Some(agent);
-        }
-    }
-    None
+    load_md_agents(dir)
+        .into_iter()
+        .find(|agent| agent.name == name)
 }
 
 /// Split a file's contents into `(frontmatter, body)`. Frontmatter is
@@ -437,8 +434,7 @@ body";
             "sudocode-custom-agents-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_nanos())
         ));
         write_temp_agent(
             &dir,
@@ -469,8 +465,7 @@ body";
             "sudocode-find-named-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_nanos())
         ));
         write_temp_agent(
             &dir,

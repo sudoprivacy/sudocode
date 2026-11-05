@@ -1089,7 +1089,7 @@ fn conditional_handoff_failed(error: &io::Error) -> ConditionalContentError {
 ///
 /// Generous on purpose: a stuck-detector, not a latency budget, so it must never
 /// fire on a slow-but-working call.
-const OP_DEADLINE: Duration = Duration::from_secs(60);
+const OP_DEADLINE: Duration = Duration::from_mins(1);
 const LOCK_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How much later than a blocking tail's own `timeout_ms` its deadline sits.

@@ -3,7 +3,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use command_group::{AsyncCommandGroup, CommandGroup};
+use command_group::CommandGroup;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
@@ -17,7 +17,11 @@ use crate::sandbox::{
 use crate::workspace_root::current_workspace_root;
 use crate::ConfigLoader;
 
+mod capture;
+use capture::spawn_captured_shell;
+
 /// Keep shell lifetime under the engine's cancellation and process-tree control.
+#[must_use]
 pub fn shell_process_group<T>(
     mut group: command_group::builder::CommandGroupBuilder<'_, T>,
 ) -> command_group::builder::CommandGroupBuilder<'_, T> {
@@ -618,17 +622,9 @@ async fn execute_bash_async(
     // Detect and emit ship provenance for git push operations
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    command.kill_on_drop(true);
+    let command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = shell_process_group(command.group()).spawn()?;
-    let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
+    let (mut child, mut stdout_pipe, mut stderr_pipe) = spawn_captured_shell(command)?;
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout_sleep);
     let abort_wait = async {
@@ -727,30 +723,34 @@ async fn pump_lines<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-/// Fold one [`StreamChunk`] into the collected output and progress counters.
-fn accumulate_chunk(
-    chunk: StreamChunk,
-    stdout_buf: &mut String,
-    stderr_buf: &mut String,
-    progress_chunk: &mut String,
-    total_lines: &mut usize,
-    total_bytes: &mut usize,
-    lossy: &mut bool,
-) {
-    match chunk {
-        StreamChunk::Stdout(decoded) => {
-            *lossy |= decoded.lossy;
-            let text = decoded.text;
-            *total_bytes += text.len();
-            *total_lines += 1;
-            stdout_buf.push_str(&text);
-            progress_chunk.push_str(&text);
-        }
-        StreamChunk::Stderr(decoded) => {
-            *lossy |= decoded.lossy;
-            let text = decoded.text;
-            *total_bytes += text.len();
-            stderr_buf.push_str(&text);
+/// Collected output and counters for the two cancellation-safe pipe readers.
+#[derive(Default)]
+struct StreamingOutput {
+    stdout: String,
+    stderr: String,
+    progress: String,
+    lines: usize,
+    bytes: usize,
+    lossy: bool,
+}
+
+impl StreamingOutput {
+    fn accumulate(&mut self, chunk: StreamChunk) {
+        match chunk {
+            StreamChunk::Stdout(decoded) => {
+                self.lossy |= decoded.lossy;
+                let text = decoded.text;
+                self.bytes += text.len();
+                self.lines += 1;
+                self.stdout.push_str(&text);
+                self.progress.push_str(&text);
+            }
+            StreamChunk::Stderr(decoded) => {
+                self.lossy |= decoded.lossy;
+                let text = decoded.text;
+                self.bytes += text.len();
+                self.stderr.push_str(&text);
+            }
         }
     }
 }
@@ -768,31 +768,19 @@ async fn execute_bash_streaming(
     abort_signal: Option<HookAbortSignal>,
     on_progress: Option<BashProgressCallback>,
 ) -> io::Result<BashCommandOutput> {
+    const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.kill_on_drop(true);
-
+    let command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = shell_process_group(command.group()).spawn()?;
-
-    let stdout = child.inner().stdout.take().expect("stdout piped");
-    let stderr = child.inner().stderr.take().expect("stderr piped");
+    let (mut child, stdout, stderr) = spawn_captured_shell(command)?;
 
     let mut stdout_reader = tokio::io::BufReader::new(stdout);
     let mut stderr_reader = tokio::io::BufReader::new(stderr);
 
-    let mut stdout_buf = String::new();
-    let mut stderr_buf = String::new();
-    let mut total_lines: usize = 0;
-    let mut total_bytes: usize = 0;
-    let mut lossy = false;
-    let mut progress_chunk = String::new();
+    let mut output = StreamingOutput::default();
     let mut last_progress = tokio::time::Instant::now();
-
-    const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
     let timeout_deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     let abort_wait = async {
@@ -833,15 +821,7 @@ async fn execute_bash_streaming(
         if readers_done {
             // Both streams hit EOF; take whatever is still queued and stop.
             while let Ok(chunk) = chunk_rx.try_recv() {
-                accumulate_chunk(
-                    chunk,
-                    &mut stdout_buf,
-                    &mut stderr_buf,
-                    &mut progress_chunk,
-                    &mut total_lines,
-                    &mut total_bytes,
-                    &mut lossy,
-                );
+                output.accumulate(chunk);
             }
             break;
         }
@@ -857,7 +837,7 @@ async fn execute_bash_streaming(
                     Some(sandbox_status),
                 ));
             }
-            _ = tokio::time::sleep_until(timeout_deadline) => {
+            () = tokio::time::sleep_until(timeout_deadline) => {
                 child.kill().await?;
                 return Ok(interrupted_bash_output(
                     &format!("Command exceeded timeout of {timeout_ms} ms"),
@@ -870,24 +850,16 @@ async fn execute_bash_streaming(
                 readers_done = true;
             }
             Some(chunk) = chunk_rx.recv() => {
-                accumulate_chunk(
-                    chunk,
-                    &mut stdout_buf,
-                    &mut stderr_buf,
-                    &mut progress_chunk,
-                    &mut total_lines,
-                    &mut total_bytes,
-                    &mut lossy,
-                );
+                output.accumulate(chunk);
 
                 if let Some(ref cb) = on_progress {
-                    if !progress_chunk.is_empty() && last_progress.elapsed() >= PROGRESS_INTERVAL {
+                    if !output.progress.is_empty() && last_progress.elapsed() >= PROGRESS_INTERVAL {
                         cb(BashProgress {
-                            output: &progress_chunk,
-                            total_lines,
-                            total_bytes,
+                            output: &output.progress,
+                            total_lines: output.lines,
+                            total_bytes: output.bytes,
                         });
-                        progress_chunk.clear();
+                        output.progress.clear();
                         last_progress = tokio::time::Instant::now();
                     }
                 }
@@ -897,11 +869,11 @@ async fn execute_bash_streaming(
 
     // Flush any remaining progress chunk
     if let Some(ref cb) = on_progress {
-        if !progress_chunk.is_empty() {
+        if !output.progress.is_empty() {
             cb(BashProgress {
-                output: &progress_chunk,
-                total_lines,
-                total_bytes,
+                output: &output.progress,
+                total_lines: output.lines,
+                total_bytes: output.bytes,
             });
         }
     }
@@ -909,10 +881,10 @@ async fn execute_bash_streaming(
     // Wait for the child to fully exit
     let status = child.wait().await?;
 
-    let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
-    let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
+    let stdout = truncate_output(&output.stdout, MAX_OUTPUT_BYTES_SAFETY);
+    let stderr = truncate_output(&output.stderr, MAX_OUTPUT_BYTES_SAFETY);
     let mut result = BashCommandOutput::completed(status, stdout, stderr);
-    result.lossy_output = lossy;
+    result.lossy_output = output.lossy;
     result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
     result.sandbox_status = Some(sandbox_status);
     Ok(result)
@@ -968,6 +940,7 @@ fn launch_background_shell(
 /// Exposed so background watches cannot drift from how every other command is
 /// constructed: hardcoding a shell is how `bash -lc` ended up resolving to the
 /// WSL stub on Windows instead of running anything.
+#[must_use]
 pub fn shell_command_in(cwd: &std::path::Path, command: &str) -> Command {
     let config = ConfigLoader::default_for(cwd).load().map_or_else(
         |_| SandboxConfig::default(),
@@ -1081,10 +1054,31 @@ struct BackgroundShell {
     shell: crate::subagent_completion::ShellKind,
 }
 
+/// Read one bounded tail while keeping decoding aligned with the file offset.
+fn read_background_output_tail(
+    output: &mut std::fs::File,
+    size: u64,
+) -> io::Result<(String, bool)> {
+    use crate::background_tasks::TASK_OUTPUT_TAIL_BYTES;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut bytes = Vec::with_capacity(TASK_OUTPUT_TAIL_BYTES);
+    let start = size.saturating_sub(TASK_OUTPUT_TAIL_BYTES as u64);
+    output.seek(SeekFrom::Start(start))?;
+    output
+        .take(TASK_OUTPUT_TAIL_BYTES as u64)
+        .read_to_end(&mut bytes)?;
+    let decoded = if start > 0 {
+        process_text::decode_process_output_tail(&bytes)
+    } else {
+        process_text::decode_process_output(&bytes)
+    };
+    Ok((decoded.text, start > 0))
+}
+
 impl BackgroundShell {
     fn monitor(mut self, mut output: std::fs::File, abort: &HookAbortSignal) {
-        use crate::background_tasks::{BackgroundTaskStatus, TASK_OUTPUT_TAIL_BYTES};
-        use std::io::{Read, Seek, SeekFrom};
+        use crate::background_tasks::BackgroundTaskStatus;
         let mut last_size = 0;
         let mut final_output = String::new();
         let mut output_truncated = false;
@@ -1104,21 +1098,9 @@ impl BackgroundShell {
             };
             let size = output.metadata().map_or(last_size, |m| m.len());
             if size != last_size {
-                let mut bytes = Vec::with_capacity(TASK_OUTPUT_TAIL_BYTES);
-                let start = size.saturating_sub(TASK_OUTPUT_TAIL_BYTES as u64);
-                let read = output.seek(SeekFrom::Start(start)).and_then(|_| {
-                    (&mut output)
-                        .take(TASK_OUTPUT_TAIL_BYTES as u64)
-                        .read_to_end(&mut bytes)
-                });
-                if read.is_ok() {
-                    final_output = if start > 0 {
-                        process_text::decode_process_output_tail(&bytes)
-                    } else {
-                        process_text::decode_process_output(&bytes)
-                    }
-                    .text;
-                    output_truncated = start > 0;
+                if let Ok((text, is_truncated)) = read_background_output_tail(&mut output, size) {
+                    final_output = text;
+                    output_truncated = is_truncated;
                     self.tasks.update(&self.id, |task| {
                         task.output.clone_from(&final_output);
                     });
@@ -1547,7 +1529,10 @@ pub(crate) fn truncate_output(s: &str, max: usize) -> String {
         end -= 1;
     }
     let mut truncated = s[..end].to_string();
-    truncated.push_str(&format!("\n\n[output truncated — exceeded {max} bytes]"));
+    let _ = std::fmt::Write::write_fmt(
+        &mut truncated,
+        format_args!("\n\n[output truncated — exceeded {max} bytes]"),
+    );
     truncated
 }
 

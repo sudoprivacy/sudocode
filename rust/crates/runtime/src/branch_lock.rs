@@ -139,6 +139,9 @@ mod tests {
             },
         ]);
 
-        assert!(collisions.is_empty());
+        assert_eq!(
+            collisions,
+            [] as [crate::branch_lock::BranchLockCollision; 0]
+        );
     }
 }

@@ -31,7 +31,7 @@ const MODEL_LABEL: &str = "model";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Prepared transcript and host resources. A renderer supplies the initial
-/// session options and adopts this into the shared SessionEngine.
+/// session options and adopts this into the shared `SessionEngine`.
 pub struct PreparedManagedAgent {
     host: HostContext,
     session: runtime::Session,
@@ -41,20 +41,25 @@ pub struct PreparedManagedAgent {
 }
 
 impl PreparedManagedAgent {
+    #[must_use]
     pub fn durable_session_id(&self) -> &str {
         &self.session.session_id
     }
+    #[must_use]
     pub fn model(&self) -> &str {
         &self.config.model
     }
     /// Stop the host when its lifetime or durable-session admission ends.
     /// Turn cancellation uses the separate signal installed by `open`.
+    #[must_use]
     pub fn abort_signal(&self) -> runtime::HookAbortSignal {
         self.abort.clone()
     }
+    #[must_use]
     pub fn mailbox(&self) -> Option<Arc<Mailbox>> {
         self.host.mailbox.clone()
     }
+    #[must_use]
     pub fn cwd(&self) -> std::path::PathBuf {
         self.host.shell_root.clone()
     }
@@ -83,10 +88,14 @@ impl PreparedManagedAgent {
 
 /// Prepare a new or resumed co-hosted session against the daemon's kernel.
 /// No turn loop runs here: the session renderer drives the shared engine.
+/// `authenticated_senders` is the daemon's auth posture: when armed, its
+/// stamping hook authenticates every conversation writer, so peers' `from`
+/// values this agent reads are verified.
 pub fn prepare_managed_agent<K>(
     kernel: &Arc<K>,
     desc: &AgentDescriptor,
     options: &SpawnOptions,
+    authenticated_senders: bool,
 ) -> Result<PreparedManagedAgent, String>
 where
     K: KernelConvenience + KernelFsAccess + Send + Sync + 'static,
@@ -145,7 +154,10 @@ where
     // absolute A2A path bypasses the workspace root, so one backend serves both
     // the workspace and `/conversations` — sender and receiver are two views of
     // one object rather than two implementations that have to agree.
-    let mailbox = Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), desc.name.clone()));
+    let mailbox = Arc::new(
+        Mailbox::daemon_absolute(Arc::clone(&fs), desc.name.clone())
+            .with_authenticated_senders(authenticated_senders),
+    );
 
     // Through the same named constructor the CLI uses, for the same reason the
     // engine is shared: the two hosts' shapes sit next to each other in

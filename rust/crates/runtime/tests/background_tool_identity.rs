@@ -90,37 +90,38 @@ fn tool_identity_is_required_and_scoping_clears_that_gate() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+use runtime::background_tasks::BackgroundTaskStatus;
+use runtime::fs_backend::StdFsBackend;
+use runtime::history::HistoryRecord;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const CHILD: &str = "SCODE_DELETED_BACKGROUND_CHILD";
+fn wait_for(mut predicate: impl FnMut() -> bool, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !predicate() {
+        assert!(Instant::now() < deadline, "timed out: {label}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+struct Release(std::path::PathBuf);
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0.join("release"), b"release");
+    }
+}
+
 /// Exercise the real background monitor, including its post-exit persistence
 /// loop. A protocol-level rejection alone cannot show that this worker retires.
 #[test]
 fn background_exit_after_external_session_deletion_retires_its_monitor() {
-    use runtime::background_tasks::BackgroundTaskStatus;
-    use runtime::fs_backend::StdFsBackend;
-    use runtime::history::HistoryRecord;
-    use std::process::Command;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    const CHILD: &str = "SCODE_DELETED_BACKGROUND_CHILD";
-    fn wait_for(mut predicate: impl FnMut() -> bool, label: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !predicate() {
-            assert!(Instant::now() < deadline, "timed out: {label}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
     if let Some(root) = std::env::var_os(CHILD) {
         let root = std::path::PathBuf::from(root);
         std::fs::write(root.join("ready"), b"ready").unwrap();
         wait_for(|| root.join("release").exists(), "native child release");
         std::fs::write(root.join("effect"), b"independent native write completed").unwrap();
         return;
-    }
-    struct Release(std::path::PathBuf);
-    impl Drop for Release {
-        fn drop(&mut self) {
-            let _ = std::fs::write(self.0.join("release"), b"release");
-        }
     }
     let root = std::env::temp_dir().join(format!("scode-deleted-monitor-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
@@ -185,7 +186,7 @@ fn background_exit_after_external_session_deletion_retires_its_monitor() {
             (path, bytes)
         })
         .collect();
-    assert!(!journals.is_empty());
+    assert_ne!(journals, [] as [(std::path::PathBuf, Vec<u8>); 0]);
     std::fs::write(root.join("release"), b"release").unwrap();
     wait_for(
         || {

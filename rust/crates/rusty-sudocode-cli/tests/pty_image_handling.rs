@@ -62,7 +62,7 @@ fn cli_at_image_reference_completes_turn() {
     // content pattern is also satisfied by the echo of the prompt, which names
     // the image and its shapes, so it can return while the turn still runs;
     // the exit is what actually proves the turn finished.)
-    sess.set_default_timeout(std::time::Duration::from_secs(180));
+    sess.set_default_timeout(std::time::Duration::from_mins(3));
     sess.expect("(?i)(answer|image|shape|color|red|blue|yellow|circle|rectangle|square)")
         .expect("scode should produce some assistant content on stdout");
     let exit = sess.expect_eof().expect("scode should exit");
@@ -125,7 +125,7 @@ fn read_image_and_text_batch_sends_real_pixels_and_survives_resume() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -162,7 +162,7 @@ fn read_image_and_text_batch_sends_real_pixels_and_survives_resume() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let body = env.captured_message_bodies().last().unwrap().clone();
@@ -187,7 +187,7 @@ fn corrupt_image_is_a_tool_error_and_other_batch_results_survive() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -220,7 +220,7 @@ fn disabled_read_cannot_attach_pixels() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -247,7 +247,7 @@ fn quoted_cli_image_path_is_attached_once() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -495,7 +495,7 @@ fn text_only_model_rejects_images_without_calling_configured_vlm() {
             sess.expect_eof().unwrap(),
             0,
             "{}",
-            sess.render(|s| s.contents())
+            sess.render(common::screen_contents)
         );
         let requests = captured_blocks(&env);
         let blocks = requests.last().unwrap().as_array().unwrap();
@@ -544,7 +544,7 @@ fn serial_read_attaches_image() {
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     if env.is_mock() {
         let requests = captured_blocks(&env);
@@ -585,17 +585,17 @@ fn real_browser_screenshot_reaches_model_as_pixels() {
     )).unwrap();
     let prompt = env.prompt("Run bash capture.sh to take a real browser screenshot, then use Read on screen.png to inspect its pixels and describe what you see. Do not inspect capture.sh or page HTML.", "browser_image_roundtrip");
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    sess.set_default_timeout(std::time::Duration::from_secs(120));
+    sess.set_default_timeout(std::time::Duration::from_mins(2));
     assert_eq!(
         sess.expect_eof().unwrap(),
         0,
         "{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
     let png = fs::read(env.workspace_root().join("screen.png")).unwrap_or_else(|error| {
         panic!(
             "actual screenshot missing: {error}; PTY: {}",
-            sess.render(|screen| screen.contents())
+            sess.render(common::screen_contents)
         )
     });
     assert!(png.starts_with(b"\x89PNG"));

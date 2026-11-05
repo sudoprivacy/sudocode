@@ -479,7 +479,7 @@ mod tests {
         let text = extract_text_from_bytes(data);
 
         // then
-        assert!(text.is_empty());
+        assert_eq!(text, "");
     }
 
     #[test]

@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
 use telemetry::{ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder};
 
 use crate::fs_backend::FsLock;
 use crate::json::JsonValue;
 use crate::{ConfigError, FsBackend, Session};
+
+mod gzip;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseRecordingConfig {
@@ -66,6 +67,7 @@ impl ResponseRecordingConfig {
 /// This lock never takes the transcript commit barrier.
 pub(crate) struct ResponseArchiveWriter {
     lock: Arc<dyn FsLock>,
+    renewal: Mutex<()>,
 }
 
 impl ResponseArchiveWriter {
@@ -94,10 +96,19 @@ impl ResponseArchiveWriter {
             std::thread::sleep(Duration::from_millis(5));
         };
         crate::subagent_completion::check_response_storage(fs, transcript)?;
-        Ok(Arc::new(Self { lock }))
+        Ok(Arc::new(Self {
+            lock,
+            renewal: Mutex::new(()),
+        }))
     }
 
     fn check(&self) -> Result<(), String> {
+        // The backend lease excludes deletion for this Arc's whole lifetime.
+        // Serialize renewals, not independent files' compression or fsyncs.
+        let _guard = self
+            .renewal
+            .lock()
+            .map_err(|_| "response writer poisoned")?;
         if !self.lock.renew().map_err(|error| error.to_string())? {
             return Err("session_writer_lost".into());
         }
@@ -222,8 +233,8 @@ impl ResponseArchive for SessionResponseArchive {
             used: Arc::clone(&self.used),
             limit: self.config.max_session_bytes,
         };
-        let recording = SessionResponseRecorder {
-            encoder: Some(GzEncoder::new(output, Compression::fast())),
+        let mut recording = SessionResponseRecorder {
+            encoder: None,
             fs: Arc::clone(&self.fs),
             writer: Arc::clone(&writer),
             metadata_path,
@@ -239,6 +250,9 @@ impl ResponseArchive for SessionResponseArchive {
             writer.check().map_err(io::Error::other)?;
             recording.write_metadata("recording", false)?;
         }
+        // Keep the compressor's large buffer out of the initial metadata I/O.
+        // Slow storage must not retain one for every pending capture.
+        recording.encoder = Some(gzip::Encoder::new(output)?);
         Ok(Box::new(recording))
     }
 }
@@ -278,7 +292,7 @@ impl Write for ArchiveWriter {
 }
 
 struct SessionResponseRecorder {
-    encoder: Option<GzEncoder<ArchiveWriter>>,
+    encoder: Option<gzip::Encoder>,
     fs: Arc<dyn FsBackend>,
     writer: Arc<ResponseArchiveWriter>,
     metadata_path: PathBuf,
@@ -353,13 +367,13 @@ impl ResponseRecorder for SessionResponseRecorder {
             .encoder
             .take()
             .is_some_and(|encoder| match encoder.finish() {
-                Ok(_) => true,
+                Ok(()) => true,
                 Err(error) => {
                     self.error = Some(error.to_string());
                     false
                 }
             });
-        // The shared lease excludes reclamation until every recorder finalizes.
+        // Retain the attachment lease through this file's final atomic write.
         if self.writer.check().is_ok() {
             let _ = self.write_metadata(end.reason, complete);
         }

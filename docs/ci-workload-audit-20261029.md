@@ -620,3 +620,29 @@ normal-input failures remain blocking. Old failed logs and first timing remain.
 The guard runs these fixtures automatically, including from Docker's snapshot
 without repository history. The overall 10% target still needs comparable
 whole-lifecycle observations.
+
+## Delivery observations through November 5, 20:20 UTC
+
+The refreshed rollout sample contains 26 merged Rust source/build PRs:
+
+| Clock | Current mean | Historical mean | Current / historical |
+| --- | ---: | ---: | ---: |
+| Final candidate CI trigger to merge | 51.452 min | 185.261 min | 27.8% |
+| First observed PR CI across all candidate heads to merge | 199.509 min | 1,036.282 min | 19.3% |
+
+The second clock includes later repairs, local validation, queueing and idle time.
+It excludes the initial author-local stage. Five strictly associated local
+histories add a mean 94.513 minutes before the first observed CI; their measured
+local-start-to-merge mean is 236.969 minutes. This small subset does not replace
+the full source cohort. Missing local histories remain unknown. Running and
+unpublished local acceptance is censored rather than reported as a fast merge.
+The 10% delivery target is not met. These observations span an ongoing rollout
+and do not establish a causal effect for a single optimization.
+
+An actual external-output discovery failure left six signed, otherwise reusable
+profiles undiscovered. Their original command execution totaled 31.11 minutes;
+the later invocation repeated all six. This establishes unnecessary execution,
+not a measured average saving. Explicit output directories now register only
+their discovery location, with the original evidence and verification preserved.
+Pure metadata, verified complete restores and discovery/index failures report
+their resource and recovery scope on the mandatory command interface.

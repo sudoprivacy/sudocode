@@ -8,6 +8,14 @@
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
+
+/* Keep the loaded interposer in scode without injecting it into tool children. */
+__attribute__((constructor)) static void instrument_scode_only(void) {
+    if (strcmp(getprogname(), "scode") == 0) {
+        unsetenv("DYLD_INSERT_LIBRARIES");
+    }
+}
+
 static int windowed_pipe(int fds[2]) {
     int result = pipe(fds);
     if (result != 0 || strcmp(getprogname(), "scode") != 0) return result;

@@ -376,6 +376,34 @@ def prepare_windows_terminal(root, output, execute):
     return execute(windows_terminal_command(root), root, output / "000.log")
 
 
+def verify_native_terminal(log, target):
+    """Refuse successful legacy installers that did not provision the drivers."""
+    records = [json.loads(line.removeprefix("NATIVE_CONPTY_HOST="))
+               for line in log.read_text(encoding="utf-8").splitlines()
+               if line.startswith("NATIVE_CONPTY_HOST=")]
+    if len(records) != 1:
+        raise RuntimeError("Native terminal preparation did not report exactly one verified provider. "
+                           "Include the current terminal installer in this source before qualifying it.")
+    identity = records[0]
+    directory = target.resolve() / "debug/deps"
+    if (Path(identity["driver_directory"]).resolve() != directory
+            or identity["architecture"] not in {"x64", "arm64"}
+            or not re.fullmatch(r"[0-9a-f]{40}", identity["distribution_commit"])
+            or not re.fullmatch(r"[0-9a-f]{64}", identity["archive_sha256"])
+            or (os.name == "nt" and identity["dynamic_load_checked"] is not True)):
+        raise RuntimeError("Native terminal preparation did not verify this target/provider ABI")
+    files = identity["files"]
+    if len(files) != 2 or {Path(item["path"]).name for item in files} != {"conpty.dll", "OpenConsole.exe"}:
+        raise RuntimeError("Native terminal preparation must report both native sidecars")
+    for item in files:
+        path = Path(item["path"])
+        if (path.resolve() != directory / path.name
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]):
+            raise RuntimeError(f"Native terminal sidecar differs from the prepared provider: {path}")
+    return identity
+
+
 def terminal_installer_scope(root, base):
     """Retain fault injection for unknown inputs; Rust-only edits keep real setup."""
     try:
@@ -396,7 +424,9 @@ def prepare_native_checks(names, root, output, execute):
         print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
               "before compilation; original installer checks and terminal tests remain required.", flush=True)
         first = selected[0]
-        prepared[first] = [prepare_windows_terminal(root, output / first, execute)]
+        directory = output / first
+        prepared[first] = [prepare_windows_terminal(root, directory, execute)]
+        verify_native_terminal(directory / "000.log", native_target_directory(root))
     return prepared
 
 

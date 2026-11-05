@@ -11,13 +11,15 @@
   <a href="docs/acp.md"><img alt="Protocol: ACP" src="https://img.shields.io/badge/protocol-ACP-purple"></a>
 </p>
 
-**A Rust coding agent for your terminal, scripts, and editors.**
+**The hacker features of Claude Code and Codex CLI, in one Rust agent that
+spends as little memory, CPU and tokens as possible.**
 
-Sudo Code (`scode`) reads your codebase, edits files, and runs commands with
-the model, account, and permissions you choose. Work in an interactive terminal,
-run a task from a script, or connect an editor through the **Agent Communication
-Protocol (ACP)**. These entrypoints share the same agent engine.
+Sudo Code (`scode`) reads your codebase, edits files and runs commands with the
+model, account and permissions you choose. Use it in a terminal, from a script,
+or from an editor through the **Agent Communication Protocol (ACP)**. All three
+share one agent engine.
 
+[Principles](#design-principles) · [Measured cost](#measured-cost) ·
 [Get started](#get-started) · [Everyday workflows](#everyday-workflows) ·
 [Architecture](#architecture) · [Contribute](#build-and-contribute) ·
 [Documentation](#documentation)
@@ -26,17 +28,90 @@ Protocol (ACP)**. These entrypoints share the same agent engine.
   <img src="assets/scode-demo.gif" alt="Sudo Code running in a terminal" width="900" />
 </p>
 
-## What you can do
+## Design principles
 
-| Task | What `scode` provides |
+Sudo Code follows two rules. Every feature and every change is judged by both.
+
+1. **Take the hacker features from Claude Code and Codex CLI.**
+2. **Keep performance and cost efficient to the extreme.**
+
+### 1. Hacker features from Claude Code and Codex CLI
+
+Sudo Code takes the power-user features of both tools and runs them on any
+model provider. You stay in control: you choose the model, account, permissions
+and version, and you can interrupt any work. No feature is hidden because
+someone might misuse it.
+
+| Feature | From |
 | --- | --- |
-| Explore and change a repository | File search, reads, edits, writes, and shell commands, with visible tool results and colored code previews. |
-| Work in your terminal | Inline output with native scrollback, Markdown, code highlighting, tables, and hyperlinks. |
-| Keep track of work | Saved sessions, resume, context compaction, and background-task inspection. |
-| Inspect inference costs | Usage and cost reporting, context inspection, and recorded prompt-cache statistics. |
-| Choose models and accounts | Configurable providers, API keys, subscription credentials, and proxy accounts. Model availability depends on your endpoint and account. |
-| Reuse your workflows | Project instructions, memory, skills, plugins, MCP servers, and installed CLI packages. |
-| Embed or delegate | ACP, an embedded browser UI, a TypeScript client, child tasks, and peer-agent communication. |
+| Skills, plugins, hooks and MCP servers; reads `.claude-plugin` manifests | Claude Code |
+| Sub-agents, background tasks, context inspection, compaction and resume | Claude Code |
+| `!` shell commands whose output becomes part of the conversation | Claude Code |
+| Enter steers a running turn; Tab queues the next message | Codex CLI |
+| `read-only`, `workspace-write` and `danger-full-access` permission modes | Codex CLI |
+| Markdown, table, code-color and Mermaid rendering | Codex CLI |
+| `AGENTS.md` project instructions; reads `.codex-plugin` manifests | Codex CLI |
+
+On top of these, Sudo Code adds a provider, account or proxy per project; an
+ACP server with a browser UI for editors and apps; and peer Agents through
+Nexus. Output stays inline in your terminal, so native scrollback, pipes and
+tmux keep working. There is no telemetry unless you opt in.
+
+### 2. Efficiency to the extreme
+
+Agents often run several at a time, on the same machine as a local model. Every
+MiB the agent holds is taken from model weights and KV cache, and every prompt
+token sent without a cache hit is paid for again. Sudo Code treats memory, CPU
+and tokens as budgets:
+
+- **Memory and CPU are gated.** Every change to the terminal interface is
+  measured in a real terminal against a fixed baseline. It fails if it exceeds
+  a hard ceiling or shows a statistically confident regression.
+- **The prompt cache stays warm.** Provider caches match only a byte-exact
+  prefix. Each session saves its system prompt and reuses it through turns,
+  compaction, restarts and forks; the date stays out of the system prompt, and
+  tools keep a fixed order. Tests capture the actual outgoing requests and check
+  that the prefix holds.
+- **Cost is visible.** Each turn shows its cache read and write share in the
+  status line. `scode cache stats` reports cache reuse across sessions and
+  classifies each cache break by cause.
+
+## Measured cost
+
+One `scode` process, release build, on Linux CI. A scripted model streams over
+local HTTP, so network and model time are excluded. Each value is the median of
+seven paired runs; ranges span seven workloads: short and long replies, a 12 KB
+Markdown reply, foreground and background tasks, and a 30-turn session
+([source run, 2026-10-28](https://github.com/sudoprivacy/sudocode/actions/runs/40774198468)).
+
+| Metric | Measured | Budget |
+| --- | ---: | ---: |
+| Peak memory (RSS) | 30–35 MiB | 80 MiB |
+| Memory growth over 30 turns | 1.8 MiB | 16 MiB |
+| Typing latency, key to echo (P95), including while streaming | 3–4 ms | 50 ms |
+| CPU per turn (stream a reply while typing, pasting and resizing) | 0.20–0.26 s | 0.8 s |
+| CPU while idle at the prompt | ≤ 10 ms per second | — |
+| Terminal output while idle | 0 bytes | 0 bytes |
+| First text on screen after the model starts streaming | 59–78 ms | 3 s |
+| Cancel, Esc to a ready prompt (P95) | 81 ms | 200 ms |
+| Resize redraw (P95) | 41 ms | 100 ms |
+| Paste (P95) | 2–3 ms | 100 ms |
+
+Startup: `scode --version` takes a median 16 ms on an Intel Mac, against 5 ms
+for a minimal Rust binary. Every release candidate must start in under 100 ms
+on Linux, macOS and Windows. Downloads are 11–17 MB per platform.
+
+Prompt cache in real use: on one maintainer's machine, 49 Anthropic sessions
+(6,887 requests) read 88.5% of their cached prompt tokens back from the cache
+and wrote only 11.5% anew.
+
+These numbers cover the `scode` process alone; the tools it runs, the model
+server and Nexus are measured separately. RSS includes shared pages. The
+[performance gate](e2e/terminal-resize/README.md#release-performance-gate)
+defines the workloads, and
+[`performance-policy.json`](e2e/terminal-resize/performance-policy.json) holds
+the budgets. [`scode cache stats`](CONTRIBUTING.md#measuring-prompt-cache-behaviour)
+shows your own prompt-cache numbers.
 
 <a id="quick-start"></a>
 
@@ -204,28 +279,6 @@ Delegation and peer communication have different lifetimes:
 The [engine boundary](rust/crates/engine-core/src/lib.rs) defines the code-level
 contract; the [Nexus integration architecture](https://s.shareone.vip/s/nexus-integration-architecture)
 documents transport and hosting.
-
-## Design principles
-
-| Principle | What it means in practice |
-| --- | --- |
-| **Simple controls, user choice** | Keep useful capabilities accessible. Let users choose models, accounts, permissions, and versions, and interrupt work. |
-| **Inspectable work** | Show commands, paths, diffs, errors, usage, and costs. Keep summaries readable and details available. |
-| **Preserve the record** | Retain drafts, conversation history, and native scrollback through ordinary interaction and resize. Explain recovery before discarding work. |
-| **Responsive and lean** | Measure typing, cancellation, resize, CPU, and memory with real terminal workloads. Keep room for local inference and parallel agents. |
-| **One engine, clear ownership** | Reuse the engine across terminal, ACP, and cohost. Give each capability and contract one owning layer; keep Agent identity and storage semantics portable across backends. |
-| **Durable facts, transient runtime state** | Persist sessions, memory, configuration, attachments, and consumed message positions. Keep process presence and live queues in the runtime layer. |
-| **Readable visual design** | Use semantic colors, an amber activity accent, and text that explains state without relying on color alone. |
-| **Open and composable** | MIT licensing, contributor copyright, provider choice, explicit opt-in telemetry, and inline terminal output. |
-
-### Runtime footprint
-
-On machines with shared CPU/GPU memory, agent processes compete with local model
-weights and KV caches. The [runtime memory reference](docs/usage.md#runtime-memory)
-defines RSS and measurement scope. The
-[performance gate](e2e/terminal-resize/README.md#release-performance-gate)
-describes workloads and points to the versioned budgets. Check their measurement
-scope before comparing results across machines or models.
 
 ## Build and contribute
 

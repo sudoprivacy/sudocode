@@ -5,6 +5,7 @@ import argparse
 import errno
 import hashlib
 from http.client import IncompleteRead
+import json
 import os
 from pathlib import Path
 import platform

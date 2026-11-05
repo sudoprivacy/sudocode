@@ -43,8 +43,8 @@ without application redraw. CI uses VS Code's bundled ConPTY.
 The author hook and complementary Windows jobs also install that distribution's
 `conpty.dll` and `OpenConsole.exe` beside ordinary Rust test drivers. `portable-pty`
 loads those compatibility exports from the driver's directory. Both native PTY
-paths therefore share this installer's commit and archive checksums. Each native
-profile records `NATIVE_CONPTY_HOST`, including member hashes, architecture and
+paths therefore share this installer's commit and archive checksums. Preparation
+records `NATIVE_CONPTY_HOST`, including member hashes, architecture and
 the actual driver directory. x64 and ARM64 sidecars have separate verified
 archives at the same distribution commit; the Electron observer retains its
 existing x64 ABI. ARM64 archive/header verification is independent of native

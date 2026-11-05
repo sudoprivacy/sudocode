@@ -363,12 +363,17 @@ def native_target_directory(root):
     return Path(os.environ.get("CARGO_TARGET_DIR", root / "rust/target")).resolve()
 
 
+def windows_terminal_command(root):
+    """Share the exact installer invocation with preparation and its receipt."""
+    terminal = Path.home() / ".cache/sudocode-terminal-host"
+    return [sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal),
+            "--native-target", str(native_target_directory(root))]
+
+
 def prepare_windows_terminal(root, output, execute):
     """Retain one verified provider for ordinary Rust PTYs and visual journeys."""
     output.mkdir(parents=True, exist_ok=True)
-    terminal = Path.home() / ".cache/sudocode-terminal-host"
-    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal),
-                    "--native-target", str(native_target_directory(root))], root, output / "000.log")
+    return execute(windows_terminal_command(root), root, output / "000.log")
 
 
 def terminal_installer_scope(root, base):
@@ -421,9 +426,9 @@ def run(name, root, output, base, execute):
             prepared = None
         if prepared:
             # These are this invocation's actual early preparation commands.
+            if len(prepared) != 1 or prepared[0]["command"] != windows_terminal_command(root):
+                raise RuntimeError("Native terminal preparation differs from this profile's target/provider")
             results.extend(prepared)
-        else:
-            results.append(prepare_windows_terminal(root, output, execute))
 
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
@@ -516,6 +521,11 @@ def run(name, root, output, base, execute):
         print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
+            # The author/CI dispatcher prepares every selected Rust PTY
+            # profile. Direct resize guard fixtures retain their existing
+            # controlled installer boundary and command inventory.
+            if not prepared:
+                results.append(prepare_windows_terminal(root, output, execute))
             if installer_scope["fault_injection_required"]:
                 command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
             else:

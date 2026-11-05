@@ -772,6 +772,21 @@ readiness query. The native enforcement guard runs the real Docker CLI against
 a deliberately stalled local HTTP endpoint and checks ordinary client errors;
 this adds infrastructure fault coverage, not product journey credit. Healthy
 execution still requires the complete container/native validation matrix.</p>
+<p><strong>Run metadata before the host queue (2026-11-06).</strong>
+The managed hook, manual checks and contract updates execute metadata preflight
+before requesting the existing host lease. Revisions selecting only metadata,
+and runs that restore fully verified signed results, finish without that wait.
+Partial signed checkpoints still wait for and execute each missing check.
+Required output prints <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> with the
+selected and pending checks. One shared helper retains source verification,
+signatures, carried results, checkpoint publication and original start times.
+Real Git, SSH signatures and concurrent processes reproduce both old waits and
+verify metadata success/failure, complete/partial resume, FIFO order, nesting
+and recovery after a holder or waiter exits. These are infrastructure controls;
+product journey counts and acceptance budgets retain their current values.
+A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
+of command execution; this is a measured scheduling incident, not a forecast
+of whole-PR savings.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

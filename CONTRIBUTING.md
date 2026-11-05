@@ -281,9 +281,16 @@ do not independently select a base from the event. Queue verification retains
 the merge group's exact base. Git/SSH/process acceptance covers stale API bases
 and refuses a signed receipt for the wrong actual base.
 
-One acceptance runs per host at a time. Every `check`, whether from the hook,
-`contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
-while its profiles run; a later invocation prints the holder from
+Checks that run tests, builds or containers share one host lease.
+Every `check`, whether from the hook, `contract-update` or a manual run,
+executes metadata preflight before joining that queue. Revisions requiring
+only preflight and runs restoring already verified complete results finish
+without waiting for the host. Partial signed progress still waits and executes
+every missing check. Signatures, source bindings, checkpoint validation and
+the earliest recorded start time keep their existing requirements. The required
+command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
+pending checks. Any pending test, build or container profile holds
+`~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
 `host-lease.json` and its queue position. Waiters start in arrival order when the
 holder exits, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.

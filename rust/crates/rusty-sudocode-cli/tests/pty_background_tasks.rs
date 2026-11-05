@@ -298,7 +298,7 @@ fn assert_detail_frame(session: &PtySession, border_color: &str) {
                 .unwrap_or_else(|| {
                     let cells = (0..raw.size().1)
                         .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
-                        .map(|cell| cell.contents())
+                        .map(|cell| cell.contents().to_string())
                         .collect::<Vec<_>>();
                     panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
                 })

@@ -5,6 +5,21 @@ const METHOD: &str = "_sudocode/session/host_context";
 const A: &str = "Reviewed business revision A: revenue uses order date.";
 const B: &str = "Reviewed business revision B: revenue uses shipment date.";
 
+fn without_cache_markers(mut messages: Vec<Value>) -> Vec<Value> {
+    for message in &mut messages {
+        if let Some(blocks) = message["content"].as_array_mut() {
+            for block in blocks {
+                if let Some(object) = block.as_object_mut() {
+                    // Only provider checkpoint metadata moves with the request.
+                    // Keep every role, content field and nested tool argument.
+                    object.remove("cache_control");
+                }
+            }
+        }
+    }
+    messages
+}
+
 async fn context_request(client: &mut AcpTestClient, session: &str) -> Value {
     let (_, request) = client
         .recv_until(RECV_TIMEOUT, |value| value["method"] == METHOD)
@@ -49,11 +64,11 @@ async fn input_finished(client: &mut AcpTestClient, kind: &str) {
         .expect("input must reach its terminal outcome");
 }
 
-async fn verify_queued_context_refresh(
+async fn resolve_queued_contexts(
     client: &mut AcpTestClient,
     server: &MockAnthropicService,
     session: &str,
-) {
+) -> Value {
     client
         .send_request_no_wait("_sudocode/session/input", submission(session, "first-turn"))
         .await;
@@ -79,7 +94,10 @@ async fn verify_queued_context_refresh(
         "queued input waits for its own current context"
     );
     let body: Value = serde_json::from_str(&first[0].raw_body).unwrap();
-    assert!(body["system"].to_string().contains(A));
+    let fixed_system = body["system"].clone();
+    let first_messages = without_cache_markers(body["messages"].as_array().unwrap().clone());
+    assert!(!fixed_system.to_string().contains(A));
+    assert!(body["messages"].to_string().contains(A));
     assert!(!body["system"]
         .to_string()
         .contains("INITIAL_CONTEXT_MUST_BE_REPLACED"));
@@ -88,19 +106,32 @@ async fn verify_queued_context_refresh(
     let requests = server.captured_requests().await;
     assert_eq!(requests.len(), 2);
     let body: Value = serde_json::from_str(&requests[1].raw_body).unwrap();
-    let system = body["system"].to_string();
-    assert!(system.contains(B) && !system.contains(A));
+    assert_eq!(
+        body["system"], fixed_system,
+        "host changes keep the system prefix"
+    );
+    let next_messages = without_cache_markers(body["messages"].as_array().unwrap().clone());
+    assert!(
+        next_messages.starts_with(&first_messages),
+        "provider history prefix changed: first={} next={}",
+        serde_json::to_string(&first_messages).unwrap(),
+        body["messages"]
+    );
+    assert!(body["messages"].to_string().contains(B));
     assert!(
         body["messages"].to_string().contains("first-turn"),
         "history survives the refresh"
     );
     assert!(body["messages"].to_string().contains("queued-turn"));
+
+    fixed_system
 }
 
-async fn verify_context_failure_and_retry(
+async fn reject_and_retry_context(
     client: &mut AcpTestClient,
     server: &MockAnthropicService,
     session: &str,
+    fixed_system: &Value,
 ) {
     client
         .send_request_no_wait(
@@ -150,16 +181,22 @@ async fn verify_context_failure_and_retry(
     let requests = server.captured_requests().await;
     assert_eq!(requests.len(), 3);
     let body: Value = serde_json::from_str(&requests[2].raw_body).unwrap();
-    assert!(body["system"].to_string().contains(B));
+    assert_eq!(&body["system"], fixed_system);
+    assert_eq!(
+        body["messages"].to_string().matches(B).count(),
+        1,
+        "identical context must not append another snapshot"
+    );
     assert!(!body["messages"].to_string().contains("denied-turn"));
     assert!(body["messages"].to_string().contains("first-turn"));
 }
 
-async fn verify_context_resume_and_isolation(
+async fn restore_and_check_context_scope(
     client: &mut AcpTestClient,
     server: &MockAnthropicService,
     workspace: &TestWorkspace,
     session: &str,
+    fixed_system: &Value,
 ) {
     let (_, loaded) = client
         .send_request(
@@ -183,7 +220,15 @@ async fn verify_context_resume_and_isolation(
     assert!(completed.get("error").is_none(), "{completed}");
     let requests = server.captured_requests().await;
     let body: Value = serde_json::from_str(&requests.last().unwrap().raw_body).unwrap();
-    assert!(body["system"].to_string().contains(A) && !body["system"].to_string().contains(B));
+    assert_eq!(
+        &body["system"], fixed_system,
+        "resume preserves the fixed prefix"
+    );
+    assert_eq!(
+        body["messages"].to_string().matches(A).count(),
+        2,
+        "resumed current context is appended after the previous revision"
+    );
     assert!(body["messages"].to_string().contains("queued-turn"));
 
     let plain = session_id_of(&session_new_with_meta(client, &workspace.root, json!({})).await);
@@ -253,12 +298,10 @@ async fn verify_host_context_cancellation(
     let requests = server.captured_requests().await;
     assert_eq!(requests.len(), initial_requests + 1);
     let body: Value = serde_json::from_str(&requests.last().unwrap().raw_body).unwrap();
-    assert!(body["system"]
+    assert!(body["messages"]
         .to_string()
         .contains("FRESH_CONTEXT_AFTER_CANCEL"));
-    assert!(!body["system"]
-        .to_string()
-        .contains("STALE_CANCELLED_CONTEXT"));
+    assert!(!body.to_string().contains("STALE_CANCELLED_CONTEXT"));
     assert!(!body["messages"]
         .to_string()
         .contains("cancelled-host-context"));
@@ -325,7 +368,8 @@ async fn verify_context_refresh_preserves_questions(
             .find(|request| !request.path.contains("count_tokens"))
             .unwrap();
         let body: Value = serde_json::from_str(&request.raw_body).unwrap();
-        assert!(body["system"].to_string().contains(context));
+        assert!(body["messages"].to_string().contains(context));
+        assert!(!body["system"].to_string().contains(context));
         assert!(body["messages"].to_string().contains(&answer));
         if index == 1 {
             assert!(!body["system"].to_string().contains(A));
@@ -371,12 +415,12 @@ async fn acp_host_context_refreshes_queued_turns_and_fails_closed() {
         .await;
         let session = session_id_of(&response);
 
-        verify_queued_context_refresh(&mut client, &server, &session).await;
-        verify_context_failure_and_retry(&mut client, &server, &session).await;
-        verify_context_resume_and_isolation(&mut client, &server, &workspace, &session).await;
+        let fixed_system = resolve_queued_contexts(&mut client, &server, &session).await;
+        reject_and_retry_context(&mut client, &server, &session, &fixed_system).await;
+        restore_and_check_context_scope(&mut client, &server, &workspace, &session, &fixed_system)
+            .await;
         verify_host_context_cancellation(&mut client, &server, &workspace).await;
         verify_context_refresh_preserves_questions(&mut client, &server, &workspace).await;
-
         client.shutdown().await;
         workspace.cleanup();
     }

@@ -315,7 +315,9 @@ Contract validation requires the Docker Engine version API to answer within
 deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on
 failure. The version request avoids optional CLI plugin discovery. A native
 guard uses the real Docker client against a stalled local HTTP endpoint to
-verify the connection deadline and preserves an ordinary client error as a
+verify the connection deadline. Its container image includes the official
+Docker CLI pinned by image digest for the nested policy checks. The guard
+preserves an ordinary client error as a
 failure. Healthy Engine execution still requires the full container matrix.
 
 On macOS, the rendering profile and the release startup measurement require

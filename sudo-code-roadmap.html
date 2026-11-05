@@ -769,7 +769,9 @@ validation starts its container/native checks, the real Docker Engine version
 request has a 30-second connection deadline and prints recovery steps on
 failure. This avoids leaving the shared host lease held by an unresponsive
 readiness query. The native enforcement guard runs the real Docker CLI against
-a deliberately stalled local HTTP endpoint and checks ordinary client errors;
+a deliberately stalled local HTTP endpoint and checks ordinary client errors.
+The guard image carries the official Docker CLI pinned by image digest so
+these checks also run inside its nested policy fixtures;
 this adds infrastructure fault coverage, not product journey credit. Healthy
 execution still requires the complete container/native validation matrix.</p>
 <p><strong>Run metadata before the host queue (2026-11-06).</strong>

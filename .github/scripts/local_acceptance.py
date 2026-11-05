@@ -1559,30 +1559,45 @@ def perform_check(args, attempt):
             receipt["carried"] = current
         else:
             receipt.pop("carried", None)
+
+    def perform_profile(name):
+        if name in reusable:
+            print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+            results[name] = reusable[name]
+        elif name in carried:
+            origin = next(group["head"] for group in groups if name in group["profiles"])
+            print(f"Carrying signed {name} from {origin[:12]}; changes since then do not select it", flush=True)
+            results[name] = carried[name]
+        else:
+            print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+            results[name] = module.run(name, ROOT, output / name, base, run_command)
+        timing["checks_finished_at"] = time.time()
+        sign_carried()
+        save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+        print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
+              "If this process exits, resume with: "
+              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+              f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+
+    serialized = [name for name in needed if name != "preflight"]
+    pending = [name for name in serialized if name not in reusable and name not in carried]
+    attempt["host_lease_wait_seconds"] = 0.0
+    print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({
+        "preflight": "metadata_before_host_lease" if "preflight" in needed else "not_selected",
+        "serialized_checks": serialized,
+        "pending_serialized_checks": pending,
+    }).decode(), flush=True)
     try:
-        with host_acceptance_lease(attempt, head):
-            prepare = getattr(module, "prepare_native_checks", None)
-            if prepare:
-                module.run.prepared_native = prepare(
-                    [name for name in needed if name not in reusable and name not in carried], ROOT, output, run_command)
-            for name in needed:
-                if name in reusable:
-                    print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
-                    results[name] = reusable[name]
-                elif name in carried:
-                    origin = next(group["head"] for group in groups if name in group["profiles"])
-                    print(f"Carrying signed {name} from {origin[:12]}; changes since then do not select it", flush=True)
-                    results[name] = carried[name]
-                else:
-                    print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-                    results[name] = module.run(name, ROOT, output / name, base, run_command)
-                timing["checks_finished_at"] = time.time()
-                sign_carried()
-                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
-                print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-                      "If this process exits, resume with: "
-                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
-                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+        if "preflight" in needed:
+            perform_profile("preflight")
+        if serialized:
+            lease = host_acceptance_lease(attempt, head) if pending else contextlib.nullcontext()
+            with lease:
+                prepare = getattr(module, "prepare_native_checks", None)
+                if prepare and pending:
+                    module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                for name in serialized:
+                    perform_profile(name)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()

@@ -47,11 +47,17 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-source", required=True)
     parser.add_argument("--expected-resume-sha256", required=True)
+    parser.add_argument("--required-cpus", type=int)
     parser.add_argument("--workers", nargs="+", type=int, choices=[4, 8], default=[8])
     args = parser.parse_args()
     root, output = args.source.resolve(), args.output.resolve()
     assert len(args.workers) == len(set(args.workers)), "Do not repeat or retry a worker field"
     output.mkdir(parents=True, exist_ok=False)
+    if args.required_cpus is not None and os.cpu_count() != args.required_cpus:
+        refusal = {"required_cpus": args.required_cpus, "actual_cpus": os.cpu_count(),
+                   "host": platform.platform(), "field_started": False}
+        (output / "hardware-refusal.json").write_text(json.dumps(refusal, indent=2))
+        raise RuntimeError("Requested exact CPU comparison host is unavailable; no native field started")
     helper = load("probe_host", root / ".github/scripts/local_acceptance.py")
     helper.ROOT = root
     checks = load("probe_checks", root / ".github/local-acceptance/checks.py")
@@ -78,7 +84,7 @@ def main():
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
               "baseline_run": None,
               "baseline_job": None,
-              "scope": "Full eight-worker native suite on pinned clean protected main, including the new cron changes. No source patch, retries, paid API calls, acceptance signature or production setting change. Original source/inventory/assertions/deadlines and captured binary hashes remain required. This fresh pass provides compatibility evidence, not a new four/eight throughput comparison."}
+              "scope": "Ordered eight-then-four comparison on the same three-core macOS VM and captured binaries from clean protected main. No source patch, retries, paid API calls, acceptance signature or production setting change. Original complete inventories/assertions/deadlines and binary hashes remain required. One ordered comparison is not counterbalanced and does not establish population or whole-PR savings."}
 
     started = time.monotonic()
 

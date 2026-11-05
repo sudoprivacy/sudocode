@@ -77,6 +77,7 @@ tempfile = "3"
 
 [dev-dependencies]
 backends = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Exercise the shipped VFS host and its error envelopes over real mTLS gRPC.

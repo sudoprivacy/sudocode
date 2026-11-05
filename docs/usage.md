@@ -782,6 +782,39 @@ exiting the session stops and reaps background processes. Background work
 survives cancellation of an unrelated parent turn. Sub-agent completion keeps
 using the existing automatic notification/queued follow-up path.
 
+## Scheduled jobs
+
+A scheduled job delivers a message on a schedule: a 5-field cron expression
+(`--schedule`), a fixed interval in seconds (`--every`) or one Unix time
+(`--at`). The agent creates one with `CronCreate`; by default the message comes
+back to that same agent. You can also use `/cron add` or `scode cron add`:
+
+```bash
+scode cron add --schedule "0 9 * * 1-5" --prompt "Summarize yesterday's commits" --name standup
+scode cron add --every 3600 --prompt "Check the build" --agent build-bot --delivery steer
+```
+
+A job addressed to an agent (`--agent`) arrives as a peer message marked
+**scheduled**, through that agent's inbox and message queue. By default it
+waits until a running turn ends; `--delivery steer` inserts it into the
+running turn at its next safe point, like a message sent with **Enter**. An
+agent that is not running receives it when it next starts. A job without
+`--agent` starts a fresh headless session in its `--cwd`.
+
+Jobs live in the config home's `crons.json`, shared by every scode process.
+The interactive REPL, the ACP server and `scode cron daemon` each run the
+scheduler, and a lock ensures one of them fires each run. A run more than ten
+minutes late, for example after sleep, is recorded as missed instead of
+firing late. `scode cron tick` fires due jobs once, unless another process is
+already scheduling.
+
+The task browser has a **Scheduled** tab: open it from the footer as above,
+then press **→**. **↑/↓** selects a job, **Enter** shows its details, **e**
+enables or disables it, **r** runs it now, and **d** deletes it after you
+confirm with **y**. **←** returns to background tasks. The footer shows how
+many jobs are enabled. Desktop hosts manage the same jobs through the ACP
+`_sudocode/cron/*` methods.
+
 ## One-shot prompt
 
 ```bash

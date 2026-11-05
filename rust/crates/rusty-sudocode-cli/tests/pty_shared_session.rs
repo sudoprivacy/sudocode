@@ -1339,7 +1339,11 @@ fn automatic_pruning_records_a_new_view_and_preserves_the_full_source_result() {
     let env = shared_mock("shared-sid-pruning");
     let config_path = env.config_home().join("sudocode.json");
     let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["models"]["claude-sonnet"]["contextWindow"] = json!(32_000);
+    // The ~40k-token result below must not fit, so it is pruned. The window
+    // also carries every tool definition; 32k left under 100 tokens of
+    // headroom, so adding one tool parameter turned pruning into a failed
+    // compaction. 36k keeps the result oversized with room for the tools.
+    config["models"]["claude-sonnet"]["contextWindow"] = json!(36_000);
     config["models"]["claude-sonnet"]["maxOutputTokens"] = json!(8_192);
     fs::write(config_path, config.to_string()).unwrap();
     let transcript = env.workspace_root().join("shared.jsonl");

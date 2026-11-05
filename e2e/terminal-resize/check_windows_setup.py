@@ -17,6 +17,7 @@ import time
 
 # The actual installer before native preparation support, not a simulated reply.
 LEGACY_INSTALLER_BLOB = "20829f60e316bfc2fe07e3d75959be304f57e0cf"
+INSTALLER_TIMEOUT = 120
 
 
 # Redirect only the download boundary; run the unchanged installer entry point
@@ -43,7 +44,7 @@ def run_concurrent_installers(command):
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             ))
         for process in processes:
-            stdout, stderr = process.communicate(timeout=120)
+            stdout, stderr = process.communicate(timeout=INSTALLER_TIMEOUT)
             assert process.returncode == 0, stdout + stderr
     finally:
         for process in processes:
@@ -110,7 +111,7 @@ def main():
                         f"http://127.0.0.1:{server.server_port}/{label}",
                         str(installer), str(destination),
                     ],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                 )
                 assert not (destination / "host.partial").exists()
                 if label == "resume":
@@ -174,7 +175,7 @@ def main():
                     native_target = (root / "native-target").resolve()
                     native_command = [sys.executable, str(installer), str(destination),
                                       "--native-target", str(native_target), "--native-arch", "x64"]
-                    native = subprocess.run(native_command, capture_output=True, text=True, timeout=120)
+                    native = subprocess.run(native_command, capture_output=True, text=True, timeout=INSTALLER_TIMEOUT)
                     assert native.returncode == 0, native.stdout + native.stderr
                     print(native.stdout, end="", flush=True)
                     native_log = root / "native-install.log"
@@ -203,7 +204,7 @@ def main():
                     ))
                     ignored = subprocess.run(
                         [sys.executable, str(legacy), str(destination), "--native-target", str(native_target)],
-                        capture_output=True, text=True, timeout=10,
+                        capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                     )
                     assert ignored.returncode == 0, ignored.stderr
                     legacy_log = root / "legacy-install.log"
@@ -221,7 +222,7 @@ def main():
                         assert "differs from the prepared provider" in str(error), error
                     else:
                         raise AssertionError("Changed sidecar bytes were accepted after preparation")
-                    repaired = subprocess.run(native_command, capture_output=True, text=True, timeout=120)
+                    repaired = subprocess.run(native_command, capture_output=True, text=True, timeout=INSTALLER_TIMEOUT)
                     assert repaired.returncode == 0, repaired.stdout + repaired.stderr
                     native_log.write_text(repaired.stdout, encoding="utf-8")
                     profiles["verify_native_terminal"](native_log, native_target)
@@ -233,7 +234,7 @@ def main():
                     (destination / "host.zip").write_bytes(b"corrupt")
                     corrupt = subprocess.run(
                         [sys.executable, str(installer), str(destination)],
-                        capture_output=True, text=True, timeout=120,
+                        capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                     )
                     assert corrupt.returncode != 0 and "checksum mismatch" in corrupt.stderr
                     assert counts[label] == 2

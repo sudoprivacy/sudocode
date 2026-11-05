@@ -316,6 +316,15 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
+After the selected native workspace checks, service acceptance runs before
+optimized release builds and rendering/browser measurements. Service bootstrap
+failures therefore stop the attempt before those expensive profiles start.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` prints this execution order. The declared
+acceptance plan and every profile's commands remain required; completed signed
+results retain their existing restore and carry rules. Real Git/SSH/child-process
+checks cover failure before slow-profile entry, complete success and verified
+restore with the original plan.
+
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
 deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on
@@ -660,7 +669,25 @@ receipt/signature/envelope files live in immutable numbered generations; an atom
 abrupt process exit can therefore retain earlier completed profiles without
 running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
-host; custom output directories can use the printed `check --resume-from` command.
+host, including explicit `--output` directories. Each external output gets one
+atomic discovery reference under `~/.nexus/local-acceptance/results/<head>/`;
+the original receipt, signature and logs remain in their output directory. The
+required command prints `LOCAL_ACCEPTANCE_OUTPUT_INDEX` with both paths. These
+references only locate evidence: reuse still verifies its signature, source,
+host, protected commands and original log hashes. Invalid references cannot
+approve checks. An index write failure prints
+`LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE` and preserves signed progress for
+explicit `check --resume-from /path/to/output` recovery.
+Older external outputs can be discovered without rerunning or re-signing them:
+
+```bash
+python .github/scripts/local_acceptance.py index-output --directory /path/to/old/output --policy-ref origin/main
+```
+
+This command verifies the original signed receipt/checkpoint and log bytes before
+writing a discovery reference. It changes no original evidence and grants no
+acceptance by itself. Deleted or moved outputs must be restored or indexed at
+their new location; missing required results still run normally.
 A later head of the same branch carries a signed profile from an earlier head of
 that branch when nothing it changed selects the profile. Only the PR's own changes
 count: a path changed since the earlier head counts when it differs from current

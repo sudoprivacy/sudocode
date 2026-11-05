@@ -233,10 +233,22 @@ pub fn tick(now: u64, firing: &Firing) -> Vec<(String, String)> {
 /// hosts several sessions (ACP) or restarts its session (the REPL); it still
 /// fires each job once.
 pub fn start_once(firing: impl FnOnce() -> Firing) {
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     STARTED.get_or_init(|| {
-        let _scheduler = spawn(firing());
+        let firing = firing();
+        let _scheduler = spawn(firing.clone());
+        firing
     });
+}
+
+static STARTED: std::sync::OnceLock<Firing> = std::sync::OnceLock::new();
+
+/// Fire `cron_id` now through this process's scheduler, as a client's
+/// "run now" does: through the same mailbox its scheduled fires use.
+pub fn trigger_here(cron_id: &str) -> Result<String, String> {
+    let firing = STARTED
+        .get()
+        .ok_or("this process is not running the scheduler yet; open a session first")?;
+    trigger(cron_id, firing)
 }
 
 /// Run the scheduler on a background thread for the life of the process:

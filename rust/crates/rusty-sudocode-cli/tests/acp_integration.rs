@@ -10376,3 +10376,160 @@ const timer = setInterval(() => {
     )
     .unwrap();
 }
+
+/// Create, refuse, pause; then hear about a job another process adds.
+/// Returns the created job's id.
+async fn cron_edits_and_change_notice(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+) -> String {
+    let (_, created) = client
+        .send_request(
+            "_sudocode/cron/create",
+            json!({"cron": {
+                "schedule": "600", "kind": "every", "prompt": "check the build",
+                "name": "build check", "target": {"type": "agent", "name": "worker"},
+                "delivery": "steer"
+            }}),
+        )
+        .await;
+    let job = &created["result"]["cron"];
+    let id = job["cron_id"].as_str().expect("created").to_string();
+    assert_eq!(job["delivery"], "steer", "{created}");
+    assert_eq!(job["created_by"], "user", "{created}");
+    assert!(job["next_run_at"].is_u64(), "armed: {created}");
+
+    let (_, refused) = client
+        .send_request(
+            "_sudocode/cron/create",
+            json!({"cron": {"schedule": "not a cron", "prompt": "x"}}),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+
+    let (_, paused) = client
+        .send_request(
+            "_sudocode/cron/update",
+            json!({"cronId": id, "changes": {"enabled": false}}),
+        )
+        .await;
+    assert_eq!(paused["result"]["cron"]["enabled"], false, "{paused}");
+
+    // Another process (here: the store's own API, as `scode cron add` uses)
+    // adds a job; the connection hears about it without asking.
+    runtime::cron_registry::CronRegistry::open(workspace.config_home.join("crons.json")).create(
+        "0 9 * * *",
+        "from the cli",
+        None,
+    );
+    let names = |message: &Value| -> Vec<String> {
+        message["params"]["crons"]
+            .as_array()
+            .map(|crons| {
+                crons
+                    .iter()
+                    .filter_map(|c| c["prompt"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (_, changed) = client
+        .recv_until(Duration::from_secs(15), |message| {
+            message["method"] == "_sudocode/cron/changed"
+                && names(message).contains(&"from the cli".to_string())
+        })
+        .await
+        .expect("a change from another process is reported");
+    let ours = changed["params"]["crons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["cron_id"] == id.as_str())
+        .expect("our job is listed");
+    assert_eq!(ours["enabled"], false, "{changed}");
+
+    id
+}
+
+/// "Run now" needs the process's scheduler, which a session starts; it
+/// delivers through that session's mailbox into the target's inbox.
+async fn cron_run_now_through_a_session(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+    id: &str,
+) {
+    let (_, early) = client
+        .send_request("_sudocode/cron/trigger", json!({"cronId": id}))
+        .await;
+    assert!(
+        early["error"]["data"]
+            .as_str()
+            .is_some_and(|data| data.contains("not running the scheduler")),
+        "{early}"
+    );
+
+    // A session starts the process's scheduler; "run now" delivers through it.
+    client
+        .send_request(
+            "session/new",
+            json!({"cwd": workspace.root.to_string_lossy(), "mcpServers": []}),
+        )
+        .await;
+    let (_, fired) = client
+        .send_request("_sudocode/cron/trigger", json!({"cronId": id}))
+        .await;
+    assert_eq!(fired["result"]["status"], "ok", "{fired}");
+    assert_eq!(fired["result"]["cron"]["run_count"], 1, "{fired}");
+    let worker = runtime::mailbox::Mailbox::workspace_local(
+        &runtime::mailbox::local_pair_root_in(&workspace.config_home),
+        "worker".into(),
+    );
+    let peers = worker.list_conversations().expect("worker inbox");
+    assert_eq!(peers.len(), 1, "one sender: {peers:?}");
+    let (delivered, _) = worker.poll_conversation(&peers[0], 0, 0).unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].kind, runtime::agent_mailbox::kinds::SCHEDULED);
+    assert_eq!(delivered[0].body, "check the build");
+    assert_eq!(
+        delivered[0].delivery,
+        runtime::turn_input::InputDelivery::Steer
+    );
+}
+
+/// A desktop host manages cron through `_sudocode/cron/*`: the same store and
+/// rules as `scode cron`, a change notification for its own edits and for any
+/// other process's, and "run now" through the session's scheduler.
+#[tokio::test]
+async fn acp_cron_methods_manage_the_shared_store_and_report_changes() {
+    let server = MockAnthropicService::spawn().await.expect("mock service");
+    let workspace = TestWorkspace::new("cron-api");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client(&workspace);
+    client
+        .send_request("initialize", json!({ "protocolVersion": 1 }))
+        .await;
+    let id = cron_edits_and_change_notice(&mut client, &workspace).await;
+    cron_run_now_through_a_session(&mut client, &workspace, &id).await;
+
+    let (_, removed) = client
+        .send_request("_sudocode/cron/remove", json!({"cronId": id}))
+        .await;
+    assert_eq!(
+        removed["result"]["cron"]["cron_id"],
+        id.as_str(),
+        "{removed}"
+    );
+    let (_, listed) = client.send_request("_sudocode/cron/list", json!({})).await;
+    assert!(
+        !listed["result"]["crons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["cron_id"] == id.as_str()),
+        "{listed}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}

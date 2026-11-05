@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::cron_registry::{CronCreateParams, CronEntry, CronRegistry, CronTarget};
+use serde::Deserialize;
+
+use crate::cron_registry::{CronCreateParams, CronEntry, CronKind, CronRegistry, CronTarget};
 use crate::cron_schedule;
 
 /// The store every process shares: `SUDOCODE_CRON_STORE` when set (tests point
@@ -80,6 +82,84 @@ pub fn set_enabled(cron_id: &str, enabled: bool) -> Result<CronEntry, String> {
     }
 }
 
+/// What [`update`] may change. Absent fields keep their value. Field names
+/// are the stored entry's, so a client edits the shape it lists.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CronUpdate {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub prompt: Option<String>,
+    pub schedule: Option<String>,
+    pub kind: Option<CronKind>,
+    pub tz: Option<String>,
+    pub cwd: Option<String>,
+    pub target: Option<CronTarget>,
+    pub delivery: Option<crate::turn_input::InputDelivery>,
+    pub enabled: Option<bool>,
+}
+
+/// Change a job. The result is validated as a whole before anything is
+/// written, and a changed schedule re-arms the next run from now.
+pub fn update(cron_id: &str, change: CronUpdate) -> Result<CronEntry, String> {
+    let registry = registry();
+    let current = registry
+        .get(cron_id)
+        .ok_or_else(|| format!("cron not found: {cron_id}"))?;
+    let kind = change.kind.unwrap_or(current.kind);
+    let schedule = change
+        .schedule
+        .clone()
+        .unwrap_or_else(|| current.schedule.clone());
+    let tz = change.tz.clone().or_else(|| current.tz.clone());
+    let rescheduled = kind != current.kind || schedule != current.schedule || tz != current.tz;
+    if rescheduled {
+        cron_schedule::validate(kind, &schedule, tz.as_deref())?;
+    }
+    if let Some(CronTarget::Agent { name }) = &change.target {
+        if name.trim().is_empty() {
+            return Err("a scheduled message needs an agent name to deliver to".into());
+        }
+    }
+    if change
+        .prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt.trim().is_empty())
+    {
+        return Err("a scheduled job needs a message".into());
+    }
+    registry.modify(cron_id, |entry| {
+        entry.kind = kind;
+        entry.schedule = schedule;
+        entry.tz = tz;
+        if let Some(name) = change.name {
+            entry.name = Some(name);
+        }
+        if let Some(description) = change.description {
+            entry.description = Some(description);
+        }
+        if let Some(prompt) = change.prompt {
+            entry.prompt = prompt;
+        }
+        if let Some(cwd) = change.cwd {
+            entry.cwd = Some(cwd);
+        }
+        if let Some(target) = change.target {
+            entry.target = target;
+        }
+        if let Some(delivery) = change.delivery {
+            entry.delivery = delivery;
+        }
+    })?;
+    match change.enabled {
+        Some(enabled) => set_enabled(cron_id, enabled),
+        None if rescheduled => arm(&registry, cron_id),
+        None => registry
+            .get(cron_id)
+            .ok_or_else(|| format!("cron not found: {cron_id}")),
+    }
+}
+
 fn arm(registry: &CronRegistry, cron_id: &str) -> Result<CronEntry, String> {
     let entry = registry
         .get(cron_id)
@@ -139,6 +219,56 @@ mod tests {
             assert!(create(no_agent).unwrap_err().contains("agent name"));
             assert!(create(every(" ", CronTarget::NewSession)).is_err());
             assert!(list().is_empty(), "nothing half-created");
+        });
+    }
+
+    #[test]
+    fn update_validates_the_result_and_re_arms_a_new_schedule() {
+        with_store(|| {
+            let entry = create(every("x", CronTarget::NewSession)).unwrap();
+            let bad = CronUpdate {
+                schedule: Some("not a number".into()),
+                ..Default::default()
+            };
+            assert!(update(&entry.cron_id, bad).is_err());
+            assert_eq!(
+                get(&entry.cron_id).unwrap().schedule,
+                "60",
+                "nothing written"
+            );
+
+            registry().set_next_run(&entry.cron_id, None).unwrap();
+            let changed = update(
+                &entry.cron_id,
+                CronUpdate {
+                    schedule: Some("120".into()),
+                    prompt: Some("check again".into()),
+                    target: Some(CronTarget::Agent {
+                        name: "worker".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(changed.schedule, "120");
+            assert_eq!(changed.prompt, "check again");
+            assert_eq!(
+                changed.target,
+                CronTarget::Agent {
+                    name: "worker".into()
+                }
+            );
+            assert!(changed.next_run_at.is_some(), "re-armed");
+
+            let paused = update(
+                &entry.cron_id,
+                CronUpdate {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!paused.enabled);
         });
     }
 

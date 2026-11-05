@@ -345,7 +345,7 @@ impl CronRegistry {
     }
 
     pub fn set_enabled(&self, cron_id: &str, enabled: bool) -> Result<(), String> {
-        self.update(cron_id, |entry| {
+        self.modify(cron_id, |entry| {
             entry.enabled = enabled;
             if enabled {
                 entry.retry_count = 0;
@@ -355,7 +355,7 @@ impl CronRegistry {
 
     /// Update the computed next-run time (scheduler bookkeeping).
     pub fn set_next_run(&self, cron_id: &str, next_run_at: Option<u64>) -> Result<(), String> {
-        self.update(cron_id, |entry| entry.next_run_at = next_run_at)
+        self.modify(cron_id, |entry| entry.next_run_at = next_run_at)
     }
 
     /// Record a completed fire with its outcome and the recomputed next
@@ -369,7 +369,7 @@ impl CronRegistry {
         error: Option<&str>,
         next_run_at: Option<u64>,
     ) -> Result<(), String> {
-        self.update(cron_id, |entry| {
+        self.modify(cron_id, |entry| {
             if status == "ok" || status == "error" {
                 entry.last_run_at = Some(entry.updated_at);
                 entry.run_count += 1;
@@ -414,7 +414,7 @@ impl CronRegistry {
 
     /// Change one entry under the store lock, stamping `updated_at` first so
     /// the change can use it as "now".
-    fn update(&self, cron_id: &str, change: impl FnOnce(&mut CronEntry)) -> Result<(), String> {
+    pub fn modify(&self, cron_id: &str, change: impl FnOnce(&mut CronEntry)) -> Result<(), String> {
         self.mutate(|inner| {
             let entry = inner
                 .entries

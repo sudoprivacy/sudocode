@@ -48,7 +48,8 @@ server.on('connection',socket=>socket.on('message',bytes=>{
   if(thread.id===ids[2]){thread.threadSource='subagent';thread.parentThreadId=ids[0];}
   if(thread.id===ids[3])thread.threadSource='guardian_review';
   const result=call.method==='initialize'?{userAgent:'fixture'}:call.method==='thread/loaded/list'
-    ?{data:loaded,nextCursor:null}:call.method==='thread/read'?{thread}:{};
+    ?{data:loaded,nextCursor:null}:call.method==='thread/read'?{thread}
+      :call.method==='turn/start'?{turn:{id:'peer-turn'}}:{};
   const reply = () => {if(socket.readyState===1)socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,result}));};
   if(holdReads&&call.method==='thread/read')pendingReads.push(reply);else reply();
 }));
@@ -285,6 +286,33 @@ async function main() {
   assert.ok(!rows().some(row=>['session/new','session/prompt'].includes(row.method)));
   await owner.close();owner=undefined;
 
+  // Codex is the agent its peers address: the owned scode hands each admitted
+  // peer message to the original thread and never answers it with its model.
+  loaded=[ids[0]];
+  const deliveryCalls=calls.length,deliveryRows=rows().length;
+  owner=await connectCodexAutojoin({...config,peers:['fixture-peer'],stateDirectory:path.join(directory,'delivery-bindings')});
+  const peerSession=owner.connectionFor(ids[0]);
+  await peerSession.request('_fixture/peer',{from:'stranger',text:'the allowlist must refuse'});
+  await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'another session must refuse',wrongSession:true});
+  await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'peer data 零 🧪'});
+  type TurnStart={method:string;params:{threadId:string;toolOutput:{output:string}}};
+  const turnStarts=()=>calls.slice(deliveryCalls).filter(call=>call.method==='turn/start') as TurnStart[];
+  const deliveryDeadline=Date.now()+5000;
+  while(!turnStarts().length){
+    assert.ok(Date.now()<deliveryDeadline,'peer message did not reach the Codex thread');
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  await new Promise(resolve=>setTimeout(resolve,200));
+  assert.equal(turnStarts().length,1,'only the allowlisted peer on the original session is admitted');
+  assert.equal(turnStarts()[0].params.threadId,ids[0]);
+  const delivered=JSON.parse(turnStarts()[0].params.toolOutput.output);
+  assert.equal(delivered.message.sudocode.a2a.from,'fixture-peer');
+  assert.equal(delivered.message.body,'peer data 零 🧪');
+  const deliveryJournal=rows().slice(deliveryRows);
+  assert.ok(deliveryJournal.some(row=>row.method==='initialize'&&row.peerOwned),'the owned scode hands peer input over');
+  assert.ok(!deliveryJournal.some(row=>row.method==='session/prompt'),'no scode model turn for a peer');
+  await owner.close();owner=undefined;loaded=[legacyId];
+
   // A directory at the log path deterministically refuses append on every OS,
   // including elevated test users. Startup must still fail before admission.
   const auditFile=path.join(directory,'mcp-audit.jsonl');
@@ -329,7 +357,7 @@ async function main() {
   assert.throws(()=>process.kill(acpStarted.pid,0),{code:'ESRCH'},'shutdown must close its ACP child');
   const released=createServer();released.listen(reserved.port,'127.0.0.1');await once(released,'listening');
   await new Promise<void>(resolve=>released.close(()=>resolve()));
-  console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, initial audit refusal, audit-failure cleanup, first-MCP readiness and no inference/replay');
+  console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, single-respondent peer delivery, initial audit refusal, audit-failure cleanup, first-MCP readiness and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   loaded=[];

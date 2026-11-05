@@ -47,8 +47,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-source", required=True)
     parser.add_argument("--patch", type=Path, required=True)
+    parser.add_argument("--workers", nargs="+", type=int, choices=[4, 8], default=[8])
     args = parser.parse_args()
     root, output = args.source.resolve(), args.output.resolve()
+    assert len(args.workers) == len(set(args.workers)), "Do not repeat or retry a worker field"
     output.mkdir(parents=True, exist_ok=False)
     helper = load("probe_host", root / ".github/scripts/local_acceptance.py")
     helper.ROOT = root
@@ -73,10 +75,11 @@ def main():
               "source_patch_sha256": hashlib.sha256(patch).hexdigest(),
               "actual_source_diff_sha256": hashlib.sha256(snapshot).hexdigest(),
               "changed_paths": changed,
+              "worker_fields": args.workers,
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
               "baseline_run": None,
               "baseline_job": None,
-              "scope": "Full eight-worker native suite on the pinned main source plus the explicitly recorded resume-input patch. Captured immutable binaries and complete case inventory, original deadlines and no retries. The patch waits for live editor acknowledgement through the existing run_turn helper before recognizing a fresh resumed turn. No same-source four-worker baseline; no causal speedup claim. This private source snapshot is not clean production HEAD and grants no acceptance signature, policy change or paid API coverage."}
+              "scope": "Full native suites on one VM and identical captured binaries for each declared worker field, on pinned main plus the recorded resume-input patch. Original assertions/deadlines, no retries. The existing run_turn helper acknowledges live input before recognizing a fresh resumed turn. One ordered comparison is not counterbalanced and does not establish population or whole-PR speedup. This patched private snapshot grants no acceptance signature, policy change or paid API coverage."}
     started = time.monotonic()
 
     def invoke(command, log):
@@ -147,7 +150,7 @@ def main():
         record.update(expected_active_cases=len(expected), ignored_cases=ignored)
         (output / "configuration.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         actual_sets = []
-        for workers in [8]:
+        for workers in args.workers:
             print(f"REAL_WORKER_FIELD workers={workers} cases={len(expected)} ignored={ignored}", flush=True)
             try:
                 row = invoke([str(tool), "nextest", "run", "--config-file", str(config), "--profile", "default",
@@ -155,7 +158,7 @@ def main():
                               "--max-fail", "1:wait", "--no-tests", "fail", *reused], f"workers-{workers}.log")
             finally:
                 record["binary_hashes_after"] = hashes(paths)
-            phase = {"workers": workers, **row}
+            phase = {"workers": workers, **row, "binary_hashes_after": dict(record["binary_hashes_after"])}
             record["phases"].append(phase)
             (output / "partial-result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", (output / f"workers-{workers}.log").read_text(encoding="utf-8", errors="replace"))
@@ -168,7 +171,7 @@ def main():
             phase.update(cases=len(cases), test_seconds=float(summary[1]))
             (output / "partial-result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             print(f"REAL_WORKER_RESULT workers={workers} seconds={row['elapsed_seconds']}", flush=True)
-        assert actual_sets == [expected]
+        assert actual_sets == [expected] * len(args.workers)
         assert subprocess.check_output(["git", "diff", "--binary"], cwd=root) == snapshot, "Measured source changed"
         assert subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=root) == b""
         record.update(status="PASS", full_inventory_matches_actual_cases=True,

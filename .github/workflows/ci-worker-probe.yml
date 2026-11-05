@@ -1,0 +1,62 @@
+name: Private current-main native eight-worker validation
+
+on:
+  push:
+    branches: [diagnostics/ci-workers-current-main-20261106]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: driver
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: cffe7dad4ce860d449c8cccad747aac828818339
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve existing cache paths
+        id: cache
+        run: python candidate/.github/local-acceptance/cache_layout.py --source candidate/rust --github-output
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.cache.outputs.workspaces }}
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Install process observer
+        run: python -m pip install psutil jsonschema
+      - name: Validate complete clean-main native suites at eight workers
+        run: python driver/.github/diagnostics/ci_worker_probe.py --source candidate --expected-source cffe7dad4ce860d449c8cccad747aac828818339 --expected-resume-sha256 8c157cf9088b931a7d98ad3434a48a3fe2ab0cf23d1ea61be395da6c45bc7ed6 --workers 8 --output "${{ runner.temp }}/native-workers"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-workers-current-main-${{ matrix.os }}-eight
+          path: ${{ runner.temp }}/native-workers
+          if-no-files-found: error
+          retention-days: 7

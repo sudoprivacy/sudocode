@@ -458,6 +458,7 @@ def run(name, root, output, base, execute):
             # These are this invocation's actual early preparation commands.
             if len(prepared) != 1 or prepared[0]["command"] != windows_terminal_command(root):
                 raise RuntimeError("Native terminal preparation differs from this profile's target/provider")
+            verify_native_terminal(output / "000.log", target)
             results.extend(prepared)
 
     if name == "preflight":

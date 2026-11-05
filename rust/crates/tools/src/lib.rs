@@ -1632,14 +1632,14 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "CronCreate",
-            description: "Schedule a recurring message (5-field cron schedule). On each run the prompt is delivered to an agent as a scheduled message: by default back to this agent, queued until a running turn ends; delivery \"steer\" inserts it into a running turn at its next safe point.",
+            description: "Schedule a recurring message (5-field cron) to an agent, by default this one.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "schedule": { "type": "string" },
                     "prompt": { "type": "string" },
                     "description": { "type": "string" },
-                    "agent": { "type": "string", "description": "Agent to deliver to; defaults to this agent." },
+                    "agent": { "type": "string" },
                     "delivery": { "type": "string", "enum": ["queue", "steer"] }
                 },
                 "required": ["schedule", "prompt"],

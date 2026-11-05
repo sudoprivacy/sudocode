@@ -259,75 +259,63 @@ fn close(mut session: PtySession) {
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
 
+fn detail_frame_rows(view: &str) -> Option<(usize, usize)> {
+    let mut rows = view.lines().enumerate();
+    let (top, header) = rows.find(|(_, row)| row.contains("╭─ Output tail"))?;
+    let (bottom, footer) = rows.find(|(_, row)| row.contains('╰'))?;
+    (header.contains('╮') && footer.contains('╯')).then_some((top, bottom))
+}
+
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
-    // Wait for every corner the assertions read: a terminal can settle on a
-    // frame whose right edge is not drawn yet (seen on Windows ConPTY).
-    common::expect_screen_rows_settled(
+    // The wait and cell assertions must inspect the same completed frame,
+    // even if another repaint starts immediately after the wait succeeds.
+    let (view, raw) = common::expect_screen_rows_settled_snapshot(
         session,
-        |view| {
-            let rows = view.lines().collect::<Vec<_>>();
-            rows.iter()
-                .any(|row| row.contains("╭─ Output tail") && row.contains('╮'))
-                && rows
-                    .iter()
-                    .any(|row| row.contains('╰') && row.contains('╯'))
-        },
+        |view| detail_frame_rows(view).is_some(),
         common::DEFAULT_TIMEOUT,
         "output is inside the detail frame",
+        |screen| screen.raw().clone(),
     );
-    session.render(|screen| {
-        let raw = screen.raw();
-        let rows = raw.rows(0, raw.size().1).collect::<Vec<_>>();
-        let top = rows
-            .iter()
-            .position(|row| row.contains("╭─ Output tail"))
-            .unwrap();
-        let bottom = rows
-            .iter()
-            .enumerate()
-            .skip(top + 1)
-            .find(|(_, row)| row.contains('╰'))
-            .unwrap()
-            .0;
-        let column = |row: usize, glyph: &str| {
-            (0..raw.size().1)
-                .find(|col| {
-                    raw.cell(u16::try_from(row).unwrap(), *col)
-                        .is_some_and(|cell| cell.contents() == glyph)
-                })
-                .unwrap_or_else(|| {
-                    let cells = (0..raw.size().1)
-                        .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
-                        .map(|cell| cell.contents().to_string())
-                        .collect::<Vec<_>>();
-                    panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
-                })
+    let rows = raw.rows(0, raw.size().1).collect::<Vec<_>>();
+    let (top, bottom) = detail_frame_rows(&view).unwrap();
+    let column = |row: usize, glyph: &str| {
+        (0..raw.size().1)
+            .find(|col| {
+                raw.cell(u16::try_from(row).unwrap(), *col)
+                    .is_some_and(|cell| cell.contents() == glyph)
+            })
+            .unwrap_or_else(|| {
+                let cells = (0..raw.size().1)
+                    .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
+                    .map(|cell| cell.contents().to_string())
+                    .collect::<Vec<_>>();
+                panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
+            })
+    };
+    let left = column(top, "╭");
+    let right = column(top, "╮");
+    for row in top..=bottom {
+        let (a, b) = if row == top {
+            ("╭", "╮")
+        } else if row == bottom {
+            ("╰", "╯")
+        } else {
+            ("│", "│")
         };
-        let left = column(top, "╭");
-        let right = column(top, "╮");
-        for row in top..=bottom {
-            let (a, b) = if row == top {
-                ("╭", "╮")
-            } else if row == bottom {
-                ("╰", "╯")
-            } else {
-                ("│", "│")
-            };
-            for (col, glyph) in [(left, a), (right, b)] {
-                let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
-                assert_eq!(
-                    cell.contents(),
-                    glyph,
-                    "aligned border at {row}:{col}; rows={rows:?}"
-                );
-                assert_eq!(format!("{:?}", cell.fgcolor()), border_color);
-                assert!(
-                    !cell.bold() && !cell.dim(),
-                    "output style cannot change border weight"
-                );
-            }
+        for (col, glyph) in [(left, a), (right, b)] {
+            let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
+            assert_eq!(
+                cell.contents(),
+                glyph,
+                "aligned border at {row}:{col}; rows={rows:?}"
+            );
+            assert_eq!(format!("{:?}", cell.fgcolor()), border_color);
+            assert!(
+                !cell.bold() && !cell.dim(),
+                "output style cannot change border weight"
+            );
         }
-    });
+    }
 }
 
 #[test]
@@ -881,19 +869,10 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
     );
     common::expect_screen_rows_settled(
         &session,
-        |_view| {
-            session.render(|screen| {
-                // ConPTY can mark the full-width rule above the question as
-                // wrapped. Inspect physical rows so contents() cannot join it
-                // to the header and hide the visible line boundary.
-                let rows = screen
-                    .raw()
-                    .rows(0, screen.raw().size().1)
-                    .collect::<Vec<_>>();
-                rows.iter().any(|line| {
-                    line.starts_with("1/1") && line.contains("Select the second answer")
-                }) && rows.iter().any(|line| line.contains("[2] Second"))
-            })
+        |view| {
+            view.lines()
+                .any(|line| line.starts_with("1/1") && line.contains("Select the second answer"))
+                && view.lines().any(|line| line.contains("[2] Second"))
         },
         Duration::from_secs(90),
         "actual question options, rather than the echoed prompt",

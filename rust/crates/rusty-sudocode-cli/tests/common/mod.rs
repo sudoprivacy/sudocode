@@ -258,6 +258,26 @@ where
     expect_screen_settled_view(sess, pred, budget, context, screen_rows)
 }
 
+/// Return settled physical rows and owned data from the same observation.
+/// Capturing under the parser lock keeps later cell/style assertions from
+/// reading a new partial repaint after the text predicate already succeeded.
+pub fn expect_screen_rows_settled_snapshot<F, C, T>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    capture: C,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    C: Fn(&pty_expect::Screen<'_>) -> T,
+{
+    let deadline = Instant::now() + at_least(budget);
+    expect_screen_observation_settled_before(sess, pred, deadline, budget, context, |screen| {
+        (screen_rows(screen), capture(screen))
+    })
+}
+
 fn expect_screen_settled_view<F>(
     sess: &PtySession,
     pred: F,
@@ -283,17 +303,35 @@ fn expect_screen_settled_before_view<F>(
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_observation_settled_before(sess, pred, deadline, budget, context, |screen| {
+        (contents(screen), ())
+    })
+    .0
+}
+
+fn expect_screen_observation_settled_before<F, O, T>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    observe: O,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    O: Fn(&pty_expect::Screen<'_>) -> (String, T),
+{
     let mut previous: Option<String> = None;
     let mut stable = 0u32;
     let mut satisfied = false;
     loop {
-        let screen = sess.render(contents);
+        let (screen, observation) = sess.render(&observe);
         if pred(&screen) {
             satisfied = true;
             if previous.as_deref() == Some(screen.as_str()) {
                 stable += 1;
                 if stable >= SETTLE_POLLS {
-                    return screen;
+                    return (screen, observation);
                 }
             } else {
                 stable = 0;

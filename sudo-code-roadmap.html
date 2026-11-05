@@ -787,6 +787,15 @@ product journey counts and acceptance budgets retain their current values.
 A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
 of command execution; this is a measured scheduling incident, not a forecast
 of whole-PR savings.</p>
+<p><strong>Verify completed publisher reruns (2026-11-06).</strong> Merge-queue
+verification binds the trusted publisher's status to its current attempt's
+completed successful jobs, matching source/run identities and execution times.
+GitHub can keep an earlier failed aggregate after all rerun jobs succeed. Old
+jobs and old success statuses cannot approve a pending or failed current
+attempt. The required gate reports the run and recovery command. Real Git,
+SSH signatures, HTTP and independent gate processes cover the observed stale
+aggregate and refusal cases. This restores delivery after metadata inconsistency;
+it adds infrastructure coverage without changing product case counts.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

@@ -281,6 +281,14 @@ do not independently select a base from the event. Queue verification retains
 the merge group's exact base. Git/SSH/process acceptance covers stale API bases
 and refuses a signed receipt for the wrong actual base.
 
+For a publisher rerun, queue verification checks the current attempt's actual
+completed jobs and binds the success status's creation time to that execution.
+GitHub's aggregate run conclusion can retain an earlier failed attempt. Older
+jobs are excluded; missing, pending, failed or mismatched current jobs and old
+success statuses still block the queue. The gate prints the run and recovery
+command when publication is incomplete. Real Git/SSH/HTTP process fixtures
+exercise both the stale aggregate and these refusals.
+
 Checks that run tests, builds or containers share one host lease.
 Every `check`, whether from the hook, `contract-update` or a manual run,
 executes metadata preflight before joining that queue. Revisions requiring

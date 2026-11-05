@@ -45,6 +45,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--expected-source", required=True)
+    parser.add_argument("--patch", type=Path, required=True)
     args = parser.parse_args()
     root, output = args.source.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -54,14 +56,27 @@ def main():
     layout = load("probe_cache", root / ".github/local-acceptance/cache_layout.py")
     target = Path(layout.resolve(Path(os.environ["GITHUB_WORKSPACE"]), root / "rust")["target"])
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    assert head == args.expected_source, (head, args.expected_source)
     assert subprocess.check_output(["git", "status", "--porcelain"], cwd=root) == b""
+    patch = args.patch.read_bytes()
+    subprocess.run(["git", "apply", "--check", "-"], cwd=root, input=patch, check=True)
+    subprocess.run(["git", "apply", "-"], cwd=root, input=patch, check=True)
+    changed = subprocess.check_output(["git", "diff", "--name-only"], cwd=root, text=True).splitlines()
+    assert changed == ["rust/crates/rusty-sudocode-cli/tests/pty_bash_compact_results.rs"], changed
+    snapshot = subprocess.check_output(["git", "diff", "--binary"], cwd=root)
+    assert snapshot, "The intended resume input change was not applied"
+    (output / "source.patch").write_bytes(patch)
+    (output / "actual-source.diff").write_bytes(snapshot)
     environment = {"SCODE_TEST_BACKEND": "mock", "CARGO_TARGET_DIR": str(target),
                    "CARGO_BUILD_JOBS": str((os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1)}
     record = {"head": head, "started_at": datetime.now(timezone.utc).isoformat(),
+              "source_patch_sha256": hashlib.sha256(patch).hexdigest(),
+              "actual_source_diff_sha256": hashlib.sha256(snapshot).hexdigest(),
+              "changed_paths": changed,
               "host": platform.platform(), "logical_cpus": os.cpu_count(), "phases": [],
               "baseline_run": None,
               "baseline_job": None,
-              "scope": "Full eight-worker native suite, captured immutable binaries and complete case inventory, original deadlines and no retries. Candidate includes the complete background-row stability fix. The preceding Linux full field passed 1,166 cases; required Linux CI covers the changed module. This follow-up completes macOS/Windows full fields after their earlier failure/cancellation. No current same-source four-worker baseline; this validates eight-worker compatibility without claiming a speedup. No acceptance signature or paid API call."}
+              "scope": "Full eight-worker native suite on the pinned main source plus the explicitly recorded resume-input patch. Captured immutable binaries and complete case inventory, original deadlines and no retries. The patch waits for live editor acknowledgement through the existing run_turn helper before recognizing a fresh resumed turn. No same-source four-worker baseline; no causal speedup claim. This private source snapshot is not clean production HEAD and grants no acceptance signature, policy change or paid API coverage."}
     started = time.monotonic()
 
     def invoke(command, log):
@@ -154,7 +169,8 @@ def main():
             (output / "partial-result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             print(f"REAL_WORKER_RESULT workers={workers} seconds={row['elapsed_seconds']}", flush=True)
         assert actual_sets == [expected]
-        assert subprocess.check_output(["git", "status", "--porcelain"], cwd=root) == b""
+        assert subprocess.check_output(["git", "diff", "--binary"], cwd=root) == snapshot, "Measured source changed"
+        assert subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=root) == b""
         record.update(status="PASS", full_inventory_matches_actual_cases=True,
                       captured_binaries_unchanged_during_measurement=True)
     except BaseException as error:

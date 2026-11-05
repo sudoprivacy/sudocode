@@ -166,7 +166,7 @@ def main():
                     # Ordinary Rust drivers load ConPTY beside their executable.
                     # Exercise repair and in-use provisioning against the same
                     # real verified distribution, retaining mapped file identity.
-                    native_target = root / "native-target"
+                    native_target = (root / "native-target").resolve()
                     native_command = [sys.executable, str(installer), str(destination),
                                       "--native-target", str(native_target), "--native-arch", "x64"]
                     native = subprocess.run(native_command, capture_output=True, text=True, timeout=120)

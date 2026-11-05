@@ -67,7 +67,9 @@ def sha(data):
 
 
 def tracked(ref, path):
-    return git("show", f"{ref}:{path}").stdout
+    # Explicitly end revision arguments: Git for Windows otherwise probes this
+    # object name as a filesystem path and can reject deep evidence directories.
+    return git("show", f"{ref}:{path}", "--").stdout
 
 
 def load_policy(ref):

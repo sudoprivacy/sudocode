@@ -344,6 +344,19 @@ pub fn record(name: &str) {
         assert "native-workspace" in checks
         if expected:
             assert "native-examples" in checks, text
+        if not scope_cases:
+            # Exercise the public planner in a deep output directory without
+            # another Cargo build or checkout. All inputs remain Git objects.
+            deep = output / "deep-plan"
+            while len(str(deep.resolve())) < 205:
+                deep /= "committed-source"
+            command("git", "clone", "--no-checkout", "--shared", str(root), str(deep), cwd=output)
+            deep_text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"),
+                                "plan", "--base", base, "--policy-ref", base,
+                                "--host", "windows", "--architecture", "AMD64", cwd=deep).read_text(encoding="utf-8")
+            deep_plan = json.loads(next(line.split("=", 1)[1] for line in deep_text.splitlines()
+                                        if line.startswith("ACCEPTANCE_PLAN=")))
+            assert deep_plan == planned, (str(deep), deep_text, text)
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)

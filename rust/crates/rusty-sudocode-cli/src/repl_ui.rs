@@ -1438,6 +1438,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // same handler below, including double Ctrl+C to exit.
                     if focus != TaskFocus::Input && !is_cancel {
                         match (focus, code) {
+                            (TaskFocus::List | TaskFocus::Detail, _) if browser.tab == tasks::TaskTab::Scheduled => {
+                                browser.scheduled_key(code);
+                            }
+                            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => browser.switch_tab(),
                             (TaskFocus::Footer, KeyCode::Enter | KeyCode::Down) => browser.open(),
                             (TaskFocus::Footer, KeyCode::Esc | KeyCode::Up) => browser.close(),
                             (TaskFocus::List, KeyCode::Down) => browser.move_selection(true),
@@ -1991,6 +1995,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
                         Ok(UiCommand::SetTurnResult { text, turn }) => {
                             turn_result.set(Some((turn, text)));
+                            // A fire or another process may have changed the jobs.
+                            tasks_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .refresh_scheduled();
                         }
                         Ok(UiCommand::UpdateTodos(todos)) => {
                             if let Ok(mut items) = todo_items_for_future.lock() {
@@ -2829,7 +2838,11 @@ pub fn spawn_repl_ui(
 
     let ctx = ReplContext {
         transcript: transcript.clone(),
-        tasks: Arc::new(Mutex::new(TaskBrowser::default())),
+        tasks: Arc::new(Mutex::new({
+            let mut browser = TaskBrowser::default();
+            browser.refresh_scheduled();
+            browser
+        })),
         prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),

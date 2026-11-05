@@ -230,3 +230,64 @@ def verify_host_lease(directory, source, command, environment):
                 except subprocess.TimeoutExpired:
                     process.terminate()
                     process.wait(timeout=10)
+    verify_service_order(fixture, run, isolated)
+
+
+def verify_service_order(fixture, run, environment):
+    """Run real failing/successful profile children and verify the signed plan."""
+    source = fixture / "service-order-source"
+    run("git", "worktree", "add", "--detach", source, "main")
+    profiles = source / ".github/local-acceptance/checks.py"
+    profiles.write_text(
+        'import sys\n'
+        'def run(name, root, output, base, execute):\n'
+        '    code = ("from pathlib import Path; import sys; "\n'
+        '            "Path(sys.argv[1]).open(\'a\').write(sys.argv[2] + chr(10)); "\n'
+        '            "failed = sys.argv[2] == \'native-services\' and Path(\'input.txt\').read_text().startswith(\'fail\'); "\n'
+        '            "print(\'CONTROLLED_SERVICE_FAILURE\' if failed else \'passed:\' + sys.argv[2]); "\n'
+        '            "raise SystemExit(23 if failed else 0)")\n'
+        '    return [execute([sys.executable, "-c", code, str(root.parent / "service-order-events.log"), name], '
+        'root, output / "000.log")]\n', encoding="utf-8")
+    declared = ["preflight", "native-workspace", "rendering", "browser", "native-release", "native-services"]
+    policy_path = source / "spec/local_acceptance.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["checks"] = {name: {"include": ["input.txt"]} for name in declared}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    run("git", "add", ".", cwd=source)
+    run("git", "commit", "-m", "Declare slow profiles before service acceptance", cwd=source)
+    run("git", "branch", "service-order-policy", cwd=source)
+    events = fixture / "service-order-events.log"
+
+    def check(label, contents, *, success, resume=None):
+        if contents is not None:
+            (source / "input.txt").write_text(contents, encoding="utf-8")
+            run("git", "commit", "-am", label, cwd=source)
+        output = fixture / label
+        arguments = [sys.executable, str(source / ".github/scripts/local_acceptance.py"), "check",
+                     "--base", "service-order-policy", "--policy-ref", "service-order-policy", "--output", str(output)]
+        if resume is not None:
+            arguments += ["--resume-from", str(resume)]
+        result = subprocess.run(arguments, cwd=source, env=environment, capture_output=True)
+        output.mkdir(exist_ok=True)
+        (output / "process.log").write_bytes(result.stdout + result.stderr)
+        assert (result.returncode == 0) == success, (result.stdout + result.stderr).decode(errors="replace")
+        return output
+
+    failed = check("service-order-failed", "fail service\n", success=False)
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert observed == ["preflight", "native-workspace", "native-services"], observed
+    assert "CONTROLLED_SERVICE_FAILURE" in (failed / "process.log").read_text(encoding="utf-8")
+    assert not (failed / "envelope.json").exists()
+    assert json.loads((failed / "attempt.json").read_text(encoding="utf-8"))["outcome"] == "failure"
+    events.unlink()
+    passed = check("service-order-passed", "pass service\n", success=True)
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert observed == ["preflight", "native-workspace", "native-services", "rendering", "browser", "native-release"], observed
+    receipt = json.loads((passed / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["plan"]["local_checks"] == declared, receipt["plan"]
+    assert set(receipt["checks"]) == set(declared)
+    assert all(len(commands) == 1 and commands[0]["exit_code"] == 0 for commands in receipt["checks"].values())
+    restored = check("service-order-restored", None, success=True, resume=passed)
+    assert events.read_text(encoding="utf-8").splitlines() == observed
+    assert (restored / "envelope.json").is_file()
+    print("PASS: actual failed service blocks release/rendering/browser entry; success and verified resume retain every profile and the declared signed plan")

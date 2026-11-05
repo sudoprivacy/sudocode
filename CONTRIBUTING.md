@@ -310,6 +310,15 @@ fixture checks nested inside an acceptance run without waiting for their parent.
 `attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
 is unchanged.
 
+After the selected native workspace checks, service acceptance runs before
+optimized release builds and rendering/browser measurements. Service bootstrap
+failures therefore stop the attempt before those expensive profiles start.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` prints this execution order. The declared
+acceptance plan and every profile's commands remain required; completed signed
+results retain their existing restore and carry rules. Real Git/SSH/child-process
+checks cover failure before slow-profile entry, complete success and verified
+restore with the original plan.
+
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
 deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on

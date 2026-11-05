@@ -1580,6 +1580,15 @@ def perform_check(args, attempt):
               f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
 
     serialized = [name for name in needed if name != "preflight"]
+    # Service bootstrap failures should precede optimized builds and measurements.
+    if "native-services" in serialized:
+        position = next((index for index, name in enumerate(serialized)
+                         if name in {"native-release", "rendering", "browser"}), len(serialized))
+        if "native-workspace" in serialized:
+            position = max(position, serialized.index("native-workspace") + 1)
+        service = serialized.index("native-services")
+        if position < service:
+            serialized.insert(position, serialized.pop(service))
     pending = [name for name in serialized if name not in reusable and name not in carried]
     attempt["host_lease_wait_seconds"] = 0.0
     print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({

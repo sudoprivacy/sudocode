@@ -7,6 +7,7 @@
     "repeated": { "calibration": 5, "comparison": 7 }
   },
   "sampling": { "input": 60, "resize": 40, "cancel": 20 },
+  "case_sampling": { "repeated": { "input": 20, "resize": 2 } },
   "profiles": {
     "core": ["short", "heavy"],
     "stress": ["short", "heavy", "foreground", "background", "repeated"]

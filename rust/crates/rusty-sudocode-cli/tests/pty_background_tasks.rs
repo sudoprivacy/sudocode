@@ -189,7 +189,9 @@ fn details_log_path(session: &PtySession, text: &str) -> String {
     // The output rows and the full-output path render in one frame, but a
     // screen read under load can land before the frame is completely written.
     let full_output = |view: &str| {
-        view.lines()
+        let (_, panel) = task_panel(view)?;
+        panel
+            .lines()
             .find_map(|line| line.trim().strip_prefix("Full output: "))
             .filter(|path| {
                 std::path::Path::new(path)
@@ -200,7 +202,10 @@ fn details_log_path(session: &PtySession, text: &str) -> String {
     };
     let view = common::expect_screen_rows(
         session,
-        |view| view.contains(text) && full_output(view).is_some(),
+        |view| {
+            task_panel(view).is_some_and(|(_, panel)| panel.contains(text))
+                && full_output(view).is_some()
+        },
         Duration::from_secs(90),
         "task details with the full output path",
     );
@@ -214,11 +219,7 @@ fn screen(session: &PtySession, text: &str) -> String {
 fn screen_with_budget(session: &PtySession, text: &str, budget: Duration) -> String {
     common::expect_screen_rows(
         session,
-        |s| {
-            s.rsplit_once("Background tasks")
-                .map_or(s, |(_, panel)| panel)
-                .contains(text)
-        },
+        |s| task_panel(s).map_or(s, |(_, panel)| panel).contains(text),
         budget,
         text,
     )
@@ -242,11 +243,25 @@ fn close(mut session: PtySession) {
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
 
+/// Locate the task panel inside the existing live input/footer boundary.
+/// Keep its physical row offset for assertions against the same raw snapshot.
+fn task_panel(view: &str) -> Option<(usize, &str)> {
+    let rows = view.lines().collect::<Vec<_>>();
+    let live = common::input_and_footer_row_range(&rows)?;
+    let top = live.start
+        + rows[live]
+            .iter()
+            .position(|row| row.trim_start_matches('─').trim() == "Background tasks")?;
+    let offset = view.split_inclusive('\n').take(top).map(str::len).sum();
+    Some((top, &view[offset..]))
+}
+
 fn detail_frame_rows(view: &str) -> Option<(usize, usize)> {
-    let mut rows = view.lines().enumerate();
+    let (first_row, panel) = task_panel(view)?;
+    let mut rows = panel.lines().enumerate();
     let (top, header) = rows.find(|(_, row)| row.contains("╭─ Output tail"))?;
     let (bottom, footer) = rows.find(|(_, row)| row.contains('╰'))?;
-    (header.contains('╮') && footer.contains('╯')).then_some((top, bottom))
+    (header.contains('╮') && footer.contains('╯')).then_some((first_row + top, first_row + bottom))
 }
 
 fn detail_frame_region(view: &str) -> Option<String> {
@@ -256,7 +271,8 @@ fn detail_frame_region(view: &str) -> Option<String> {
 }
 
 fn detail_command_region(view: &str, marker: &str) -> Option<String> {
-    let rows = view.lines().collect::<Vec<_>>();
+    let (first_row, panel) = task_panel(view)?;
+    let rows = panel.lines().collect::<Vec<_>>();
     let top = rows
         .iter()
         .position(|row| row.trim_start().starts_with("Command:"))?;
@@ -272,7 +288,7 @@ fn detail_command_region(view: &str, marker: &str) -> Option<String> {
         .map(str::trim)
         .collect::<String>()
         .contains(marker)
-        .then(|| format!("{top}:{command}"))
+        .then(|| format!("{}:{command}", first_row + top))
 }
 
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
@@ -548,7 +564,7 @@ fn expect_completed_status_detail(session: &mut PtySession, background: &str, no
         },
     );
     let panel = session.render(common::screen_contents);
-    let panel = panel.rsplit_once("Background tasks").unwrap().1;
+    let (_, panel) = task_panel(&panel).unwrap();
     assert!(
         !panel.contains("k stop"),
         "completed tasks have no stop hint: {panel}"
@@ -953,6 +969,46 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
 }
 
 #[test]
+fn task_details_use_the_live_panel_when_history_contains_an_output_frame() {
+    let env = TestEnv::new_mock("background-details-retained-history");
+    let _release = ReleaseOnDrop(env.workspace_root().to_path_buf());
+    let mut call = shell(
+        "background",
+        "echo CURRENT_TASK_OUTPUT; while [ ! -f release ]; do sleep 0.1; done # CURRENT_COMMAND_MARKER",
+        "Task details with literal history",
+    );
+    // Literal transcript content may resemble a retained partial UI after
+    // resize. It must remain visible without becoming the current task frame.
+    call["stream_prelude"] = json!(
+        "```text\nCommand: RETAINED_COMMAND\n╭─ Output tail · retained history\nHISTORY_FRAME_SENTINEL\n```\n"
+    );
+    let mut session = start_with_env(
+        &env,
+        &[call],
+        &[
+            ("COLORFGBG", "15;0"),
+            ("NO_COLOR", ""),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    open(&mut session);
+    let view = screen(&session, "  CURRENT_TASK_OUTPUT");
+    let (history, _) = view.rsplit_once("Background tasks").unwrap();
+    assert!(history.contains("HISTORY_FRAME_SENTINEL"), "{view}");
+    assert!(history.contains("╭─ Output tail"), "{view}");
+    expect_stable_region(
+        &session,
+        common::DEFAULT_TIMEOUT,
+        "current command remains separate from literal history",
+        |view| detail_command_region(view, "CURRENT_COMMAND_MARKER"),
+    );
+    assert_detail_frame(&session, "Rgb(158, 158, 158)");
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    close(session);
+}
+
+#[test]
 fn task_browser_resizes_and_returns_to_fast_prompt_input() {
     let (env, _release) = task_env("background-resize-input");
     let mut session = start_with_env(
@@ -997,13 +1053,13 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
         common::DEFAULT_TIMEOUT,
         "small detail viewport yields its decoration before controls",
         |view| {
-            let (before, panel) = view.rsplit_once("Background tasks")?;
+            let (top, panel) = task_panel(view)?;
             (panel.contains("AFTER_EMPTY_LINE")
                 && panel.contains("k stop")
-                && !view.contains("Runtime:")
-                && !view.contains("Output tail · rows")
-                && !view.contains("Enlarge terminal"))
-            .then(|| format!("{}:{panel}", before.lines().count()))
+                && !panel.contains("Runtime:")
+                && !panel.contains("Output tail · rows")
+                && !panel.contains("Enlarge terminal"))
+            .then(|| format!("{top}:{panel}"))
         },
     );
     session.resize(40, 120).unwrap();
@@ -1278,7 +1334,7 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
     open(&mut session);
     let view = screen(&session, "  LAST_LOG_EVIDENCE");
     screen(&session, "exit 0");
-    let panel = view.rsplit_once("Background tasks").unwrap().1;
+    let (_, panel) = task_panel(&view).unwrap();
     assert!(
         !panel
             .lines()
@@ -1327,7 +1383,9 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
     common::expect_screen_rows_settled(
         &session,
         |view| {
-            let panel = view.rsplit_once("Background tasks").unwrap().1;
+            let Some((_, panel)) = task_panel(view) else {
+                return false;
+            };
             panel.contains("Output tail · rows")
                 && !panel.contains(&range)
                 && !panel

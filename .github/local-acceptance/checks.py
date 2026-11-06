@@ -1007,7 +1007,16 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             path = sources / "runner" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
-    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
+    scratch = []
+    if name == "rendering":
+        scratch = ["--tmpfs", "/benchmark-tmp:rw,nosuid,nodev,exec,size=512m",
+                   "--env", "TMPDIR=/benchmark-tmp"]
+        print("RENDERING_FIXTURE_STORAGE: throwaway sessions use a private 512 MiB tmpfs; "
+              "reports, binaries and build caches retain their existing storage. "
+              "This isolates render measurements from host disk flushes and does not qualify "
+              "persistent-storage performance. Other profiles retain their storage; "
+              "exit assertions, deadlines and performance budgets are unchanged.", flush=True)
+    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048", *scratch,
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
             "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",

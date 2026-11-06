@@ -424,6 +424,19 @@ The public process controls refuse missing input, resize or turn observations
 and unsupported reductions. Fresh product stress execution is required before
 claiming runtime savings; observation counts alone do not prove faster delivery.
 
+Rendering's throwaway sessions use a private 512 MiB tmpfs in its local Docker
+container. Reports, copied binaries and Cargo caches keep their existing storage.
+The frozen historical baseline serialized response-archive disk flushes; real
+debugger stacks show that backlog delaying exit, while a controlled native
+disk/tmpfs comparison isolates the storage cost. Exit assertions, deadlines and
+all performance budgets remain unchanged. This gate now isolates rendering from
+host disk flush latency, reducing coverage of slow persistent storage. It does
+not qualify filesystem durability. Other profiles, including the browser,
+native persistence, response gzip, compaction and cache checks retain their
+storage paths. A real Docker regression executes a native process from the
+temporary directory and verifies the mount type, capacity, frozen sources and
+durable evidence location.
+
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
 Docker runs the candidate in pinned

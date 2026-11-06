@@ -408,6 +408,21 @@ SHA256 alongside the original parent policy; old policies retain 60 keys.
 Real process controls reject missing observations and unsupported reductions.
 Fresh full product stress execution is required to measure elapsed savings;
 these inventory counts do not establish the overall 10% delivery target.</p>
+<p><strong>Isolate render measurements from throwaway-session disk flushes
+(2026-11-06).</strong> Rendering alone places temporary sessions in a private
+512 MiB container tmpfs. Reports, binaries and build caches retain their storage.
+The exact historical baseline's debugger stacks show response-archive
+<code>fsync</code> and write-lock contention during exit. A native alternating
+disk/tmpfs control keeps the binary, driver, workload, assertions and deadlines
+fixed: eight processes averaged 17.695 seconds on disk versus 12.527 on tmpfs
+(29.2% less); terminal restoration to exit averaged 3.737 versus 0.093 seconds.
+This is one local host's small control. Exit checks and all performance budgets remain unchanged.
+<strong>Coverage reduction:</strong> this rendering gate no longer measures
+slow persistent storage and does not qualify durability. Browser, native
+persistence, response gzip, compression and cache checks retain their storage.
+The mandatory command prints <code>RENDERING_FIXTURE_STORAGE</code>; a real
+Docker/native process verifies the temporary mount, capacity and durable report
+location. A small control's saving is not an end-to-end CI result.</p>
 <p><strong>Consolidate mandatory rendering workloads (2026-11-01).</strong>
 The required matrix adopts the 12 KiB Markdown workload proposed in
 <a href="https://github.com/sudoprivacy/sudocode/pull/1196">#1196</a>.

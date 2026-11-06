@@ -112,8 +112,7 @@ def main():
              'originalDeadlinesAndAssertions': True, 'workers': 4, 'rounds': [],
              'scope': args.scope, 'selection': selection}
     try:
-        options = (checks.workspace_nextest_options(output, bool(targets),
-                   hosted_source_ready=checks.supports_hosted_eight_workers(source))
+        options = (checks.workspace_nextest_options(output, bool(targets))
                    if args.scope == 'workspace' else checks.nextest_options(output))
         assert options[options.index('--test-threads') + 1] == '4'
         code = run_observed(['cargo', 'test', '--no-run', *arguments], source, output, 'compile', compiling=True)

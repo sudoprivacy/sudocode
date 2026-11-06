@@ -877,15 +877,22 @@ impl ToolCardContent {
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
-    render_tool_card_with_width(content, status, crate::render::query_terminal_width())
+    render_tool_card_with_width(
+        content,
+        status,
+        crate::render::query_terminal_width(),
+        false,
+    )
 }
 
 /// The layout owner supplies its width, so all cards in one UI frame use the
 /// same terminal-size snapshot instead of racing independent ioctl queries.
+/// `is_pulse_low` draws a running card's frame at the quiet point of its pulse.
 pub(crate) fn render_tool_card_with_width(
     content: &ToolCardContent,
     status: ToolStatus,
     term_width: usize,
+    is_pulse_low: bool,
 ) -> String {
     use crate::render::left_frame;
 
@@ -896,6 +903,13 @@ pub(crate) fn render_tool_card_with_width(
         ToolStatus::Error => TextRole::Error,
         ToolStatus::Review => TextRole::Secondary,
     });
+    let color = if is_pulse_low && status == ToolStatus::Running {
+        theme()
+            .brand_pulse_low(crate::render::ColorSupport::detect())
+            .unwrap_or(color)
+    } else {
+        color
+    };
     let tail = if matches!(status, ToolStatus::Queued | ToolStatus::Running) {
         left_frame::Tail::Open
     } else {

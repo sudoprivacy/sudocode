@@ -11,6 +11,38 @@ type ForegroundKey = (Rgb, Option<Rgb>, ColorSupport);
 
 thread_local! {
     static FOREGROUNDS: RefCell<HashMap<ForegroundKey, Color>> = RefCell::default();
+    static FADED: RefCell<HashMap<(Rgb, Rgb, ColorSupport), Option<Color>>> = RefCell::default();
+}
+
+/// `preferred` faded half way into `surface`, reduced to the palette without
+/// `foreground`'s contrast floor: a fade is meant to be quieter than text.
+/// `None` where the palette cannot hold a shade (16 colors or no color).
+pub(super) fn faded(preferred: Rgb, surface: Rgb, support: ColorSupport) -> Option<Color> {
+    if matches!(support, ColorSupport::NoColor | ColorSupport::Ansi16) {
+        return None;
+    }
+    FADED.with(|cache| {
+        *cache
+            .borrow_mut()
+            .entry((preferred, surface, support))
+            .or_insert_with(|| {
+                let rgb = blend(preferred, surface, 0.5);
+                match support {
+                    ColorSupport::TrueColor => Some(Color::Rgb {
+                        r: rgb.0,
+                        g: rgb.1,
+                        b: rgb.2,
+                    }),
+                    ColorSupport::Ansi256 => (16..=255)
+                        .min_by(|a, b| {
+                            perceptual_distance(xterm(*a), rgb)
+                                .total_cmp(&perceptual_distance(xterm(*b), rgb))
+                        })
+                        .map(Color::AnsiValue),
+                    ColorSupport::NoColor | ColorSupport::Ansi16 => None,
+                }
+            })
+    })
 }
 
 pub(super) fn xterm(index: u8) -> Rgb {

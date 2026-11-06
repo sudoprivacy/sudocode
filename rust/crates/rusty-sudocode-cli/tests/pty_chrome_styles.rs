@@ -159,6 +159,40 @@ fn expect_frame_caps(sess: &PtySession, color: &str, tail: &str) {
     }
 }
 
+/// A running card breathes: its frame alternates between the brand amber and
+/// one quieter shade, about once a second, changing colour but never weight.
+/// On a no-color terminal it stays steady.
+fn expect_frame_pulse(sess: &PtySession, border: &str, no_color: bool) {
+    let expected = terminal_palette::expected_color(border);
+    let mut seen: Vec<String> = Vec::new();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        if let Some((color, bold, dim)) = attributes(sess, "╭─") {
+            assert!(!bold && !dim, "the pulse changes colour, never weight");
+            if seen.last() != Some(&color) {
+                seen.push(color);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let distinct: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
+    if no_color {
+        assert_eq!(distinct, [expected].into(), "no-color frames stay steady");
+        return;
+    }
+    assert!(
+        distinct.len() == 2 && distinct.contains(&expected) && !distinct.contains("Default"),
+        "the frame alternates between amber and one quieter shade: {seen:?}"
+    );
+    // A half period is 480 ms, so 3 s holds about six changes. Many more would
+    // be a flicker driven by redraws rather than the clock.
+    let changes = seen.len() - 1;
+    assert!(
+        (3..=10).contains(&changes),
+        "about one breath per second: {changes} changes in 3 s ({seen:?})"
+    );
+}
+
 fn settle_chrome(sess: &PtySession) {
     // A styled label (or the prompt byte itself) can arrive before the frame
     // finishes. Resizing in that window reflows the startup banner while the
@@ -604,6 +638,7 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
         DARK_SECONDARY
     };
     expect_frame_caps(&sess, border, "╎");
+    expect_frame_pulse(&sess, border, no_color);
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");

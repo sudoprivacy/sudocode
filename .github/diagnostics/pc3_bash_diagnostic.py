@@ -1,6 +1,7 @@
 """Observe original Mac PTY cases; this diagnostic never waives acceptance."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -27,13 +28,47 @@ def permission_cause(error):
     return None
 
 
+def normal_child_priority():
+    # Hosted job launchers can start at nice -10. Lower only this owned child
+    # to normal; actual tests must not inherit a compiler's nice 10.
+    current = os.getpriority(os.PRIO_PROCESS, 0)
+    if current < 0:
+        os.nice(-current)
+    if os.getpriority(os.PRIO_PROCESS, 0) != 0:
+        raise RuntimeError('Launch this diagnostic at normal test priority')
+
+
+def add_pipe_window_failure_diagnostics(source):
+    """Add only failure output to the disposable candidate, never a product change."""
+    relative = 'rust/crates/rusty-sudocode-cli/tests/pty_tool_concurrency.rs'
+    path = source / relative
+    original = subprocess.check_output(['git', 'show', 'HEAD:' + relative], cwd=source)
+    assert path.read_bytes() == original and not path.is_symlink()
+    needle = '''            Err(error) => panic!(
+                "reader did not start for {name}: {error}\\n{}",
+                sess.render(common::screen_contents)
+            ),'''
+    replacement = '''            Err(error) => panic!(
+                "reader did not start for {name}: {error}\\n{}\\nCaptured mock tool requests: {:#?}",
+                sess.render(common::screen_contents),
+                env.captured_message_bodies()
+            ),'''
+    text = original.decode()
+    assert text.count(needle) == 1
+    path.write_text(text.replace(needle, replacement), encoding='utf-8')
+    patch = subprocess.check_output(['git', 'diff', 'HEAD', '--binary'], cwd=source)
+    assert git(source, 'diff', '--name-only').splitlines() == [relative]
+    return patch
+
+
 def run_observed(command, source, output, name, *, compiling=False):
     started = time.monotonic()
     captured = set()
     denied = set()
     proof = {'command': command, 'compiling': compiling, 'samples': [], 'permissionRejections': []}
     with (output / (name + '.log')).open('wb') as log:
-        child = subprocess.Popen(command, cwd=source / 'rust', stdout=log, stderr=log)
+        child = subprocess.Popen(command, cwd=source / 'rust', stdout=log, stderr=log,
+                                 preexec_fn=normal_child_priority)
         while child.poll() is None:
             sample = {'seconds': round(time.monotonic() - started, 2), 'processes': []}
             try:
@@ -110,7 +145,7 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--expected-source', required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--scope', choices=['group', 'workspace'], default='group')
+    parser.add_argument('--scope', choices=['group', 'workspace', 'pipe-window'], default='group')
     parser.add_argument('--rounds', type=int, choices=range(1, 4), default=3)
     args = parser.parse_args()
     source, output = args.source.resolve(), args.output.resolve()
@@ -125,12 +160,23 @@ def main():
     nextest = str(checks.nextest_binary(output))
     arguments = ['--locked', '-p', 'rusty-sudocode-cli', '--test', 'acceptance_cli_05', '--features', 'engine-acp/mailbox']
     selection = {'mode': 'original-group'}
+    diagnostic_patch = b''
+    test_filter = []
     if args.scope == 'workspace':
         metadata = json.loads(subprocess.check_output(
             ['cargo', 'metadata', '--no-deps', '--locked', '--format-version=1'], cwd=source / 'rust'))
         targets, selection = checks.grouped_workspace_test_targets(source, metadata)
         arguments = ['--workspace', '--locked', '--features', 'engine-acp/mailbox',
                      *checks.workspace_integration_test_targets(targets)]
+    elif args.scope == 'pipe-window':
+        diagnostic_patch = add_pipe_window_failure_diagnostics(source)
+        (output / 'failure-diagnostics.patch').write_bytes(diagnostic_patch)
+        arguments = ['--locked', '-p', 'rusty-sudocode-cli', '--test', 'acceptance_cli_06',
+                     '--features', 'engine-acp/mailbox']
+        test_filter = ['-E', 'test(=pty_tool_concurrency::concurrent_shell_capture_is_private_during_the_pipe_cloexec_window)']
+        selection = {'mode': 'original-case-with-added-failure-output',
+                     'diagnosticPatchSha256': hashlib.sha256(diagnostic_patch).hexdigest(),
+                     'runtimeSourceChanged': False, 'assertionsDeadlinesGeometryChanged': False}
     proof = {'source': args.expected_source, 'mockOnly': True, 'acceptanceWaiver': False,
              'originalDeadlinesAndAssertions': True, 'workers': 4, 'rounds': [],
              'scope': args.scope, 'selection': selection}
@@ -141,16 +187,22 @@ def main():
         code = run_observed(['cargo', 'test', '--no-run', *arguments], source, output, 'compile', compiling=True)
         assert code == 0, 'Original native test targets must build'
         for number in range(1, args.rounds + 1):
-            code = run_observed([nextest, 'nextest', 'run', *options, *arguments], source, output, f'round-{number}')
+            code = run_observed([nextest, 'nextest', 'run', *options, *arguments, *test_filter], source, output, f'round-{number}')
             proof['rounds'].append({'round': number, 'exit': code})
             if code:
                 break
         proof['passed'] = bool(proof['rounds']) and all(item['exit'] == 0 for item in proof['rounds'])
     finally:
-        proof['sourceUnchanged'] = git(source, 'rev-parse', 'HEAD') == args.expected_source and git(source, 'status', '--porcelain') == ''
+        same_head = git(source, 'rev-parse', 'HEAD') == args.expected_source
+        status = git(source, 'status', '--porcelain')
+        proof['sourceUnchanged'] = same_head and status == ''
+        expected_status = ('M rust/crates/rusty-sudocode-cli/tests/pty_tool_concurrency.rs'
+                           if diagnostic_patch else '')
+        proof['diagnosticInputsUnchanged'] = same_head and status == expected_status and subprocess.check_output(
+            ['git', 'diff', 'HEAD', '--binary'], cwd=source) == diagnostic_patch
         (output / 'receipt.json').write_text(json.dumps(proof, indent=2))
     print(json.dumps(proof), flush=True)
-    return 0 if proof['passed'] and proof['sourceUnchanged'] else 1
+    return 0 if proof['passed'] and proof['diagnosticInputsUnchanged'] else 1
 
 
 if __name__ == '__main__':

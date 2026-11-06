@@ -185,6 +185,24 @@ where
     expect_screen_view(sess, pred, budget, context, screen_rows)
 }
 
+/// Retain physical rows and cells together without requiring animation to stop.
+pub fn expect_screen_rows_snapshot<F, C, T>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    capture: C,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    C: Fn(&pty_expect::Screen<'_>) -> T,
+{
+    let deadline = Instant::now() + at_least(budget);
+    expect_screen_observation_before(sess, pred, deadline, budget, context, |screen| {
+        (screen_rows(screen), capture(screen))
+    })
+}
+
 fn expect_screen_view<F>(
     sess: &PtySession,
     pred: F,
@@ -210,10 +228,28 @@ fn expect_screen_before_view<F>(
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_observation_before(sess, pred, deadline, budget, context, |screen| {
+        (contents(screen), ())
+    })
+    .0
+}
+
+fn expect_screen_observation_before<F, O, T>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    observe: O,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    O: Fn(&pty_expect::Screen<'_>) -> (String, T),
+{
     loop {
-        let screen = sess.render(contents);
+        let (screen, observation) = sess.render(&observe);
         if pred(&screen) {
-            return screen;
+            return (screen, observation);
         }
         assert!(
             Instant::now() < deadline,
@@ -258,6 +294,57 @@ where
     expect_screen_settled_view(sess, pred, budget, context, screen_rows)
 }
 
+/// Return settled physical rows and owned data from the same observation.
+/// Capturing under the parser lock keeps later cell/style assertions from
+/// reading a new partial repaint after the text predicate already succeeded.
+pub fn expect_screen_rows_settled_snapshot<F, C, T>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    capture: C,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    C: Fn(&pty_expect::Screen<'_>) -> T,
+{
+    let deadline = Instant::now() + at_least(budget);
+    expect_screen_observation_settled_before(
+        sess,
+        |view| ScreenStabilityKey::WholeScreen {
+            is_satisfied: pred(view),
+        },
+        deadline,
+        budget,
+        context,
+        |screen| (screen_rows(screen), capture(screen)),
+    )
+}
+
+/// Retain one observation while only the selected region must stop changing.
+/// Region selection runs outside the parser lock, like other wait predicates.
+pub fn expect_screen_rows_region_settled_snapshot<F, C, T>(
+    sess: &PtySession,
+    region: F,
+    budget: Duration,
+    context: &str,
+    capture: C,
+) -> (String, T)
+where
+    F: Fn(&str) -> Option<String>,
+    C: Fn(&pty_expect::Screen<'_>) -> T,
+{
+    let deadline = Instant::now() + at_least(budget);
+    expect_screen_observation_settled_before(
+        sess,
+        |view| ScreenStabilityKey::Region(region(view)),
+        deadline,
+        budget,
+        context,
+        |screen| (screen_rows(screen), capture(screen)),
+    )
+}
+
 fn expect_screen_settled_view<F>(
     sess: &PtySession,
     pred: F,
@@ -283,17 +370,54 @@ fn expect_screen_settled_before_view<F>(
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_observation_settled_before(
+        sess,
+        |view| ScreenStabilityKey::WholeScreen {
+            is_satisfied: pred(view),
+        },
+        deadline,
+        budget,
+        context,
+        |screen| (contents(screen), ()),
+    )
+    .0
+}
+
+enum ScreenStabilityKey {
+    WholeScreen { is_satisfied: bool },
+    Region(Option<String>),
+}
+
+fn expect_screen_observation_settled_before<F, O, T>(
+    sess: &PtySession,
+    stability: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    observe: O,
+) -> (String, T)
+where
+    F: Fn(&str) -> ScreenStabilityKey,
+    O: Fn(&pty_expect::Screen<'_>) -> (String, T),
+{
     let mut previous: Option<String> = None;
     let mut stable = 0u32;
     let mut satisfied = false;
     loop {
-        let screen = sess.render(contents);
-        if pred(&screen) {
+        let (screen, observation) = sess.render(&observe);
+        let key = stability(&screen);
+        let (is_satisfied, current) = match &key {
+            ScreenStabilityKey::WholeScreen { is_satisfied } => {
+                (*is_satisfied, Some(screen.as_str()))
+            }
+            ScreenStabilityKey::Region(value) => (value.is_some(), value.as_deref()),
+        };
+        if is_satisfied {
             satisfied = true;
-            if previous.as_deref() == Some(screen.as_str()) {
+            if previous.as_deref() == current {
                 stable += 1;
                 if stable >= SETTLE_POLLS {
-                    return screen;
+                    return (screen, observation);
                 }
             } else {
                 stable = 0;
@@ -309,7 +433,10 @@ where
             };
             panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
         }
-        previous = Some(screen);
+        previous = match key {
+            ScreenStabilityKey::WholeScreen { .. } => Some(screen),
+            ScreenStabilityKey::Region(value) => value,
+        };
         std::thread::sleep(SCREEN_POLL);
     }
 }
@@ -382,11 +509,7 @@ fn input_after_prompt(screen: &str) -> Option<&str> {
 #[must_use]
 pub fn input_and_footer_of(screen: &str) -> Option<String> {
     let rows: Vec<_> = screen.lines().collect();
-    // The vt100 test parser can retain the next slot on the same physical row
-    // as a full-width rule. Recognize the rule prefix without discarding it.
-    let is_separator = |row: &&str| row.starts_with("──");
-    let end = rows.iter().rposition(is_separator)?;
-    let start = rows[..end].iter().rposition(is_separator)?;
+    let start = input_and_footer_row_range(&rows)?.start;
     let mut area = Vec::with_capacity(rows.len() - start);
     let first = rows[start].trim_start_matches('─');
     if !first.is_empty() {
@@ -394,6 +517,19 @@ pub fn input_and_footer_of(screen: &str) -> Option<String> {
     }
     area.extend_from_slice(&rows[start + 1..]);
     Some(area.join("\n"))
+}
+
+/// Physical row coordinates of the current input/footer area, including its
+/// opening rule. Share this boundary with text projections when inspecting
+/// raw cells; retained history must not supply the current panel's borders.
+#[must_use]
+pub fn input_and_footer_row_range(rows: &[&str]) -> Option<std::ops::Range<usize>> {
+    // The vt100 test parser can retain the next slot on the same physical row
+    // as a full-width rule. Recognize the rule prefix without discarding it.
+    let is_separator = |row: &&str| row.starts_with("──");
+    let end = rows.iter().rposition(is_separator)?;
+    let start = rows[..end].iter().rposition(is_separator)?;
+    Some(start..rows.len())
 }
 
 /// The model live mode grades its assertions against.

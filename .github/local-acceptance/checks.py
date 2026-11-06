@@ -391,11 +391,52 @@ def stable_performance_power(output):
     return monitor_window()
 
 
-def prepare_windows_terminal(root, output, execute):
-    """Retain the actual installer command/log for the selected resize receipt."""
-    output.mkdir(parents=True, exist_ok=True)
+NATIVE_RUST_PTY_CHECKS = {"native-workspace", "native-resize", "native-release", "native-services"}
+
+
+def native_target_directory(root):
+    return Path(os.environ.get("CARGO_TARGET_DIR", root / "rust/target")).resolve()
+
+
+def windows_terminal_command(root):
+    """Share the exact installer invocation with preparation and its receipt."""
     terminal = Path.home() / ".cache/sudocode-terminal-host"
-    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+    return [sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal),
+            "--native-target", str(native_target_directory(root))]
+
+
+def prepare_windows_terminal(root, output, execute):
+    """Retain one verified provider for ordinary Rust PTYs and visual journeys."""
+    output.mkdir(parents=True, exist_ok=True)
+    return execute(windows_terminal_command(root), root, output / "000.log")
+
+
+def verify_native_terminal(log, target):
+    """Refuse successful legacy installers that did not provision the drivers."""
+    records = [json.loads(line.removeprefix("NATIVE_CONPTY_HOST="))
+               for line in log.read_text(encoding="utf-8").splitlines()
+               if line.startswith("NATIVE_CONPTY_HOST=")]
+    if len(records) != 1:
+        raise RuntimeError("Native terminal preparation did not report exactly one verified provider. "
+                           "Include the current terminal installer in this source before qualifying it.")
+    identity = records[0]
+    directory = target.resolve() / "debug/deps"
+    if (Path(identity["driver_directory"]).resolve() != directory
+            or identity["architecture"] not in {"x64", "arm64"}
+            or not re.fullmatch(r"[0-9a-f]{40}", identity["distribution_commit"])
+            or not re.fullmatch(r"[0-9a-f]{64}", identity["archive_sha256"])
+            or (os.name == "nt" and identity["dynamic_load_checked"] is not True)):
+        raise RuntimeError("Native terminal preparation did not verify this target/provider ABI")
+    files = identity["files"]
+    if len(files) != 2 or {Path(item["path"]).name for item in files} != {"conpty.dll", "OpenConsole.exe"}:
+        raise RuntimeError("Native terminal preparation must report both native sidecars")
+    for item in files:
+        path = Path(item["path"])
+        if (path.resolve() != directory / path.name
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]):
+            raise RuntimeError(f"Native terminal sidecar differs from the prepared provider: {path}")
+    return identity
 
 
 def terminal_installer_scope(root, base):
@@ -425,10 +466,14 @@ def validate_before_host_lease(names, root, output):
 def prepare_native_checks(names, root, output, execute):
     """Install selected Windows terminal inputs before long native compilation."""
     prepared = {}
-    if os.name == "nt" and "native-resize" in names:
+    selected = [name for name in names if name in NATIVE_RUST_PTY_CHECKS]
+    if os.name == "nt" and selected:
         print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
               "before compilation; original installer checks and terminal tests remain required.", flush=True)
-        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+        first = selected[0]
+        directory = output / first
+        prepared[first] = [prepare_windows_terminal(root, directory, execute)]
+        verify_native_terminal(directory / "000.log", native_target_directory(root))
     return prepared
 
 
@@ -436,7 +481,7 @@ def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
     rust = root / "rust"
-    target = Path(os.environ.get("CARGO_TARGET_DIR", rust / "target")).resolve()
+    target = native_target_directory(root)
     suffix = ".exe" if os.name == "nt" else ""
     env = {"SCODE_TEST_BACKEND": "mock", "CARGO_TARGET_DIR": str(target)}
 
@@ -450,6 +495,18 @@ def run(name, root, output, base, execute):
     def native_tests(*args):
         return command(str(nextest_binary(output)), "nextest", "run",
                        *nextest_options(output), *args, cwd=rust)
+
+    if os.name == "nt" and name in NATIVE_RUST_PTY_CHECKS:
+        try:
+            prepared = run.prepared_native.get(name)
+        except AttributeError:
+            prepared = None
+        if prepared:
+            # These are this invocation's actual early preparation commands.
+            if len(prepared) != 1 or prepared[0]["command"] != windows_terminal_command(root):
+                raise RuntimeError("Native terminal preparation differs from this profile's target/provider")
+            verify_native_terminal(output / "000.log", target)
+            results.extend(prepared)
 
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
@@ -546,15 +603,10 @@ def run(name, root, output, base, execute):
         print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            try:
-                prepared = run.prepared_native.get(name)
-            except AttributeError:
-                prepared = None
-            if prepared:
-                # These are actual commands from this invocation, not a cached
-                # successful profile. Append them to the normal signed receipt.
-                results.extend(prepared)
-            else:
+            # The author/CI dispatcher prepares every selected Rust PTY
+            # profile. Direct resize guard fixtures retain their existing
+            # controlled installer boundary and command inventory.
+            if not prepared:
                 results.append(prepare_windows_terminal(root, output, execute))
             if installer_scope["fault_injection_required"]:
                 command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
@@ -687,12 +739,12 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "ed99a507cb25b20784a22a6c10dfc321763bf2b2934d0d30c57c4bb44d26869a",
+        ".github/scripts/local_acceptance.py": "c2c4014f0f4ebb52784cd73406eafb72d2cd105fb52023e19c814e75262321ca",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
         ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
-        "e2e/local-acceptance/carryover_acceptance.py": "3249cb47c0dc416c915f3080d27e42184d58566a80ab58433ee03e066ed1aab9",
+        "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "a5942d3505a031ec0f816d2f009c642a6c4c661015fbc87d54c161c97c478ea7",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
@@ -765,7 +817,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "7bf79728e2ec8d1115fb357ead698f0b24ab9bbb8bda6c3972fce89d188bafbf"
+    expected = "2afe7c0cd4f83d0c7fbeacc92669f4354493712fcf23f8fc5c9295163526871a"
     if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
         raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(

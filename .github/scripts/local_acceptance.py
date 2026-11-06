@@ -1518,12 +1518,13 @@ def live_lease_tickets(queue, own):
 
 @contextlib.contextmanager
 def host_acceptance_lease(attempt, head):
-    """Run one acceptance at a time on this host, in arrival order.
+    """Run one fresh profile at a time on this host, in arrival order.
 
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Waiters take the host in the order they arrived. Processes
+    a memory kill. Each fresh profile rejoins the FIFO, so already waiting work
+    can run before this invocation's next profile. Processes
     started under the holder inherit HOST_LEASE_ENV and are already serialized,
     so nested fixture checks do not wait for their parent.
     """
@@ -1554,13 +1555,19 @@ def host_acceptance_lease(attempt, head):
                     current = "an unrecorded process"
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
-                      "one acceptance runs per host and waiters start in arrival order.", flush=True)
+                      "this invocation rejoins the FIFO between fresh profiles; each profile stays exclusive.", flush=True)
                 reported = time.monotonic()
             time.sleep(1)
-        attempt["host_lease_wait_seconds"] = round(time.monotonic() - started, 3)
+        waited = round(time.monotonic() - started, 3)
+        attempt["host_lease_wait_seconds"] = round(attempt.get("host_lease_wait_seconds", 0.0) + waited, 3)
+        acquired = time.time()
+        attempt.setdefault("host_lease_acquisitions", []).append({
+            "profile": attempt.get("active_profile"), "wait_seconds": waited, "acquired_at": acquired,
+        })
         holder.write_bytes(canonical({"pid": os.getpid(), "head": head, "root": str(ROOT),
-                                      "acquired_at": time.time()}))
-        print(f"Acquired this host's local acceptance lease after {attempt['host_lease_wait_seconds']:.3f}s",
+                                      "acquired_at": acquired, "profile": attempt.get("active_profile")}))
+        print(f"Acquired this host's local acceptance lease after {waited:.3f}s; "
+              f"cumulative wait {attempt['host_lease_wait_seconds']:.3f}s",
               flush=True)
         # The holder no longer waits; the next ticket becomes the queue head.
         release_host_lock(waiting)
@@ -1726,22 +1733,32 @@ def perform_check(args, attempt):
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
     attempt["host_lease_wait_seconds"] = 0.0
+    attempt["host_lease_acquisitions"] = []
     print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({
         "preflight": "metadata_before_host_lease" if "preflight" in needed else "not_selected",
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
+        "reservation": "one_fresh_profile_then_fifo_requeue",
     }).decode(), flush=True)
     try:
         if "preflight" in needed:
             perform_profile("preflight")
-        if serialized:
-            lease = host_acceptance_lease(attempt, head) if pending else contextlib.nullcontext()
+        validate = getattr(module, "validate_before_host_lease", None)
+        if validate and pending:
+            validate(pending, ROOT, output)
+        prepared = False
+        for name in serialized:
+            fresh = name in pending
+            attempt["active_profile"] = name
+            lease = host_acceptance_lease(attempt, head) if fresh else contextlib.nullcontext()
             with lease:
-                prepare = getattr(module, "prepare_native_checks", None)
-                if prepare and pending:
-                    module.run.prepared_native = prepare(pending, ROOT, output, run_command)
-                for name in serialized:
-                    perform_profile(name)
+                if fresh and not prepared:
+                    prepare = getattr(module, "prepare_native_checks", None)
+                    if prepare:
+                        module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                    prepared = True
+                perform_profile(name)
+        attempt.pop("active_profile", None)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()

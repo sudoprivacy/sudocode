@@ -305,16 +305,30 @@ the earliest recorded start time keep their existing requirements. The required
 command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
-`host-lease.json` and its queue position. Waiters start in arrival order when the
-holder exits, including an abrupt exit; each holds a ticket under
+`host-lease.json`, its active profile and the queue position. Each fresh profile
+rejoins the FIFO after the previous profile completes, so existing waiters run
+before this invocation's next profile. A running profile keeps the lease through
+its execution and checkpoint. Waiters start in arrival order when that profile
+releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
 Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
 fixture checks nested inside an acceptance run without waiting for their parent.
-`attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
-is unchanged.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
+records the total wait across acquisitions as `host_lease_wait_seconds` and each
+profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+
+A fresh `guard-contract` also validates its protected input pins, selection
+digest and release recipe before joining the host queue. The required
+`GUARD_STATIC_PREFLIGHT` output states that full execution remains required.
+A mismatch reports the path and observed hash, retains signed preflight progress,
+and exits without taking a queue ticket or starting Docker/native checks.
+Execution stages and validates a separate copy from the protected Git ref again;
+the preliminary snapshot grants no acceptance or execution credit. Already
+verified results and policies without this optional early validator keep their
+existing paths.
 
 After the selected native workspace checks, service acceptance runs before
 optimized release builds and rendering/browser measurements. Service bootstrap

@@ -276,9 +276,8 @@ use api::{
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
     agent_mailbox::{kinds as mailbox_kinds, MailboxEnvelope},
-    check_freshness,
-    cron_registry::CronRegistry,
-    current_workspace_root, dedupe_superseded_commit_events, edit_file, glob_search,
+    check_freshness, current_workspace_root, dedupe_superseded_commit_events, edit_file,
+    glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     plan_store::compose_task_framing,
     read_file,
@@ -295,23 +294,6 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-fn global_cron_registry() -> &'static CronRegistry {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<CronRegistry> = OnceLock::new();
-    // Persistent store shared with the `scode cron` CLI and the scheduler,
-    // so a cron the agent creates survives restart and actually fires —
-    // rather than living only for this process. `SUDOCODE_CRON_STORE`
-    // overrides the path (tests point it at a temp file; it is cron-only,
-    // so isolating cron never perturbs other config-home consumers).
-    REGISTRY.get_or_init(|| {
-        let path = std::env::var_os("SUDOCODE_CRON_STORE").map_or_else(
-            || runtime::default_config_home().join("crons.json"),
-            std::path::PathBuf::from,
-        );
-        CronRegistry::open(path)
-    })
-}
 
 /// The persisted todo list for this session. Used to seed a REPL's context panel
 /// at startup, before any turn has produced a `TodoWrite` result to read.
@@ -1650,13 +1632,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "CronCreate",
-            description: "Create a scheduled recurring task.",
+            description: "Schedule a recurring message (5-field cron) to an agent, by default this one.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "schedule": { "type": "string" },
                     "prompt": { "type": "string" },
-                    "description": { "type": "string" }
+                    "description": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "delivery": { "type": "string", "enum": ["queue", "steer"] }
                 },
                 "required": ["schedule", "prompt"],
                 "additionalProperties": false
@@ -2836,39 +2820,34 @@ fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
-    // Validate up front so the agent gets an actionable error instead of a
-    // cron that silently never fires. The tool schedules standard 5-field
-    // cron expressions.
-    runtime::cron_schedule::validate(
-        runtime::cron_registry::CronKind::Cron,
-        &input.schedule,
-        None,
-    )?;
-    let reg = global_cron_registry();
-    let entry = reg.create(&input.schedule, &input.prompt, input.description.as_deref());
-    // Seed the first fire time so the scheduler/tick considers it.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let next = runtime::cron_schedule::first_run_at(&entry, now);
-    if next.is_some() {
-        let _ = reg.set_next_run(&entry.cron_id, next);
-    }
-    to_pretty_json(json!({
-        "cron_id": entry.cron_id,
-        "schedule": entry.schedule,
-        "prompt": entry.prompt,
-        "description": entry.description,
-        "enabled": entry.enabled,
-        "created_at": entry.created_at,
-        "next_run_at": next
-    }))
+    // A job the agent schedules comes back to the agent that asked for it,
+    // through its own inbox and message queue.
+    let agent = input
+        .agent
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| runtime::mailbox::sending_mailbox().self_id().to_string());
+    let target = if agent.is_empty() {
+        runtime::cron_registry::CronTarget::NewSession
+    } else {
+        runtime::cron_registry::CronTarget::Agent { name: agent }
+    };
+    let entry = runtime::cron_service::create(runtime::cron_registry::CronCreateParams {
+        schedule: input.schedule,
+        kind: runtime::cron_registry::CronKind::Cron,
+        prompt: input.prompt,
+        description: input.description,
+        target,
+        delivery: input.delivery,
+        created_by: runtime::cron_registry::CronCreator::Agent,
+        ..Default::default()
+    })?;
+    to_pretty_json(serde_json::to_value(entry).map_err(|e| e.to_string())?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
-    match global_cron_registry().delete(&input.cron_id) {
+    match runtime::cron_service::remove(&input.cron_id) {
         Ok(entry) => to_pretty_json(json!({
             "cron_id": entry.cron_id,
             "schedule": entry.schedule,
@@ -2880,25 +2859,10 @@ fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
 }
 
 fn run_cron_list(_input: Value) -> Result<String, String> {
-    let entries: Vec<_> = global_cron_registry()
-        .list(false)
-        .into_iter()
-        .map(|e| {
-            json!({
-                "cron_id": e.cron_id,
-                "schedule": e.schedule,
-                "prompt": e.prompt,
-                "description": e.description,
-                "enabled": e.enabled,
-                "run_count": e.run_count,
-                "last_run_at": e.last_run_at,
-                "created_at": e.created_at
-            })
-        })
-        .collect();
+    let entries = runtime::cron_service::list();
     to_pretty_json(json!({
+        "count": entries.len(),
         "crons": entries,
-        "count": entries.len()
     }))
 }
 
@@ -4378,6 +4342,10 @@ struct CronCreateInput {
     prompt: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    delivery: Option<runtime::turn_input::InputDelivery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7323,7 +7291,7 @@ fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<S
     }
 
     let mut disabled = Vec::new();
-    for entry in global_cron_registry().list(true) {
+    for entry in runtime::cron_service::registry().list(true) {
         let haystack = format!(
             "{} {}",
             entry.prompt,
@@ -7331,7 +7299,9 @@ fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<S
         )
         .to_ascii_lowercase();
         if tokens.iter().any(|token| haystack.contains(token))
-            && global_cron_registry().disable(&entry.cron_id).is_ok()
+            && runtime::cron_service::registry()
+                .disable(&entry.cron_id)
+                .is_ok()
         {
             disabled.push(entry.cron_id);
         }
@@ -9862,7 +9832,7 @@ mod tests {
         await_agent_output, build_agent_system_prompt, canonicalize_tool_name,
         classify_lane_failure, convert_messages, derive_agent_state,
         execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
-        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
+        extract_recovery_outcome, final_assistant_text, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
         normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
         push_output_block, run_ask_user_question_v2, search_tool_specs, AgentInput, AgentJob,
@@ -10072,6 +10042,40 @@ mod tests {
     /// A host that owns scheduling (sudowork runs its own scheduler and never
     /// ticks scode's crons.json) sets `SUDOCODE_DISABLE_CRON_TOOLS` so the agent
     /// cannot "schedule" a task that would persist but never fire — an orphan.
+    #[test]
+    fn cron_create_delivers_back_to_this_agent_by_default() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!("cron-tool-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SUDOCODE_CRON_STORE", dir.join("crons.json"));
+        let created: serde_json::Value = serde_json::from_str(
+            &execute_tool(
+                "CronCreate",
+                &json!({"schedule": "*/5 * * * *", "prompt": "check the queue"}),
+            )
+            .expect("create"),
+        )
+        .unwrap();
+        let steer: serde_json::Value = serde_json::from_str(
+            &execute_tool(
+                "CronCreate",
+                &json!({"schedule": "0 * * * *", "prompt": "x", "agent": "worker", "delivery": "steer"}),
+            )
+            .expect("create with options"),
+        )
+        .unwrap();
+        std::env::remove_var("SUDOCODE_CRON_STORE");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let me = runtime::mailbox::sending_mailbox().self_id().to_string();
+        assert_eq!(created["target"], json!({"type": "agent", "name": me}));
+        assert_eq!(created["delivery"], "queue");
+        assert_eq!(created["created_by"], "agent");
+        assert!(created["next_run_at"].is_u64(), "armed: {created}");
+        assert_eq!(steer["target"], json!({"type": "agent", "name": "worker"}));
+        assert_eq!(steer["delivery"], "steer");
+    }
+
     #[test]
     fn cron_tools_hidden_when_host_owns_scheduling() {
         let _guard = env_lock()
@@ -12173,7 +12177,7 @@ mod tests {
             "deadbee"
         );
 
-        let cron = global_cron_registry().create(
+        let cron = runtime::cron_service::registry().create(
             "*/10 * * * *",
             "roadmap-nudge-10min for ROADMAP #66",
             Some("ROADMAP #66 reminder"),
@@ -12212,7 +12216,7 @@ mod tests {
             reminder_manifest_json["laneEvents"][1]["data"]["disabledCronIds"][0],
             cron.cron_id
         );
-        let disabled_entry = global_cron_registry()
+        let disabled_entry = runtime::cron_service::registry()
             .get(&cron.cron_id)
             .expect("cron should still exist");
         assert!(!disabled_entry.enabled);

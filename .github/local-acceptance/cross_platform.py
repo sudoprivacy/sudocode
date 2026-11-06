@@ -57,6 +57,11 @@ prepare = getattr(checks, "prepare_native_checks", None)
 if prepare:
     checks.run.prepared_native = prepare(native_checks, root, output, execute)
 
-for name in native_checks:
+ordered_checks = helper.scheduled_checks(native_checks)
+print("CI_NATIVE_EXECUTION_ORDER=" + json.dumps({
+    "declared_checks": native_checks, "execution_order": ordered_checks,
+    "failure": "First failed profile stops this job; later profiles remain required.",
+}), flush=True)
+for name in ordered_checks:
     checks.run(name, root, output / name,
                os.environ["ACCEPTANCE_BASE"], execute)

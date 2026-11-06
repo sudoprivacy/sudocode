@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { connectCodex, CodexRequestError, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
 import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
-import { connectScode, type ScodeConnection, type SessionNotification } from './scodeAcp';
+import { connectScode, type ScodeConnection, type ScodePeerMessage } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
 import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
   readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
@@ -147,14 +147,14 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       }
       const profile = boundProfile(binding);
       let callback: CodexCallback | undefined;
-      const pending: SessionNotification[] = [];
+      const pending: ScodePeerMessage[] = [];
       let overflow = false;
-      const connection = await connectScode(profile, notification => {
-        if(callback)callback.receive(notification);
-        else if(notification.update.sessionUpdate==='user_message_chunk'){
-          if(pending.length<64)pending.push(notification);else overflow=true;
-        }
-      });
+      // Codex is the agent its peers address: the owned scode hands each peer
+      // message over instead of answering it with its own model.
+      const connection = await connectScode({ ...profile, onPeerMessage: message => {
+        if(callback)callback.receive(message);
+        else if(pending.length<64)pending.push(message);else overflow=true;
+      } });
       owner.connection = connection;
       // Native audit proves which Agent was actually loaded. A copied profile
       // cannot quietly attach every root to the same credential/receiver.
@@ -167,7 +167,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         ? createCodexNodeCallback(native.request,callbackConfig,connection,result)
         : createCodexCallback(native.request,callbackConfig,connection.sessionId);
       owner.callback = callback;
-      for(const notification of pending)callback.receive(notification);
+      for(const message of pending)callback.receive(message);
       owner.verified = true;
       void connection.exited.then(exit => {
         owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; no automatic task or send replay`;

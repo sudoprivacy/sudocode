@@ -134,16 +134,16 @@ async function main(): Promise<void> {
     assert.ok(Date.now() - closingAt < 2000, 'an uncooperative owned proxy must stop within the configured bounded phases');
     await assert.rejects(connectCodex({ codexArgv: [path.join(directory, 'missing-native-binary')] }), /ENOENT|exited/);
 
-    const notification = { sessionId: 'existing-acp', update: { sessionUpdate: 'user_message_chunk' as const,
-      content: { type: 'text' as const, text: 'peer data 零 🧪' } }, _meta: { sudocode: { a2a: { from: 'allowed-peer' } } } };
+    const message = { sessionId: 'existing-acp', text: '<mailbox-message from="allowed-peer">peer data 零 🧪</mailbox-message>',
+      body: 'peer data 零 🧪', sudocode: { a2a: { from: 'allowed-peer' } } };
     for (const mode of ['idle', 'active']) {
       state = mode;
       const log = path.join(directory, `${mode}.jsonl`);
       const callback = await connectCodexCallback({ ...config, threadId: original, peers: ['allowed-peer'], log }, 'existing-acp');
       try {
-        callback.receive({ ...notification, sessionId: 'different-acp' });
-        callback.receive({ ...notification, _meta: { sudocode: { a2a: { from: 'unlisted-peer' } } } });
-        callback.receive(notification);
+        callback.receive({ ...message, sessionId: 'different-acp' });
+        callback.receive({ ...message, sudocode: { a2a: { from: 'unlisted-peer' } } });
+        callback.receive(message);
         await waitFor(() => fs.readFileSync(log, 'utf8').includes('"phase":"accepted"'));
         const entries = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
         assert.equal(entries.filter(entry => entry.phase === 'received').length, 1);

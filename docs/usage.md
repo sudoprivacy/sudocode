@@ -629,29 +629,30 @@ For the canonical, live command list:
 scode --help
 ```
 
-### Experimental pinned composer
+### Experimental shaded prompts
 
-Enable `experimental.promptViewport` to try a fixed composer, shaded submitted
-prompts and a one-line header for the answer currently being read:
+Enable `experimental.promptViewport` to try matching shaded surfaces for the
+live editor and submitted prompts:
 
 ```json
 {"experimental":{"promptViewport":true}}
 ```
 
-This temporary experiment is off by default and applies to the default REPL.
-Use the mouse wheel to browse; the composer also accepts Page Up / Page Down
-and Alt+End to return to the latest output. Typing preserves the reading
-position. The draft survives scrolling and resize. Use your terminal's native
-selection gesture (often Shift+drag) while mouse reporting is enabled.
+This temporary experiment is off by default. It uses the same inline editor,
+output writer and native terminal history as the ordinary REPL. New output
+advances the editor with the conversation; the mouse wheel and scrollbar browse
+the same terminal history. Selection uses the terminal's ordinary drag gesture.
+The draft survives returning to the latest output and resizing.
 
-The experiment keeps the terminal's main buffer and existing inline renderer;
-it does not enter alternate-screen mode. On normal exit it restores rendered
-conversation output to native terminal history. Saved sessions remain the
-durable record and `--resume` restores their prompt boundaries.
-Older presentation rows live in a disposable disk spool; only nearby row layouts
-and the visible frame remain cached. Colors respect the terminal palette and
-`NO_COLOR`. This changes presentation only and adds no model requests or prompt
-context. Validation and graduation requirements live in the
+The earlier fixed conversation view has been removed because its mouse scrolling
+and the terminal scrollbar controlled separate histories. The editor and prompt
+header are no longer pinned while browsing older native history. A sticky view
+would require support from the terminal host to share its scroll position.
+
+Saved sessions remain the durable record; `--resume` uses the existing replay
+formatter. Colors respect the terminal palette and `NO_COLOR`. The existing
+`promptViewport` setting name remains compatible. This changes presentation only
+and adds no model requests or prompt context. Validation requirements live in the
 [roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
 
 ## Bash tool results
@@ -780,6 +781,39 @@ priority. Stopping a task cancels its process group and owned child tasks;
 exiting the session stops and reaps background processes. Background work
 survives cancellation of an unrelated parent turn. Sub-agent completion keeps
 using the existing automatic notification/queued follow-up path.
+
+## Scheduled jobs
+
+A scheduled job delivers a message on a schedule: a 5-field cron expression
+(`--schedule`), a fixed interval in seconds (`--every`) or one Unix time
+(`--at`). The agent creates one with `CronCreate`; by default the message comes
+back to that same agent. You can also use `/cron add` or `scode cron add`:
+
+```bash
+scode cron add --schedule "0 9 * * 1-5" --prompt "Summarize yesterday's commits" --name standup
+scode cron add --every 3600 --prompt "Check the build" --agent build-bot --delivery steer
+```
+
+A job addressed to an agent (`--agent`) arrives as a peer message marked
+**scheduled**, through that agent's inbox and message queue. By default it
+waits until a running turn ends; `--delivery steer` inserts it into the
+running turn at its next safe point, like a message sent with **Enter**. An
+agent that is not running receives it when it next starts. A job without
+`--agent` starts a fresh headless session in its `--cwd`.
+
+Jobs live in the config home's `crons.json`, shared by every scode process.
+The interactive REPL, the ACP server and `scode cron daemon` each run the
+scheduler, and a lock ensures one of them fires each run. A run more than ten
+minutes late, for example after sleep, is recorded as missed instead of
+firing late. `scode cron tick` fires due jobs once, unless another process is
+already scheduling.
+
+The task browser has a **Scheduled** tab: open it from the footer as above,
+then press **→**. **↑/↓** selects a job, **Enter** shows its details, **e**
+enables or disables it, **r** runs it now, and **d** deletes it after you
+confirm with **y**. **←** returns to background tasks. The footer shows how
+many jobs are enabled. Desktop hosts manage the same jobs through the ACP
+`_sudocode/cron/*` methods.
 
 ## One-shot prompt
 

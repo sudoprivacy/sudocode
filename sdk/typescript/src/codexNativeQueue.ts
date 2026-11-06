@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { identifier } from './codexBindings';
 import { CodexRequestError, validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
 import { codexPeerData } from './codexPeerData';
-import type { SessionNotification } from './scodeAcp';
+import type { ScodePeerMessage } from './scodeAcp';
 import { timeout } from './timeout';
 
 export interface CodexNativeQueueConfig extends CodexConnectionConfig {
@@ -45,12 +45,12 @@ export function validateCodexNativeQueueConfig(config: CodexNativeQueueConfig): 
  * Once submission is possible every failure stays Unknown; nothing is replayed.
  */
 export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfig, threadId: string,
-  notification: SessionNotification, eventId: string): Promise<CodexNativeQueueReceipt> {
+  message: ScodePeerMessage, eventId: string): Promise<CodexNativeQueueReceipt> {
   let home: string, text: string;
   try {
     home = validateCodexNativeQueueConfig(config);
     if (!identifier(threadId) || !identifier(eventId)) throw new Error('Explicit native thread and unique event UUIDs are required');
-    text = codexPeerData(notification, eventId).text;
+    text = codexPeerData(message, eventId).text;
     if (Buffer.byteLength(JSON.stringify(text)) > 256 * 1024) throw new Error('Native queue peer envelope exceeds 256 KiB');
   } catch (error) { throw new CodexRequestError('not_sent', String(error), undefined, error); }
   const observe = (entry: Record<string, unknown>) => {

@@ -82,6 +82,8 @@ pub use session::history;
 pub use session_control::SessionStore;
 pub mod cron_registry;
 pub mod cron_schedule;
+pub mod cron_scheduler;
+pub mod cron_service;
 pub mod plan_store;
 pub mod spawn_task;
 mod sse;

@@ -413,15 +413,18 @@ PTY cases keep the native suite's per-PR scope.
 The repeated-turn stress scenario samples 20 typed keys per input phase per
 turn, instead of 60. All 24 paired processes and 30 turns per process remain:
 600 observations per phase per process, or 43,200 overall instead of 129,600.
-Single-turn core scenarios retain 60 keys per phase. Resize (40 per turn),
-cancel (20 per process), paste, resource measurements, budgets and the relative
-evaluator remain unchanged. This reduces repeated typing coverage and can miss
-intermittent latency spikes; equivalent statistical sensitivity is not claimed.
+Single-turn core scenarios retain 60 keys per phase and 40 resizes per turn.
+Repeated turns retain one narrow/wide resize pair: 60 resizes per process,
+1,440 overall instead of 28,800. Cancel (20 per process), paste, resource
+measurements, budgets and the relative evaluator remain unchanged. This reduces
+repeated typing and resize pressure; intermittent latency spikes and small
+resize-dependent memory leaks may be missed. Equivalent sensitivity is not claimed.
 `RENDERING_SAMPLING` prints each effective policy before measurement. Each sample
 retains the exact resolved workload policy and its SHA256; the original judged
 policy remains in the parent report. Policies without overrides retain 60.
-The public process controls refuse missing input, resize or turn observations
-and unsupported reductions. Fresh product stress execution is required before
+The parent counts raw arrays using the evaluator's shared helper. The public
+process controls refuse missing input, resize or turn observations, tampered
+summaries and unsupported reductions. Fresh product stress execution is required before
 claiming runtime savings; observation counts alone do not prove faster delivery.
 
 Rendering's throwaway sessions use a private 512 MiB tmpfs in its local Docker

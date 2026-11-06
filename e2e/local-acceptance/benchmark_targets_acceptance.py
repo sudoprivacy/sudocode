@@ -193,8 +193,8 @@ fn render_performance_workload() {
                  "contracts": policy["contracts"], "turns": [{}] * spec["turns"],
                  "metrics": {name: 1 for name in shared.expected_metrics(spec)},
                  "input_samples_ms": {phase: [1] * (sampling["input"] * spec["turns"]) for phase in phases},
-                 "action_samples_ms": {"resize": [1] * (policy["sampling"]["resize"] * spec["turns"]),
-                     "paste": [1] * spec["turns"], "cancel": [1] * (policy["sampling"]["cancel"] if "wait" in phases else 0)},
+                 "action_samples_ms": {"resize": [1] * (sampling["resize"] * spec["turns"]),
+                     "paste": [1] * spec["turns"], "cancel": [1] * (sampling["cancel"] if "wait" in phases else 0)},
                  "metadata": {"observer": "native-fixture-process"}}
         value["metrics"]["rss_peak_mib"] = 10
         (fixture / f"{case}-base.json").write_text(json.dumps(value))
@@ -209,7 +209,7 @@ fn render_performance_workload() {
     arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
                  "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
     results = {}
-    for mode in ["pass", "regressed", "short-rss", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "sampling-mismatch", "invalid", "metadata", "command"]:
+    for mode in ["pass", "regressed", "short-rss", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "sampling-mismatch", "raw-observations-mismatch", "invalid", "metadata", "command"]:
         events = fixture / "events.txt"
         events.unlink(missing_ok=True)
         destination = output / mode
@@ -219,7 +219,7 @@ fn render_performance_workload() {
                 return command(sys.executable, "-c", "raise SystemExit(23)")
             log = command(*args, extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture),
                                        "SCODE_ACCEPTANCE_RENDER_MODE": mode})
-            if mode in {"missing-sample", "extra-sample", "mispaired-sample", "sampling-mismatch"}:
+            if mode in {"missing-sample", "extra-sample", "mispaired-sample", "sampling-mismatch", "raw-observations-mismatch"}:
                 child_path = Path(args[args.index("--output") + 1]) / "report.json"
                 child = json.loads(child_path.read_text())
                 if child["policy"]["profiles"]["core"] == ["heavy"]:
@@ -229,6 +229,8 @@ fn render_performance_workload() {
                         child["samples"].append(dict(child["samples"][0]))
                     elif mode == "mispaired-sample":
                         child["samples"][0]["side"] = child["samples"][1]["side"]
+                    elif mode == "raw-observations-mismatch":
+                        child["samples"][0]["data"]["input_samples_ms"]["stream"].pop()
                     else:
                         child["sampling"]["heavy"]["input"] -= 1
                     child_path.write_text(json.dumps(child))
@@ -278,6 +280,8 @@ fn render_performance_workload() {
             assert len(trace) == 36 and "paired sample inventory differs" in report["failures"][0]
         elif mode == "sampling-mismatch":
             assert len(trace) == 36 and "different resolved sampling" in report["failures"][0]
+        elif mode == "raw-observations-mismatch":
+            assert len(trace) == 36 and "missing or extra raw observations" in report["failures"][0]
         elif mode == "incomplete":
             assert len(trace) == 25 and "missing/extra measurements" in report["failures"][0]
         else:
@@ -292,12 +296,16 @@ fn render_performance_workload() {
     repeated_source = fixture / "repeated-base.json"
     original_repeated = repeated_source.read_text()
     sampling_results = {}
-    for mode in ["pass", "missing-input", "missing-resize", "missing-turn", "legacy"]:
+    for mode in ["pass", "missing-input", "missing-resize", "missing-turn", "input-only", "legacy"]:
         value = json.loads(original_repeated)
         selected_policy = dict(repeated_policy)
         if mode == "legacy":
             selected_policy.pop("case_sampling", None)
             value["input_samples_ms"] = {phase: values * 3 for phase, values in value["input_samples_ms"].items()}
+            value["action_samples_ms"]["resize"] *= 20
+        elif mode == "input-only":
+            selected_policy["case_sampling"] = {"repeated": {"input": 20}}
+            value["action_samples_ms"]["resize"] *= 20
         elif mode == "missing-input":
             value["input_samples_ms"]["history"].pop()
         elif mode == "missing-resize":
@@ -314,12 +322,15 @@ fn render_performance_workload() {
         except RuntimeError:
             failed = True
         report = json.loads((destination / "report.json").read_text())
-        passing = mode in {"pass", "legacy"}
+        passing = mode in {"pass", "input-only", "legacy"}
         assert failed != passing and report["status"] == ("passed" if passing else "invalid"), report
         if passing:
             assert len(report["samples"]) == 24
-            assert report["sampling"]["repeated"] == {"input": 60 if mode == "legacy" else 20, "resize": 40, "cancel": 20}
+            assert report["sampling"]["repeated"] == {"input": 60 if mode == "legacy" else 20,
+                "resize": 40 if mode in {"input-only", "legacy"} else 2, "cancel": 20}
+            assert report["observations"]["repeated"] == shared.case_observations(selected_policy, "repeated")
             for sample in report["samples"]:
+                assert shared.observation_counts(sample["data"]) == report["observations"]["repeated"]
                 workload = destination / sample["path"]
                 workload = workload.parent / "workload-policy.json"
                 assert shared.digest(workload) == sample["workload_policy_sha256"]
@@ -332,7 +343,8 @@ fn render_performance_workload() {
     # requested profile is core and the invalid override names a stress case.
     invalid_sampling = [{"short": {"input": 20}}, {"repeated": {"input": 19}},
                         {"repeated": {"input": True}}, {"repeated": {"resize": 20}},
-                        {"repeated": {"input": 20, "cancel": 1}}]
+                        {"repeated": {"input": 20, "cancel": 1}},
+                        *[{"repeated": {"input": 20, "resize": value}} for value in [1, 3, 20, True]]]
     for index, override in enumerate(invalid_sampling):
         repeated_path.write_text(json.dumps({**policy, "case_sampling": override}))
         try:

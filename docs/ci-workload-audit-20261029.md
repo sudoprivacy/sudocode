@@ -646,3 +646,74 @@ not a measured average saving. Explicit output directories now register only
 their discovery location, with the original evidence and verification preserved.
 Pure metadata, verified complete restores and discovery/index failures report
 their resource and recovery scope on the mandatory command interface.
+
+
+## Signed local-clock expansion (2026-11-06)
+
+The earlier five-history snapshot above remains unchanged. A read-only supplement
+uses the same 27 merged Rust source/build PRs observed through November 6,
+00:02:24 UTC. It checks every observed candidate head's available note against
+its original SSH signature, commit/tree/base and historical execution policy,
+with enrolled signers frozen at `cb2d5e99220b1bf85c0b73aa95a09a4bbbcd4fca`.
+All 27 PRs have a verified local start before their first observed CI trigger.
+Of 43 observed head notes, 1 remains unverified or missing;
+earlier unpublished, manual or failed attempts can also be absent.
+
+| Clock | Samples | Mean | Median | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| Final candidate CI to merge | 27 | 51.135 min | 47.367 min | Initial local work and earlier candidates excluded |
+| First observed PR CI across all candidates to merge | 27 | 201.843 min | 60.400 min | Includes later repair/validation/idle/queue time |
+| Earliest verified local start to merge | 27 | **329.648 min** | **247.156 min** | Observed lower bound, incomplete earlier history allowed |
+
+The signed local records add a mean 127.804 minutes before the first CI
+trigger. Overlapping intervals are not added together. A later note, missing
+record or unfinished PR is not a zero-minute local run. This expanded sample
+does not show a new performance regression; it exposes time that CI-only clocks
+did not include. The historical 1,036.282-minute comparison is itself a hosted
+clock, so it cannot supply an exact ratio for total local-to-merge latency.
+The one-tenth total-delivery goal remains unproved and unmet.
+
+This retrospective sample includes earlier rollout failures and queues. All 27
+code PRs merged before the source/queue-green worker rollout #1286; #1288 and
+shared scheduling #1287 followed it. The 27-PR mean cannot establish their causal effect. Keep a
+separate prospective view after `c78866ae` merged at November 6, 00:37:27 UTC,
+retaining ongoing/carryover work and unknown local history in the aggregate.
+This observation adds no acceptance gate or new test requirement.
+
+### Source observations
+
+Times are UTC. The first local timestamp is the earliest authenticated start
+among available notes for all observed heads of that PR; it is not proof that
+no earlier work happened. Git notes preserve the original public verification
+data under `refs/notes/local-acceptance`. The collector neither ran profiles nor
+created signatures, notes or statuses.
+
+| PR | Earliest signed local start | First observed CI | Merged | Lower-bound local-to-merge minutes |
+| --- | --- | --- | --- | ---: |
+| [#1186](https://github.com/sudoprivacy/sudocode/pull/1186) | 10-31 08:43:12 | 10-31 08:58:38 | 10-31 10:02:37 | 79.409 |
+| [#1193](https://github.com/sudoprivacy/sudocode/pull/1193) | 10-31 13:04:13 | 10-31 14:47:22 | 10-31 22:21:58 | 557.748 |
+| [#1195](https://github.com/sudoprivacy/sudocode/pull/1195) | 10-31 08:12:35 | 10-31 19:32:08 | 10-31 20:34:05 | 741.493 |
+| [#1197](https://github.com/sudoprivacy/sudocode/pull/1197) | 10-31 23:18:03 | 11-01 00:39:04 | 11-01 01:33:14 | 135.171 |
+| [#1206](https://github.com/sudoprivacy/sudocode/pull/1206) | 11-01 06:02:11 | 11-01 07:22:54 | 11-02 07:09:08 | 1506.938 |
+| [#1220](https://github.com/sudoprivacy/sudocode/pull/1220) | 11-01 18:47:39 | 11-01 19:58:33 | 11-02 17:01:02 | 1333.376 |
+| [#1230](https://github.com/sudoprivacy/sudocode/pull/1230) | 11-02 05:07:20 | 11-02 05:38:29 | 11-02 06:19:41 | 72.348 |
+| [#1231](https://github.com/sudoprivacy/sudocode/pull/1231) | 11-02 16:13:11 | 11-02 17:02:37 | 11-02 20:20:21 | 247.156 |
+| [#1238](https://github.com/sudoprivacy/sudocode/pull/1238) | 11-02 12:08:30 | 11-02 12:11:30 | 11-02 13:49:50 | 101.329 |
+| [#1242](https://github.com/sudoprivacy/sudocode/pull/1242) | 11-03 02:45:47 | 11-03 04:03:13 | 11-03 05:05:30 | 139.700 |
+| [#1243](https://github.com/sudoprivacy/sudocode/pull/1243) | 11-03 07:36:58 | 11-03 08:22:45 | 11-03 09:18:36 | 101.630 |
+| [#1245](https://github.com/sudoprivacy/sudocode/pull/1245) | 11-03 11:38:45 | 11-03 12:56:47 | 11-03 13:48:15 | 129.497 |
+| [#1246](https://github.com/sudoprivacy/sudocode/pull/1246) | 11-03 12:59:46 | 11-03 14:42:11 | 11-03 15:33:40 | 153.894 |
+| [#1247](https://github.com/sudoprivacy/sudocode/pull/1247) | 11-03 17:25:48 | 11-03 17:50:27 | 11-03 18:31:53 | 66.078 |
+| [#1248](https://github.com/sudoprivacy/sudocode/pull/1248) | 11-03 16:03:13 | 11-03 18:08:33 | 11-03 18:58:04 | 174.842 |
+| [#1250](https://github.com/sudoprivacy/sudocode/pull/1250) | 11-03 18:19:54 | 11-03 19:40:31 | 11-03 22:53:54 | 273.992 |
+| [#1259](https://github.com/sudoprivacy/sudocode/pull/1259) | 11-04 04:59:06 | 11-04 06:37:45 | 11-04 11:36:13 | 397.109 |
+| [#1260](https://github.com/sudoprivacy/sudocode/pull/1260) | 11-04 05:59:05 | 11-04 07:57:01 | 11-04 08:37:25 | 158.329 |
+| [#1262](https://github.com/sudoprivacy/sudocode/pull/1262) | 11-04 05:49:58 | 11-04 09:14:40 | 11-04 11:21:46 | 331.792 |
+| [#1263](https://github.com/sudoprivacy/sudocode/pull/1263) | 11-04 06:42:56 | 11-04 11:26:48 | 11-04 12:06:38 | 323.688 |
+| [#1264](https://github.com/sudoprivacy/sudocode/pull/1264) | 11-04 11:31:12 | 11-04 12:45:22 | 11-04 13:32:01 | 120.805 |
+| [#1266](https://github.com/sudoprivacy/sudocode/pull/1266) | 11-04 14:31:08 | 11-04 18:05:29 | 11-04 18:52:51 | 261.702 |
+| [#1268](https://github.com/sudoprivacy/sudocode/pull/1268) | 11-04 16:04:27 | 11-04 20:32:58 | 11-04 21:19:43 | 315.257 |
+| [#1269](https://github.com/sudoprivacy/sudocode/pull/1269) | 11-04 17:12:43 | 11-04 21:38:01 | 11-04 22:23:10 | 310.436 |
+| [#1271](https://github.com/sudoprivacy/sudocode/pull/1271) | 11-04 21:39:17 | 11-04 22:43:01 | 11-04 23:43:25 | 124.127 |
+| [#1276](https://github.com/sudoprivacy/sudocode/pull/1276) | 11-05 14:25:38 | 11-05 15:43:53 | 11-05 20:12:54 | 347.251 |
+| [#1279](https://github.com/sudoprivacy/sudocode/pull/1279) | 11-05 16:13:39 | 11-05 18:26:31 | 11-05 22:49:03 | 395.387 |

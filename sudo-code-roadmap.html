@@ -852,6 +852,20 @@ minutes from observed local start to merge; this subset cannot replace the whole
 source cohort. Unknown local histories and unfinished work remain explicit.
 The 10% delivery goal is not met. These rollout observations establish no causal
 speedup for one change; case and coverage counts retain their declared scopes.</p>
+<p><strong>Verify the initial local clock (2026-11-06).</strong>
+For the same 27 merged Rust source/build PRs observed through November 6,
+00:02 UTC, original SSH notes provide a verified local start before the first
+CI trigger for every PR. Earliest available signed local start to merge averages
+<strong>329.648 minutes</strong> (median 247.156); this is a lower bound,
+because earlier manual, unpublished or failed work can be missing. These clocks
+add a mean 127.804 minutes before the first observed CI; overlapping time
+is not summed. Hosted clocks alone average 51.135 minutes from the final candidate
+and 201.843 minutes across all observed candidates. The historical hosted
+baseline cannot establish an exact total-delivery ratio. Missing history and
+unfinished work remain explicit; the one-tenth goal is not met. The audit retains
+all 27 source observations and the earlier five-history snapshot. These code PRs
+merged before the latest worker/scheduling rollouts, whose prospective effect must
+be measured separately.</p>
 <p><strong>Keep older source branches compatible.</strong> The hosted
 increase requires the measured canonical resume-test fingerprint, with CRLF
 normalized. Old or unknown fixtures retain four without merging main. Later

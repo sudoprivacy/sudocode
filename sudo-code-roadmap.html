@@ -888,6 +888,19 @@ from 0.82&ndash;0.97 seconds before to 0.39&ndash;0.53 after. This is component 
 not a whole-PR speedup. There is no global cache, fingerprint-format change or
 new equivalence rule. Existing real Git/push/SSH recovery and refusal checks,
 plus the full Docker/native guard, remain required.</p>
+<p><strong>Prepare verified guard tools before the matrix (2026-11-06).</strong>
+A recorded 223.316-second attempt failed late when downloading the official
+nextest archive with a TLS EOF. Image preparation now reuses the frozen
+<code>nextest_binary</code> function, preserving its original URL/checksums;
+the production context builder is shared with real Docker controls.
+Archive/executable corruption refusal and restoration run in the tool image
+build layer. Unchanged tool/image inputs retain that layer. Each selected
+attempt checks the actual cached CLI with <code>--network none</code> before
+the full matrix and author-native checks. Mandatory output reports preparation
+failures and the saved build log before test execution. Real Docker validated
+official provisioning, offline execution, corruption refusal and recovery;
+these infrastructure controls add no product journey credit. Original matrix
+cases, assertions, deadlines and native platform coverage remain required.</p>
 <p><strong>Keep older source branches compatible.</strong> The hosted
 increase requires the measured canonical resume-test fingerprint, with CRLF
 normalized. Old or unknown fixtures retain four without merging main. Later

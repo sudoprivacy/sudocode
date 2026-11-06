@@ -261,6 +261,8 @@ def verify_profile_handoff(fixture, authority, run, environment):
     directory.mkdir()
     repository = directory / "policy"
     run("git", "clone", "--no-hardlinks", "--branch", "main", fixture / "work", repository, cwd=directory)
+    run("git", "config", "user.name", "Profile FIFO E2E", cwd=repository)
+    run("git", "config", "user.email", "profile-fifo@example.invalid", cwd=repository)
     helper = repository / ".github/scripts/local_acceptance.py"
     shutil.copyfile(authority / ".github/scripts/local_acceptance.py", helper)
     run("git", "config", "localAcceptance.signer", "fixture", cwd=repository)

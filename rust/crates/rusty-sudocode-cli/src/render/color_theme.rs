@@ -193,6 +193,27 @@ impl ColorTheme {
             .unwrap_or(Color::Reset)
     }
 
+    /// The brand amber before palette reduction; light surfaces use a readable shade.
+    const fn brand_rgb(self) -> Rgb {
+        if self.light_background {
+            (148, 93, 5)
+        } else {
+            Self::AMBER
+        }
+    }
+
+    /// The quiet point of a running tool card's frame pulse: the brand amber
+    /// half faded into the painted background. `None` where the palette has no
+    /// such shade (16 colors or none), so those frames stay steady.
+    pub(crate) fn brand_pulse_low(self, support: ColorSupport) -> Option<Color> {
+        let surface = terminal_palette::background().unwrap_or(if self.light_background {
+            (255, 255, 255)
+        } else {
+            (0, 0, 0)
+        });
+        color_math::faded(self.brand_rgb(), surface, support)
+    }
+
     fn resolve_color(self, role: TextRole, support: ColorSupport) -> Color {
         let limited = support == ColorSupport::Ansi16;
         let readable = |rgb| color_math::foreground(rgb, terminal_palette::background(), support);
@@ -204,11 +225,7 @@ impl ColorTheme {
                 if limited {
                     Color::DarkYellow
                 } else {
-                    readable(if self.light_background {
-                        (148, 93, 5)
-                    } else {
-                        Self::AMBER
-                    })
+                    readable(self.brand_rgb())
                 }
             }
             TextRole::Accent => {

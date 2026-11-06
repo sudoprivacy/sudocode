@@ -509,11 +509,7 @@ fn input_after_prompt(screen: &str) -> Option<&str> {
 #[must_use]
 pub fn input_and_footer_of(screen: &str) -> Option<String> {
     let rows: Vec<_> = screen.lines().collect();
-    // The vt100 test parser can retain the next slot on the same physical row
-    // as a full-width rule. Recognize the rule prefix without discarding it.
-    let is_separator = |row: &&str| row.starts_with("──");
-    let end = rows.iter().rposition(is_separator)?;
-    let start = rows[..end].iter().rposition(is_separator)?;
+    let start = input_and_footer_row_range(&rows)?.start;
     let mut area = Vec::with_capacity(rows.len() - start);
     let first = rows[start].trim_start_matches('─');
     if !first.is_empty() {
@@ -521,6 +517,19 @@ pub fn input_and_footer_of(screen: &str) -> Option<String> {
     }
     area.extend_from_slice(&rows[start + 1..]);
     Some(area.join("\n"))
+}
+
+/// Physical row coordinates of the current input/footer area, including its
+/// opening rule. Share this boundary with text projections when inspecting
+/// raw cells; retained history must not supply the current panel's borders.
+#[must_use]
+pub fn input_and_footer_row_range(rows: &[&str]) -> Option<std::ops::Range<usize>> {
+    // The vt100 test parser can retain the next slot on the same physical row
+    // as a full-width rule. Recognize the rule prefix without discarding it.
+    let is_separator = |row: &&str| row.starts_with("──");
+    let end = rows.iter().rposition(is_separator)?;
+    let start = rows[..end].iter().rposition(is_separator)?;
+    Some(start..rows.len())
 }
 
 /// The model live mode grades its assertions against.

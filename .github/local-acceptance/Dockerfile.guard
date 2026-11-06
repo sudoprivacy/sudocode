@@ -14,5 +14,7 @@ RUN nice -n 10 rustup component add rustfmt clippy \
  && cargo clippy --version
 
 ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
+COPY nextest_seed.py /opt/nextest_seed.py
+RUN python3 /opt/nextest_seed.py --verify-cache
 COPY guard.py /opt/acceptance-guard.py
 ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

@@ -345,6 +345,16 @@ verify the connection deadline. Its container image includes the official
 Docker CLI pinned by image digest for the nested policy checks. The guard
 preserves an ordinary client error as a
 failure. Healthy Engine execution still requires the full container matrix.
+The guard image provisions nextest before the matrix using the exact frozen
+`nextest_binary` function, including its original URL and checksums. Image
+preparation runs archive/executable corruption-refusal controls and restores the
+verified files. Docker reuses that layer while its tool script and image inputs
+stay unchanged. Each selected attempt rechecks the actual cached CLI with
+`--network none` before running the full matrix and author-native guards.
+`GUARD_TOOL_PREFLIGHT` names these stages. Image/tool preparation errors point
+to the saved build log and installed retry command before tests begin.
+This caches tool preparation; the full matrix and native checks retain their
+original cases, assertions and deadlines.
 
 On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads
@@ -633,6 +643,17 @@ sources retain their existing selection without adding a duplicate example
 build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
 native guard proves normal linking, no implicit example execution and refusal
 of a deliberately broken example. These checks add no product PTY coverage.
+Changes confined to ordinary individual CLI test files can omit the separate
+example build on both the author and complementary hosts. README and Markdown
+files under `docs/` may accompany them. The selector reads committed Git blobs;
+deleted, redirected or unknown inputs, shared helpers, manifests and production
+sources retain ordinary scope. `EXAMPLE_BUILD_SCOPE` reports `isolated_cli_tests`
+on this path. Native test selection and execution stay required. Real Git/Cargo
+guards execute the changed CLI test, then independently confirm that the example
+artifact remains fresh with the same binary hash. Mixed/shared changes retain
+example compilation and a broken example still fails. This removes unchanged
+compile-only work; it does not add product journey coverage or prove a whole-PR
+time reduction.
 Contract validation checks the Docker Git/signature/authorization matrix before
 Cargo fixtures and author-host native guards. Passing runs keep every existing
 check; an early metadata failure leaves later compilation unrun.
@@ -741,6 +762,17 @@ unchanged profile commands and matching original logs; `preflight` always runs.
 The receipt records each origin head with its signed envelope, and the verifier
 re-checks that envelope, its ancestry, the change set and the copied command
 records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+For a contract update, the managed child keeps the candidate command recipe and
+protected signing authority separate. Carry admission, checkpoints, resume and
+publication use the same protected authority; an earlier unmerged candidate
+policy cannot qualify as its own protected ancestor. Ineligible carried profiles
+run fresh. Exact-source recovery still checks compatibility with the candidate
+recipe and verifies its signatures against the protected enrolled keys.
+Older managed parents already name the protected base and exact candidate policy;
+that child argument form keeps the same authority before the parent is upgraded.
+Real Git/SSH/child-process controls retain the former local-pass/publication-refusal
+counterexample and require the actual managed child to refuse that carry before
+executing and publishing fresh checks. They add no product journey coverage.
 When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
 record includes preparation commands and the author-host runner arguments.
 Run preparation first: mainline recovery fetches protected main before resolving
@@ -807,6 +839,11 @@ Within one verification, identical immutable source/policy references share the
 computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
 receipts retain their original verification path. Signatures, source/base,
 current required checks, equivalence rules and refusal conditions remain.
+Both fingerprint formats share one AST projection helper. It copies the module
+shell and the dispatcher that projection mutates; other nodes remain read-only.
+Each profile and later invocation keeps its own dispatch projection. Fingerprint
+bytes and conservative reflection/import behavior remain unchanged, so this
+computation change requires no new equivalence rule or repeated product run.
 Provider tests require explicit local execution or manual provider dispatch;
 PR, queue and main events never authorize paid calls. Real-daemon queue tests
 still run for changed daemon inputs without a model credential. Documentation/CI-only

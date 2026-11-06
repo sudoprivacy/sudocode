@@ -81,8 +81,8 @@ def verify_carryover(directory, source, environment):
         run("git", "commit", "-m", message)
         return run("git", "rev-parse", "HEAD")
 
-    def check():
-        text = run(sys.executable, helper, "check", "--base", "main", "--policy-ref", "main", "--publish")
+    def check(policy="main"):
+        text = run(sys.executable, helper, "check", "--base", "main", "--policy-ref", policy, "--publish")
         head = run("git", "rev-parse", "HEAD")
         results = sorted((home / ".nexus/local-acceptance/results" / head).iterdir())
         return text, json.loads((results[-1] / "receipt.json").read_text())
@@ -99,6 +99,16 @@ def verify_carryover(directory, source, environment):
 
     def origins(receipt):
         return {group["head"]: group["profiles"] for group in receipt.get("carried", [])}
+
+    def replace_signed_note(head, payload, label):
+        data = fixture / (label + "-receipt.json")
+        data.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        run("ssh-keygen", "-Y", "sign", "-f", key, "-n", "sudocode-local-acceptance", data)
+        envelope = {"signer": "fixture", "payload": base64.b64encode(data.read_bytes()).decode(),
+                    "signature": base64.b64encode(data.with_suffix(".json.sig").read_bytes()).decode()}
+        note = fixture / (label + "-note.json")
+        note.write_text(json.dumps({"version": 1, "attestations": {"fixture": envelope}}))
+        run("git", "notes", "--ref=local-acceptance", "add", "-f", "-F", note, head)
 
     first = commit("Change product and page", {"src/core.txt": "pr core\n", "src/extra.txt": "pr extra\n",
                                                "web/page.txt": "pr page\n"})
@@ -157,18 +167,77 @@ def verify_carryover(directory, source, environment):
     assert payload.get("carried"), payload
     forged = dict(payload)
     forged["carried"] = [{**forged["carried"][0], "profiles": ["native-workspace"]}]
-    data = fixture / "forged-receipt.json"
-    data.write_text(json.dumps(forged, sort_keys=True, separators=(",", ":")))
-    run("ssh-keygen", "-Y", "sign", "-f", key, "-n", "sudocode-local-acceptance", data)
-    forged_envelope = {"signer": "fixture", "payload": base64.b64encode(data.read_bytes()).decode(),
-                       "signature": base64.b64encode(data.with_suffix(".json.sig").read_bytes()).decode()}
-    forged_note = fixture / "forged-note.json"
-    forged_note.write_text(json.dumps({"version": 1, "attestations": {"fixture": forged_envelope}}))
-    run("git", "notes", "--ref=local-acceptance", "add", "-f", "-F", forged_note, head)
+    replace_signed_note(head, forged, "source-selected")
     run(sys.executable, helper, "verify", "--base", "main", "--policy-ref", "main", success=False,
         error="require native-workspace to run again")
+
+    # A candidate recipe is not protected authority. The old managed child
+    # passes locally but fails publication here; both boundaries must agree.
+    run("git", "checkout", "-b", "contract-source", "main")
+    unmerged_policy = commit("Unmerged candidate command policy", {
+        ".github/local-acceptance/checks.py": profiles.read_text() + "\n# Private candidate policy\n",
+        "src/core.txt": "candidate contract input\n",
+    })
+    _, receipt = check(unmerged_policy)
+    assert events() == ["preflight", "native-workspace"] and "carried" not in receipt
+    candidate = commit("Follow up without changing native inputs", {"notes.txt": "first follow-up\n"})
+    boundary = (
+        'import importlib.util,sys\n'
+        'spec=importlib.util.spec_from_file_location("author_boundary",sys.argv[2])\n'
+        'module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n'
+        'if sys.argv[1] in {"verify","verify-local"}:\n'
+        ' if sys.argv[1]=="verify":\n'
+        '  module.git("fetch","--no-tags","origin","+refs/notes/local-acceptance:refs/notes/local-acceptance")\n'
+        ' module.verify(sys.argv[3],"main",sys.argv[3],signers_ref="main")\n'
+        'else:\n'
+        ' module.run_candidate_checks(sys.argv[3],"main","origin",sys.argv[4])\n'
+    )
+    bound_output = fixture / "authority-bound-output"
+    text = run(sys.executable, "-c", boundary, "check", helper, candidate, bound_output)
+    receipt = json.loads((bound_output / "receipt.json").read_text())
+    assert events() == ["preflight", "native-workspace"], text
+    assert "carried" not in receipt, receipt
+    run(sys.executable, "-c", boundary, "verify", helper, candidate)
+    exact_output = fixture / "authority-bound-exact-source-resume"
+    run(sys.executable, "-c", boundary, "check", helper, candidate, exact_output)
+    resumed = json.loads((exact_output / "receipt.json").read_text())
+    assert events() == [], resumed
+    assert set(resumed["resumed_from"]["profiles"]) == {"preflight", "native-workspace"}
+    run(sys.executable, "-c", boundary, "verify", helper, candidate)
+    # The installed protected parent can still be older than this candidate.
+    # Its child argv lacks --signers-ref; the exact candidate/base pairing must
+    # enforce the same authority without replacing that installed parent.
+    candidate = commit("Use the legacy managed child arguments", {"notes.txt": "second follow-up\n"})
+    text, receipt = check(candidate)
+    assert events() == ["preflight", "native-workspace"], text
+    assert "carried" not in receipt, receipt
+    run(sys.executable, "-c", boundary, "verify", helper, candidate)
+
+    # Protected origin authority does not excuse a changed candidate recipe.
+    run("git", "checkout", "-b", "candidate-recipe", "main")
+    recipe_origin = commit("Protected-policy native execution", {"src/core.txt": "recipe input\n"})
+    _, origin_receipt = check()
+    assert events() == ["preflight", "native-workspace"]
+    run("git", "fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance")
+    origin_note = json.loads(run("git", "notes", "--ref=local-acceptance", "show", recipe_origin))
+    recipe = profiles.read_text().replace("print(sys.argv[2])", "print('candidate recipe: ' + sys.argv[2])")
+    assert recipe != profiles.read_text()
+    candidate = commit("Change only the candidate command recipe", {".github/local-acceptance/checks.py": recipe})
+    recipe_output = fixture / "candidate-recipe-output"
+    run(sys.executable, "-c", boundary, "check", helper, candidate, recipe_output)
+    receipt = json.loads((recipe_output / "receipt.json").read_text())
+    assert events() == ["preflight", "native-workspace"] and "carried" not in receipt
+    assert "candidate recipe: native-workspace" in (recipe_output / "native-workspace/000.log").read_text()
+    forged = {**receipt, "checks": {**receipt["checks"],
+                                   "native-workspace": origin_receipt["checks"]["native-workspace"]},
+              "carried": [{"head": recipe_origin, "profiles": ["native-workspace"],
+                           "envelope": origin_note["attestations"]["fixture"]}]}
+    replace_signed_note(candidate, forged, "candidate-recipe")
+    run(sys.executable, "-c", boundary, "verify-local", helper, candidate, success=False,
+        error="require native-workspace to run again")
     print("PASS: actual signed CLI carries unselected profiles across later commits and clean main merges, "
-          "chains to the true origin, reruns profiles a PR change or replaced PR change selects, and refuses forged carried evidence")
+          "chains to the true origin, reruns selected profiles, refuses forged/unmerged-policy evidence, "
+          "and binds the managed child admission to the actual protected publication authority")
 
 
 if __name__ == "__main__":

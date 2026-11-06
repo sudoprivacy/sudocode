@@ -416,6 +416,18 @@ pub fn record(name: &str) {
     selected = profiles.changed_cli_test_targets(root, newer_main)
     assert selected == ["kept_driver"], f"Newer-main-only changes widened isolated native scope: {selected}"
     assert profiles.changed_cli_test_targets(root, git("merge-base", newer_main, "HEAD")) == selected
+
+    def example_scope(expected):
+        text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"), "plan",
+                       "--base", newer_main, "--policy-ref", base,
+                       "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
+        plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                               if line.startswith("ACCEPTANCE_PLAN=")))
+        assert ("native-examples" in plan["local_checks"]) == expected, text
+        assert "native-workspace" in plan["local_checks"], text
+        return plan
+
+    isolated_plan = example_scope(False)
     previous_pids = environment["SCODE_GROUP_PID_DIR"]
     environment["SCODE_GROUP_PID_DIR"] = str(output / "isolated-target-pids")
     selected_args = [argument for name in selected for argument in ["--test", name]]
@@ -423,7 +435,8 @@ pub fn record(name: &str) {
     assert {path.name for path in (output / "isolated-target-pids").iterdir()} == {"driver"}
     environment["SCODE_GROUP_PID_DIR"] = previous_pids
     behind_main = {"newer_main": newer_main, "head": isolated_head, "selected": selected,
-                   "actual_native_targets": ["driver"], "conservative_cases": []}
+                   "actual_native_targets": ["driver"], "isolated_plan": isolated_plan,
+                   "conservative_cases": []}
     for index, (label, path) in enumerate([
         ("shared test helper", package + "tests/common/mod.rs"),
         ("production source", package + "src/main.rs"),
@@ -434,6 +447,7 @@ pub fn record(name: &str) {
         write(path, (file.read_text() if file.exists() else "") + "// Changed actual branch input.\n")
         head = commit("Keep full scope for " + label)
         assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        example_scope(True)
         behind_main["conservative_cases"].append({"case": label, "head": head})
         if index == 0:
             environment["SCODE_GROUP_PID_DIR"] = str(output / "mixed-target-pids")
@@ -448,11 +462,13 @@ pub fn record(name: &str) {
             git("mv", package + "tests/kept_driver.rs", package + "src/moved.rs")
         head = commit(label)
         assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        example_scope(True)
         behind_main["conservative_cases"].append({"case": label, "head": head})
     git("switch", "isolated-native-test")
     write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
     head = commit("Keep actual branch source changes even when main has identical bytes")
     assert profiles.changed_cli_test_targets(root, newer_main) is None
+    example_scope(True)
     behind_main["conservative_cases"].append({"case": "coincident main and PR source bytes", "head": head})
     git("switch", "-c", "grouping-controls", grouped_scope_head)
     for label, replacement, workspace_text, remove in [

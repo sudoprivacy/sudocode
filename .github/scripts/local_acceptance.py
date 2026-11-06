@@ -647,14 +647,35 @@ def production_build_paths(paths, base, head, *, opt_in=None):
     return [path for path in paths if path not in ignored]
 
 
+def isolated_cli_test_inputs(paths, head):
+    """Prove that only existing individual CLI test modules changed in Git."""
+    inputs = [path for path in paths if path != "README.md"
+              and not (path.startswith("docs/") and path.endswith(".md"))]
+    pattern = r"rust/crates/rusty-sudocode-cli/tests/([A-Za-z0-9_]+)\.rs"
+    if not inputs or any(not re.fullmatch(pattern, path) for path in inputs):
+        return False
+    try:
+        # Deleted, redirected and unknown files retain ordinary example builds.
+        for path in inputs:
+            entry = git("ls-tree", "-z", head, "--", path).stdout.split(b"\0")
+            if len(entry) != 2 or not entry[0].startswith(b"100644 blob ") or entry[1]:
+                return False
+        return True
+    except (RuntimeError, OSError, ValueError):
+        return False
+
+
 def selected(policy, paths, *, base=None, head=None):
     paths = list(paths)
     separate_examples = False
     if "native-examples" in policy["checks"] and any(path.startswith("rust/") for path in paths):
         separate_examples = head is None or committed_test_groups(head)
+        isolated_tests = head is not None and isolated_cli_test_inputs(paths, head)
+        separate_examples = separate_examples and not isolated_tests
         if head is not None:
             print("EXAMPLE_BUILD_SCOPE=" + json.dumps({"head": head, "separate_profile": separate_examples,
-                  "reason": "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
+                  "reason": "isolated_cli_tests" if isolated_tests else
+                            "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
     opt_in = opt_in_test_target_inputs(paths, base, head) if base and head else set()
     product_paths = production_build_paths(paths, base, head, opt_in=opt_in) if base and head else paths
     if product_paths != paths:

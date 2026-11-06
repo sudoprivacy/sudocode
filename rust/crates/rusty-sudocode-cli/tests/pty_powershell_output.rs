@@ -78,7 +78,28 @@ fn powershell_drains_both_streams_before_exit_and_next_turn_reads_the_result() {
     let transcript = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
         .expect("saved transcript");
     let session = runtime::Session::load_from_path(&transcript).unwrap();
-    let results: Vec<serde_json::Value> = session
+    let results = read_powershell_results(&session);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["exit_code"], 0);
+    assert_eq!(results[1]["exit_code"], 0);
+    for (field, byte) in [("stdout", b'O'), ("stderr", b'E')] {
+        let stream = results[0][field]
+            .as_str()
+            .expect("drained output stream")
+            .trim_end_matches(['\r', '\n']);
+        assert_eq!(stream.len(), 1_048_576, "complete {field}");
+        assert!(stream.bytes().all(|value| value == byte), "exact {field}");
+    }
+    let recovered: serde_json::Value =
+        serde_json::from_str(results[1]["stdout"].as_str().expect("follow-up stdout")).unwrap();
+    assert_eq!(
+        recovered, completed,
+        "the next model turn receives the real prior command result"
+    );
+}
+
+fn read_powershell_results(session: &runtime::Session) -> Vec<serde_json::Value> {
+    session
         .messages()
         .iter()
         .flat_map(|message| &message.blocks)
@@ -108,22 +129,5 @@ fn powershell_drains_both_streams_before_exit_and_next_turn_reads_the_result() {
             }
             _ => None,
         })
-        .collect();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["exit_code"], 0);
-    assert_eq!(results[1]["exit_code"], 0);
-    for (field, byte) in [("stdout", b'O'), ("stderr", b'E')] {
-        let stream = results[0][field]
-            .as_str()
-            .expect("drained output stream")
-            .trim_end_matches(['\r', '\n']);
-        assert_eq!(stream.len(), 1_048_576, "complete {field}");
-        assert!(stream.bytes().all(|value| value == byte), "exact {field}");
-    }
-    let recovered: serde_json::Value =
-        serde_json::from_str(results[1]["stdout"].as_str().expect("follow-up stdout")).unwrap();
-    assert_eq!(
-        recovered, completed,
-        "the next model turn receives the real prior command result"
-    );
+        .collect()
 }

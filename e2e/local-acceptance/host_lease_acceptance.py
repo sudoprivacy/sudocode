@@ -251,7 +251,7 @@ def verify_host_lease(directory, source, command, environment):
                     process.terminate()
                     process.wait(timeout=10)
     verify_external_index(fixture, sources["A"], isolated)
-    verify_service_order(fixture, run, isolated)
+    verify_service_order(fixture, source, run, isolated)
 
 
 def verify_external_index(fixture, source, environment):
@@ -325,11 +325,13 @@ def verify_external_index(fixture, source, environment):
     print("PASS: original external proof adoption, Unicode paths, wrong locators and corrupt log/signature refusal; index I/O failure retains verified progress")
 
 
-def verify_service_order(fixture, run, environment):
+def verify_service_order(fixture, authority, run, environment):
     """Run real failing/successful profile children and verify the signed plan."""
     source = fixture / "service-order-source"
     run("git", "worktree", "add", "--detach", source, "main")
     profiles = source / ".github/local-acceptance/checks.py"
+    shutil.copyfile(authority / ".github/local-acceptance/cross_platform.py",
+                    profiles.with_name("cross_platform.py"))
     profiles.write_text(
         'import sys\n'
         'def run(name, root, output, base, execute):\n'
@@ -383,3 +385,38 @@ def verify_service_order(fixture, run, environment):
     assert events.read_text(encoding="utf-8").splitlines() == observed
     assert (restored / "envelope.json").is_file()
     print("PASS: actual failed service blocks release/rendering/browser entry; success and verified resume retain every profile and the declared signed plan")
+
+    # Execute the production CI entrypoint in its trusted private tool snapshot.
+    # Only tiny profile inputs differ; real children and error propagation run.
+    native = ["native-workspace", "native-release", "native-services"]
+    ci_environment = {key: value for key, value in environment.items()
+                      if not key.startswith("GITHUB_")}
+    for label, contents, success, expected in [
+        ("ci-service-failed", "fail service\n", False, ["native-workspace", "native-services"]),
+        ("ci-service-passed", "pass service\n", True,
+         ["native-workspace", "native-services", "native-release"]),
+        ("ci-release-only", "pass service\n", True, ["native-release"]),
+    ]:
+        events.unlink()
+        (source / "input.txt").write_text(contents, encoding="utf-8")
+        selected = ["native-release"] if label == "ci-release-only" else native
+        output = fixture / label
+        result = subprocess.run([sys.executable, str(profiles.with_name("cross_platform.py"))],
+            cwd=source, env={**ci_environment, "ACCEPTANCE_NATIVE_CHECKS": " ".join(selected),
+                            "ACCEPTANCE_OUTPUT": str(output), "ACCEPTANCE_BASE": "service-order-policy"},
+            capture_output=True)
+        output.mkdir(exist_ok=True)
+        log = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        (output / "process.log").write_text(log, encoding="utf-8")
+        assert (result.returncode == 0) == success, log
+        assert events.read_text(encoding="utf-8").splitlines() == expected, log
+        report = json.loads(next(line.split("=", 1)[1] for line in log.splitlines()
+                                 if line.startswith("CI_NATIVE_EXECUTION_ORDER=")))
+        assert report["declared_checks"] == selected, report
+        assert report["execution_order"] == (["native-workspace", "native-services", "native-release"]
+                                              if selected == native else selected), report
+        if not success:
+            assert "CONTROLLED_SERVICE_FAILURE" in log, log
+            assert not (output / "native-release").exists()
+    (source / "input.txt").write_text("pass service\n", encoding="utf-8")
+    print("PASS: real complementary CI entrypoint shares service-first order, fails before release and preserves release-only selection")

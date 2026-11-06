@@ -1569,6 +1569,20 @@ def check(args):
         print("LOCAL_ACCEPTANCE_TIMING=" + canonical(attempt).decode(), flush=True)
 
 
+def scheduled_checks(needed):
+    """Keep service bootstrap ahead of expensive profiles after workspace setup."""
+    ordered = list(needed)
+    if "native-services" in ordered:
+        position = next((index for index, name in enumerate(ordered)
+                         if name in {"native-release", "rendering", "browser"}), len(ordered))
+        if "native-workspace" in ordered:
+            position = max(position, ordered.index("native-workspace") + 1)
+        service = ordered.index("native-services")
+        if position < service:
+            ordered.insert(position, ordered.pop(service))
+    return ordered
+
+
 def perform_check(args, attempt):
     import importlib.util
 
@@ -1672,16 +1686,7 @@ def perform_check(args, attempt):
               f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
               f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
 
-    serialized = [name for name in needed if name != "preflight"]
-    # Service bootstrap failures should precede optimized builds and measurements.
-    if "native-services" in serialized:
-        position = next((index for index, name in enumerate(serialized)
-                         if name in {"native-release", "rendering", "browser"}), len(serialized))
-        if "native-workspace" in serialized:
-            position = max(position, serialized.index("native-workspace") + 1)
-        service = serialized.index("native-services")
-        if position < service:
-            serialized.insert(position, serialized.pop(service))
+    serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
     attempt["host_lease_wait_seconds"] = 0.0
     print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({

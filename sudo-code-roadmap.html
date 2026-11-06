@@ -856,9 +856,15 @@ speedup for one change; case and coverage counts retain their declared scopes.</
 For the same 27 merged Rust source/build PRs observed through November 6,
 00:02 UTC, original SSH notes provide a verified local start before the first
 CI trigger for every PR. Earliest available signed local start to merge averages
-<strong>329.648 minutes</strong> (median 247.156); this is a lower bound,
-because earlier manual, unpublished or failed work can be missing. These clocks
-add a mean 127.804 minutes before the first observed CI; overlapping time
+<strong>360.935 minutes</strong> (median 261.702); this is a lower bound.
+The initial notes-only snapshot was 329.648 minutes (median 247.156).
+Unioning the same PRs' commit lists and observed CI heads found 118 candidate
+commits. Another 25 original SSH proofs, including nine completed-profile
+checkpoints, moved four PRs' verified starts earlier; 21 available local proofs
+also had their original completed-command log hashes checked. Partial checkpoints
+prove completed profiles and timing, never full acceptance. Manual, dropped or
+unpublished heads and other-host history can remain missing. These clocks
+add a mean 159.091 minutes before the first observed CI; overlapping time
 is not summed. Hosted clocks alone average 51.135 minutes from the final candidate
 and 201.843 minutes across all observed candidates. The historical hosted
 baseline cannot establish an exact total-delivery ratio. Missing history and

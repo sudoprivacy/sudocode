@@ -87,6 +87,8 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--expected-source', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--scope', choices=['group', 'workspace'], default='group')
+    parser.add_argument('--rounds', type=int, choices=range(1, 4), default=3)
     args = parser.parse_args()
     source, output = args.source.resolve(), args.output.resolve()
     assert sys.platform == 'darwin'
@@ -99,14 +101,24 @@ def main():
     spec.loader.exec_module(checks)
     nextest = str(checks.nextest_binary(output))
     arguments = ['--locked', '-p', 'rusty-sudocode-cli', '--test', 'acceptance_cli_05', '--features', 'engine-acp/mailbox']
+    selection = {'mode': 'original-group'}
+    if args.scope == 'workspace':
+        metadata = json.loads(subprocess.check_output(
+            ['cargo', 'metadata', '--no-deps', '--locked', '--format-version=1'], cwd=source / 'rust'))
+        targets, selection = checks.grouped_workspace_test_targets(source, metadata)
+        arguments = ['--workspace', '--locked', '--features', 'engine-acp/mailbox',
+                     *checks.workspace_integration_test_targets(targets)]
     proof = {'source': args.expected_source, 'mockOnly': True, 'acceptanceWaiver': False,
-             'originalDeadlinesAndAssertions': True, 'workers': 4, 'rounds': []}
+             'originalDeadlinesAndAssertions': True, 'workers': 4, 'rounds': [],
+             'scope': args.scope, 'selection': selection}
     try:
         code = run_observed(['cargo', 'test', '--no-run', *arguments], source, output, 'compile', compiling=True)
-        assert code == 0, 'Original grouped test target must build'
-        options = checks.nextest_options(output)
+        assert code == 0, 'Original native test targets must build'
+        options = (checks.workspace_nextest_options(output, bool(targets),
+                   hosted_source_ready=checks.supports_hosted_eight_workers(source))
+                   if args.scope == 'workspace' else checks.nextest_options(output))
         assert options[options.index('--test-threads') + 1] == '4'
-        for number in range(1, 4):
+        for number in range(1, args.rounds + 1):
             code = run_observed([nextest, 'nextest', 'run', *options, *arguments], source, output, f'round-{number}')
             proof['rounds'].append({'round': number, 'exit': code})
             if code:

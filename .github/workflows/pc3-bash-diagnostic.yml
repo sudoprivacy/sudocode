@@ -16,7 +16,6 @@ jobs:
       matrix:
         source:
           - 9a0e38777199654d57e04f652e096be295501410
-          - af214f33f97593c29aeb064524890ee0ed5329e5
     env:
       SCODE_TEST_BACKEND: mock
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -50,8 +49,8 @@ jobs:
           env-vars: ImageOS
           save-if: false
       - run: python -m pip install psutil
-      - name: Diagnose the original grouped PTY tests without changing their deadlines
-        run: python driver/.github/diagnostics/pc3_bash_diagnostic.py --source candidate --expected-source ${{ matrix.source }} --output "${{ runner.temp }}/bash-diagnostic"
+      - name: Diagnose the original complete native workspace without changing its deadlines
+        run: python driver/.github/diagnostics/pc3_bash_diagnostic.py --source candidate --expected-source ${{ matrix.source }} --scope workspace --rounds 1 --output "${{ runner.temp }}/bash-diagnostic"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

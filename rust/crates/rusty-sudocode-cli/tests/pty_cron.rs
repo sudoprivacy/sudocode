@@ -209,6 +209,46 @@ fn add_then_list_and_persist() {
 }
 
 #[test]
+fn add_to_an_agent_with_a_delivery_mode() {
+    let env = CronEnv::new("agent-delivery");
+    env.cron(&[
+        "add",
+        "--every",
+        "600",
+        "--prompt",
+        "check the build",
+        "--agent",
+        "worker",
+        "--delivery",
+        "steer",
+    ])
+    .expect("created")
+    .unwrap();
+    let json = env.crons_json();
+    assert!(json.contains("\"type\": \"agent\""), "{json}");
+    assert!(json.contains("\"name\": \"worker\""), "{json}");
+    assert!(json.contains("\"delivery\": \"steer\""), "{json}");
+    assert!(json.contains("\"created_by\": \"user\""), "{json}");
+
+    let mut s = env.cron(&[
+        "add",
+        "--every",
+        "600",
+        "--prompt",
+        "x",
+        "--delivery",
+        "now",
+    ]);
+    s.expect("--delivery must be queue or steer").unwrap();
+    drop(s);
+    assert_eq!(
+        env.crons_json().matches("\"cron_id\"").count(),
+        1,
+        "bad flag must not persist"
+    );
+}
+
+#[test]
 fn add_every_and_at_kinds() {
     let env = CronEnv::new("kinds");
     env.cron(&["add", "--every", "3600", "--prompt", "hourly"])

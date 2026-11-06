@@ -30,6 +30,7 @@ pub enum InputSource {
     Peer,
     Subagent,
     Background,
+    Scheduled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

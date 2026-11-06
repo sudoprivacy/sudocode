@@ -15,7 +15,6 @@
 
 use std::path::PathBuf;
 
-use runtime::agent_mailbox;
 use runtime::coordinator_mode::COORDINATOR_ENV_VAR;
 use runtime::coordinator_notification::{self, COORDINATOR_INBOX_RECIPIENT};
 use tools::testing::{persist_terminal_with_telemetry_for_test, seed_agent_manifest_for_test};
@@ -110,10 +109,14 @@ fn coord_mode_off_persist_terminal_does_not_touch_inbox() {
     )
     .expect("persist ok");
 
-    let inbox = agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT);
+    let transcript = std::path::PathBuf::from(
+        runtime::mailbox::InboxConvention::new(ws.to_string_lossy().into_owned())
+            .transcript_path("agent-push-noop", COORDINATOR_INBOX_RECIPIENT),
+    );
     assert!(
-        !inbox.exists(),
-        "coord mode OFF must not create the coordinator inbox file"
+        !transcript.exists(),
+        "coord mode OFF must not create the coordinator conversation: {}",
+        transcript.display()
     );
     let pending = coordinator_notification::drain(&ws).unwrap_or_default();
     assert_eq!(pending.messages().count(), 0);

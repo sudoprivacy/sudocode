@@ -20,13 +20,18 @@ SOURCE = Path(__file__).resolve().parents[2]
 
 
 def fixture_environment():
-    """Clear hook-exported repository selectors before touching temporary repos."""
+    """Clear hook-exported repository selectors before touching temporary repos.
+
+    Fixture checks run tiny executable profiles. They never take this host's
+    real acceptance lease, so a manual run does not queue behind an acceptance
+    in progress. The host lease fixture clears this and uses a private home.
+    """
     names = subprocess.check_output(["git", "rev-parse", "--local-env-vars"],
                                     cwd=SOURCE, text=True).splitlines()
     environment = {key: value for key, value in os.environ.items() if key not in names
                    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
     environment["PYTHONIOENCODING"] = "utf-8"
-    return {**environment, "NO_COLOR": "1"}
+    return {**environment, "NO_COLOR": "1", "SUDOCODE_ACCEPTANCE_HOST_LEASE": "fixture"}
 
 
 FIXTURE_ENV = fixture_environment()

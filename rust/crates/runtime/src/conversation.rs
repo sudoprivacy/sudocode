@@ -1437,6 +1437,14 @@ where
         self
     }
 
+    /// Tool rounds per user turn before the turn winds down: the next request
+    /// carries no tools, so the model answers from the results it has.
+    #[must_use]
+    pub fn with_max_steps(mut self, max_steps: Option<u32>) -> Self {
+        self.max_steps = max_steps;
+        self
+    }
+
     #[must_use]
     pub fn with_hook_abort_signal(mut self, hook_abort_signal: HookAbortSignal) -> Self {
         self.tool_executor_mut()
@@ -1663,8 +1671,8 @@ where
     /// overwhelmingly common case.
     ///
     /// Workspace root is the turn's scoped root (the process cwd outside
-    /// ACP), matching the per-workspace `.sudocode-inbox/coordinator.jsonl`
-    /// convention that every emit site uses (same root).
+    /// ACP), the same root every emit site writes the coordinator's
+    /// conversation under.
     fn prepend_pending_task_notifications(
         blocks: Vec<ContentBlock>,
     ) -> Result<(Vec<ContentBlock>, crate::mailbox::PendingMessages), RuntimeError> {

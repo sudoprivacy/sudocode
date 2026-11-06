@@ -1,7 +1,9 @@
 //! Pure formatting and report functions extracted from `main.rs`.
 
 mod a2a;
+mod agent;
 mod plan;
+pub(crate) mod reasoning;
 use crate::render::TextRole;
 pub(super) use a2a::summary_preview;
 
@@ -15,8 +17,8 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) use crate::render::text_layout::display_width;
 use crate::render::text_layout::{truncate_to_width, wrap_ansi_to_width};
 
+use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
-use crate::render::{styled_text::StyledText, StyledLine};
 use crate::{GitWorkspaceSummary, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, VERSION};
 use crossterm::style::Color;
 
@@ -103,10 +105,9 @@ pub(crate) fn render_message(
                         // model wrote for itself, and letting a stray `#` or
                         // `*` in it become a heading or emphasis would make it
                         // louder than the answer it belongs under.
-                        let thinking =
-                            format!("{}{}", thinking_header(), dim_thinking(thinking.trim_end()));
                         crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out, &thinking,
+                            &mut out,
+                            &reasoning::block(thinking.trim_end(), term_width),
                         );
                     }
                     runtime::ContentBlock::ToolUse { id, input, .. } => {
@@ -174,36 +175,11 @@ pub(crate) fn render_messages(
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
-    render_messages_observed(messages, term_width, renderer, |_, _| {})
-}
-
-/// Keep prompt locations as presentation metadata, never embedded terminal text.
-pub(crate) fn render_messages_with_prompts(
-    messages: &[runtime::ConversationMessage],
-    term_width: usize,
-    renderer: &crate::render::TerminalRenderer,
-) -> (String, Vec<usize>) {
-    let mut prompts = Vec::new();
-    let text = render_messages_observed(messages, term_width, renderer, |offset, msg| {
-        if msg.role == runtime::MessageRole::User {
-            prompts.push(offset);
-        }
-    });
-    (text, prompts)
-}
-
-fn render_messages_observed(
-    messages: &[runtime::ConversationMessage],
-    term_width: usize,
-    renderer: &crate::render::TerminalRenderer,
-    mut observe: impl FnMut(usize, &runtime::ConversationMessage),
-) -> String {
     let mut output = String::new();
     let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
         if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
             crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
-            observe(output.len() - rendered.trim_matches('\n').len(), msg);
         }
     }
     output
@@ -231,32 +207,6 @@ pub(crate) fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Reasoning is styled prose, never parsed as Markdown. Both live and replay
-/// consume this representation; terminal adapters alone serialize ANSI.
-pub(crate) fn dim_thinking_styled(text: &str) -> StyledText {
-    StyledText::from_ansi_with_style(text, theme().style(TextRole::Reasoning))
-}
-
-pub(crate) fn thinking_header_styled() -> StyledText {
-    let mut text = dim_thinking_styled("✻ Thinking…");
-    text.plain("\n");
-    text
-}
-
-#[inline]
-pub(crate) fn dim_thinking(text: &str) -> String {
-    let mut output = String::new();
-    dim_thinking_styled(text).write_ansi_lines(&mut output);
-    output
-}
-
-#[inline]
-pub(crate) fn thinking_header() -> String {
-    let mut output = String::new();
-    thinking_header_styled().write_ansi_lines(&mut output);
-    output
 }
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant
@@ -608,7 +558,7 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         }
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
             let styled = crate::render::theme()
-                .prompt_style(false)
+                .prompt_style()
                 .apply(body)
                 .to_string();
             rendered.push_str(
@@ -643,6 +593,11 @@ pub(crate) enum ToolKind {
     Send,
     AgentList,
     WritePlan,
+    AgentSpawn,
+    PidFork,
+    PidOutput,
+    PidStatus,
+    PidKill,
 }
 
 impl ToolKind {
@@ -663,6 +618,11 @@ impl ToolKind {
             Self::Send => "Send",
             Self::AgentList => "AgentList",
             Self::WritePlan => "WritePlan",
+            Self::AgentSpawn => "AgentSpawn",
+            Self::PidFork => "PidFork",
+            Self::PidOutput => "PidOutput",
+            Self::PidStatus => "PidStatus",
+            Self::PidKill => "PidKill",
         }
     }
 
@@ -692,6 +652,11 @@ impl ToolKind {
             "send" | "Send" => Some(Self::Send),
             "agent_list" | "AgentList" => Some(Self::AgentList),
             "write_plan" | "WritePlan" => Some(Self::WritePlan),
+            "agent_spawn" | "AgentSpawn" => Some(Self::AgentSpawn),
+            "pid_fork" | "PidFork" => Some(Self::PidFork),
+            "pid_output" | "PidOutput" => Some(Self::PidOutput),
+            "pid_status" | "PidStatus" => Some(Self::PidStatus),
+            "pid_kill" | "PidKill" => Some(Self::PidKill),
             _ => None,
         }
     }
@@ -796,6 +761,10 @@ pub(crate) fn tool_card_content(
         }
         Some(ToolKind::AgentList) => a2a::agent_list_card(input, output, status),
         Some(ToolKind::WritePlan) => plan::card(output, status),
+        Some(ToolKind::AgentSpawn | ToolKind::PidFork) => agent::spawn_card(name, input, output),
+        Some(ToolKind::PidOutput | ToolKind::PidStatus | ToolKind::PidKill) => {
+            agent::pid_card(name, input, output)
+        }
         Some(ToolKind::Read) => read_card(input, output, status),
         Some(ToolKind::Write) => write_card(input, output, status),
         Some(ToolKind::Edit) => edit_card(input, output, status),

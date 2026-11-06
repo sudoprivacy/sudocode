@@ -1,6 +1,6 @@
 # Standalone nexus-A2A E2E substrate — a single-node auth-off `nexusd-cluster`
 # founder that a standalone `scode` (this repo) dials as a plain gRPC client to
-# send/receive over the replicated `/agents/<name>/chat-with-me` DT_STREAM.
+# send/receive over the replicated `/conversations/<id>/transcript` DT_STREAM.
 #
 # The daemon image is a nexus artifact (built from `nexus/rust/nexusd`), so it
 # is a PREREQ, not built here — override `NEXUS_DAEMON_IMAGE` or build it once:

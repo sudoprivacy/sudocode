@@ -21,17 +21,17 @@ use agent_client_protocol::{
     Dispatch, Error, Handled, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
-    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
-    CancelNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, ExtRequest, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
-    SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
-    StopReason, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-    UnstructuredCommandInput, Usage,
+    AgentCapabilities, AgentNotification, AvailableCommand, AvailableCommandInput,
+    AvailableCommandsUpdate, CancelNotification, ClientRequest, CloseSessionRequest,
+    CloseSessionResponse, ContentBlock, ContentChunk, ExtNotification, ExtRequest, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
+    SessionUpdate, SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput, Usage,
 };
 use engine_core::engine_events::CompletionAction;
 use engine_core::{AuthMode, DirectToolError, EngineDelegate, EngineEvent};
@@ -352,6 +352,24 @@ fn subagent_events_version(meta: Option<&agent_client_protocol_schema::Meta>) ->
         .get("version")?
         .as_u64()?;
     (version >= 1).then_some(version.min(SUBAGENT_EVENTS_VERSION))
+}
+
+/// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
+/// echoes in the `initialize` result) when the client itself is the agent its
+/// peers address. A peer message then reaches the client as
+/// `_sudocode/session/peer_message` and does not start a turn of this session,
+/// so one message never has two respondents.
+pub const PEER_INPUT_META_KEY: &str = "peerInput";
+
+/// Whether the client asked to own peer input
+/// (`clientCapabilities._meta.sudocode.peerInput.version >= 1`). Anything
+/// malformed is "not asked".
+fn peer_input_owned(meta: Option<&agent_client_protocol_schema::Meta>) -> bool {
+    meta.and_then(|meta| meta.get("sudocode"))
+        .and_then(|sudocode| sudocode.get(PEER_INPUT_META_KEY))
+        .and_then(|peer_input| peer_input.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|version| version >= 1)
 }
 
 /// ACP presentation subscriptions and durable wire delivery. All lifecycle
@@ -830,6 +848,7 @@ async fn ensure_a2a_receiver(
     cx: &ConnectionTo<Client>,
     _config: &SdkAcpConfig,
     session_id: &str,
+    client_owned: bool,
 ) {
     let Some(agent) = registry.agent_of(session_id) else {
         return;
@@ -843,6 +862,11 @@ async fn ensure_a2a_receiver(
     let Some(mailbox) = mailbox else {
         return;
     };
+    if !tools::cron_tools_disabled() {
+        let firing = Arc::clone(&mailbox);
+        runtime::cron_scheduler::start_once(|| runtime::cron_scheduler::Firing::new(firing));
+    }
+    let verified = mailbox.authenticates_senders();
     let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
     else {
         return;
@@ -854,6 +878,10 @@ async fn ensure_a2a_receiver(
         cx.clone(),
         agent,
         session_id.to_owned(),
+        PeerRoute {
+            client_owned,
+            verified,
+        },
     ));
 }
 
@@ -862,6 +890,15 @@ type PeerDelivery = (
     std::sync::mpsc::SyncSender<bool>,
 );
 type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
+
+/// Where a session's peer messages go, and what is known about their senders.
+#[derive(Clone, Copy)]
+struct PeerRoute {
+    /// The client owns peer input (`peerInput`): deliver to it, start no turn.
+    client_owned: bool,
+    /// The session's mailbox authenticates every writer.
+    verified: bool,
+}
 
 async fn admit_peer_receiver(
     registry: &SharedSessionRegistry,
@@ -956,7 +993,12 @@ async fn run_peer_receiver(
     cx: ConnectionTo<Client>,
     agent: String,
     mut bound: String,
+    route: PeerRoute,
 ) {
+    let PeerRoute {
+        client_owned,
+        verified,
+    } = route;
     let stop = receiver.stop.clone();
     loop {
         // A retried mailbox cursor must refer to the same still-pending input.
@@ -977,11 +1019,24 @@ async fn run_peer_receiver(
             continue;
         };
         bound.clone_from(&session_id);
+        if client_owned {
+            // The client is the agent: hand it the message instead of this
+            // session's model. The cursor advances once the notification is
+            // written to the transport; a closed client leaves it unread.
+            let delivered = cx
+                .send_notification(peer_message_notification(&session_id, &message, verified))
+                .is_ok();
+            let _ = ack.send(delivered);
+            if !delivered {
+                break;
+            }
+            continue;
+        }
         let Some(driver) = registry.driver(&session_id) else {
             let _ = ack.send(false);
             continue;
         };
-        let text = message.to_prompt();
+        let text = message.to_prompt(verified);
         let mut states = driver.input_changes();
         let action = peer_input_action(&message, &text);
         let receipt = tokio::select! {
@@ -1001,7 +1056,7 @@ async fn run_peer_receiver(
         if !committed {
             break;
         }
-        let mut a2a = json!({"from":message.from,"kind":message.kind});
+        let mut a2a = json!({"from":message.from,"kind":message.kind,"verified":verified});
         if let Some(summary) = &message.summary {
             a2a["summary"] = json!(summary);
         }
@@ -1022,6 +1077,30 @@ async fn run_peer_receiver(
         Ok(Ok(())) => {}
         error => eprintln!("[acp-peer] receiver teardown failed: {error:?}"),
     }
+}
+
+/// A peer message for a client that owns peer input: the same wrapper a session
+/// model would read, plus the sender fields a client routes and replies on.
+fn peer_message_notification(
+    session_id: &str,
+    message: &runtime::agent_mailbox::MailboxEnvelope,
+    verified: bool,
+) -> AgentNotification {
+    let mut a2a = json!({"from": message.from, "kind": message.kind, "verified": verified});
+    if let Some(summary) = &message.summary {
+        a2a["summary"] = json!(summary);
+    }
+    let payload = serde_json::value::to_raw_value(&json!({
+        "sessionId": session_id,
+        "text": message.to_prompt(verified),
+        "body": message.body,
+        "sudocode": {"a2a": a2a},
+    }))
+    .expect("peer message projection is serializable");
+    AgentNotification::ExtNotification(ExtNotification::new(
+        "_sudocode/session/peer_message",
+        payload.into(),
+    ))
 }
 
 async fn wait_peer_input_commit(
@@ -2555,6 +2634,7 @@ pub(crate) async fn run_acp_on_transport(
     // Per connection: whether this client opted into sub-agent events at
     // `initialize`. Sessions it creates or loads get a sub-agent route.
     let subagent_events = Arc::new(AtomicBool::new(false));
+    let peer_input_client = Arc::new(AtomicBool::new(false));
     let subagent_completions = Arc::new(AtomicBool::new(false));
     let task_completions = Arc::new(AtomicBool::new(false));
 
@@ -2568,6 +2648,7 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_events = Arc::clone(&subagent_events);
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
+                let peer_input_client = Arc::clone(&peer_input_client);
                 async move |req: InitializeRequest,
                             responder: Responder<InitializeResponse>,
                             _cx: ConnectionTo<Client>| {
@@ -2588,6 +2669,15 @@ pub(crate) async fn run_acp_on_transport(
                             ));
                     subagent_completions.store(completion_version, Ordering::SeqCst);
                     let mut meta = initialize_meta(subagent_version);
+                    // Hosted sessions have no client of their own to own peer
+                    // input; their host already routes it.
+                    let owns_peer_input =
+                        !hosted && peer_input_owned(req.client_capabilities.meta.as_ref());
+                    peer_input_client.store(owns_peer_input, Ordering::SeqCst);
+                    if owns_peer_input {
+                        meta.get_mut("sudocode").unwrap()[PEER_INPUT_META_KEY] =
+                            json!({"version": 1});
+                    }
                     if completion_version {
                         meta.get_mut("sudocode").unwrap()[if tasks {
                             subagent_completions::TASK_META_KEY
@@ -2626,6 +2716,7 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_events = Arc::clone(&subagent_events);
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
+                let peer_input_client = Arc::clone(&peer_input_client);
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -2662,6 +2753,7 @@ pub(crate) async fn run_acp_on_transport(
                     let config = config.clone();
                     let commands = session_ops::available_commands();
                     let peer_config = config.clone();
+                    let client_owns_peer_input = peer_input_client.load(Ordering::SeqCst);
                     let cx_notify = cx.clone();
                     let completions_enabled = subagent_completions.load(Ordering::SeqCst);
                     let tasks_enabled = task_completions.load(Ordering::SeqCst);
@@ -2783,6 +2875,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &cx_notify,
                                     &peer_config,
                                     &session_id,
+                                    client_owns_peer_input,
                                 )
                                 .await;
                             }
@@ -2981,6 +3074,7 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_events = Arc::clone(&subagent_events);
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
+                let peer_input_client = Arc::clone(&peer_input_client);
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -3010,6 +3104,7 @@ pub(crate) async fn run_acp_on_transport(
                     let config = config.clone();
                     let commands = session_ops::available_commands();
                     let peer_config = config.clone();
+                    let client_owns_peer_input = peer_input_client.load(Ordering::SeqCst);
                     let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
@@ -3166,6 +3261,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &cx_notify,
                                     &peer_config,
                                     &session_id,
+                                    client_owns_peer_input,
                                 )
                                 .await;
                             }
@@ -3539,6 +3635,9 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_dispatch(
             {
                 let registry = Arc::clone(&registry);
+                // A client that manages cron gets change notifications from
+                // its first cron request on; one watcher per connection.
+                let cron_watching = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
                     Dispatch::Request(message, responder)
                         if message.method() == RUNTIME_STATUS_METHOD =>
@@ -3570,6 +3669,21 @@ pub(crate) async fn run_acp_on_transport(
                             responder.respond_with_result(result)?;
                             Ok(())
                         })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if crate::cron_control::matches(message.method()) =>
+                    {
+                        if !cron_watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            let watcher = cx.clone();
+                            cx.spawn(async move {
+                                crate::cron_control::watch(watcher).await;
+                                Ok(())
+                            })?;
+                        }
+                        let (method, params) = message.into_parts();
+                        responder
+                            .respond_with_result(crate::cron_control::call(&method, params))?;
                         Ok(Handled::Yes)
                     }
                     Dispatch::Request(message, responder)

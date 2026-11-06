@@ -6,6 +6,13 @@
 //! (`<config_home>/crons.json`) so scheduled jobs survive process
 //! restarts. A registry created via [`CronRegistry::open`] write-throughs
 //! every mutation; [`CronRegistry::new`] stays purely in-memory (tests).
+//!
+//! The file is the single source of truth. Several processes open it at
+//! once (the REPL, the ACP server a desktop host spawns, `scode cron`), so
+//! every operation reloads it first and every mutation is a
+//! read-modify-write under an exclusive lock on `<store>.lock`. An
+//! in-memory copy that is only written back would let one process silently
+//! undo another's change.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,6 +44,34 @@ pub enum CronKind {
     /// One-shot at an absolute unix timestamp (`schedule` = the ts as
     /// text). Self-disables after it fires.
     At,
+}
+
+/// Where a fire delivers its message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CronTarget {
+    /// A fresh session in the entry's `cwd`, one per fire.
+    #[default]
+    NewSession,
+    /// The named agent's inbox. A running agent receives it like a peer
+    /// message, steered or queued per [`CronEntry::delivery`]; an agent that
+    /// is not running finds it in its durable inbox when it starts.
+    Agent { name: String },
+}
+
+/// Who created a job, shown to the user and kept through migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CronCreator {
+    #[default]
+    User,
+    Agent,
+}
+
+/// A scheduled fire queues behind a running turn unless the job asks to
+/// steer into it.
+fn default_delivery() -> crate::turn_input::InputDelivery {
+    crate::turn_input::InputDelivery::Queue
 }
 
 /// A scheduled job. New fields carry `#[serde(default)]` so an older
@@ -77,6 +112,12 @@ pub struct CronEntry {
     pub retry_count: u32,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    #[serde(default)]
+    pub target: CronTarget,
+    #[serde(default = "default_delivery")]
+    pub delivery: crate::turn_input::InputDelivery,
+    #[serde(default)]
+    pub created_by: CronCreator,
 }
 
 /// Parameters for a full-fidelity create (CLI / scheduler path). The
@@ -90,6 +131,10 @@ pub struct CronCreateParams {
     pub name: Option<String>,
     pub tz: Option<String>,
     pub cwd: Option<String>,
+    pub target: CronTarget,
+    /// `None` = the default ([`InputDelivery::Queue`](crate::turn_input::InputDelivery)).
+    pub delivery: Option<crate::turn_input::InputDelivery>,
+    pub created_by: CronCreator,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +151,46 @@ struct CronInner {
 }
 
 impl CronInner {
+    /// Replace the in-memory entries with the store's current contents. A
+    /// missing file is an empty store; an unreadable one keeps what is held
+    /// (logged by the caller) rather than dropping every job.
+    fn reload(&mut self) {
+        let Some(path) = &self.store_path else {
+            return;
+        };
+        let doc = match std::fs::read_to_string(path) {
+            Ok(raw) => match serde_json::from_str::<CronStoreDoc>(&raw) {
+                Ok(doc) => doc,
+                Err(_) => return,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => CronStoreDoc::default(),
+            Err(_) => return,
+        };
+        self.entries.clear();
+        self.counter = doc.counter;
+        for entry in doc.crons {
+            self.counter = self.counter.max(entry_counter_hint(&entry));
+            self.entries.insert(entry.cron_id.clone(), entry);
+        }
+    }
+
+    /// Exclusive cross-process lock for a read-modify-write of the store.
+    /// Released when the returned file is dropped (or the process dies).
+    fn lock_store(&self) -> Option<std::fs::File> {
+        let path = self.store_path.as_ref()?;
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("json.lock"))
+            .ok()?;
+        file.lock().ok()?;
+        Some(file)
+    }
+
     /// Write the current entries to the store path, if configured.
     /// Best-effort: a failed write is surfaced to the caller so the
     /// tool/CLI can report it, but never poisons the in-memory state.
@@ -138,7 +223,7 @@ impl CronInner {
 }
 
 /// On-disk shape of `crons.json`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct CronStoreDoc {
     #[serde(default)]
     version: u32,
@@ -162,18 +247,11 @@ impl CronRegistry {
     /// bad store never bricks startup.
     #[must_use]
     pub fn open(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let mut inner = CronInner::default();
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(doc) = serde_json::from_str::<CronStoreDoc>(&raw) {
-                inner.counter = doc.counter;
-                for entry in doc.crons {
-                    inner.counter = inner.counter.max(entry_counter_hint(&entry));
-                    inner.entries.insert(entry.cron_id.clone(), entry);
-                }
-            }
-        }
-        inner.store_path = Some(path);
+        let mut inner = CronInner {
+            store_path: Some(path.into()),
+            ..CronInner::default()
+        };
+        inner.reload();
         Self {
             inner: Arc::new(Mutex::new(inner)),
         }
@@ -192,64 +270,67 @@ impl CronRegistry {
 
     /// Full-fidelity create (CLI / scheduler path).
     pub fn create_full(&self, params: CronCreateParams) -> CronEntry {
-        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
-        inner.counter += 1;
-        let ts = now_secs();
-        let cron_id = format!("cron_{:08x}_{}", ts, inner.counter);
-        let entry = CronEntry {
-            cron_id: cron_id.clone(),
-            schedule: params.schedule,
-            prompt: params.prompt,
-            description: params.description,
-            enabled: true,
-            created_at: ts,
-            updated_at: ts,
-            last_run_at: None,
-            run_count: 0,
-            name: params.name,
-            kind: params.kind,
-            tz: params.tz,
-            cwd: params.cwd,
-            next_run_at: None,
-            last_status: None,
-            last_error: None,
-            retry_count: 0,
-            max_retries: default_max_retries(),
-        };
-        inner.entries.insert(cron_id, entry.clone());
-        let _ = inner.persist();
-        entry
+        self.mutate(|inner| {
+            inner.counter += 1;
+            let ts = now_secs();
+            let cron_id = format!("cron_{:08x}_{}", ts, inner.counter);
+            let entry = CronEntry {
+                cron_id: cron_id.clone(),
+                schedule: params.schedule,
+                prompt: params.prompt,
+                description: params.description,
+                enabled: true,
+                created_at: ts,
+                updated_at: ts,
+                last_run_at: None,
+                run_count: 0,
+                name: params.name,
+                kind: params.kind,
+                tz: params.tz,
+                cwd: params.cwd,
+                next_run_at: None,
+                last_status: None,
+                last_error: None,
+                retry_count: 0,
+                max_retries: default_max_retries(),
+                target: params.target,
+                delivery: params.delivery.unwrap_or_else(default_delivery),
+                created_by: params.created_by,
+            };
+            inner.entries.insert(cron_id, entry.clone());
+            Ok(entry)
+        })
+        .expect("create cannot fail")
     }
 
     pub fn get(&self, cron_id: &str) -> Option<CronEntry> {
-        let inner = self.inner.lock().expect("cron registry lock poisoned");
-        inner.entries.get(cron_id).cloned()
+        self.read(|inner| inner.entries.get(cron_id).cloned())
     }
 
     pub fn list(&self, enabled_only: bool) -> Vec<CronEntry> {
-        let inner = self.inner.lock().expect("cron registry lock poisoned");
-        let mut out: Vec<CronEntry> = inner
-            .entries
-            .values()
-            .filter(|e| !enabled_only || e.enabled)
-            .cloned()
-            .collect();
-        out.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then(a.cron_id.cmp(&b.cron_id))
-        });
-        out
+        self.read(|inner| {
+            let mut out: Vec<CronEntry> = inner
+                .entries
+                .values()
+                .filter(|e| !enabled_only || e.enabled)
+                .cloned()
+                .collect();
+            out.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then(a.cron_id.cmp(&b.cron_id))
+            });
+            out
+        })
     }
 
     pub fn delete(&self, cron_id: &str) -> Result<CronEntry, String> {
-        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
-        let removed = inner
-            .entries
-            .remove(cron_id)
-            .ok_or_else(|| format!("cron not found: {cron_id}"))?;
-        let _ = inner.persist();
-        Ok(removed)
+        self.mutate(|inner| {
+            inner
+                .entries
+                .remove(cron_id)
+                .ok_or_else(|| format!("cron not found: {cron_id}"))
+        })
     }
 
     /// Enable a cron entry. Clears the retry counter so a re-enabled job
@@ -264,30 +345,17 @@ impl CronRegistry {
     }
 
     pub fn set_enabled(&self, cron_id: &str, enabled: bool) -> Result<(), String> {
-        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
-        let entry = inner
-            .entries
-            .get_mut(cron_id)
-            .ok_or_else(|| format!("cron not found: {cron_id}"))?;
-        entry.enabled = enabled;
-        if enabled {
-            entry.retry_count = 0;
-        }
-        entry.updated_at = now_secs();
-        let _ = inner.persist();
-        Ok(())
+        self.modify(cron_id, |entry| {
+            entry.enabled = enabled;
+            if enabled {
+                entry.retry_count = 0;
+            }
+        })
     }
 
     /// Update the computed next-run time (scheduler bookkeeping).
     pub fn set_next_run(&self, cron_id: &str, next_run_at: Option<u64>) -> Result<(), String> {
-        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
-        let entry = inner
-            .entries
-            .get_mut(cron_id)
-            .ok_or_else(|| format!("cron not found: {cron_id}"))?;
-        entry.next_run_at = next_run_at;
-        let _ = inner.persist();
-        Ok(())
+        self.modify(cron_id, |entry| entry.next_run_at = next_run_at)
     }
 
     /// Record a completed fire with its outcome and the recomputed next
@@ -301,23 +369,16 @@ impl CronRegistry {
         error: Option<&str>,
         next_run_at: Option<u64>,
     ) -> Result<(), String> {
-        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
-        let entry = inner
-            .entries
-            .get_mut(cron_id)
-            .ok_or_else(|| format!("cron not found: {cron_id}"))?;
-        let now = now_secs();
-        if status == "ok" || status == "error" {
-            entry.last_run_at = Some(now);
-            entry.run_count += 1;
-            entry.retry_count = 0;
-        }
-        entry.last_status = Some(status.to_owned());
-        entry.last_error = error.map(str::to_owned);
-        entry.next_run_at = next_run_at;
-        entry.updated_at = now;
-        let _ = inner.persist();
-        Ok(())
+        self.modify(cron_id, |entry| {
+            if status == "ok" || status == "error" {
+                entry.last_run_at = Some(entry.updated_at);
+                entry.run_count += 1;
+                entry.retry_count = 0;
+            }
+            entry.last_status = Some(status.to_owned());
+            entry.last_error = error.map(str::to_owned);
+            entry.next_run_at = next_run_at;
+        })
     }
 
     /// Record a cron run (legacy helper): marks an `ok` fire, bumping
@@ -330,27 +391,60 @@ impl CronRegistry {
     /// Increment the busy-retry counter; returns the new count so the
     /// scheduler can compare against `max_retries`.
     pub fn bump_retry(&self, cron_id: &str) -> Result<u32, String> {
-        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
-        let entry = inner
-            .entries
-            .get_mut(cron_id)
-            .ok_or_else(|| format!("cron not found: {cron_id}"))?;
-        entry.retry_count += 1;
-        entry.updated_at = now_secs();
-        let count = entry.retry_count;
-        let _ = inner.persist();
-        Ok(count)
+        self.mutate(|inner| {
+            let entry = inner
+                .entries
+                .get_mut(cron_id)
+                .ok_or_else(|| format!("cron not found: {cron_id}"))?;
+            entry.retry_count += 1;
+            entry.updated_at = now_secs();
+            Ok(entry.retry_count)
+        })
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().expect("cron registry lock poisoned");
-        inner.entries.len()
+        self.read(|inner| inner.entries.len())
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Change one entry under the store lock, stamping `updated_at` first so
+    /// the change can use it as "now".
+    pub fn modify(&self, cron_id: &str, change: impl FnOnce(&mut CronEntry)) -> Result<(), String> {
+        self.mutate(|inner| {
+            let entry = inner
+                .entries
+                .get_mut(cron_id)
+                .ok_or_else(|| format!("cron not found: {cron_id}"))?;
+            entry.updated_at = now_secs();
+            change(entry);
+            Ok(())
+        })
+    }
+
+    fn read<T>(&self, read: impl FnOnce(&CronInner) -> T) -> T {
+        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
+        inner.reload();
+        read(&inner)
+    }
+
+    /// Read-modify-write under the store lock. A failed write is not
+    /// returned: callers report the change, and the next reload shows what
+    /// actually persisted.
+    fn mutate<T>(
+        &self,
+        change: impl FnOnce(&mut CronInner) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut inner = self.inner.lock().expect("cron registry lock poisoned");
+        let _store = inner.lock_store();
+        inner.reload();
+        let out = change(&mut inner)?;
+        let _ = inner.persist();
+        Ok(out)
     }
 }
 
@@ -368,6 +462,80 @@ fn entry_counter_hint(entry: &CronEntry) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn store(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("crons.json")
+    }
+
+    #[test]
+    fn v1_store_loads_with_v2_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            store(&dir),
+            r#"{"version":1,"counter":1,"crons":[{"cron_id":"cron_00000001_1","schedule":"0 * * * *","prompt":"hourly","description":null,"enabled":true,"created_at":1,"updated_at":1,"last_run_at":null,"run_count":0}]}"#,
+        )
+        .unwrap();
+        let entry = CronRegistry::open(store(&dir))
+            .get("cron_00000001_1")
+            .unwrap();
+        assert_eq!(entry.target, CronTarget::NewSession);
+        assert_eq!(entry.delivery, crate::turn_input::InputDelivery::Queue);
+        assert_eq!(entry.created_by, CronCreator::User);
+    }
+
+    #[test]
+    fn create_full_carries_target_delivery_and_creator() {
+        let entry = CronRegistry::new().create_full(CronCreateParams {
+            schedule: "60".into(),
+            kind: CronKind::Every,
+            prompt: "check in".into(),
+            target: CronTarget::Agent {
+                name: "worker".into(),
+            },
+            delivery: Some(crate::turn_input::InputDelivery::Steer),
+            created_by: CronCreator::Agent,
+            ..Default::default()
+        });
+        assert_eq!(
+            entry.target,
+            CronTarget::Agent {
+                name: "worker".into()
+            }
+        );
+        assert_eq!(entry.delivery, crate::turn_input::InputDelivery::Steer);
+        assert_eq!(entry.created_by, CronCreator::Agent);
+    }
+
+    /// Two processes hold the same store. Neither may undo the other's
+    /// change by writing back a stale copy.
+    #[test]
+    fn registries_sharing_a_store_keep_each_others_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = CronRegistry::open(store(&dir));
+        let second = CronRegistry::open(store(&dir));
+        let a = first.create("0 * * * *", "from first", None);
+        let b = second.create("0 * * * *", "from second", None);
+        first.disable(&b.cron_id).unwrap();
+        second.record_run(&a.cron_id).unwrap();
+
+        let reopened = CronRegistry::open(store(&dir));
+        assert_eq!(reopened.len(), 2, "both creates survive");
+        assert!(
+            !reopened.get(&b.cron_id).unwrap().enabled,
+            "first's change to second's job"
+        );
+        assert_eq!(
+            reopened.get(&a.cron_id).unwrap().run_count,
+            1,
+            "second's change to first's job"
+        );
+        assert_ne!(a.cron_id, b.cron_id, "ids stay unique across processes");
+        assert_eq!(
+            first.list(false).len(),
+            2,
+            "a live registry sees the other's job"
+        );
+    }
 
     #[test]
     fn creates_and_retrieves_cron() {

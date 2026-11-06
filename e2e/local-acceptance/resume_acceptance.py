@@ -285,6 +285,10 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert not (abrupt / "envelope.json").exists()
     checkpoint = json.loads((checkpoint_directory(abrupt) / "receipt.json").read_text())
     assert checkpoint["kind"] == "completed-profiles" and set(checkpoint["checks"]) == {"native-workspace"}
+    # Automatic discovery retains the earlier failed attempt across this retry.
+    assert checkpoint["timing"]["started_at"] == abrupt_attempt["started_at"]
+    assert checkpoint["timing"]["first_recorded_started_at"] == failed_attempt["started_at"]
+    assert checkpoint["timing"]["first_recorded_started_at"] < abrupt_attempt["started_at"]
     assert events() == before_events + ["native-v1"]
     assert run("git", "ls-remote", "origin", "refs/notes/local-acceptance") == before_notes
     # A half-written new generation is invisible until its atomic pointer is
@@ -303,7 +307,7 @@ def verify_resume(directory, source, command, host_smoke=False):
     check(recovered, abrupt)
     receipt = json.loads((recovered / "receipt.json").read_text())
     assert receipt["resumed_from"]["profiles"] == ["native-workspace"]
-    assert receipt["timing"]["first_recorded_started_at"] == abrupt_attempt["started_at"]
+    assert receipt["timing"]["first_recorded_started_at"] == checkpoint["timing"]["first_recorded_started_at"]
     assert events() == before_events + ["native-v1", "render-v2"]
     # Preserve the prior on-disk checkpoint format for already-running authors.
     legacy = fixture / "legacy-checkpoint-format"
@@ -320,7 +324,7 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Reusing signed native-workspace" in result.stdout, result.stdout
     receipt = json.loads((automatic / "receipt.json").read_text())
-    assert receipt["timing"]["first_recorded_started_at"] == abrupt_attempt["started_at"]
+    assert receipt["timing"]["first_recorded_started_at"] == checkpoint["timing"]["first_recorded_started_at"]
     assert events() == before_events + ["native-v1", "render-v2", "render-v2", "render-v2"]
     print("PASS: actual abrupt CLI exit keeps completed signed profiles; explicit/automatic recovery skips them, retains first timing and accepts legacy checkpoints; unsigned generations and escaped pointers cannot replace proof")
 

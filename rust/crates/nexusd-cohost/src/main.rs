@@ -54,8 +54,12 @@ fn main() -> Result<()> {
         // business, and an index would silently pick the wrong service the first
         // time that order changed.
         services.retain(|decl| decl.name != managed_agent::SERVICE_NAME);
+        // The same posture that arms the a2a stamping hook decides whether
+        // the agents' peers are verified.
         services.push(managed_agent::service_decl_with_spawn(Arc::new(
-            SudoCodeSpawnAdapter,
+            SudoCodeSpawnAdapter {
+                authenticated_senders: ctx.auth_armed,
+            },
         )));
         services
     })

@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import * as path from 'node:path';
-import type { ScodeAcpConfig, SessionNotification, ScodeQuestionRequest } from '../src/scodeAcp';
+import type { ScodeAcpConfig, SessionNotification, ScodeQuestionRequest, ScodePeerMessage } from '../src/scodeAcp';
 const root = path.resolve(__dirname, '../..');
 const { connectScode, validateScodeQuestionResponse } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/scodeAcp');
 
@@ -78,6 +78,19 @@ async function main(): Promise<void> {
     assert.doesNotThrow(() => validateScodeQuestionResponse(request, { answers: [{ id: 'q', value: 'opaque native value' }] }));
   }
 
+  // A client that owns peer input receives each message instead of the session.
+  const peerMessages: ScodePeerMessage[] = [];
+  const peerOwner = await connectScode({ ...base, onPeerMessage: message => peerMessages.push(message) });
+  try {
+    await peerOwner.request('session/prompt', prompt(peerOwner.sessionId, 'peer-message'));
+    assert.deepEqual(peerMessages.map(message => message.sudocode.a2a.from), ['fixture-peer', 'stranger']);
+    assert.match(peerMessages[0].text, /^<mailbox-message from="fixture-peer">/);
+    assert.equal(peerMessages[0].body, 'hello from fixture-peer');
+  } finally { await peerOwner.close(); }
+  // An older scode would answer every peer itself as well; the owner is refused.
+  await assert.rejects(connectScode({ ...base, scodeArgv: [process.execPath, fixture, 'no-peer-input'],
+    onPeerMessage: () => {}, onError: () => {} }), /client-owned peer input/);
+
   for (const scenario of ['no-load', 'load-fails']) {
     const observed: string[] = [];
     await assert.rejects(connectScode({ ...base, scodeArgv: [process.execPath, fixture, scenario],
@@ -122,6 +135,6 @@ async function main(): Promise<void> {
   }
   assert.equal((await disconnected.exited).code, 17);
   assert.equal(disconnected.closed, true, 'unexpected agent exit must reject pending requests and close ownership');
-  console.log('PASS scode ACP: native load, idle callbacks, permissions, questions, startup failure and bounded stop');
+  console.log('PASS scode ACP: native load, idle callbacks, client-owned peer input, permissions, questions, startup failure and bounded stop');
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

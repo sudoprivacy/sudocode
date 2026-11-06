@@ -29,21 +29,42 @@ export interface CodexMcpConfig {
   endpoint: {port: number; token: string};
 }
 
+/** The initializer and one-time installation consume the same native commands. */
+export function codexMcpInstallationCommands(file: string, entry: string): {
+  native: CodexConnectionConfig; registrationArgv: string[]; nativePreparationArgv: string[];
+} {
+  const {config} = readConfig(file);
+  if (!path.isAbsolute(entry) || !statSync(entry).isFile()) throw new Error('An existing absolute bridge entry is required');
+  return {native:config.native,...nativeCommands(file,config.native.codexArgv,entry)};
+}
+
+function nativeCommands(file:string,codexArgv:string[],entry:string):{
+  registrationArgv:string[];nativePreparationArgv:string[];nativeProxyArgv:string[];userEntryArgv:string[];
+} {
+  return {registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,'--codex','--config',file],
+    nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
+    nativeProxyArgv:[...codexArgv,'app-server','proxy'],
+    userEntryArgv:[process.execPath,entry,'--launch-codex','--config',file,'--']};
+}
+
 /** Prepare the portable private config and the native global-MCP command.
  * Deliberately do not change a running controller, node or global configuration.
  */
-export function prepareCodexMcp(file: string, nativeCommand: string | string[], enrollmentArgv: string[], peers: string[],
-  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist'): {
+export function prepareCodexMcp(file: string, nativeCommand: string | string[] | CodexConnectionConfig, enrollmentArgv: string[], peers: string[],
+  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist', commandEntry?:string): {
     configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[];
-    ownerPreparationArgv?: string[]; userEntryArgv: string[]; installed: false;
+    ownerPreparationArgv?: string[]; userEntryArgv: string[]; installationArgv?:string[]; installed: false;
   } {
-  const codexArgv = typeof nativeCommand === 'string' ? [nativeCommand] : nativeCommand;
-  validateCodexConnectionConfig({codexArgv});
+  const native = typeof nativeCommand === 'string' ? {codexArgv:[nativeCommand]}
+    : Array.isArray(nativeCommand) ? {codexArgv:nativeCommand} : nativeCommand;
+  validateCodexConnectionConfig(native);
+  const codexArgv = native.codexArgv;
+  if(commandEntry!==undefined && (!path.isAbsolute(commandEntry)||/[\0\r\n]/.test(commandEntry)))throw new Error('An absolute ordinary Codex command path is required');
   if(![file,codexArgv[0],entry].every(value=>typeof value==='string'&&path.isAbsolute(value))
       || !statSync(codexArgv[0]).isFile() || !statSync(entry).isFile())throw new Error('Existing absolute native executable/entry and private config paths are required');
   const parent = path.dirname(file);
   mkdirSync(parent,{recursive:true,mode:0o700});
-  const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native:{codexArgv},
+  const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native,
     stateDirectory:path.join(parent,'codex-agents'),auditLog:path.join(parent,'codex-network.jsonl'),
     peers,peerPolicy,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
   // Validate before publishing. This initializer neither runs the enrollment
@@ -52,10 +73,8 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[], 
   writeFileSync(file,JSON.stringify(config,null,2)+'\n',{flag:'wx',mode:0o600});
   return {configFile:file,...(process.platform==='win32'
       ? {ownerPreparationArgv:[process.execPath,entry,'--prepare-codex-owner','--config',file]} : {}),
-    userEntryArgv:[process.execPath,entry,'--launch-codex','--config',file,'--'],
-    nativePreparationArgv:[...codexArgv,'app-server','daemon','start'],
-    nativeProxyArgv:[...codexArgv,'app-server','proxy'],registrationArgv:[...codexArgv,'mcp','add','nexus_scode','--',process.execPath,entry,
-    '--codex','--config',file],installed:false};
+    ...nativeCommands(file,codexArgv,entry),...(commandEntry
+      ?{installationArgv:[process.execPath,entry,'--install-codex','--config',file,'--command-entry',commandEntry]}:{}),installed:false};
 }
 
 /** Validate the same private runtime before preparing its Windows owner action. */

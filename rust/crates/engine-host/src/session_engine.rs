@@ -619,10 +619,18 @@ impl SessionEngine {
     /// Config keys ∪ discovery ids, `current` pinned first — the model list the
     /// seam's `ModelChanged` carries and `/model` (no arg) shows.
     fn available_models(&self, current: &str) -> Vec<String> {
-        let catalog = self.lock_session().runtime.api_client().model_catalog();
-        if let Some(catalog) = &catalog {
+        if let Some(catalog) = self.lock_session().runtime.api_client().model_catalog() {
             catalog.refresh_in_background();
         }
+        self.known_models(current)
+    }
+
+    /// [`Self::available_models`] from what is already known: config keys and
+    /// the cached (or bundled) catalog, without starting a discovery refresh.
+    /// Cheap enough for UI paths such as Tab completion; a refresh starts a
+    /// thread with its own runtime and HTTP client.
+    fn known_models(&self, current: &str) -> Vec<String> {
+        let catalog = self.lock_session().runtime.api_client().model_catalog();
         let _catalog_scope = catalog
             .as_ref()
             .map(runtime::model_discovery::ModelCatalog::enter);
@@ -1540,6 +1548,11 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn available_models(&self) -> Vec<String> {
         vec![self.current_model()]
     }
+    /// The models known without starting discovery (see
+    /// [`SessionEngine::known_models`]).
+    fn known_models(&self) -> Vec<String> {
+        vec![self.current_model()]
+    }
     fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
         None
     }
@@ -1618,6 +1631,9 @@ impl SessionLifecycle for SessionEngine {
     }
     fn available_models(&self) -> Vec<String> {
         SessionEngine::available_models(self, &self.session_model())
+    }
+    fn known_models(&self) -> Vec<String> {
+        SessionEngine::known_models(self, &self.session_model())
     }
     fn session_snapshot(&self) -> runtime::Session {
         self.lock_session().runtime.session().clone()

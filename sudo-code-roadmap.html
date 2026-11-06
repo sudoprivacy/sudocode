@@ -750,8 +750,11 @@ doctests remain. Real native controls poison library and binary units, observe
 the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
 <p><strong>Bound grouped workspace concurrency (2026-11-02).</strong> Complete
-grouped native suites default to eight test processes on hosts with at least
-eight logical CPUs. Smaller/unknown hosts, older ungrouped workspaces, isolated
+grouped native suites retain eight processes on hosts with at least eight CPUs.
+Qualified hosted resume-test source also enables eight from four CPUs, or three
+on macOS after its matched full-suite comparison; old or
+unknown source keeps four. Smaller/unknown
+hosts, older ungrouped workspaces, isolated
 targets and other profiles retain four. An explicit
 <code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
 still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
@@ -764,6 +767,156 @@ with one leaked ACP child was refused; the test now awaits its existing shutdown
 helper. Real native process guards observe overlap and explicit four-worker
 limits. Cases, assertions, retries, deadlines and budgets remain unchanged;
 the guards add no e2e coverage credit.</p>
+<p><strong>Bound Docker readiness (2026-11-05).</strong> Before contract
+validation starts its container/native checks, the real Docker Engine version
+request has a 30-second connection deadline and prints recovery steps on
+failure. This avoids leaving the shared host lease held by an unresponsive
+readiness query. The native enforcement guard runs the real Docker CLI against
+a deliberately stalled local HTTP endpoint and checks ordinary client errors.
+The guard image carries the official Docker CLI pinned by image digest so
+these checks also run inside its nested policy fixtures;
+this adds infrastructure fault coverage, not product journey credit. Healthy
+execution still requires the complete container/native validation matrix.</p>
+<p><strong>Run metadata before the host queue (2026-11-06).</strong>
+The managed hook, manual checks and contract updates execute metadata preflight
+before requesting the existing host lease. Revisions selecting only metadata,
+and runs that restore fully verified signed results, finish without that wait.
+Partial signed checkpoints still wait for and execute each missing check.
+Required output prints <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> with the
+selected and pending checks. One shared helper retains source verification,
+signatures, carried results, checkpoint publication and original start times.
+Real Git, SSH signatures and concurrent processes reproduce both old waits and
+verify metadata success/failure, complete/partial resume, FIFO order, nesting
+and recovery after a holder or waiter exits. These are infrastructure controls;
+product journey counts and acceptance budgets retain their current values.
+A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
+of command execution; this is a measured scheduling incident, not a forecast
+of whole-PR savings.</p>
+<p><strong>Preserve full published dependency tags (2026-11-06).</strong>
+CI preflight compares the complete Nexus manifest tag with its unique lockfile
+tag and commit, preserving prerelease and build suffixes. The earlier extraction
+truncated a real <code>v0.8.29-rc.5</code> manifest to <code>v0.8.29</code>, falsely
+refusing a matching lockfile. The same preflight job executes ten real Bash
+workflow-step scenarios, including correct prereleases and genuine mismatch,
+ambiguity and missing-input refusal. This fixes an infrastructure false failure;
+it adds no product journey coverage and removes no product checks.</p>
+<p><strong>Verify completed publisher reruns (2026-11-06).</strong> Merge-queue
+verification binds the trusted publisher's status to its current attempt's
+completed successful jobs, matching source/run identities and execution times.
+GitHub can keep an earlier failed aggregate after all rerun jobs succeed. Old
+jobs and old success statuses cannot approve a pending or failed current
+attempt. The required gate reports the run and recovery command. Real Git,
+SSH signatures, HTTP and independent gate processes cover the observed stale
+aggregate and refusal cases. This restores delivery after metadata inconsistency;
+it adds infrastructure coverage without changing product case counts.</p>
+<p><strong>Check services before expensive profiles (2026-11-06).</strong>
+After the selected native workspace checks, existing service acceptance
+runs before optimized release builds and rendering/browser measurements.
+A recorded source attempt passed 1,107 native cases and spent 19m 01s building
+release before encountering an existing-Box bootstrap failure. The reordered
+service check offers earlier feedback for that failure pattern; this is not
+a measured whole-population saving. All profile commands, assertions and
+coverage remain required, and the declared signed plan retains its order.
+Required output reports actual execution order. Real Git, SSH signatures and
+child processes prove service failure prevents slow-profile entry, successful
+execution retains every profile, and verified restore repeats no commands.
+The complementary native CI entrypoint shares the local ordering helper;
+<code>CI_NATIVE_EXECUTION_ORDER</code> reports the declared and executed order.
+Real entrypoint/child-process controls verify service failure stops before
+release, success runs all selected checks, and release-only jobs still run.
+These controls add infrastructure coverage without product journey credit.</p>
+<p><strong>Discover signed external outputs (2026-11-06).</strong>
+Explicit <code>--output</code> directories now register one atomic discovery
+reference per source/output. Same-head resume and unchanged-profile carry
+share this discovery path with default outputs. Required output names both the
+reference and original evidence; signatures, source, native host, protected
+commands and original log hashes are still verified before reuse.
+A real historical counterexample had six valid reusable profiles outside the
+registry, and the later run repeated all six. This proves missed discovery;
+it does not establish an average delivery saving.
+<code>index-output --directory PATH --policy-ref origin/main</code> verifies
+older original evidence and registers only its location, without rerunning,
+rewriting or re-signing it. Index I/O failure preserves signed progress and prints
+explicit resume recovery. Real Git, SSH and independent processes cover automatic
+same-head/cross-head reuse, old-evidence adoption, Unicode paths, corrupt
+signatures/logs, invalid references and index I/O failures. These controls add
+infrastructure coverage; product cases and acceptance budgets remain required.</p>
+<p><strong>Count the entire delivery clock (2026-11-06).</strong>
+Through November 5, 20:20 UTC, 26 merged Rust source/build PRs average 51.452
+minutes from final-candidate CI to merge, versus the historical 185.261 minutes
+(27.8%). From the first observed PR CI across all heads, including later repairs,
+validation, idle and queues, the mean is 199.509 versus 1,036.282 minutes (19.3%).
+Initial author-local time remains outside those hosted clocks. Five strictly
+associated local histories add a mean 94.513 initial minutes and average 236.969
+minutes from observed local start to merge; this subset cannot replace the whole
+source cohort. Unknown local histories and unfinished work remain explicit.
+The 10% delivery goal is not met. These rollout observations establish no causal
+speedup for one change; case and coverage counts retain their declared scopes.</p>
+<p><strong>Verify the initial local clock (2026-11-06).</strong>
+For the same 27 merged Rust source/build PRs observed through November 6,
+00:02 UTC, original SSH notes provide a verified local start before the first
+CI trigger for every PR. Earliest available signed local start to merge averages
+<strong>329.648 minutes</strong> (median 247.156); this is a lower bound,
+because earlier manual, unpublished or failed work can be missing. These clocks
+add a mean 127.804 minutes before the first observed CI; overlapping time
+is not summed. Hosted clocks alone average 51.135 minutes from the final candidate
+and 201.843 minutes across all observed candidates. The historical hosted
+baseline cannot establish an exact total-delivery ratio. Missing history and
+unfinished work remain explicit; the one-tenth goal is not met. The audit retains
+all 27 source observations and the earlier five-history snapshot. These code PRs
+merged before the latest worker/scheduling rollouts, whose prospective effect must
+be measured separately.</p>
+<p><strong>Avoid repeated signature-verification computation (2026-11-06).</strong>
+Modern receipts still validate both recorded fingerprint maps against their
+attested original source. Verification skips an overwritten whole-policy hash
+and shares computed maps within one call when the immutable source/policy
+references match. There is no global cache. Legacy whole-hash/bootstrap paths,
+signatures, source/base, required checks and strict refusal conditions remain.
+Two alternating observations per implementation on one original nine-profile
+SSH receipt produced identical verified data and diagnostics: median verification
+was 4.331/2.514 seconds, with 28/19 Git object reads. This component measurement
+does not establish a population or whole-PR speedup. Existing real Git/push/SSH
+compatibility and full Docker/native guards remain required; no product case,
+assertion or deadline is removed.</p>
+<p><strong>Keep older source branches compatible.</strong> The hosted
+increase requires the measured canonical resume-test fingerprint, with CRLF
+normalized. Old or unknown fixtures retain four without merging main. Later
+fixture edits conservatively return to four until qualified; required output
+reports the decision. Existing eight-core behavior remains.</p>
+<p><strong>Retain completed author evidence across the worker default (2026-11-06).</strong>
+Exact protected recipe pairs preserve prior signed workspace results with
+their original commands and worker counts. Local thresholds and explicit
+lower counts remain valid; cases, assertions and deadlines are unchanged.
+Earlier execution is never presented as a new eight-worker run. Original
+source, signatures and logs still verify; further criteria changes and forged
+recipe maps refuse reuse. Pending unmerged origin policies remain refused,
+with origin/current policy and reviewed-merge recovery in required CLI output.
+These controls add no product journey coverage.</p>
+<p><strong>Measure hosted worker throughput (2026-11-06).</strong>
+One ordered 4/8-worker comparison per VM kept identical captured binaries and
+full case inventories. Windows (four CPUs, 1,104 cases) took 600.998/438.974
+seconds; macOS (five CPUs, 1,157 cases) took 868.141/459.716 seconds. Observed
+test-stage reductions were 27.0% and 47.0%. Setup, compilation and queues are
+excluded; this does not establish population or whole-PR savings. Separate full
+eight-worker runs passed on all three platforms. The resume test acknowledges
+live input before recognizing a new completed turn and still requires a fresh
+provider request and identical persisted results. Real native control processes
+verify hosted/local thresholds, small/unknown hosts and explicit lower limits.
+No product case, assertion, retry policy or deadline is removed; these execution
+controls add no product journey coverage.</p>
+<p><strong>Use the measured three-core Mac pool (2026-11-06).</strong>
+On clean protected source <code>cffe7dad</code>, one standard three-core Mac ran
+eight then four workers using identical captured binaries and complete case
+inventories. Both phases passed all 1,161 cases with 76 unchanged ignored cases;
+134 binary hashes stayed identical. Test execution took 649.779/1,000.493 seconds,
+35.1% less at eight. Setup, compilation and queues are excluded; one ordered
+comparison establishes no population or whole-PR saving. Qualified hosted macOS
+now also uses eight from three CPUs. Three-core Windows/Linux, unknown source,
+local thresholds and explicit lower limits retain their existing behavior.
+Real native case processes cover qualified/unqualified three-core Mac selection,
+two-core refusal, local-host behavior and explicit limits. Existing valid signed
+results retain their original commands through exact protected recipe pairs;
+no old result is relabelled. No product case, assertion or deadline is removed.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in
@@ -1784,7 +1937,7 @@ See <a href="docs/acp.md#direct-a2a-requests">the wire contract and test limits<
     <tr><td><code>Agent</code> (sub-agents, 6 presets + auto-background + custom <code>.md</code> agents + auto-summarize + permission_mode=bubble + agent color + backgrounded-agents view)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td><code>pty_task_family</code>, <code>tools::tests::auto_bg_*</code>, <code>tools::tests::{lookup_custom_agent_*,allowed_tools_for_custom_agent_*,build_system_prompt_embeds_custom_agent_body}</code>, <code>runtime::custom_agents::tests</code>, <code>tools::agent_summary_threshold</code> (4 integration tests), <code>pty_presets_e2e</code> + <code>pty_custom_agents</code> + <code>pty_agent_summary</code> (live-only per plan §6.4)</td><td>LLM tool with 6 presets. <code>fork</code> preset rebuilt with real parent-context inheritance. Sync <code>Agent(run_in_background=false)</code> auto-backgrounds after <code>SUDOCODE_AGENT_AUTO_BG_SECS</code>. Custom <code>.md</code>-with-YAML-frontmatter sub-agents parsed from <code>~/.nexus/sudocode/agents/</code> and <code>&lt;cwd&gt;/.sudocode/agents/</code>. Built-in preset names are NOT shadowable. **AgentSummary auto-summarize**: when a sub-agent's final text exceeds <code>SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS</code> (default 8000 chars, <code>0</code> disables), the tools crate writes the FULL text to a <code>&lt;agent_id&gt;.full.md</code> sibling next to the normal output, updates the manifest's <code>resultFullPath</code> field, and spawns a summarizer sub-turn against the same provider config (empty tools, ≤500-word system prompt). Parent's <code>TaskOutput</code> returns the SHORT summary; the parent can still <code>read_file(resultFullPath)</code> for the raw output. Summarizer errors fall back to the full text so a flaky provider never blocks the parent.</td></tr>
     <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_task_family::task_list_on_empty_registry_returns_zero_count</code> (mock) · <code>pty_task_family::task_create_then_list_shows_task_e2e</code> (live) · <code>runtime::task_registry::tests</code></td><td>LLM tool. Background task management. Mock test covers TaskList empty-registry path. Live e2e covers full journey: TaskCreate → TaskList (verify task appears) → clean exit. Unit-covered in <code>runtime::task_registry::tests</code> (create/get/list/stop status transitions).</td></tr>
     <tr><td>Workers (boot, trust, prompt)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td><code>pty_task_family::task_list_on_empty_registry_returns_zero_count</code></td><td>Worker lifecycle via <code>runtime::spawn_task</code> mailbox loop + <code>global_agent_registry</code> completion tracking. Covered indirectly through TaskList PTY test; end-to-end <code>Agent</code>-spawn PTY live e2e scheduled with the fork rebuild.</td></tr>
-    <tr><td>Coordinator Mode (role prompt swap + hard tool gate + task-notification XML + SendMessage live delivery + usage counters + proactive push)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_coordinator_mode::{coordinator_prompt_absent_without_env_var,coordinator_prompt_present_with_env_var}</code>, <code>runtime::coordinator_gate</code>, <code>tools::coordinator_dispatch_guard</code>, <code>runtime::task_notification_render</code>, <code>tools::subagent_multi_turn_loop</code>, <code>pty_send_message_multi_turn</code> (live-only)</td><td>Enabled by <code>SUDOCODE_COORDINATOR_MODE=1</code>. Ports CC-fork's <code>getCoordinatorSystemPrompt()</code> — Research → Synthesis → Impl → Verify workflow. Hard tool-allowlist gate landed: schema-side filter hides write-side tools from the LLM's tool list when coord mode is on; dispatch-side guard catches hallucinated calls with an instructive error. <code>&lt;task-notification&gt;</code> XML output format landed via <code>runtime::coordinator_mode::render_task_notification</code>. **SendMessage plain-text live delivery landed**: <code>run_agent_job_returning_text</code> now runs a multi-turn loop — after each <code>run_turn</code>, exits if aborted; else drains the agent's <code>.sudocode-inbox/&lt;agent_id&gt;.jsonl</code> and, if new envelopes arrived, feeds them into the next turn as a synthetic <code>&lt;mailbox-message from="…"&gt;</code> block. <code>shutdown_request</code> envelopes exit cleanly (no synth turn). Cap at <code>SUDOCODE_SUBAGENT_MAX_MULTI_TURNS</code> (default 16). 6 integration tests in <code>tools/tests/subagent_multi_turn_loop.rs</code> cover: empty mailbox, follow-up message resume with correct XML shape, shutdown_request early exit, abort-signal preempts drain, multiple envelopes collapse to one synth turn, cap enforcement.</td></tr>
+    <tr><td>Coordinator Mode (role prompt swap + hard tool gate + task-notification XML + SendMessage live delivery + usage counters + proactive push)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_coordinator_mode::{coordinator_prompt_absent_without_env_var,coordinator_prompt_present_with_env_var}</code>, <code>runtime::coordinator_gate</code>, <code>tools::coordinator_dispatch_guard</code>, <code>runtime::task_notification_render</code>, <code>tools::subagent_multi_turn_loop</code>, <code>pty_send_message_multi_turn</code> (live-only)</td><td>Enabled by <code>SUDOCODE_COORDINATOR_MODE=1</code>. Ports CC-fork's <code>getCoordinatorSystemPrompt()</code> — Research → Synthesis → Impl → Verify workflow. Hard tool-allowlist gate landed: schema-side filter hides write-side tools from the LLM's tool list when coord mode is on; dispatch-side guard catches hallucinated calls with an instructive error. <code>&lt;task-notification&gt;</code> XML output format landed via <code>runtime::coordinator_mode::render_task_notification</code>. **SendMessage plain-text live delivery landed**: <code>run_agent_job_returning_text</code> now runs a multi-turn loop — after each <code>run_turn</code>, exits if aborted; else drains the agent's conversation transcripts (<code>runtime::mailbox::Mailbox::read_pending</code>) and, if new envelopes arrived, feeds them into the next turn as a synthetic <code>&lt;mailbox-message from="…"&gt;</code> block. <code>shutdown_request</code> envelopes exit cleanly (no synth turn). Cap at <code>SUDOCODE_SUBAGENT_MAX_MULTI_TURNS</code> (default 16). 6 integration tests in <code>tools/tests/subagent_multi_turn_loop.rs</code> cover: empty mailbox, follow-up message resume with correct XML shape, shutdown_request early exit, abort-signal preempts drain, multiple envelopes collapse to one synth turn, cap enforcement.</td></tr>
     <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td data-priority="must-have">must-have</td><td data-status="shipped">Shipped</td><td>—</td><td>Complete cron shipped: persistent scheduler (cron/every/at + IANA tz), <code>scode cron</code> CLI (add/list/remove/enable/disable/run/tick/daemon) + REPL <code>/cron</code>, firing via the in-process agent-run path (same as <code>scode prompt</code>), <code>tools::run_cron_*</code> on the persistent store, with behavioral PTY live coverage.<br><br><strong>Host coherence (short term, shipped):</strong> a host that owns scheduling — sudowork runs its own scheduler and never ticks scode's <code>crons.json</code> — sets <code>SUDOCODE_DISABLE_CRON_TOOLS=1</code> when it spawns scode, so the agent can't create a cron that persists but never fires (an orphan). Only the agent-facing tools are hidden; the <code>scode cron</code> CLI is untouched. Chosen because sudowork and sudocode each have production users today.<br><br><strong>Long term (target):</strong> collapse to ONE scheduler — sudowork's scheduling delegates entirely to scode's cron (sudowork keeps its UI/conversation/enterprise layer and drives <code>scode cron tick</code>; its <code>[CRON_CREATE]</code> agent protocol and SQLite <code>cron_jobs</code> retire). Then the tool gate is removed and sudowork becomes a true wrapper/UI. Per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
       <tr><td>Sub-agents &mdash; 6 built-in presets end-to-end (<code>general-purpose</code>, <code>Explore</code>, <code>Plan</code>, <code>Verification</code>, <code>scode-guide</code>, <code>statusline-setup</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_presets_e2e::preset_{general_purpose,explore,plan,verification,scode_guide,statusline_setup}_e2e</code></td><td>Each preset PTY-runs the FULL Agent tool round-trip against live sudorouter (6/6 PASS, 2026-07-17, avg ~15s/preset).</td></tr>
     <tr><td>Sub-agent <code>permission_mode="bubble"</code> &mdash; escalation prompts surface on parent's terminal</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_agent_permission_bubble::permission_prompt_from_subagent_bubbles_to_parent_terminal</code></td><td>Sub-agent's <code>permission_mode="bubble"</code> param plumbs end-to-end; sentinel <code>BUBBLE_TEST_DONE</code> surfaces in parent's report (verified 2026-07-17).</td></tr>
@@ -3059,37 +3212,22 @@ namespace for the new TUI work.</p>
 <h4>No alternate-screen / full-screen TUI mode — by rule</h4>
 
 <section id="prompt-viewport-experiment">
-<h5>Bounded inline prompt viewport experiment — 2026-10-27</h5>
-<p><strong>Experimental; off by default.</strong> Reviewing an
-earlier answer while composing a queued follow-up currently moves the editor out
-of view in native terminal scrollback. Evaluate an opt-in inline conversation
-viewport with a fixed composer, a
-contextual prompt header and shaded user messages. The normal REPL, pipes, ACP,
-classic input and worker attach/detach retain their existing behavior. This is
-not approval for dashboards, split panes, a new renderer dependency or a
-<code>--tui</code> command.</p>
+<h5>Native inline prompt surfaces — 2026-10-31</h5>
+<p><strong>Experimental; off by default.</strong> The existing
+<code>promptViewport</code> setting now applies matching shading to the live
+editor and committed prompts. The fixed conversation viewport was removed after
+Windows VS Code testing exposed independent wheel and native scrollbar positions.
+All output uses the existing inline history writer, and the terminal owns
+scrolling and selection.</p>
 <ul>
-  <li>Use the existing iocraft renderer and engine boundary. Register the
-  temporary <code>promptViewport</code> experiment in the existing registry.
-  Stay in the main terminal buffer and reuse its cell-range damage writer;
-  do not enter alternate-screen mode.</li>
-  <li>Keep immutable rendered history in a disposable disk spool, with bounded
-  visible-row caches. Typing must not scan or rewrap accumulated history.</li>
-  <li>Retain unchanged renderer layout and prepared styled-text lines, with
-  explicit cache limits and invalidation for content, styles and width.
-  Measure the enabled feature before and after optimization, as well as
-  enabled/disabled costs; preserve the four visual effects and existing budgets.</li>
-  <li>Anchor reading to content while new output arrives. Keep prompt headers
-  presentation-only and preserve the draft through scroll and resize.</li>
-  <li>Reuse semantic prompt styling and the existing Unicode/ANSI layout code;
-  do not introduce another conversation formatter or model request.</li>
-  <li>Verify wheel/keyboard navigation, selection/copy, Unicode, streaming,
-  terminal handoff, resume and shutdown through real PTYs. Preserve failed
-  measurements. Existing default-mode performance CI does not establish the
-  experiment's performance: compare explicit enabled/disabled workloads too.</li>
-  <li>Do not graduate or enable this viewport by default until terminal behavior,
-  memory and responsiveness meet the existing budgets. Back-to-bottom is a
-  secondary reading-state control.</li>
+  <li>Keep one output path, one replay formatter and one prompt style. Styling
+  must not introduce another transcript store or input/navigation owner.</li>
+  <li>Verify native history growth, actual scrollbar dragging and wheel scrolling,
+  selection, Unicode drafts, resize and resume through real PTYs and browser
+  terminal interaction. Retain enabled/disabled performance budgets.</li>
+  <li>A composer and prompt header that remain visible during native scrollback
+  require terminal-host integration. They are deferred until the host can share
+  its scroll position.</li>
 </ul>
 </section>
 

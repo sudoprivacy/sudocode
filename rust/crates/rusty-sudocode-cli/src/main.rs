@@ -2595,6 +2595,7 @@ fn show_effort_selection(
             custom_input_hint: None,
             force_fuzzy_select: true,
             back_value: None,
+            initial_value: None,
         },
         items,
         move |level, cli, out| {
@@ -2648,7 +2649,12 @@ impl IocraftQuestionPrompter {
         }
     }
 
-    fn show_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
+    fn show_field(
+        &self,
+        request: &runtime::QuestionPromptRequest,
+        index: usize,
+        earlier: Option<&runtime::QuestionPromptAnswer>,
+    ) {
         let field = &request.fields[index];
         self.ui.show_question(repl_ui::QuestionPromptView {
             presentation: request.presentation.clone(),
@@ -2671,7 +2677,8 @@ impl IocraftQuestionPrompter {
             allow_custom_input: field.allow_custom_input,
             custom_input_hint: field.custom_input_hint.clone(),
             force_fuzzy_select: false,
-            back_value: None,
+            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
+            initial_value: earlier.map(|answer| answer.value.clone()),
         });
     }
 
@@ -2742,20 +2749,28 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
         let this = self.clone();
         let request = request.clone();
         Box::pin(async move {
-            let mut answers = Vec::with_capacity(request.fields.len());
-            for index in 0..request.fields.len() {
+            // Answers are kept per question so going back restores them.
+            let mut answers: Vec<Option<runtime::QuestionPromptAnswer>> =
+                vec![None; request.fields.len()];
+            let mut index = 0;
+            while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
-                this.show_field(&request, index);
+                this.show_field(&request, index, answers[index].as_ref());
                 let raw = if let Ok(answer) = rx.await {
                     answer.trim().to_string()
                 } else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };
-                answers.push(Self::answer_for_field(&request.fields[index], raw));
+                if raw == repl_ui::QUESTION_BACK {
+                    index = index.saturating_sub(1);
+                    continue;
+                }
+                answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
+                index += 1;
             }
             this.ui.clear_question();
-            Ok(answers)
+            Ok(answers.into_iter().flatten().collect())
         })
     }
 }
@@ -3313,20 +3328,13 @@ fn run_repl_iocraft_dispatch(
     // Banner + restored history: on resume the iocraft REPL must replay the
     // session's messages to scrollback, not just the banner — otherwise a resumed conversation looks empty. Both come from
     // one println in spawn_repl_ui, before raw mode.
-    let (banner, startup_prompts) = {
+    let banner = {
         let banner = cli.startup_banner();
-        let (history, prompts) = cli.render_restored_scrollback();
+        let history = cli.render_restored_scrollback();
         if history.is_empty() {
-            (banner, Vec::new())
+            banner
         } else {
-            let offset = banner.len() + 1;
-            (
-                format!("{banner}\n{history}"),
-                prompts
-                    .into_iter()
-                    .map(|position| position + offset)
-                    .collect(),
-            )
+            format!("{banner}\n{history}")
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
@@ -3377,14 +3385,17 @@ fn run_repl_iocraft_dispatch(
                 .dequeue_all_human()
         })
     };
+    let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
-        startup_prompts,
         seed_todos,
         input_history,
         Some(dequeue_hook),
+        Arc::clone(&completions),
     );
+    cli.completions = Some(completions);
+    cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
@@ -3517,7 +3528,17 @@ fn run_repl_iocraft_dispatch(
     // an inbox nothing is polling. `attach` reuses the session's selected
     // mailbox, including a pending binding that this receiver retries.
     let mailbox_abort = runtime::HookAbortSignal::new();
-    let mailbox_receiver = engine_host::peer::attach(&session_agent_name).spawn_receiver(
+    let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
+    // Whether this namespace authenticated the senders it delivers.
+    let peer_verified = peer.mailbox().authenticates_senders();
+    let mailbox_receiver = peer.spawn_receiver(
         mailbox_abort.clone(),
         peer_turn_sink(
             coord_tx.clone(),
@@ -3618,7 +3639,7 @@ fn run_repl_iocraft_dispatch(
                             input_queue::QueuedKind::Human => {
                                 echo_submit_to_scrollback(&repl_output, &echo.display);
                             }
-                            input_queue::QueuedKind::Peer => {
+                            input_queue::QueuedKind::Peer | input_queue::QueuedKind::Scheduled => {
                                 echo_peer_to_scrollback(&repl_output, &echo.display);
                             }
                             input_queue::QueuedKind::Subagent
@@ -3650,14 +3671,18 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
-                        let prompt =
-                            runtime::agent_mailbox::compose_next_turn_from_envelopes(&[msg]);
-                        (
-                            prompt.clone(),
-                            prompt,
-                            input_queue::QueuedKind::Peer,
-                            Some(ack),
-                        )
+                        // A scheduled job's message arrives through the same
+                        // inbox; only its origin differs.
+                        let kind = if msg.kind == runtime::agent_mailbox::kinds::SCHEDULED {
+                            input_queue::QueuedKind::Scheduled
+                        } else {
+                            input_queue::QueuedKind::Peer
+                        };
+                        let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
+                            &[msg],
+                            peer_verified,
+                        );
+                        (prompt.clone(), prompt, kind, Some(ack))
                     }
                     CoordinatorEvent::SubagentCompleted { prompt, display } => {
                         (prompt, display, input_queue::QueuedKind::Subagent, None)
@@ -3892,6 +3917,7 @@ fn run_repl_iocraft_dispatch(
                                     custom_input_hint: Some("or type a model name".to_string()),
                                     force_fuzzy_select: false,
                                     back_value: None,
+                                    initial_value: None,
                                 },
                                 models,
                                 move |model_name, cli, out| {
@@ -4010,6 +4036,7 @@ fn run_repl_iocraft_dispatch(
                                     )
                             {
                                 repl_ui_cmd.begin_turn();
+                                cli_lock.refresh_completions();
                             }
                             repl_ui_cmd.set_cache_tip(cli_lock.cache_ttl_tip());
                             true
@@ -4332,6 +4359,8 @@ struct LiveCli {
     /// `println!`. Set by the iocraft REPL dispatch so slash command output
     /// goes through `split_for_iocraft` and renders correctly in raw mode.
     iocraft_output: Option<repl_ui::OutputSender>,
+    /// What the iocraft REPL's Tab offers for slash-command arguments.
+    completions: Option<Arc<Mutex<commands::CompletionContext>>>,
 }
 
 fn run_acp_server(
@@ -4683,6 +4712,7 @@ impl LiveCli {
             shared_queue_mode: None,
             is_repl: false,
             iocraft_output: None,
+            completions: None,
         })
     }
 
@@ -4745,21 +4775,14 @@ impl LiveCli {
     /// Render the restored conversation history to a scrollback string, or an
     /// empty string when there is none (a fresh session), through the shared
     /// `render_messages`, so a resumed session's history stays visible.
-    fn render_restored_scrollback(&self) -> (String, Vec<usize>) {
+    fn render_restored_scrollback(&self) -> String {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
-            return (String::new(), Vec::new());
+            return String::new();
         }
         let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
         let renderer = render::TerminalRenderer::new();
-        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
-            cli::format::render_messages_with_prompts(session.messages(), term_width, &renderer)
-        } else {
-            (
-                render_messages(session.messages(), term_width, &renderer),
-                Vec::new(),
-            )
-        }
+        render_messages(session.messages(), term_width, &renderer)
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the
@@ -5143,6 +5166,37 @@ impl LiveCli {
         )
     }
 
+    /// Refresh what Tab offers for slash-command arguments, at startup,
+    /// between turns and after a command changes the session or model. Models
+    /// come from what is already known (no discovery refresh); sessions are
+    /// listed only when Tab completes a session argument.
+    fn refresh_completions(&self) {
+        let Some(shared) = &self.completions else {
+            return;
+        };
+        let active = self.lifecycle.session_handle().id;
+        let sessions: commands::ValueList = Arc::new(move || {
+            let mut ids = vec![active.clone()];
+            ids.extend(
+                list_managed_sessions()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|session| session.id)
+                    .filter(|id| *id != active)
+                    .take(20),
+            );
+            ids
+        });
+        let context = commands::CompletionContext {
+            models: self.lifecycle.known_models(),
+            sessions: Some(sessions),
+            cwd: env::current_dir().unwrap_or_default(),
+        };
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context;
+    }
+
     /// Show lifecycle usage in the dynamic status slot, or plain output.
     fn print_turn_status_line(
         &self,
@@ -5190,6 +5244,7 @@ impl LiveCli {
             // A turn can switch branches (its tools run git), so refresh here.
             ui.set_workspace_position(workspace_position());
         }
+        self.refresh_completions();
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
             // status line is deliberately NOT echoed to scrollback: the

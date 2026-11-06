@@ -64,6 +64,90 @@ fn tab_completion_shows_slash_commands() {
     let _ = sess.expect_eof();
 }
 
+/// Tab completes a command's arguments from its usage hint and from runtime
+/// values: a literal choice, a subcommand followed by a session id, a file in
+/// the working directory, and a model.
+#[test]
+fn tab_completion_completes_arguments() {
+    let env = TestEnv::new("tab-complete-args");
+    std::fs::write(env.workspace_root().join("notes-export.md"), "fixture")
+        .expect("write completion fixture");
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "REPL input ready");
+
+    // The screen trims the input line, so a trailing space shows only through
+    // what the next Tab completes.
+    let complete = |sess: &mut pty_expect::PtySession,
+                    typed: &str,
+                    tabs: usize,
+                    done: &dyn Fn(&str) -> bool,
+                    what: &str| {
+        sess.send(typed).expect("type partial command");
+        common::expect_screen(
+            sess,
+            |screen| common::input_line_of(screen) == typed.trim(),
+            common::DEFAULT_TIMEOUT,
+            "partial command reached the editor",
+        );
+        for _ in 0..tabs {
+            sess.send("\t").expect("send Tab");
+        }
+        common::expect_screen(
+            sess,
+            |screen| done(&common::input_line_of(screen)),
+            common::DEFAULT_TIMEOUT,
+            what,
+        );
+        sess.send_ctrl('u').expect("clear the input line");
+        common::expect_screen(
+            sess,
+            |screen| common::input_line_of(screen).is_empty(),
+            common::DEFAULT_TIMEOUT,
+            "input line cleared",
+        );
+    };
+
+    complete(
+        &mut sess,
+        "/permissions wo",
+        1,
+        &|line| line == "/permissions workspace-write",
+        "a literal choice from the usage hint",
+    );
+    complete(
+        &mut sess,
+        "/session sw",
+        2,
+        &|line| {
+            line.strip_prefix("/session switch ")
+                .is_some_and(|id| !id.is_empty() && !id.contains(' '))
+        },
+        "the subcommand, then a session id from the session store",
+    );
+    complete(
+        &mut sess,
+        "/export notes-ex",
+        1,
+        &|line| line == "/export notes-export.md",
+        "a file in the working directory",
+    );
+    complete(
+        &mut sess,
+        "/model ",
+        1,
+        &|line| {
+            line.strip_prefix("/model ")
+                .is_some_and(|model| !model.is_empty())
+        },
+        "a model the session can switch to",
+    );
+
+    sess.send_ctrl('c').expect("cancel");
+    std::thread::sleep(Duration::from_millis(100));
+    sess.send_ctrl('c').expect("exit");
+    let _ = sess.expect_eof();
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 2. /model switches model in REPL
 // ──────────────────────────────────────────────────────────────────────

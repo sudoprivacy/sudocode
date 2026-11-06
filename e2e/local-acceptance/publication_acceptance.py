@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 
 
@@ -46,9 +47,10 @@ def verify_publication(directory, work, clean_environment):
     # Stage protected code in the verifier; candidate code is fetched/read only.
     for name in ["gate.py", "publish.py"]:
         shutil.copy2(SOURCE / ".github/local-acceptance" / name, verifier / ".github/local-acceptance" / name)
+    shutil.copy2(SOURCE / ".github/scripts/check_pr_history.py", verifier / ".github/scripts/check_pr_history.py")
     pull = {"number": 1, "draft": False, "head": {"sha": head, "repo": {"full_name": "acceptance/fixture"}},
             "base": {"sha": trusted, "ref": "main", "repo": {"full_name": "acceptance/fixture"}}}
-    state = {"runs": {}, "posts": [], "proof": "success"}
+    state = {"runs": {}, "posts": [], "proof": "success", "statuses": [], "publisher_jobs": None}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -72,11 +74,12 @@ def verify_publication(directory, work, clean_environment):
             elif path == prefix + "/actions/workflows/local-acceptance.yml/runs":
                 self.reply({"workflow_runs": list(state["runs"].values())})
             elif path.startswith(prefix + "/actions/runs/") and path.endswith("/jobs"):
-                self.reply({"jobs": [{"name": "Verify local acceptance", "conclusion": state["proof"]}]})
+                self.reply({"jobs": state["publisher_jobs"] if state["publisher_jobs"] is not None else
+                            [{"name": "Verify local acceptance", "conclusion": state["proof"]}]})
             elif path.startswith(prefix + "/actions/runs/"):
                 self.reply(state["runs"][int(path.rsplit("/", 1)[-1])])
             elif path.endswith("/statuses"):
-                self.reply([])
+                self.reply(state["statuses"])
             else:
                 self.reply({"message": "Unknown fixture resource", "path": path}, 404)
 
@@ -112,15 +115,19 @@ def verify_publication(directory, work, clean_environment):
     cases = []
 
     def invoke(label, source, runs, *, expected=None, success=True, proof="success", attempt=1,
-               gate_only=False, verified_base=None):
-        state.update(runs={item["id"]: item for item in runs}, posts=[], proof=proof)
+               gate_only=False, verified_base=None, merge_group=False, statuses=None,
+               publisher_jobs=None, refusal=None):
+        state.update(runs={item["id"]: item for item in runs}, posts=[], proof=proof,
+                     statuses=statuses or [], publisher_jobs=publisher_jobs)
         event = output / (label + ".json")
         payload = ({"pull_request": pull} if gate_only else
                    {"workflow_run": {"id": source, "run_attempt": attempt}})
+        if merge_group:
+            payload = {"merge_group": {"head_sha": head, "base_sha": trusted}}
         payload["repository"] = {"full_name": "acceptance/fixture", "description": "Metadata ❯ 中文"}
         event.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run([sys.executable, str(bootstrap), f"http://127.0.0.1:{server.server_port}",
-                                 str(verifier / ".github/local-acceptance" / ("gate.py" if gate_only else "publish.py"))], cwd=verifier,
+                                 str(verifier / ".github/local-acceptance" / ("gate.py" if gate_only or merge_group else "publish.py"))], cwd=verifier,
             env={**clean_environment, "GITHUB_REPOSITORY": "acceptance/fixture", "GITHUB_EVENT_PATH": str(event),
                  "GITHUB_OUTPUT": str(output / (label + ".outputs")), "GITHUB_RUN_ID": "300",
                  "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "LC_ALL": "C", "LANG": "C",
@@ -135,6 +142,8 @@ def verify_publication(directory, work, clean_environment):
             assert encodings[0]["encoding"].lower().replace("-", "") not in {"utf8", "cp65001"}, encodings
         print("PUBLICATION_ENV_CASE=" + json.dumps({"case": label, **encodings[0]}), flush=True)
         assert (result.returncode == 0) == success, result.stdout.decode() + result.stderr.decode()
+        if refusal is not None:
+            assert refusal in result.stderr.decode(), result.stderr.decode()
         assert [item["state"] for item in state["posts"]] == ([] if expected is None else [expected]), state
         if verified_base is not None:
             outputs = (output / (label + ".outputs")).read_text(encoding="utf-8")
@@ -161,6 +170,52 @@ def verify_publication(directory, work, clean_environment):
         assert "Invalid SSH acceptance signature" in refusal, refusal
         git("update-ref", "refs/notes/local-acceptance", original_note_ref, cwd=origin)
         invoke("restored-real-note-passes", 104, [run(104)], expected="success")
+        publisher_run = {"id": 300, "path": ".github/workflows/local-acceptance-publish.yml",
+                         "event": "workflow_run", "head_sha": trusted, "run_attempt": 2,
+                         "status": "completed", "conclusion": "failure"}
+        published = {"context": "Local acceptance", "state": "success",
+                     "creator": {"login": "github-actions[bot]"},
+                     "target_url": "https://github.com/acceptance/fixture/actions/runs/300",
+                     "created_at": "2026-11-05T16:42:17Z"}
+        successful_job = {"id": 302, "run_id": 300, "run_attempt": 2, "head_sha": trusted,
+                          "status": "completed", "conclusion": "success",
+                          "started_at": "2026-11-05T16:41:59Z", "completed_at": "2026-11-05T16:42:23Z"}
+        old_job = {**successful_job, "id": 301, "run_attempt": 1, "conclusion": "failure"}
+
+        def queue(label, *, run_changes=None, job_changes=None, status_changes=None,
+                  jobs=None, success=False, refusal="Acceptance publisher attempt"):
+            invoke(label, 300, [{**publisher_run, **(run_changes or {})}], merge_group=True,
+                   statuses=[{**published, **(status_changes or {})}],
+                   publisher_jobs=(jobs if jobs is not None else [old_job, {**successful_job, **(job_changes or {})}]),
+                   success=success, refusal=None if success else refusal)
+
+        queue("queue-stale-failed-aggregate-current-jobs-success", success=True)
+        queue("queue-stale-queued-aggregate-current-jobs-success",
+              run_changes={"status": "queued", "conclusion": None}, success=True)
+        queue("queue-first-attempt-success", run_changes={"run_attempt": 1, "conclusion": "success"}, success=True)
+        queue("queue-first-attempt-publishing", run_changes={"run_attempt": 1, "conclusion": None}, success=True)
+        queue("queue-current-failed-job-refused", job_changes={"conclusion": "failure"})
+        queue("queue-success-aggregate-failed-current-job-refused",
+              run_changes={"conclusion": "success"}, job_changes={"conclusion": "failure"})
+        queue("queue-another-current-job-failed-refused",
+              jobs=[successful_job, {**successful_job, "id": 303, "conclusion": "failure"}])
+        queue("queue-current-pending-job-refused", job_changes={"status": "in_progress", "conclusion": None})
+        queue("queue-current-jobs-missing-refused", jobs=[old_job])
+        queue("queue-newer-job-attempt-refused", jobs=[successful_job, {**successful_job, "run_attempt": 3}])
+        queue("queue-job-wrong-source-refused", job_changes={"head_sha": head})
+        queue("queue-job-wrong-run-refused", job_changes={"run_id": 301})
+        queue("queue-old-status-refused", status_changes={"created_at": "2026-11-05T16:39:22Z"},
+              refusal="Acceptance status does not belong")
+        queue("queue-malformed-status-time-refused", status_changes={"created_at": "invalid"},
+              refusal="Acceptance status does not belong")
+        queue("queue-status-after-job-refused", status_changes={"created_at": "2026-11-05T16:42:24Z"},
+              refusal="Acceptance status does not belong")
+        queue("queue-wrong-workflow-refused", run_changes={"path": ".github/workflows/other.yml"},
+              refusal="not produced by the trusted publisher")
+        queue("queue-wrong-event-refused", run_changes={"event": "push"},
+              refusal="not produced by the trusted publisher")
+        queue("queue-first-attempt-failed-refused", run_changes={"run_attempt": 1},
+              refusal="not produced by the trusted publisher")
         # Model a protected main that has incorporated an ancestor of this PR,
         # while the PR API still reports its old base. Run/sign real commands
         # against that actual new base; do not edit or re-sign an old receipt.
@@ -193,6 +248,146 @@ def verify_publication(directory, work, clean_environment):
         server.shutdown()
         thread.join()
         server.server_close()
+    verify_note_reference_race(output, clean_environment)
+    cases.append({"case": "real-notes-reference-race-and-stable-refusal", "exit_code": 0})
     (output / "result.json").write_text(json.dumps({"status": "PASS", "cases": cases,
         "scope": "Actual publisher child processes and loopback HTTP API with real Git fetches and SSH notes. Candidate code is not run; no live GitHub authority or product journey credit."}, indent=2) + "\n", encoding="utf-8")
     print("PASS: draft/ready ordering, frozen protected base, current ownership and real SSH publisher refusal")
+
+
+def verify_note_reference_race(directory, clean_environment):
+    """Advance a real bare ref after push negotiation but before its transaction."""
+    output = directory / "notes-reference-race"
+    output.mkdir()
+    origin, work = output / "origin.git", output / "work"
+    git_environment = {**clean_environment, "LC_ALL": "C", "LANG": "C"}
+
+    def git(*args, cwd=work, data=None):
+        return subprocess.check_output(["git", *map(str, args)], cwd=cwd,
+            env=git_environment, input=data, stderr=subprocess.PIPE).decode().strip()
+
+    git("init", "--quiet", "--bare", origin, cwd=output)
+    git("init", "--quiet", "--initial-branch=main", work, cwd=output)
+    git("config", "user.name", "Notes race fixture")
+    git("config", "user.email", "notes-race@fixture.invalid")
+    git("config", "commit.gpgsign", "false")
+    (work / "input").write_text("baseline\n", encoding="utf-8")
+    git("add", "input")
+    git("commit", "--quiet", "-m", "Baseline")
+    baseline_head = git("rev-parse", "HEAD")
+    (work / "input").write_text("candidate\n", encoding="utf-8")
+    git("commit", "--quiet", "-am", "Candidate")
+    head = git("rev-parse", "HEAD")
+    git("remote", "add", "origin", origin)
+    git("push", "--quiet", "origin", "HEAD:refs/heads/main")
+    notes_ref = "refs/notes/local-acceptance"
+    git("notes", "--ref=" + notes_ref, "add", "-m", "baseline note", baseline_head)
+    previous = git("rev-parse", notes_ref)
+    git("push", "--quiet", "origin", notes_ref)
+    prepared = "refs/notes/prepared-race"
+    git("update-ref", prepared, previous)
+    git("notes", "--ref=" + prepared, "add", "-f", "-m", "concurrent winner", baseline_head)
+    other = {"signer": "concurrent-fixture", "payload": "opaque concurrent fixture data"}
+    git("notes", "--ref=" + prepared, "add", "-m",
+        json.dumps({"version": 1, "attestations": {other["signer"]: other}}), head)
+    concurrent = git("rev-parse", prepared)
+    git("push", "--quiet", "origin", prepared)
+
+    # The hook only holds the transaction. The parent advances the actual bare
+    # ref after receive-pack advertised its old value; no Git result is mocked.
+    hook = output / "receive-barrier.py"
+    hook.write_text(
+        'import json,os,sys,time\nfrom pathlib import Path\n'
+        'root=Path(os.environ["SCODE_NOTES_RACE_DIRECTORY"])\n'
+        'updates=sys.stdin.read().splitlines()\n'
+        'if any(row.endswith(" refs/notes/local-acceptance") for row in updates):\n'
+        ' try: descriptor=os.open(root/"claimed",os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\n'
+        ' except FileExistsError: pass\n'
+        ' else:\n'
+        '  os.close(descriptor)\n'
+        '  ready=root/"ready.tmp"\n'
+        '  ready.write_text(json.dumps(updates),encoding="utf-8");ready.replace(root/"ready.json")\n'
+        '  deadline=time.monotonic()+90\n'
+        '  while not (root/"release").exists():\n'
+        '   if time.monotonic()>=deadline: raise SystemExit("receive barrier expired")\n'
+        '   time.sleep(0.01)\n', encoding="utf-8")
+    receive = origin / "hooks/pre-receive"
+    receive.write_text('#!/bin/sh\nexec "$SCODE_NOTES_RACE_PYTHON" "$SCODE_NOTES_RACE_HOOK"\n',
+                       encoding="utf-8")
+    receive.chmod(0o755)
+    git("config", "core.hooksPath", origin / "hooks", cwd=origin)
+    bootstrap = output / "publisher.py"
+    bootstrap.write_text(
+        'import importlib.util,json,sys\nfrom pathlib import Path\n'
+        'spec=importlib.util.spec_from_file_location("actual_notes_publisher",sys.argv[1])\n'
+        'module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n'
+        'module.ROOT=Path(sys.argv[2]);original=module.git\n'
+        'def observe(*args,**kwargs):\n'
+        ' result=original(*args,**kwargs)\n'
+        ' if args[0]=="push":\n'
+        '  with Path(sys.argv[4]).open("a",encoding="utf-8") as stream:\n'
+        '   stream.write(json.dumps({"args":args,"exit_code":result.returncode,"stderr":result.stderr.decode(errors="replace")})+"\\n")\n'
+        ' return result\n'
+        'module.git=observe\n'
+        'module.publish(sys.argv[3],{"signer":"race-fixture","payload":"opaque fixture data; not an acceptance attestation"},"origin")\n',
+        encoding="utf-8")
+    environment = {**git_environment,
+        "SCODE_NOTES_RACE_DIRECTORY": str(output),
+        "SCODE_NOTES_RACE_PYTHON": Path(sys.executable).as_posix(),
+        "SCODE_NOTES_RACE_HOOK": hook.as_posix()}
+    process = subprocess.Popen([sys.executable, str(bootstrap),
+        str(SOURCE / ".github/scripts/local_acceptance.py"), str(work), head,
+        str(output / "actual-pushes.jsonl")], cwd=work, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 90
+        while not (output / "ready.json").exists():
+            assert process.poll() is None, "Publisher exited before the real receive transaction"
+            assert time.monotonic() < deadline, "Receive transaction was not observed"
+            time.sleep(0.01)
+        updates = json.loads((output / "ready.json").read_text(encoding="utf-8"))
+        assert len(updates) == 1 and updates[0].split()[0] == previous, updates
+        git("update-ref", notes_ref, concurrent, previous, cwd=origin)
+        (output / "release").touch()
+        stdout, stderr = process.communicate(timeout=90)
+    finally:
+        (output / "release").touch()
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    (output / "publisher.stdout.log").write_bytes(stdout)
+    (output / "publisher.stderr.log").write_bytes(stderr)
+    pushes = [json.loads(row) for row in
+              (output / "actual-pushes.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert pushes and pushes[0]["exit_code"] != 0, pushes
+    assert "cannot lock ref 'refs/notes/local-acceptance'" in pushes[0]["stderr"], pushes
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert len(pushes) == 2 and pushes[1]["exit_code"] == 0, pushes
+    assert git("notes", "--ref=" + notes_ref, "show", baseline_head, cwd=origin) == "concurrent winner"
+    published = json.loads(git("notes", "--ref=" + notes_ref, "show", head, cwd=origin))
+    assert published["attestations"]["race-fixture"]["payload"].startswith("opaque fixture data")
+    assert published["attestations"][other["signer"]] == other
+    # An unrelated push rejection with the same remote tip is not concurrency
+    # and must fail after one attempt rather than masking a permission failure.
+    final_tip = git("rev-parse", notes_ref, cwd=origin)
+    (work / "input").write_text("refused\n", encoding="utf-8")
+    git("commit", "--quiet", "-am", "Refused publisher")
+    refused_head = git("rev-parse", "HEAD")
+    receive.write_text('#!/bin/sh\nprintf "publication denied by fixture\\n" >&2\nexit 1\n',
+                       encoding="utf-8")
+    rejected = subprocess.run([sys.executable, str(bootstrap),
+        str(SOURCE / ".github/scripts/local_acceptance.py"), str(work), refused_head,
+        str(output / "refused-pushes.jsonl")], cwd=work, env=environment,
+        capture_output=True, timeout=90)
+    (output / "refused.stdout.log").write_bytes(rejected.stdout)
+    (output / "refused.stderr.log").write_bytes(rejected.stderr)
+    refusals = [json.loads(row) for row in
+               (output / "refused-pushes.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rejected.returncode != 0 and len(refusals) == 1, refusals
+    assert "publication denied by fixture" in refusals[0]["stderr"], refusals
+    assert git("rev-parse", notes_ref, cwd=origin) == final_tip
+    (output / "result.json").write_text(json.dumps({"status": "PASS", "head": head,
+        "before": previous, "concurrent": concurrent, "pushes": pushes, "stable_refusals": refusals,
+        "scope": "Real Git receive-pack ref race and note preservation; no acceptance attestation or product test credit."},
+        indent=2) + "\n", encoding="utf-8")
+    print("PASS: real receive transaction race preserves concurrent notes and publishes the intended note")

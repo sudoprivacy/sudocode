@@ -3,10 +3,11 @@ import concurrent.futures
 import http.server
 import json
 from pathlib import Path
-import socketserver
 import sys
 import threading
 import time
+
+from loopback_http import LoopbackHTTPServer
 
 lock = threading.Lock()
 labels = {}
@@ -67,16 +68,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-class LoopbackServer(http.server.ThreadingHTTPServer):
-    def server_bind(self):
-        # HTTPServer otherwise resolves the hostname via getfqdn during bind.
-        # This local fixture must not depend on the CI runner's reverse DNS.
-        socketserver.TCPServer.server_bind(self)
-        self.server_name = 'localhost'
-        self.server_port = self.server_address[1]
-
 if len(sys.argv) > 1:
-    server = LoopbackServer(('127.0.0.1', 0), Handler)
+    server = LoopbackHTTPServer(('127.0.0.1', 0), Handler)
     ready = Path('http-port.tmp')
     ready.write_text(str(server.server_port))
     ready.rename('http-port')

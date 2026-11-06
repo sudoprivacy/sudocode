@@ -16,9 +16,10 @@ const options = parseArgs({ options: {
   'operator-context': {type:'string'},
   'legacy-import': {type:'boolean'},
   'human-review-entry': {type:'boolean'},
+  'installed-command': {type:'boolean'},
 } }).values;
 if (options.help) {
-  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>] [--human-review-entry]');
+  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>] [--human-review-entry] [--installed-command --autojoin --operator-context <private fixture context>]');
   process.exit(0);
 }
 const executable = options.codex ?? process.env.CODEX_TEST_BIN;
@@ -29,9 +30,13 @@ assert(options.output, 'An explicit evidence output directory is required');
 const managedPackageRoot=options['managed-package-root'];
 if(managedPackageRoot)assert(path.isAbsolute(managedPackageRoot)
   && fs.statSync(path.join(managedPackageRoot,'bin/codex.js')).isFile(),'Select the existing official npm package root');
-const humanReviewEntry=options['human-review-entry']===true;
+const installedCommand=options['installed-command']===true;
+const humanReviewEntry=options['human-review-entry']===true || installedCommand;
 if(humanReviewEntry)assert(managedPackageRoot,'The human-review entry must exercise the official managed native package');
 if(humanReviewEntry)assert(!options['legacy-import'],'The explicit remote legacy frontend is a separate launch mode');
+if(installedCommand)assert(options.autojoin && options['operator-context'],
+  'Installed-command acceptance requires the existing isolated real-Node enrollment fixture');
+const autojoinServer=installedCommand?'nexus_scode':'nexus_auto';
 const evidence = path.resolve(options.output);
 fs.mkdirSync(evidence,{recursive:true,mode:0o700});
 const library = path.resolve(__dirname,'../dist/index.cjs');
@@ -85,6 +90,7 @@ if(managedPackageRoot)Object.assign(childEnv,{CODEX_MANAGED_BY_NPM:'1',CODEX_MAN
 const receipt = {
   ordinaryManagedLaunch:!!managedPackageRoot,
   humanReviewEntry,
+  installedCommand,
   ...(managedPackageRoot?{launcherWrapperSha256:crypto.createHash('sha256')
     .update(fs.readFileSync(path.join(managedPackageRoot,'bin/codex.js'))).digest('hex')}:{}),
   at: new Date().toISOString(), scenario:options.case, platform:process.platform, driverArgv,
@@ -208,7 +214,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           : [process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
         endpoint:{port,token:crypto.randomBytes(32).toString('hex')},
       }),{mode:0o600});
-      if(process.platform==='win32'){
+      if(process.platform==='win32' && !installedCommand){
         const prepared=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
         const registered=execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),
           {encoding:'utf8',timeout:10000,windowsHide:true});
@@ -228,9 +234,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       (options['mcp-context'] ? '[mcp_servers.context_probe]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+JSON.stringify(path.join(__dirname,'fixtures/mcpStartupContext.cjs'))+']\nrequired = true\n'+
         '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
-      (options.autojoin ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
+      (options.autojoin && !installedCommand ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
-    if(humanReviewEntry){
+    if(humanReviewEntry && !installedCommand){
       const entry=path.resolve(__dirname,'../dist/server.cjs');
       const configFile=autojoinConfig??path.join(root,'user-entry.json');
       if(!autojoinConfig)require(library).prepareCodexMcp(configFile,configured.codexArgv,
@@ -311,9 +317,71 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         updater:{autoUpdateEnabled:false},shutdownGraceSeconds:5}),{mode:0o600,flag:'wx'});
       receipt.managedStartupAttempted=true;
       receipt.oneTimeNativePreparation=[];
+      if(installedCommand){
+        const directory=path.join(root,'bin');fs.mkdirSync(directory,{mode:0o700});
+        const commandEntry=path.join(directory,process.platform==='win32'?'codex.ps1':'codex');
+        if(process.platform==='win32'){
+          const quote=value=>"'"+value.replace(/'/g,"''")+"'";
+          fs.writeFileSync(commandEntry,'& '+quote(executable)+' @args\r\nexit $LASTEXITCODE\r\n');
+        }else fs.symlinkSync(executable,commandEntry);
+        const argv=[process.execPath,path.resolve(__dirname,'../dist/server.cjs'),
+          '--install-codex','--config',autojoinConfig,'--command-entry',commandEntry];
+        const result=spawnSync(argv[0],argv.slice(1),{cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
+        receipt.machineInstallation={argv,status:result.status,stdout:result.stdout,stderr:result.stderr,
+          error:result.error?.message,scope:'only this private fixture home and command entry'};
+        if(process.platform==='win32'){
+          // Installation can register its Task before a later step fails.
+          // Reconcile the canonical private plan before any success assertion
+          // or stdout parsing, while preserving the original installer error.
+          try{
+            const journalFile=autojoinConfig+'.installation.json';
+            if(fs.existsSync(journalFile)){
+              const partial=JSON.parse(fs.readFileSync(journalFile,'utf8'));
+              if(partial.ownerTask){
+                const privateRoot=fs.realpathSync(root)+path.sep;
+                assert(fs.realpathSync(autojoinConfig).startsWith(privateRoot));
+                assert(fs.realpathSync(autojoinConfig+'.windows-owner.xml').startsWith(privateRoot));
+                const expected=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
+                assert.deepEqual(partial.ownerTask,expected,'Only the canonical private owner Task may be cleaned up');
+                windowsOwnerPreparation=expected;
+                receipt.windowsOwnerTask={...expected,
+                  registered:partial.completed?.includes('ownerTaskRegistration')===true,
+                  registrationInFlight:partial.inFlight==='ownerTaskRegistration',
+                  scope:'validated private installer Task plan; actual Task ownership rechecked during cleanup'};
+              }
+            }
+          }catch(error){receipt.windowsOwnerCaptureError=String(error);}
+        }
+        assert.equal(result.status,0,'one installation command must succeed');
+        assert(!receipt.windowsOwnerCaptureError,receipt.windowsOwnerCaptureError);
+        const installed=JSON.parse(result.stdout);
+        assert.equal(installed.installed,true);assert.equal(installed.commandEntry,commandEntry);
+        assert.equal(installed.a2aJourneyVerified,false,'setup alone must not claim an A2A journey');
+        const journal=JSON.parse(fs.readFileSync(installed.journal,'utf8'));
+        assert.equal(journal.phase,'installed');assert.ok(journal.completed.includes('finalReadback'));
+        receipt.machineInstallation.journal={phase:journal.phase,completed:journal.completed,
+          backupKind:journal.backup.kind,commandEntrySha256:journal.commandEntrySha256};
+        if(process.platform==='win32'){
+          assert(windowsOwnerPreparation,'the installer must prepare the existing canonical Windows Task');
+          const powershell=path.join(childEnv.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+          assert(fs.statSync(powershell).isFile());
+          userEntryArgv=[powershell,'-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',commandEntry];
+        }else userEntryArgv=[commandEntry];
+        userEntryArgv.push('--sandbox','danger-full-access','--ask-for-approval','on-request','-c','approvals_reviewer=user');
+        const version=JSON.parse(execFileSync(executable,['app-server','daemon','version'],
+          {cwd:workspace,encoding:'utf8',env:childEnv,timeout:10000}));
+        assert.equal(version.status,'running');
+        assert.equal(canonicalSocketPath(version.socketPath),canonicalSocketPath(selectedSocket));
+        receipt.machineInstallation.nativeAlreadyRunningBeforeFirstFrontend=true;
+        receipt.machineInstallation.nativeVersion=version.managedCodexVersion;
+        receipt.preparedNativeSha256=crypto.createHash('sha256').update(fs.readFileSync(version.managedCodexPath)).digest('hex');
+        receipt.preparedNativeVersion=version.managedCodexVersion;
+      }
       // Explicit one-time preparation, then the ordinary cold CLI must acquire
-      // its own default daemon within the original listener deadline.
-      for(const action of ['start','stop']){
+      // its own default daemon within the original listener deadline. The
+      // installed-command variant instead exercises the daemon started by its
+      // one setup command, including first-use registration without a restart.
+      for(const action of installedCommand?[]:['start','stop']){
         const before=Date.now();
         const result=spawnSync(configured.codexArgv[0],['app-server','daemon',action],
           {cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
@@ -327,7 +395,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           receipt.preparedNativeVersion=value.managedCodexVersion;
         }
       }
-      assert(!socketEntryPresent(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
+      if(!installedCommand)assert(!socketEntryPresent(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
     }else{
       native=spawn(configured.codexArgv[0],[...configured.codexArgv.slice(1),'app-server','--listen','unix://'],
         {cwd:workspace,env:childEnv,stdio:['ignore','ignore','pipe']});
@@ -454,7 +522,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           const deadline=Date.now()+10000;
           for(;;){
             const status=await request(observer,'actual current MCP owner readiness','mcpServer/tool/call',{
-              threadId:receipt.autojoinClaims[0].threadId,server:'nexus_auto',tool:'scode_status',arguments:{}});
+              threadId:receipt.autojoinClaims[0].threadId,server:autojoinServer,tool:'scode_status',arguments:{}});
             assert.notEqual(status.isError,true,JSON.stringify(status));
             receipt.autojoinReadiness=JSON.parse(status.content[0].text);
             if(receipt.autojoinReadiness.state==='observing'&&receipt.autojoinClaims.every(claim=>
@@ -467,7 +535,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         for(const claim of receipt.autojoinClaims){
           // Actual native MCP routing overwrites a conflicting caller _meta.
           const result=await request(observer,'native MCP routing','mcpServer/tool/call',{
-            threadId:claim.threadId,server:'nexus_auto',tool:'scode_send',
+            threadId:claim.threadId,server:autojoinServer,tool:'scode_send',
             arguments:{to:operatorContext?.recipient??'fixture-peer',message:'Exact automatic root 🧪\n\u0000',summary:'root binding'},
             _meta:{threadId:receipt.autojoinClaims.find(other=>other!==claim).threadId},
           });
@@ -579,7 +647,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           assert.deepEqual(after,receipt.autojoinClaims,'resume must not issue another Agent or operation');
           const claim=after.find(claim=>claim.threadId===restored.id);
           const result=await request(observer,'resumed native MCP routing','mcpServer/tool/call',{
-            threadId:restored.id,server:'nexus_auto',tool:'scode_send',
+            threadId:restored.id,server:autojoinServer,tool:'scode_send',
             arguments:{to:operatorContext?.recipient??'fixture-peer',message:'Resumed exact Agent 🧪',summary:'resume binding'},
           });
           assert.equal(result.isError,false,JSON.stringify(result));
@@ -663,7 +731,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
             assert.ok(claim,'the surviving root must keep its original claim');
             const beforeSend=receipt.modelRequests.length;
             const result=await request(observer,'surviving native MCP routing','mcpServer/tool/call',{
-              threadId:thread.id,server:'nexus_auto',tool:'scode_send',
+              threadId:thread.id,server:autojoinServer,tool:'scode_send',
               arguments:{to:operatorContext.recipient,message:'Surviving original root 🧪',summary:'independent frontend lifetime'},
             });
             observation.directSend=result;
@@ -705,6 +773,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       }
       receipt.result='PASS';
       receipt.notProven=[...(seededResume?[]:['existing-history resume']),...(cancelledResume?['completed assistant-history resume']:[]),
+        ...(installedCommand?['native daemon cold startup after installation']:[]),
         ...(operatorContext?[]:['automatic authenticated Nexus enrollment']),...(process.platform==='win32'?[]:['Windows actual TUI/default endpoint']),
         'current production private frontend migration','all Codex application launch modes'];
       return;
@@ -753,9 +822,51 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     if(windowsOwnerPreparation){
       try{
         const prepared=windowsOwnerPreparation;
-        const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
-          {encoding:'utf8',timeout:10000,windowsHide:true});
-        receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,output});
+        // Revalidate the same canonical action/principal immediately before
+        // removal. An absent Task needs no delete; an unknown action refuses.
+        assert(fs.realpathSync(prepared.taskFile).startsWith(fs.realpathSync(root)+path.sep));
+        assert.equal(crypto.createHash('sha256').update(fs.readFileSync(prepared.taskFile)).digest('hex'),
+          prepared.taskSha256,'The canonical private Task plan changed before cleanup');
+        const quote=value=>"'"+value.replace(/'/g,"''")+"'";
+        const script=`$ErrorActionPreference='Stop'
+$service=New-Object -ComObject 'Schedule.Service'; $service.Connect()
+$folder=$service.GetFolder('\\')
+$tasks=@($folder.GetTasks(1) | Where-Object { $_.Name -ceq ${quote(prepared.taskName)} })
+if($tasks.Count -eq 0){ '{"exists":false}' ; exit 0 }
+if($tasks.Count -ne 1){ throw 'Ambiguous private owner Task' }
+$actual=[xml]$tasks[0].Xml
+$expected=[xml][System.IO.File]::ReadAllText(${quote(prepared.taskFile)})
+$definition=$tasks[0].Definition
+# Task Scheduler omits these defaults from exported XML. Read their effective
+# COM properties instead of interpreting absent XML as an unknown value.
+if($definition.Principal.RunLevel -ne 0){ throw 'Mismatched owner Task effective RunLevel' }
+if($definition.Settings.AllowDemandStart -ne $true){ throw 'Mismatched owner Task effective AllowDemandStart' }
+if($definition.Settings.Enabled -ne $true){ throw 'Mismatched owner Task effective Enabled' }
+foreach($name in @('Command','Arguments','WorkingDirectory','UserId','LogonType','Description','MultipleInstancesPolicy','DisallowStartIfOnBatteries','StopIfGoingOnBatteries','ExecutionTimeLimit')){
+  $left=@($actual.SelectNodes("//*[local-name()='$name']"))
+  $right=@($expected.SelectNodes("//*[local-name()='$name']"))
+  if($left.Count -ne 1 -or $right.Count -ne 1){ throw "Ambiguous owner Task field: $name" }
+  $a=$left[0].InnerText; $b=$right[0].InnerText
+  if($name -eq 'UserId' -and $a -cne $b){ $a=[System.Security.Principal.NTAccount]::new($a).Translate([System.Security.Principal.SecurityIdentifier]).Value }
+  if($a -cne $b){ throw "Mismatched owner Task field: $name" }
+}
+foreach($name in @('Actions','Principals')){
+  if(@($actual.SelectNodes("//*[local-name()='$name']/*")).Count -ne 1){ throw "Unexpected owner Task structure: $name" }
+}
+if(@($actual.SelectNodes("//*[local-name()='Exec']")).Count -ne 1 -or @($actual.SelectNodes("//*[local-name()='Triggers']/*")).Count -ne 0){ throw 'Unexpected private owner Task action or trigger' }
+'{"exists":true,"matches":true}'`;
+        const powershell=path.join(childEnv.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+        const deadline=Date.now()+10000;
+        const observed=JSON.parse(execFileSync(powershell,['-NoLogo','-NoProfile','-NonInteractive',
+          '-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+          {encoding:'utf8',timeout:Math.max(1,deadline-Date.now()),windowsHide:true}));
+        assert.equal(typeof observed.exists,'boolean');
+        if(observed.exists){
+          assert.equal(observed.matches,true);
+          const output=execFileSync(prepared.removalArgv[0],prepared.removalArgv.slice(1),
+            {encoding:'utf8',timeout:Math.max(1,deadline-Date.now()),windowsHide:true});
+          receipt.cleanup.push({privateWindowsOwnerTaskRemoved:prepared.taskName,ownershipVerified:true,output});
+        }else receipt.cleanup.push({privateWindowsOwnerTaskAbsent:prepared.taskName});
       }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     if(legacySocket){

@@ -41,12 +41,6 @@ pub use a2a::is_conversation_transcript_path;
 /// uses it.
 pub const A2A_INBOX_BASE: &str = "/agents";
 
-/// Directory a local JSONL inbox lives under, relative to the workspace root.
-///
-/// Owned by [`crate::agent_mailbox`] — it builds every path under this — and
-/// re-exported here so the convention reads as one thing in one place.
-pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
-
 /// The shared root under which same-machine standalone `scode` processes keep
 /// their mailboxes, so two started in different folders can address each other.
 ///
@@ -266,6 +260,10 @@ pub struct Mailbox {
     /// identity nothing deletes, whereas `is_append_stream` changes its answer
     /// the moment a stream is created.
     provisioned: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Whether every writer this mailbox reads was authenticated by its
+    /// transport, so a frame's `from` is the writer's identity rather than its
+    /// claim. Set by the constructor that knows: never by a sender.
+    authenticated_senders: bool,
 }
 
 impl Mailbox {
@@ -280,7 +278,26 @@ impl Mailbox {
             self_id,
             convention,
             provisioned: std::sync::Mutex::new(std::collections::HashSet::new()),
+            authenticated_senders: false,
         }
+    }
+
+    /// Declare that the transport behind this mailbox authenticates every
+    /// writer, so each frame's `from` is the writer's identity. Only the host
+    /// that built the transport knows this: a node's certificate-only mTLS
+    /// connection, or a co-host whose daemon arms the stamping hook.
+    #[must_use]
+    pub fn with_authenticated_senders(mut self, authenticated: bool) -> Self {
+        self.authenticated_senders = authenticated;
+        self
+    }
+
+    /// Whether a message read here has a verified sender (see
+    /// [`Self::with_authenticated_senders`]).
+    #[must_use]
+    #[inline]
+    pub fn authenticates_senders(&self) -> bool {
+        self.authenticated_senders
     }
 
     /// A mailbox addressing the daemon's own path space: `self_id`'s
@@ -450,6 +467,9 @@ impl Mailbox {
             agent.into(),
             InboxConvention::new(String::new()),
         )
+        // The certificate is the credential: the daemon authenticated every
+        // writer and its stamping hook wrote each `from`.
+        .with_authenticated_senders(true)
     }
 
     #[must_use]
@@ -654,12 +674,12 @@ impl Mailbox {
     /// A `DT_STREAM` backend frames the append itself, so the envelope goes
     /// through the backend. JSONL has no framing of its own — a message is a
     /// line — and that branch goes through
-    /// [`crate::agent_mailbox::append_envelope`], which is the one writer of
-    /// this format.
+    /// [`crate::agent_mailbox::append_envelope_via`], which is the one writer
+    /// of this format.
     ///
     /// It used to be two: this method built the line itself (timestamp,
     /// recipient, serialize, newline, create the directory) while
-    /// `coordinator_notification` called `append_envelope`, so the same format
+    /// `coordinator_notification` called a separate appender, so the same format
     /// had two implementations that could drift apart. One of them also holds a
     /// write lock the other did not — `write_all` may in principle issue
     /// several `write` calls for one buffer, and the reader skips a line it
@@ -682,7 +702,7 @@ impl Mailbox {
         // send time is what distinguishes "these same bytes again" from "my peer
         // said that a second time". Guarded on 0 so a caller that supplies its
         // own time (a relay preserving the original) keeps it, which is also why
-        // `append_envelope_to_path`'s identical guard stays a no-op after this.
+        // `append_envelope_via`'s identical guard stays a no-op after this.
         if envelope.timestamp == 0 {
             envelope.timestamp = crate::agent_mailbox::now_secs();
         }
@@ -761,6 +781,17 @@ impl Mailbox {
         Ok((messages, next))
     }
 
+    /// Whether `env` is for this reader rather than an echo of its own write.
+    ///
+    /// Our own writes are skipped so a conversation never echoes back to us.
+    /// The one exception is a scheduled message addressed to us: a job an agent
+    /// schedules for itself is written under its own name into its
+    /// conversation with itself, and must still arrive.
+    fn is_delivery(&self, env: &MailboxEnvelope) -> bool {
+        env.from != self.self_id
+            || (env.kind == crate::agent_mailbox::kinds::SCHEDULED && env.to == self.self_id)
+    }
+
     /// Drain backend-owned chunks without a separate type lookup. A chunk is
     /// either a complete envelope frame or a batch of JSONL envelope records.
     fn poll_tail(
@@ -786,7 +817,7 @@ impl Mailbox {
                 |envelope| vec![envelope],
             );
             for env in envelopes {
-                if !env.from.is_empty() && env.from != self.self_id && !env.body.is_empty() {
+                if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
                     out.push(env);
                 }
             }
@@ -2423,8 +2454,8 @@ impl Drop for MailboxScope {
 ///
 /// Two levels, and the second is the contract rather than a fallback: a session
 /// hands its peer mailbox to its dispatcher, which scopes the thread running the
-/// tool; a caller with no session scope (a sub-agent, a test) delivers to
-/// `.sudocode-inbox/` in its workspace through this same call. Being one code
+/// tool; a caller with no session scope (a sub-agent, a test) delivers to the
+/// conversation transcript in its workspace through this same call. Being one code
 /// path is what stops the two drifting.
 ///
 /// The fallback's identity is derived rather than left empty: a conversation is
@@ -2665,6 +2696,39 @@ mod tests {
         let (msgs, _) = mb.poll_conversation("agent-b", 0, 0).unwrap();
         assert_eq!(msgs.len(), 1, "self-writes must be filtered");
         assert_eq!(msgs[0].body, "from peer");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A job an agent schedules for itself is a write under its own name into
+    /// its conversation with itself. It must arrive; nothing else of its own
+    /// may echo back, including a scheduled message it sent someone else.
+    #[test]
+    fn a_scheduled_message_to_self_arrives_and_nothing_else_echoes() {
+        let ws = temp_workspace("scheduled-self");
+        let mb = local_mailbox(&ws, "agent-a");
+        let scheduled = |to: &str, body: &str| MailboxEnvelope {
+            kind: crate::agent_mailbox::kinds::SCHEDULED.to_string(),
+            ..note("agent-a", to, body)
+        };
+        mb.send(scheduled("agent-a", "reminder for me")).unwrap();
+        mb.send(note("agent-a", "agent-a", "plain note to self"))
+            .unwrap();
+        mb.send(scheduled("agent-b", "reminder for b")).unwrap();
+
+        let (own, _) = mb.poll_conversation("agent-a", 0, 0).unwrap();
+        let bodies: Vec<_> = own.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["reminder for me"]);
+        let (with_b, _) = mb.poll_conversation("agent-b", 0, 0).unwrap();
+        assert!(
+            with_b.is_empty(),
+            "a scheduled message to b is b's, not an echo"
+        );
+
+        let b = local_mailbox(&ws, "agent-b");
+        let (for_b, _) = b.poll_conversation("agent-a", 0, 0).unwrap();
+        assert_eq!(for_b.len(), 1);
+        assert_eq!(for_b[0].body, "reminder for b");
 
         let _ = std::fs::remove_dir_all(&ws);
     }

@@ -13,7 +13,7 @@ configured target. The scode and native workspaces need not be identical.
 
 ## Ownership and delivery
 
-For each admitted peer notification, one bounded native stdio producer performs
+For each admitted peer message, one bounded native stdio producer performs
 only initialize, complete empty `thread/loaded/list`, `thread/queue/add`, then
 another complete empty inventory check. It checks notifications through EOF,
 refuses a loaded thread or client-action request, and must exit normally to

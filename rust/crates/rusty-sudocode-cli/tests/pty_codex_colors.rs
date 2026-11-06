@@ -1,6 +1,6 @@
 //! Compare real terminal cells with output from Codex's original highlighter.
-//! The fixture was generated from openai/codex b741e480 (two-face 0.5.1),
-//! independently of scode's renderer. No Codex/ratatui dependency is required.
+//! e2e/codex-style/capture.py regenerates these fixtures from the pinned upstream
+//! helpers, independently of scode's renderer. No Codex/ratatui dependency is required.
 mod common;
 
 use common::TestEnv;

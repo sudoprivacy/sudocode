@@ -31,8 +31,13 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
     std::fs::write(skill.join("SKILL.md"), "---\nname: shared-workspace\ndescription: Check the shared project\n---\nRun sh scripts/run.sh from this skill directory.\n").unwrap();
     std::fs::write(skill.join("scripts/run.sh"), "printf skill-script-ok").unwrap();
     let first = descriptor("first", "/projects/first");
-    let prepared =
-        prepare_managed_agent(&kernel, &first, &seed_managed_session(&kernel, &first)).unwrap();
+    let prepared = prepare_managed_agent(
+        &kernel,
+        &first,
+        &seed_managed_session(&kernel, &first),
+        false,
+    )
+    .unwrap();
     let original_id = prepared.durable_session_id().to_string();
     let cwd = prepared.cwd();
     assert_eq!(cwd, project.canonicalize().unwrap());
@@ -60,6 +65,7 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
         &kernel,
         &second_descriptor,
         &seed_managed_session(&kernel, &second_descriptor),
+        false,
     )
     .unwrap();
     assert_ne!(second.cwd(), cwd);
@@ -83,6 +89,7 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
             resume_session_id: Some(original_id.clone()),
             ..Default::default()
         },
+        false,
     )
     .unwrap();
     assert_eq!(restored.durable_session_id(), original_id);

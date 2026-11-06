@@ -25,6 +25,9 @@ pub(super) struct TaskSummary {
     unconfirmed: usize,
     unread: usize,
     failed: usize,
+    /// Enabled scheduled jobs: their tab is reachable from the footer even
+    /// when no background task exists.
+    scheduled: usize,
 }
 
 impl TaskSummary {
@@ -40,32 +43,32 @@ impl TaskSummary {
         frame: usize,
     ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
         let active = self.running + self.stopping;
-        let (full, short, color) = if self.unconfirmed > 0 {
+        let (full, short, role) = if self.unconfirmed > 0 {
             (
                 format!(
                     "{} unconfirmed",
                     quantity(self.unconfirmed, "background task")
                 ),
                 format!("{} unconfirmed", self.unconfirmed),
-                theme().color(TextRole::Warning),
+                TextRole::Warning,
             )
         } else if self.failed > 0 {
             (
                 format!("{} failed", quantity(self.failed, "background task")),
                 format!("{} failed", self.failed),
-                theme().color(TextRole::Error),
+                TextRole::Error,
             )
         } else if self.stopping > 0 {
             (
                 format!("Stopping {}…", quantity(self.stopping, "background task")),
                 format!("{} stopping", self.stopping),
-                theme().color(TextRole::Brand),
+                TextRole::Brand,
             )
         } else if self.running > 0 {
             (
                 format!("{} still running", quantity(self.running, "task")),
                 format!("{} running", self.running),
-                theme().color(TextRole::Brand),
+                TextRole::Brand,
             )
         } else {
             return None;
@@ -85,25 +88,20 @@ impl TaskSummary {
             .animates_status()
             .then(|| crate::render::activity::spinner_frame(frame));
         let logo_width = logo.map_or(0, |logo| display_width(logo) + 1);
-        let has_color =
-            crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
-        let style = |color| crossterm::style::ContentStyle {
-            foreground_color: has_color.then_some(color),
-            ..Default::default()
-        };
+        let theme = theme();
         let render = |label: &str, metadata: &str| {
             let mut text = StyledText::default();
             if let Some(logo) = logo {
                 text.push(
-                    style(theme().color(TextRole::Brand)),
+                    theme.style(TextRole::Brand),
                     &truncate_to_width(&format!("{logo} "), width),
                 );
             }
             text.push(
-                style(color),
+                theme.style(role),
                 &truncate_to_width(label, width.saturating_sub(logo_width)),
             );
-            text.push(style(theme().color(TextRole::Secondary)), metadata);
+            text.push(theme.style(TextRole::Secondary), metadata);
             std::sync::Arc::new(text)
         };
         let summary = render(&short, "");
@@ -114,6 +112,94 @@ impl TaskSummary {
         };
         Some((full, summary))
     }
+}
+
+fn job_label(job: &runtime::cron_registry::CronEntry) -> String {
+    job.name
+        .as_deref()
+        .or(job.description.as_deref())
+        .filter(|label| !label.trim().is_empty())
+        .map_or_else(|| plain(&job.prompt), plain)
+}
+
+fn schedule_text(job: &runtime::cron_registry::CronEntry) -> String {
+    use runtime::cron_registry::CronKind;
+    match job.kind {
+        CronKind::Cron => job.schedule.clone(),
+        CronKind::Every => job.schedule.parse::<u64>().map_or_else(
+            |_| format!("every {}", job.schedule),
+            |secs| match secs {
+                s if s % 3600 == 0 => format!("every {}h", s / 3600),
+                s if s % 60 == 0 => format!("every {}m", s / 60),
+                s => format!("every {s}s"),
+            },
+        ),
+        CronKind::At => "once".into(),
+    }
+}
+
+/// How far from now `at` is, as `in 12m` or `5m ago`.
+fn relative(at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let span = |secs: u64| match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    };
+    if at >= now {
+        format!("in {}", span(at - now))
+    } else {
+        format!("{} ago", span(now - at))
+    }
+}
+
+fn job_state(job: &runtime::cron_registry::CronEntry) -> String {
+    let next = if job.enabled {
+        job.next_run_at
+            .map_or_else(|| "not armed".into(), |at| format!("next {}", relative(at)))
+    } else {
+        "disabled".to_string()
+    };
+    match job.last_status.as_deref() {
+        Some(status) => format!("{next} · last {status}"),
+        None => next,
+    }
+}
+
+fn job_detail(job: &runtime::cron_registry::CronEntry, width: usize) -> Vec<String> {
+    use runtime::cron_registry::CronTarget;
+    let target = match &job.target {
+        CronTarget::Agent { name } => format!("message to {name}"),
+        CronTarget::NewSession => format!(
+            "new session in {}",
+            job.cwd.as_deref().unwrap_or("the current directory")
+        ),
+    };
+    let delivery = if job.delivery.is_steer() {
+        "steers into a running turn"
+    } else {
+        "queues behind a running turn"
+    };
+    let mut lines = vec![
+        format!("  {}", job_label(job)),
+        format!("  {} · {} · {delivery}", schedule_text(job), target),
+        format!("  {} · runs {}", job_state(job), job.run_count),
+    ];
+    if let Some(error) = &job.last_error {
+        lines.push(format!("  last error: {}", plain(error)));
+    }
+    lines.push(String::new());
+    lines.extend(
+        plain(&job.prompt)
+            .lines()
+            .take(8)
+            .map(|line| fit(&format!("  {line}"), width)),
+    );
+    lines
 }
 
 fn quantity(count: usize, noun: &str) -> String {
@@ -132,6 +218,25 @@ pub(super) enum TaskFocus {
     Tip,
     /// The cache-TTL panel opened from that tip.
     Ttl,
+}
+
+/// The browser's two lists, switched with ←/→.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum TaskTab {
+    #[default]
+    Background,
+    Scheduled,
+}
+
+/// The Scheduled tab: the shared cron store, through the same service
+/// `scode cron`, `/cron` and the agent's tools use.
+#[derive(Default)]
+struct ScheduledTab {
+    jobs: Vec<runtime::cron_registry::CronEntry>,
+    selected: usize,
+    confirm_delete: bool,
+    /// The outcome of the last action, shown under the list.
+    notice: Option<String>,
 }
 
 /// Rows of the cache-TTL panel, top to bottom.
@@ -162,6 +267,8 @@ pub(super) struct TaskBrowser {
     ttl_advice: Option<TtlAdvice>,
     tip_actionable: bool,
     ttl_row: usize,
+    pub tab: TaskTab,
+    scheduled: ScheduledTab,
 }
 
 impl TaskBrowser {
@@ -248,6 +355,7 @@ impl TaskBrowser {
                 summary.failed += usize::from(entry.task.status == BackgroundTaskStatus::Failed);
             }
         }
+        summary.scheduled = self.scheduled.jobs.iter().filter(|job| job.enabled).count();
         if self.summary == summary {
             return;
         }
@@ -265,6 +373,9 @@ impl TaskBrowser {
         if summary.unread > 0 {
             parts.push(quantity(summary.unread, "new result"));
         }
+        if summary.scheduled > 0 {
+            parts.push(format!("{} scheduled", summary.scheduled));
+        }
         self.footer_summary = parts.join(" · ");
         let mut compact = Vec::new();
         if summary.terminals > 0 {
@@ -278,6 +389,9 @@ impl TaskBrowser {
         }
         if summary.unread > 0 {
             compact.push(format!("+{}", summary.unread));
+        }
+        if summary.scheduled > 0 {
+            compact.push(format!("{} sched", summary.scheduled));
         }
         self.compact_summary = compact.join(" ");
     }
@@ -378,8 +492,170 @@ impl TaskBrowser {
         self.focus = TaskFocus::Input;
     }
 
+    /// Re-read the cron store: on open, on a tab switch, after an action, and
+    /// when a turn ends (a fire or another process may have changed it).
+    pub fn refresh_scheduled(&mut self) {
+        self.scheduled.jobs = runtime::cron_service::list();
+        self.scheduled.selected = self
+            .scheduled
+            .selected
+            .min(self.scheduled.jobs.len().saturating_sub(1));
+        self.refresh_summary();
+    }
+
+    pub fn switch_tab(&mut self) {
+        self.tab = match self.tab {
+            TaskTab::Background => TaskTab::Scheduled,
+            TaskTab::Scheduled => TaskTab::Background,
+        };
+        self.focus = TaskFocus::List;
+        self.scheduled.confirm_delete = false;
+        self.scheduled.notice = None;
+        self.refresh_scheduled();
+    }
+
+    fn selected_job(&self) -> Option<&runtime::cron_registry::CronEntry> {
+        self.scheduled.jobs.get(self.scheduled.selected)
+    }
+
+    /// A key in the Scheduled tab. ↑/↓ select, Enter details, `e` enable or
+    /// disable, `r` run now, `d` delete after `y`, Esc back.
+    pub fn scheduled_key(&mut self, code: iocraft::KeyCode) {
+        use iocraft::KeyCode;
+        if self.scheduled.confirm_delete {
+            self.scheduled.confirm_delete = false;
+            if code == KeyCode::Char('y') {
+                if let Some(job) = self.selected_job().cloned() {
+                    self.scheduled.notice =
+                        Some(match runtime::cron_service::remove(&job.cron_id) {
+                            Ok(_) => format!("Deleted {}", job_label(&job)),
+                            Err(error) => error,
+                        });
+                }
+                self.refresh_scheduled();
+            } else {
+                self.scheduled.notice = None;
+            }
+            return;
+        }
+        match (self.focus, code) {
+            (TaskFocus::Detail, KeyCode::Esc) => self.focus = TaskFocus::List,
+            (TaskFocus::List, KeyCode::Esc) => self.close(),
+            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => self.switch_tab(),
+            (TaskFocus::List, KeyCode::Up) => {
+                self.scheduled.selected = self.scheduled.selected.saturating_sub(1);
+            }
+            (TaskFocus::List, KeyCode::Down) => {
+                self.scheduled.selected =
+                    (self.scheduled.selected + 1).min(self.scheduled.jobs.len().saturating_sub(1));
+            }
+            (TaskFocus::List, KeyCode::Enter) if self.selected_job().is_some() => {
+                self.focus = TaskFocus::Detail;
+            }
+            (_, KeyCode::Char('e')) => {
+                if let Some(job) = self.selected_job().cloned() {
+                    let enabled = !job.enabled;
+                    self.scheduled.notice = Some(
+                        match runtime::cron_service::set_enabled(&job.cron_id, enabled) {
+                            Ok(_) if enabled => format!("Enabled {}", job_label(&job)),
+                            Ok(_) => format!("Disabled {}", job_label(&job)),
+                            Err(error) => error,
+                        },
+                    );
+                    self.refresh_scheduled();
+                }
+            }
+            (_, KeyCode::Char('r')) => {
+                if let Some(job) = self.selected_job().cloned() {
+                    self.scheduled.notice =
+                        Some(match runtime::cron_scheduler::trigger_here(&job.cron_id) {
+                            Ok(status) => format!("Ran {}: {status}", job_label(&job)),
+                            Err(error) => error,
+                        });
+                    self.refresh_scheduled();
+                }
+            }
+            (_, KeyCode::Char('d')) if self.selected_job().is_some() => {
+                self.scheduled.confirm_delete = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn scheduled_panel(&self, width: usize, max_rows: usize) -> String {
+        let secondary = theme().fg_seq(TextRole::Secondary);
+        let mut lines = vec![format!(
+            "{}Scheduled{RESET}{secondary} · {} · ← background tasks{RESET}",
+            theme().fg_seq(TextRole::Brand),
+            quantity(self.scheduled.jobs.len(), "job"),
+        )];
+        if self.focus == TaskFocus::Detail {
+            if let Some(job) = self.selected_job() {
+                lines.extend(job_detail(job, width));
+            }
+            lines.push(format!(
+                "{secondary}e enable/disable · r run now · d delete · Esc list{RESET}"
+            ));
+        } else {
+            if self.scheduled.jobs.is_empty() {
+                lines.push(
+                    "  No scheduled jobs. Ask the agent to schedule one, or use /cron add".into(),
+                );
+            }
+            // Header and key hints, plus the notice line while one shows.
+            let notice = self.scheduled.confirm_delete || self.scheduled.notice.is_some();
+            let rows = max_rows
+                .saturating_sub(2 + usize::from(notice))
+                .clamp(1, 18);
+            let start = self
+                .scheduled
+                .selected
+                .saturating_sub(rows / 2)
+                .min(self.scheduled.jobs.len().saturating_sub(rows));
+            for (index, job) in self
+                .scheduled
+                .jobs
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(rows)
+            {
+                let focused = index == self.scheduled.selected;
+                let marker =
+                    ChoiceText::new(theme(), crate::render::ColorSupport::detect(), focused)
+                        .prefix(if focused { "❯" } else { " " });
+                lines.push(format!(
+                    "{marker} {}{}{RESET}{secondary} · {} · {}{RESET}",
+                    theme().fg_seq(TextRole::Accent),
+                    fit(&job_label(job), width.saturating_sub(40)),
+                    schedule_text(job),
+                    job_state(job),
+                ));
+            }
+            lines.push(format!(
+                "{secondary}↑/↓ select · Enter details · e enable/disable · r run now · d delete · Esc back{RESET}"
+            ));
+        }
+        if self.scheduled.confirm_delete {
+            if let Some(job) = self.selected_job() {
+                lines.push(format!(
+                    "Delete {}? y to confirm, any other key to keep it",
+                    job_label(job)
+                ));
+            }
+        } else if let Some(notice) = &self.scheduled.notice {
+            lines.push(format!("{secondary}{notice}{RESET}"));
+        }
+        lines
+            .into_iter()
+            .map(|line| truncate_to_width(&line, width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn open(&mut self) {
         self.focus = TaskFocus::List;
+        self.refresh_scheduled();
         self.clamp();
     }
     fn clamp(&mut self) {
@@ -458,6 +734,9 @@ impl TaskBrowser {
         if self.focus == TaskFocus::Ttl {
             return self.ttl_panel(width);
         }
+        if self.tab == TaskTab::Scheduled {
+            return self.scheduled_panel(width, max_rows);
+        }
         let mut lines = vec![format!(
             "{}Background tasks{RESET}",
             theme().fg_seq(TextRole::Brand)
@@ -511,7 +790,7 @@ impl TaskBrowser {
                 ));
             }
             lines.push(format!(
-                "{}↑/↓ select · Enter details · k stop · Esc back{RESET}",
+                "{}↑/↓ select · Enter details · k stop · → scheduled · Esc back{RESET}",
                 theme().fg_seq(TextRole::Secondary)
             ));
         } else if let Some(entry) = self

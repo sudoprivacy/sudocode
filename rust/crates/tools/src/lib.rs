@@ -276,9 +276,8 @@ use api::{
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
     agent_mailbox::{kinds as mailbox_kinds, MailboxEnvelope},
-    check_freshness,
-    cron_registry::CronRegistry,
-    current_workspace_root, dedupe_superseded_commit_events, edit_file, glob_search,
+    check_freshness, current_workspace_root, dedupe_superseded_commit_events, edit_file,
+    glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     plan_store::compose_task_framing,
     read_file,
@@ -295,23 +294,6 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-fn global_cron_registry() -> &'static CronRegistry {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<CronRegistry> = OnceLock::new();
-    // Persistent store shared with the `scode cron` CLI and the scheduler,
-    // so a cron the agent creates survives restart and actually fires —
-    // rather than living only for this process. `SUDOCODE_CRON_STORE`
-    // overrides the path (tests point it at a temp file; it is cron-only,
-    // so isolating cron never perturbs other config-home consumers).
-    REGISTRY.get_or_init(|| {
-        let path = std::env::var_os("SUDOCODE_CRON_STORE").map_or_else(
-            || runtime::default_config_home().join("crons.json"),
-            std::path::PathBuf::from,
-        );
-        CronRegistry::open(path)
-    })
-}
 
 /// The persisted todo list for this session. Used to seed a REPL's context panel
 /// at startup, before any turn has produced a `TodoWrite` result to read.
@@ -1650,13 +1632,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "CronCreate",
-            description: "Create a scheduled recurring task.",
+            description: "Schedule a recurring message (5-field cron) to an agent, by default this one.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "schedule": { "type": "string" },
                     "prompt": { "type": "string" },
-                    "description": { "type": "string" }
+                    "description": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "delivery": { "type": "string", "enum": ["queue", "steer"] }
                 },
                 "required": ["schedule", "prompt"],
                 "additionalProperties": false
@@ -2836,39 +2820,34 @@ fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
-    // Validate up front so the agent gets an actionable error instead of a
-    // cron that silently never fires. The tool schedules standard 5-field
-    // cron expressions.
-    runtime::cron_schedule::validate(
-        runtime::cron_registry::CronKind::Cron,
-        &input.schedule,
-        None,
-    )?;
-    let reg = global_cron_registry();
-    let entry = reg.create(&input.schedule, &input.prompt, input.description.as_deref());
-    // Seed the first fire time so the scheduler/tick considers it.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let next = runtime::cron_schedule::first_run_at(&entry, now);
-    if next.is_some() {
-        let _ = reg.set_next_run(&entry.cron_id, next);
-    }
-    to_pretty_json(json!({
-        "cron_id": entry.cron_id,
-        "schedule": entry.schedule,
-        "prompt": entry.prompt,
-        "description": entry.description,
-        "enabled": entry.enabled,
-        "created_at": entry.created_at,
-        "next_run_at": next
-    }))
+    // A job the agent schedules comes back to the agent that asked for it,
+    // through its own inbox and message queue.
+    let agent = input
+        .agent
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| runtime::mailbox::sending_mailbox().self_id().to_string());
+    let target = if agent.is_empty() {
+        runtime::cron_registry::CronTarget::NewSession
+    } else {
+        runtime::cron_registry::CronTarget::Agent { name: agent }
+    };
+    let entry = runtime::cron_service::create(runtime::cron_registry::CronCreateParams {
+        schedule: input.schedule,
+        kind: runtime::cron_registry::CronKind::Cron,
+        prompt: input.prompt,
+        description: input.description,
+        target,
+        delivery: input.delivery,
+        created_by: runtime::cron_registry::CronCreator::Agent,
+        ..Default::default()
+    })?;
+    to_pretty_json(serde_json::to_value(entry).map_err(|e| e.to_string())?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
-    match global_cron_registry().delete(&input.cron_id) {
+    match runtime::cron_service::remove(&input.cron_id) {
         Ok(entry) => to_pretty_json(json!({
             "cron_id": entry.cron_id,
             "schedule": entry.schedule,
@@ -2880,34 +2859,19 @@ fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
 }
 
 fn run_cron_list(_input: Value) -> Result<String, String> {
-    let entries: Vec<_> = global_cron_registry()
-        .list(false)
-        .into_iter()
-        .map(|e| {
-            json!({
-                "cron_id": e.cron_id,
-                "schedule": e.schedule,
-                "prompt": e.prompt,
-                "description": e.description,
-                "enabled": e.enabled,
-                "run_count": e.run_count,
-                "last_run_at": e.last_run_at,
-                "created_at": e.created_at
-            })
-        })
-        .collect();
+    let entries = runtime::cron_service::list();
     to_pretty_json(json!({
+        "count": entries.len(),
         "crons": entries,
-        "count": entries.len()
     }))
 }
 
 // ── SendMessage ────────────────────────────────────────────────────
 
-/// Best-effort sanitizer for a mailbox filename stem. Recipient
-/// names can be arbitrary strings from the model — collapse anything
-/// outside `[A-Za-z0-9_-]` to `_` so we can't traverse or overwrite
-/// files outside `.sudocode-inbox/`.
+/// Best-effort sanitizer for a recipient name used in a mailbox path.
+/// Recipient names can be arbitrary strings from the model — collapse
+/// anything outside `[A-Za-z0-9_-]` to `_` so a name can't traverse out
+/// of the mailbox root or address another conversation.
 fn sanitize_recipient(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
@@ -4378,6 +4342,10 @@ struct CronCreateInput {
     prompt: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    delivery: Option<runtime::turn_input::InputDelivery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4554,6 +4522,8 @@ struct AgentJob {
     /// config as the parent, regardless of CWD changes.
     sudocode_config: SudoCodeConfig,
     fallback_config: ProviderFallbackConfig,
+    /// Tool rounds per turn before the subagent winds down and answers.
+    step_budget: u32,
     /// Auth mode captured at spawn time so the subagent uses the same
     /// credential path (api-key / proxy / subscription) as the parent — see
     /// [`subagent_auth_mode`]. `None` only when no session has published one.
@@ -5630,7 +5600,15 @@ fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
         .map(|report| report.load_outcome())
 }
 
-const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
+/// Tool rounds a subagent turn may take when the user has not set `maxSteps`.
+/// Reaching it winds the turn down exactly as the main loop does: the next
+/// request carries no tools, so the subagent reports what it found instead of
+/// failing and losing it.
+const DEFAULT_AGENT_STEP_BUDGET: u32 = 100;
+
+/// Hard backstop above the step budget, for a model that keeps going after
+/// its tools are withdrawn.
+const AGENT_ITERATION_MARGIN: usize = 8;
 
 fn execute_agent(
     input: AgentInput,
@@ -5744,7 +5722,7 @@ fn prepare_agent_job(
     // Capture provider config at spawn time so the subagent thread inherits the
     // parent's auth/credential settings rather than re-loading from CWD.
     let sudocode_config = load_sudocode_config();
-    let fallback_config = load_provider_fallback_config();
+    let (fallback_config, step_budget) = load_agent_runtime_settings();
     // Explicit override from the Agent tool call, falling back to the mode the
     // session's own client resolved to.
     let auth_mode = subagent_auth_mode(input.auth_mode.as_deref())?;
@@ -5780,6 +5758,7 @@ fn prepare_agent_job(
         allowed_tools,
         sudocode_config,
         fallback_config,
+        step_budget,
         auth_mode,
         inherited_messages,
         execution,
@@ -6046,14 +6025,14 @@ fn notify_agent_completion(original_manifest: &AgentOutput, fs: &dyn FsBackend) 
 
 /// Default per-subagent cap on how many DISTINCT user-turns the
 /// multi-turn loop will service before force-exiting. Not the same as
-/// `DEFAULT_AGENT_MAX_ITERATIONS` (which caps tool-loop iterations
-/// WITHIN a single turn). Overridable via
+/// `DEFAULT_AGENT_STEP_BUDGET` (which bounds tool rounds WITHIN a single
+/// turn). Overridable via
 /// `SUDOCODE_SUBAGENT_MAX_MULTI_TURNS`.
 ///
 /// Sized to leave plenty of headroom for a coordinator-driven
 /// conversation where the parent sends 5–10 follow-ups before the
-/// worker completes; at 16 turns × 32 tool-loop iterations that's
-/// still bounded well below runaway.
+/// worker completes; at 16 turns × 100 tool rounds that's still
+/// bounded well below runaway.
 const DEFAULT_SUBAGENT_MAX_MULTI_TURNS: usize = 16;
 
 fn subagent_max_multi_turns() -> usize {
@@ -6070,8 +6049,13 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
             .map_err(|error| error.to_string())?,
     );
     let _mailbox = runtime::mailbox::MailboxScope::enter(Arc::clone(&mailbox));
-    let mut conv_runtime =
-        build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
+    let mut conv_runtime = build_agent_runtime(job)?
+        .with_max_steps(Some(job.step_budget))
+        .with_max_iterations(
+            usize::try_from(job.step_budget).map_or(usize::MAX, |budget| {
+                budget.saturating_add(AGENT_ITERATION_MARGIN)
+            }),
+        );
     // Accumulate telemetry across every multi-turn iteration so a
     // long coordinator-driven conversation reports one aggregated
     // `<total_tokens>` / `<tool_uses>` count in the task-notification.
@@ -6401,8 +6385,10 @@ where
             // A shutdown in a mixed batch cannot acknowledge ordinary messages
             // before their turn succeeds. Process that batch, then stop.
             is_shutdown_pending = has_shutdown;
-            current_prompt =
-                runtime::agent_mailbox::compose_next_turn_from_envelopes(&new_envelopes);
+            current_prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
+                &new_envelopes,
+                mailbox.authenticates_senders(),
+            );
             continue;
         }
 
@@ -7305,7 +7291,7 @@ fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<S
     }
 
     let mut disabled = Vec::new();
-    for entry in global_cron_registry().list(true) {
+    for entry in runtime::cron_service::registry().list(true) {
         let haystack = format!(
             "{} {}",
             entry.prompt,
@@ -7313,7 +7299,9 @@ fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<S
         )
         .to_ascii_lowercase();
         if tokens.iter().any(|token| haystack.contains(token))
-            && global_cron_registry().disable(&entry.cron_id).is_ok()
+            && runtime::cron_service::registry()
+                .disable(&entry.cron_id)
+                .is_ok()
         {
             disabled.push(entry.cron_id);
         }
@@ -7657,6 +7645,24 @@ fn build_provider_entry_with_config(
     })
 }
 
+/// Provider fallbacks and the subagent step budget, from one config load.
+/// The user's `maxSteps` bounds every turn, the subagent's included.
+fn load_agent_runtime_settings() -> (ProviderFallbackConfig, u32) {
+    let config = current_workspace_root()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok());
+    let fallback = config
+        .as_ref()
+        .map_or_else(ProviderFallbackConfig::default, |config| {
+            config.provider_fallbacks().clone()
+        });
+    let step_budget = config
+        .as_ref()
+        .and_then(|config| config.feature_config().max_steps())
+        .unwrap_or(DEFAULT_AGENT_STEP_BUDGET);
+    (fallback, step_budget)
+}
+
 fn load_sudocode_config() -> SudoCodeConfig {
     current_workspace_root()
         .ok()
@@ -7666,15 +7672,6 @@ fn load_sudocode_config() -> SudoCodeConfig {
                 .ok()
         })
         .unwrap_or_default()
-}
-
-fn load_provider_fallback_config() -> ProviderFallbackConfig {
-    current_workspace_root()
-        .ok()
-        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
-        .map_or_else(ProviderFallbackConfig::default, |config| {
-            config.provider_fallbacks().clone()
-        })
 }
 
 /// Turn a provider error into a [`RuntimeError`] that keeps its
@@ -9835,7 +9832,7 @@ mod tests {
         await_agent_output, build_agent_system_prompt, canonicalize_tool_name,
         classify_lane_failure, convert_messages, derive_agent_state,
         execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
-        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
+        extract_recovery_outcome, final_assistant_text, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
         normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
         push_output_block, run_ask_user_question_v2, search_tool_specs, AgentInput, AgentJob,
@@ -10045,6 +10042,40 @@ mod tests {
     /// A host that owns scheduling (sudowork runs its own scheduler and never
     /// ticks scode's crons.json) sets `SUDOCODE_DISABLE_CRON_TOOLS` so the agent
     /// cannot "schedule" a task that would persist but never fire — an orphan.
+    #[test]
+    fn cron_create_delivers_back_to_this_agent_by_default() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!("cron-tool-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SUDOCODE_CRON_STORE", dir.join("crons.json"));
+        let created: serde_json::Value = serde_json::from_str(
+            &execute_tool(
+                "CronCreate",
+                &json!({"schedule": "*/5 * * * *", "prompt": "check the queue"}),
+            )
+            .expect("create"),
+        )
+        .unwrap();
+        let steer: serde_json::Value = serde_json::from_str(
+            &execute_tool(
+                "CronCreate",
+                &json!({"schedule": "0 * * * *", "prompt": "x", "agent": "worker", "delivery": "steer"}),
+            )
+            .expect("create with options"),
+        )
+        .unwrap();
+        std::env::remove_var("SUDOCODE_CRON_STORE");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let me = runtime::mailbox::sending_mailbox().self_id().to_string();
+        assert_eq!(created["target"], json!({"type": "agent", "name": me}));
+        assert_eq!(created["delivery"], "queue");
+        assert_eq!(created["created_by"], "agent");
+        assert!(created["next_run_at"].is_u64(), "armed: {created}");
+        assert_eq!(steer["target"], json!({"type": "agent", "name": "worker"}));
+        assert_eq!(steer["delivery"], "steer");
+    }
+
     #[test]
     fn cron_tools_hidden_when_host_owns_scheduling() {
         let _guard = env_lock()
@@ -12146,7 +12177,7 @@ mod tests {
             "deadbee"
         );
 
-        let cron = global_cron_registry().create(
+        let cron = runtime::cron_service::registry().create(
             "*/10 * * * *",
             "roadmap-nudge-10min for ROADMAP #66",
             Some("ROADMAP #66 reminder"),
@@ -12185,7 +12216,7 @@ mod tests {
             reminder_manifest_json["laneEvents"][1]["data"]["disabledCronIds"][0],
             cron.cron_id
         );
-        let disabled_entry = global_cron_registry()
+        let disabled_entry = runtime::cron_service::registry()
             .get(&cron.cron_id)
             .expect("cron should still exist");
         assert!(!disabled_entry.enabled);

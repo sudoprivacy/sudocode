@@ -22,6 +22,35 @@ contract](../../docs/design/codex-native-queue-callback.md) specifies the explic
 native home, bounded unloaded producer, Unknown/no-replay behavior and actual
 native/ConPTY acceptance. Socket callbacks remain the default.
 
+## Claude Code channel attachment
+
+Claude Code joins the agent network through the fixed-session bridge with
+`claudeChannel` in its config. The bridge declares the Claude Code
+[`claude/channel`](https://code.claude.com/docs/en/channels-reference) capability
+and asks scode for [client-owned peer input](../../docs/acp.md#client-owned-peer-input-clientcapabilities_metasudocodepeerinput):
+each peer message arrives in the Claude Code session as
+`<channel source="…" from="…" verified="…">` holding the same
+`<mailbox-message>` block a scode model reads, and the scode session's own model
+never answers it. Claude replies with `scode_send`; `scode_agent_list`,
+`scode_prompt` and `scode_status` are unchanged.
+
+```json
+{ "version": 1, "scodeArgv": ["/abs/scode", "acp"], "workspace": "/abs/workspace",
+  "acpSessionId": "EXISTING_NODE_SESSION", "auditLog": "/abs/private/audit.jsonl",
+  "claudeChannel": { "peerPolicy": "node-namespace" } }
+```
+
+`node-namespace` accepts any sender the Node stamped, after `agent_list` proves
+the session's Node identity. `allowlist` with `peers` accepts only those names.
+`verified` comes from scode's per-message provenance (`true` when the session's
+mailbox authenticates writers); for a scode that does not report it, the bridge
+marks events verified only after its own Node identity check. Register the bridge as an
+MCP server (for example `claude mcp add nexus_scode -- node /abs/server.cjs
+--config /abs/private/claude.json`) and start Claude Code with
+`claude --dangerously-load-development-channels server:nexus_scode` while
+channels are in research preview. A scode without client-owned peer input is
+refused at startup instead of answering peers alongside Claude.
+
 ## Global native Codex attachment
 
 The `--codex` entry connects all loaded user-root threads through one per-user
@@ -29,7 +58,10 @@ bridge owner. It uses Codex's normal global MCP configuration. It does not copy
 one fixed Agent/session config into every workspace. Same-directory roots get
 distinct durable bindings; resuming a thread reuses its original Agent and ACP
 session. Task prompts and exact direct messages keep the same implementations
-as the fixed-session bridge below.
+as the fixed-session bridge below. Each owned scode session uses
+[client-owned peer input](../../docs/acp.md#client-owned-peer-input-clientcapabilities_metasudocodepeerinput),
+so peer messages reach the Codex thread and the scode session's own model never
+answers them; a scode without it is refused.
 
 This mode requires native root inventory and host-supplied tool-call metadata
 (qualified on native Codex 0.163.0), a compatible scode with native actor audit,
@@ -125,6 +157,53 @@ functions and cached paths. Rehashing cannot move an entry ahead of another
 directory in that terminal's PATH. A plain native command remains available by its original
 absolute path. Its incompatible CLI overrides still select native private mode.
 
+### One installation command for a prepared machine
+
+An operator first selects the existing Nexus Box, enrollment authority, verified
+scode and official native Codex installation. Keep those credentials on that
+machine. `--init-codex-operator` and `--init-codex` prepare their existing private
+policies; they do not enroll an actor or install/start Nexus.
+
+Supply `--native-env-file /absolute/private/environment.json` to `--init-codex`
+to pin the complete selected native environment, including an existing absolute
+`CODEX_HOME`. Supply `--command-entry /absolute/public/codex` (or `codex.ps1`
+for PowerShell) to receive a complete `installationArgv`. The native executable
+and official wrapper in the runtime must be real independent paths, so replacing
+the public launcher cannot recurse into itself. Keep environment values in the
+private file, rather than putting credentials in command arguments.
+
+Run that emitted argv once, equivalently:
+
+```sh
+node /absolute/package/dist/server.cjs --install-codex \
+  --config /absolute/private/runtime.json --command-entry /absolute/public/codex
+```
+
+It registers the existing Windows owner Task when applicable, asks official
+Codex to prepare its managed daemon, installs and reads back the global
+`nexus_scode` MCP entry, then replaces only the explicitly selected ordinary
+launcher. The previous small script or symlink is backed up in the private
+installation record. Native binaries are refused. An entry or runtime changed
+during preparation is preserved; a different existing MCP registration needs
+explicit migration. Each native home admits one create-only installation, so
+concurrent configurations and uncertain partial attempts cannot replay writes.
+
+This configures **new Codex launches**. A shell function already loaded in an
+existing terminal can still shadow the selected disk entry; verify resolution
+in the actual user terminal. Existing private/legacy roots retain their separate
+migration window. No prompt, mint, root load, Node stop or Job-policy change is
+part of installation. The result deliberately leaves `a2aJourneyVerified=false`:
+fresh enrollment and actual list/send/receive plus resume still need acceptance.
+On failure, retain the named installation record and backup for operator recovery;
+there is no automatic retry or rollback over another writer's changes.
+
+For assisted onboarding, ask Codex to select the verified native/scode paths and
+owner-supplied enrollment grant, prepare the two private policies, run the emitted
+installation argv, and verify the actual ordinary command and original resume
+identity. Missing Box/authority is an input to resolve, never implicit permission
+to create another Node or use a different network. This is not yet a zero-input
+fresh-machine installer.
+
 Existing fixed-session Agents can be prepared offline with `--bind-codex`.
 The [binding contract](../../docs/design/codex-a2a-autojoin.md#durable-state-and-recovery)
 specifies its explicit mapping document, original SID and separate native/ACP
@@ -152,6 +231,23 @@ human-review policy, two shared user roots, visible history before interruption,
 actual unload before resume and zero extra resume requests. It uses the same
 private fake provider and preserves the existing lifecycle deadlines and
 request counts; it does not qualify a production installation or new machine.
+
+The isolated real-Node fixture can also exercise the one-command installation.
+Alongside its pinned scode/daemon inputs, set `NEXUS_OPERATOR_BIN`,
+`NEXUS_OPERATOR_SHA256`, `NEXUS_OPERATOR_SOURCE`, `CODEX_ENROLLMENT_TEST_BIN`
+and `CODEX_ENROLLMENT_PACKAGE_ROOT`, then run
+`CODEX_ENROLLMENT_INSTALL_ENTRY=1 npm run test:native` after creating the clean
+source-bound archive. Windows also supplies `CODEX_ENROLLMENT_DRIVER` as JSON
+argv for the existing ConPTY driver. This selects the same idle,
+cancelled-resume and completed-resume journeys, installs one private `codex`
+command (`codex.ps1` on Windows), and launches every TUI through that command
+with the human-review flags. Actual enrollment, MCP send/receive, identity,
+history, request-count and retirement assertions remain in the same fixture.
+The first frontend uses the daemon started by installation, without a restart
+to pick up registration. This installation variant is separate from the
+unchanged cold-daemon and legacy-import cases; it does not modify a live user
+home or certify a production migration. A setup result alone still reports
+`a2aJourneyVerified: false`.
 
 ## Build a source-bound archive
 
@@ -400,8 +496,9 @@ connects to the existing native app-server proxy/socket and original loaded
 thread. It steers an active turn or starts an idle turn through the native
 frontend; it does not resume, fork, create another controller or weaken the
 frontend's approvals. Configure it using `CodexCallbackConfig` from the
-`/codexCallback` export. Notification content remains peer data, not user
-authority. An active steer or a delayed callback is not proof of true idle
+`/codexCallback` export. The bridge's scode connection then owns peer input, so
+the frontend is the only respondent to each peer message. Message content
+remains peer data, not user authority. An active steer or a delayed callback is not proof of true idle
 wakeup: acceptance must observe native idle and an accepted `turn/start`.
 
 A pre-existing thread can retain a temporary MCP config override. On Codex

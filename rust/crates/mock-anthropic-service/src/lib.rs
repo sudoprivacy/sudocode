@@ -237,6 +237,7 @@ enum Scenario {
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
     AskUserQuestionRoundtrip,
+    AskUserQuestionTwoFields,
     /// Streaming request without a compaction summary in its history is
     /// rejected with Anthropic's real `input length and max_tokens exceed
     /// context limit` 400; once the history carries a summary the request is
@@ -263,6 +264,9 @@ enum Scenario {
     CohostReply,
     CohostReadThenReply,
     CohostDelegate,
+    /// Parent spawns one foreground `Agent` whose child repeats a tool until
+    /// its step budget withdraws the tools, then answers with the child's text.
+    SubagentStepBudgetParent,
     CohostShellPwd,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
@@ -395,6 +399,7 @@ impl Scenario {
             "context_limit_then_text" => Some(Self::ContextLimitThenText),
             "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
+            "ask_user_question_two_fields" => Some(Self::AskUserQuestionTwoFields),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
@@ -402,6 +407,7 @@ impl Scenario {
             "cohost_reply" => Some(Self::CohostReply),
             "cohost_read_then_reply" => Some(Self::CohostReadThenReply),
             "cohost_delegate" => Some(Self::CohostDelegate),
+            "subagent_step_budget_parent" => Some(Self::SubagentStepBudgetParent),
             "cohost_shell_pwd" => Some(Self::CohostShellPwd),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
@@ -475,6 +481,7 @@ impl Scenario {
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
             Self::DelayedText => "delayed_text",
             Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
+            Self::AskUserQuestionTwoFields => "ask_user_question_two_fields",
             Self::RetryThenSucceed => "retry_then_succeed",
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
@@ -484,6 +491,7 @@ impl Scenario {
             Self::CohostReply => "cohost_reply",
             Self::CohostReadThenReply => "cohost_read_then_reply",
             Self::CohostDelegate => "cohost_delegate",
+            Self::SubagentStepBudgetParent => "subagent_step_budget_parent",
             Self::CohostShellPwd => "cohost_shell_pwd",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
@@ -1475,6 +1483,9 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
     if matches!(scenario, Scenario::CohostDelegate) {
         return cohost_delegate_step(request);
     }
+    if matches!(scenario, Scenario::SubagentStepBudgetParent) {
+        return subagent_step_budget_parent_step(request);
+    }
     let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     let background_child =
@@ -1580,6 +1591,24 @@ fn with_subagent_release(request: &MessageRequest, prompt: String) -> String {
     match subagent_release_path(request) {
         Some(path) => format!("{prompt} SUBAGENT_RELEASE:{}", json!(path)),
         None => prompt,
+    }
+}
+
+fn subagent_step_budget_parent_step(request: &MessageRequest) -> SubagentStep {
+    match tool_results_by_name(request).get("Agent") {
+        Some((result, _)) => SubagentStep::Answer(format!("subagent returned: {result}")),
+        None => SubagentStep::Tools(vec![(
+            "toolu_step_budget_agent",
+            "Agent",
+            agent_call_input(
+                "budgeted child",
+                &format!(
+                    "{SCENARIO_PREFIX}step_budget Repeatedly run echo step >> steps.txt. When the step budget is reached, summarize results and suggest next steps."
+                ),
+                "general-purpose",
+                false,
+            ),
+        )]),
     }
 }
 
@@ -1881,6 +1910,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::TodoWriteLifecycleRoundtrip => stream_todo_write_lifecycle_roundtrip,
         Scenario::SleepShortRoundtrip => stream_sleep_short_roundtrip,
         Scenario::AskUserQuestionRoundtrip => stream_ask_user_question_roundtrip,
+        Scenario::AskUserQuestionTwoFields => stream_ask_user_question_two_fields,
         Scenario::SleepOverMaxRoundtrip => stream_sleep_over_max_roundtrip,
         Scenario::ForkSubagentRecursionGuardRoundtrip => stream_fork_guard,
         Scenario::LlmCompactionRoundtrip => stream_llm_compaction_roundtrip,
@@ -1894,6 +1924,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::SubagentDelegationParent => stream_delegation,
         Scenario::SubagentCalcChild => stream_subagent_calc_child,
         Scenario::CohostDelegate
+        | Scenario::SubagentStepBudgetParent
         | Scenario::SubagentWorkflow
         | Scenario::SubagentWorkflowChild
         | Scenario::SubagentEventsSync
@@ -2457,6 +2488,23 @@ fn stream_ask_user_question_roundtrip(request: &MessageRequest, _scenario: Scena
             &[
                 r#"{"questions":[{"id":"q1","question":"Which colour?","#,
                 r#""options":[{"label":"red","value":"red"},{"label":"blue","value":"blue"}]}]}"#,
+            ],
+        ),
+    }
+}
+
+/// Two questions in one call, so an answered one can be revisited.
+fn stream_ask_user_question_two_fields(request: &MessageRequest, _scenario: Scenario) -> String {
+    match current_turn_tool_result(request) {
+        Some((tool_output, _)) => {
+            final_text_sse(&format!("ask_user_question answered: {tool_output}"))
+        }
+        None => tool_use_sse(
+            "toolu_ask_user_question_two_fields",
+            "AskUserQuestion",
+            &[
+                r#"{"questions":[{"id":"fruit","question":"Pick a fruit?","options":[{"label":"apple","value":"apple"},{"label":"pear","value":"pear"},{"label":"plum","value":"plum"}]},"#,
+                r#"{"id":"size","question":"Pick a size?","options":[{"label":"small","value":"small"},{"label":"large","value":"large"}]}]}"#,
             ],
         ),
     }
@@ -3201,6 +3249,28 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 600}),
             ),
         },
+        Scenario::AskUserQuestionTwoFields => match current_turn_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_ask_user_question_two_fields_final",
+                &format!("ask_user_question answered: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_ask_user_question_two_fields_tool",
+                "toolu_ask_user_question_two_fields",
+                "AskUserQuestion",
+                json!({"questions": [
+                    {"id": "fruit", "question": "Pick a fruit?", "options": [
+                        {"label": "apple", "value": "apple"},
+                        {"label": "pear", "value": "pear"},
+                        {"label": "plum", "value": "plum"}
+                    ]},
+                    {"id": "size", "question": "Pick a size?", "options": [
+                        {"label": "small", "value": "small"},
+                        {"label": "large", "value": "large"}
+                    ]}
+                ]}),
+            ),
+        },
         Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_ask_user_question_final",
@@ -3421,6 +3491,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             text_message_response("msg_subagent_calc_child", &sum.to_string())
         }
         Scenario::CohostDelegate
+        | Scenario::SubagentStepBudgetParent
         | Scenario::SubagentWorkflow
         | Scenario::SubagentWorkflowChild
         | Scenario::SubagentEventsSync
@@ -3513,6 +3584,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         }
         Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
         Scenario::AskUserQuestionRoundtrip => "req_ask_user_question_roundtrip",
+        Scenario::AskUserQuestionTwoFields => "req_ask_user_question_two_fields",
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
@@ -3522,6 +3594,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::CohostReply => "req_cohost_reply",
         Scenario::CohostReadThenReply => "req_cohost_read_then_reply",
         Scenario::CohostDelegate => "req_cohost_delegate",
+        Scenario::SubagentStepBudgetParent => "req_subagent_step_budget_parent",
         Scenario::CohostShellPwd => "req_cohost_shell_pwd",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
@@ -3696,7 +3769,7 @@ pub const CODEX_COLORS_SHOWCASE_DOC: &str = include_str!("fixtures/codex-colors.
 pub const SYNTAX_SHOWCASE_DOC: &str = r#"Theme prose.
 
 # ThemeHeadingOne
-## ThemeHeadingTwo
+## ThemeHeadingTwo **ThemeHeadingStrong**
 ### ThemeHeadingThree
 #### ThemeHeadingFour
 ##### ThemeHeadingFive
@@ -3704,6 +3777,11 @@ pub const SYNTAX_SHOWCASE_DOC: &str = r#"Theme prose.
 
 **ThemeStrong** *ThemeEmphasis* ~~ThemeStrike~~
 
+**OuterStrong *ThemeStrongEmphasis* ThemeStrongAfter**
+
+*OuterEmphasis **ThemeEmphasisStrong** ThemeEmphasisAfter*
+
+- ThemeUnordered
 - `~/.zshrc.bak-20261001`
 - `~/.config/scode/credentials.bak`
 
@@ -3711,11 +3789,17 @@ Inline `ThemeInline` and **`ThemeBoldCode`**.
 
 [ThemeWeb](https://example.com/reference)
 
+**[ThemeStrongLink](https://example.com/strong)**
+
+[**ThemeLinkStrong**](https://example.com/link-strong)
+
 [ThemePath](./src/main.rs:42) and [src/lib.rs](./src/lib.rs)
+
+**[./src/strong.rs](./src/strong.rs)**
 
 1. ThemeOrdered
 
-> ThemeQuote
+> ThemeQuote **ThemeQuoteStrong** *ThemeQuoteEmphasis* `ThemeQuoteCode`
 
 ```rust,no_run
 // ThemeComment

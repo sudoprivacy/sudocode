@@ -246,6 +246,8 @@ fn every_remote_backend_constructor_fails_before_rpc() {
         .expect("lazy client construction");
     let backend = NexusVfsFsBackend::new(client, "arbitrary-api-key".to_string());
     denied(backend.read("/agents/a/inbox"));
+    denied(backend.read_versioned("/agents/a/inbox"));
+    denied(backend.write_if_version("/agents/a/inbox", None, b"x"));
     denied(backend.write("/agents/a/inbox", b"x"));
     denied(backend.append("/agents/a/inbox", b"x"));
     denied(backend.stat("/agents/a/inbox"));
@@ -260,6 +262,8 @@ fn every_remote_backend_constructor_fails_before_rpc() {
     );
     let from_arc = NexusVfsFsBackend::from_arc(Arc::clone(&shared), String::new());
     denied(from_arc.read("/agents/a/inbox"));
+    denied(from_arc.read_versioned("/agents/a/inbox"));
+    denied(from_arc.write_if_version("/agents/a/inbox", None, b"x"));
 
     let mailbox = runtime::mailbox::Mailbox::over_nexus(shared, "sender", "any-token");
     let delivery = mailbox.send(runtime::agent_mailbox::MailboxEnvelope {
@@ -316,6 +320,25 @@ fn write_then_read_round_trips_through_the_vfs() {
         !std::path::Path::new(path).exists(),
         "co-hosted write must not touch the host filesystem"
     );
+}
+
+#[test]
+fn conditional_operations_preserve_files_on_unqualified_storage() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    let path = "/ws/plain-register";
+    fs.write(path, b"original").unwrap();
+    assert_eq!(
+        fs.read_versioned(path).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        fs.write_if_version(path, None, b"replacement")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Unsupported,
+    );
+    assert_eq!(fs.read(path).unwrap(), b"original");
 }
 
 #[test]
@@ -1751,6 +1774,154 @@ fn remote_backend(
     (fs, host, client)
 }
 
+#[cfg(target_os = "linux")]
+fn install_conditional_alias_mounts(
+    kernel: &Kernel,
+    manager: &nexus_raft::ZoneManager,
+    root: &std::path::Path,
+) {
+    use nexus_raft::zone_meta_store::ZoneMetaStore;
+    use std::time::Duration;
+
+    let zone = manager.create_zone("root", vec![]).unwrap();
+    assert!(zone.wait_for_leader(Duration::from_secs(10)));
+    let cas = Arc::new(
+        backends::storage::cas_local::CasLocalBackend::new_durable(&root.join("cas")).unwrap(),
+    );
+    for mount in ["/control", "/control-alias"] {
+        kernel
+            .vfs_router_arc()
+            .add_mount(mount, "root", Some(cas.clone()), false);
+        kernel.install_mount_metastore(
+            Kernel::canonical_mount_key(mount, "root"),
+            Arc::new(ZoneMetaStore::new_with_subtree(
+                zone.consensus_node().clone(),
+                manager.runtime_handle(),
+                mount.into(),
+                "/__managed_content_v1__".into(),
+            )),
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn conditional_content_cohost_and_mtls_share_the_committed_image() {
+    use runtime::fs_backend::{VersionToken, WriteOutcome};
+
+    let root = tempfile::tempdir().unwrap();
+    let manager =
+        nexus_raft::ZoneManager::isolated(root.path().join("raft").to_str().unwrap()).unwrap();
+    let kernel = kernel_with_root_backend();
+    install_conditional_alias_mounts(&kernel, &manager, root.path());
+    let local = Arc::new(vfs_backend(&kernel));
+    local.create_dir_all("/ws").unwrap();
+    local.write("/ws/ready.txt", b"ready").unwrap();
+    let (remote, host, client) = remote_backend(&kernel);
+    let remote = Arc::new(remote);
+    let path = "/control/register";
+    let alias = "/control-alias/register";
+    assert!(local.read_versioned(path).unwrap().is_none());
+    assert!(remote.read_versioned(alias).unwrap().is_none());
+    let WriteOutcome::Committed(first) = local.write_if_version(path, None, b"").unwrap() else {
+        panic!("first image must commit");
+    };
+    assert_ne!(first.0, [] as [u8; 0]);
+    assert_eq!(
+        remote.read_versioned(alias).unwrap(),
+        Some((Vec::new(), first.clone()))
+    );
+    assert_eq!(
+        remote.write_if_version(alias, None, b"wrong").unwrap(),
+        WriteOutcome::Conflict {
+            current: Some(first.clone())
+        }
+    );
+
+    let outcomes = race_conditional_writers([local.clone(), remote.clone()], alias, &first);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, WriteOutcome::Committed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, WriteOutcome::Conflict { .. }))
+            .count(),
+        1
+    );
+    let image = remote.read_versioned(path).unwrap().unwrap();
+    assert!(image.0 == b"cohost" || image.0 == b"remote");
+    assert_ne!(image.1, first);
+    assert_eq!(local.read_versioned(alias).unwrap(), Some(image.clone()));
+    assert_eq!(
+        local
+            .write_if_version(path, Some(&first), b"stale")
+            .unwrap(),
+        WriteOutcome::Conflict {
+            current: Some(image.1.clone())
+        }
+    );
+    assert!(remote
+        .write_if_version(alias, Some(&VersionToken(Vec::new())), b"empty token")
+        .is_err());
+
+    let invalid = NexusVfsFsBackend::from_arc_mtls(client, "invalid-key".into(), "root");
+    assert!(invalid.read_versioned(path).is_err());
+    assert!(matches!(
+        invalid.write_if_version(path, Some(&image.1), b"forbidden"),
+        Err(_) | Ok(WriteOutcome::Unknown)
+    ));
+    assert_eq!(local.read_versioned(path).unwrap(), Some(image));
+    remote.write("/ws/plain", b"unqualified").unwrap();
+    assert_eq!(
+        remote.read_versioned("/ws/plain").unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        remote
+            .write_if_version("/ws/plain", None, b"overwrite")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(local.read("/ws/plain").unwrap(), b"unqualified");
+
+    drop(invalid);
+    drop(remote);
+    drop(host);
+    drop(local);
+    kernel.release_metastores();
+    manager.shutdown();
+}
+
+#[cfg(target_os = "linux")]
+fn race_conditional_writers(
+    writers: [Arc<dyn FsBackend>; 2],
+    path: &'static str,
+    expected: &runtime::fs_backend::VersionToken,
+) -> Vec<runtime::fs_backend::WriteOutcome> {
+    let barrier = Arc::new(std::sync::Barrier::new(writers.len()));
+    let tasks: Vec<_> = writers
+        .into_iter()
+        .zip([b"cohost".as_slice(), b"remote".as_slice()])
+        .map(|(writer, image)| {
+            let barrier = barrier.clone();
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                writer
+                    .write_if_version(path, Some(&expected), image)
+                    .unwrap()
+            })
+        })
+        .collect();
+    tasks.into_iter().map(|task| task.join().unwrap()).collect()
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn remote_existence_preserves_admission_and_policy_errors() {
@@ -1953,6 +2124,8 @@ fn metadata_and_lock_share_scope_with_positive_lifecycle_controls() {
     permission_denied(restricted.stat("/private/alias"));
     permission_denied(restricted.read_link("/private/alias"));
     permission_denied(restricted.try_lock("/private/lease", 1000));
+    permission_denied(restricted.read_versioned("/private/target"));
+    permission_denied(restricted.write_if_version("/private/target", None, b"changed"));
     permission_denied(restricted.record_log("/private/history", RecordLogMode::CreateNew));
     permission_denied(restricted.record_log("/private/target", RecordLogMode::Existing));
     assert_eq!(restricted.read_link("/ws/alias").unwrap(), "/ws/target");
@@ -1983,6 +2156,8 @@ fn links_cannot_redirect_scoped_io_or_rename_to_private_content() {
         "/ws",
     );
     permission_denied(restricted.read("/ws/escape"));
+    permission_denied(restricted.read_versioned("/ws/escape"));
+    permission_denied(restricted.write_if_version("/ws/escape", None, b"changed"));
     permission_denied(restricted.write("/ws/escape", b"changed"));
     permission_denied(restricted.append("/ws/escape", b"changed"));
     permission_denied(restricted.tail_read("/ws/escape", 0, 0));

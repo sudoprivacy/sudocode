@@ -6,14 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tonic = { version = "0.13", features = ["transport", "tls-ring"] }
-prost = "0.13"
+kernel = { workspace = true }
+tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 serde_json = { workspace = true }
-
-[build-dependencies]
-tonic-build = "0.13"
-protoc-bin-vendored = "3"
 
 [lints]
 workspace = true

@@ -451,6 +451,18 @@ def terminal_installer_scope(root, base):
     return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
 
 
+def validate_before_host_lease(names, root, output):
+    """Reject invalid guard inputs early; execution still stages its own copy."""
+    if "guard-contract" not in names:
+        return
+    print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
+          "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
+    stage_profile_executor(root, execution_policy_ref(), "guard-contract",
+                           output / "guard-contract" / "prequeue-static-policy")
+    print("GUARD_STATIC_PREFLIGHT: passed; execution will restage and revalidate the protected Git inputs.",
+          flush=True)
+
+
 def prepare_native_checks(names, root, output, execute):
     """Install selected Windows terminal inputs before long native compilation."""
     prepared = {}
@@ -727,18 +739,18 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "d8ff062fd7f0c89486439d8a0e4e4c7a3323ef982382e43322ca8c1c28b746f6",
+        ".github/scripts/local_acceptance.py": "c2c4014f0f4ebb52784cd73406eafb72d2cd105fb52023e19c814e75262321ca",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
         ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "a5942d3505a031ec0f816d2f009c642a6c4c661015fbc87d54c161c97c478ea7",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "a060ae86954e8ad5ff4507551b3adc83346f335fff9421c31ddf0f38f1ed801d",
-        "e2e/local-acceptance/host_lease_acceptance.py": "9889de100125304be8ff6630e78cf57341ab54a1b6da0df6272a7a524703a48e",
+        "e2e/local-acceptance/host_lease_acceptance.py": "8b5914b541f2cdcc1eb1fe9671a4642c42b5e80bf61cc10bceb935468ea2628e",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
@@ -748,7 +760,7 @@ def native_guard_files():
         "e2e/local-acceptance/publication_acceptance.py": "209ca63435e8e42d2c15d90f0f3c4f93fa17f0e74ca615e7b0eecf9746f05120",
         "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
+        "e2e/local-acceptance/run.py": "2e5eb115d6c3cbe8135ffd5fe94ccf31e18a8d74b3c4919845f8012ade433790",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",

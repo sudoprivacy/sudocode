@@ -65,7 +65,8 @@ def workflow_scope(output, environment):
         return lines[start:end]
 
     condition = "        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'"
-    for name in ["Co-host duet against a daemon built from this checkout", "Checkout the VFS contract used by the co-host",
+    for name in ["Co-host duet against a daemon built from this checkout",
+                 "Conditional owner content survives a co-host process restart", "Checkout the VFS contract used by the co-host",
                  "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
@@ -274,7 +275,7 @@ def run(output):
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 
-    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None):
+    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None, live_required=True):
         cohost_required = daemon if cohost_required is None else cohost_required
         head = command("git", "rev-parse", "HEAD")
         keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
@@ -298,9 +299,9 @@ def run(output):
                 emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
                 assert emitted["cohost_required"] == result["cohost_required"], emitted
                 assert result["clippy_required"] == "true", result
-                assert result["live_required"] == "true", result
+                assert result["live_required"] == str(live_required).lower(), result
                 assert result["benchmark_required"] == str(benchmark).lower(), result
-                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}; native lint/provider coverage retained", flush=True)
+                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}, lint=true, live={live_required}", flush=True)
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -310,6 +311,16 @@ def run(output):
 
     expect("dev-only manifest/lock skips unchanged normal products", base, [])
     ci_scope(base, False)
+    queue_base = command("git", "rev-parse", "HEAD")
+    queue_branch = command("git", "branch", "--show-current")
+    command("git", "switch", "--detach", queue_base)
+    for path in [".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py"]:
+        original = (repository / path).read_text() if (repository / path).exists() else ""
+        write(path, original + "\n# Changed queue execution input.\n")
+        commit("Queue execution input requires the actual daemon and native lint")
+        ci_scope(queue_base, True, benchmark=True, live_required=False)
+        command("git", "switch", "--detach", queue_base)
+    command("git", "switch", queue_branch)
     assert product() == original_binary
     cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
     assert product() == original_binary
@@ -667,6 +678,7 @@ def run(output):
               "newly_required_profile_refused": True,
               "required_normal_failure_still_fails": True,
               "actual_pr_push_queue_selectors_keep_lint_and_provider_scope": True,
+              "queue_entry_changes_require_real_daemon_and_lint_without_paid_calls": True,
               "actual_cli_package_is_binary_only_and_has_no_workspace_dependents": True,
               "broken_independent_cli_does_not_build_into_cohost": True,
               "shared_runtime_source_rebuilds_actual_cohost": True,

@@ -694,7 +694,7 @@ def native_guard_files():
         ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
         "e2e/local-acceptance/carryover_acceptance.py": "3249cb47c0dc416c915f3080d27e42184d58566a80ab58433ee03e066ed1aab9",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "a5942d3505a031ec0f816d2f009c642a6c4c661015fbc87d54c161c97c478ea7",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "a060ae86954e8ad5ff4507551b3adc83346f335fff9421c31ddf0f38f1ed801d",
@@ -708,7 +708,7 @@ def native_guard_files():
         "e2e/local-acceptance/publication_acceptance.py": "209ca63435e8e42d2c15d90f0f3c4f93fa17f0e74ca615e7b0eecf9746f05120",
         "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
+        "e2e/local-acceptance/run.py": "2e5eb115d6c3cbe8135ffd5fe94ccf31e18a8d74b3c4919845f8012ade433790",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -1007,7 +1007,16 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             path = sources / "runner" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
-    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
+    scratch = []
+    if name == "rendering":
+        scratch = ["--tmpfs", "/benchmark-tmp:rw,nosuid,nodev,exec,size=512m",
+                   "--env", "TMPDIR=/benchmark-tmp"]
+        print("RENDERING_FIXTURE_STORAGE: throwaway sessions use a private 512 MiB tmpfs; "
+              "reports, binaries and build caches retain their existing storage. "
+              "This isolates render measurements from host disk flushes and does not qualify "
+              "persistent-storage performance. Other profiles retain their storage; "
+              "exit assertions, deadlines and performance budgets are unchanged.", flush=True)
+    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048", *scratch,
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
             "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
@@ -1202,6 +1211,15 @@ def rendering_cases(terminal, arguments, output, command, plan):
             or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
         raise RuntimeError("Rendering policy changed after its pre-build validation")
+    if policy.get("case_sampling") and set(plan.get("sampling", {})) != set(cases):
+        raise RuntimeError("Rendering sampling overrides require a complete resolved per-case plan")
+    if policy.get("case_sampling") and set(plan.get("observations", {})) != set(cases):
+        raise RuntimeError("Rendering sampling overrides require complete raw observation counts")
+    inventory = None
+    if "observations" in plan:
+        spec = importlib.util.spec_from_file_location("rendering_observation_inventory", terminal / "benchmark.py")
+        inventory = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inventory)
     if not cases or len(cases) != len(set(cases)) or any(
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
@@ -1212,6 +1230,10 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
               "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
               "unjudged_warmups": 0}
+    if "sampling" in plan:
+        report["sampling"] = plan["sampling"]
+    if inventory is not None:
+        report["observations"] = plan["observations"]
     metadata = None
 
     def save():
@@ -1241,6 +1263,10 @@ def rendering_cases(terminal, arguments, output, command, plan):
                     child = json.loads(child_path.read_text(encoding="utf-8"))
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    if "sampling" in plan and child.get("sampling") != {case: plan["sampling"][case]}:
+                        raise RuntimeError(f"Rendering scenario {case} used different resolved sampling")
+                    if inventory is not None and child.get("observations") != {case: plan["observations"][case]}:
+                        raise RuntimeError(f"Rendering scenario {case} declared different raw observation counts")
                     if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
                         raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
                                            f"required {plan['samples'][case]} judged observations and no extra warm-ups")
@@ -1253,6 +1279,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
                             raise RuntimeError(f"Rendering {key} changed between scenarios")
                         report[key] = child[key]
                     for sample in child["samples"]:
+                        if inventory is not None and inventory.observation_counts(sample["data"]) != plan["observations"][case]:
+                            raise RuntimeError(f"Rendering scenario {case} has missing or extra raw observations")
                         observed = sample["data"]["metadata"]
                         if metadata is not None and metadata != observed:
                             raise RuntimeError("Rendering terminal observer/platform changed between scenarios")

@@ -88,12 +88,24 @@ def workload(name,root,output,base,command,target):
     # This private probe is later deliberately corrupted by the non-root host.
     # Docker owns the output on Linux; retain execution while allowing that edit.
     binary.chmod(binary.stat().st_mode | 0o002)
-    log=command(str(binary),'-c','print("STAGED_NATIVE_BINARY_EXECUTED")')
-    assert log.read_text().strip()=='STAGED_NATIVE_BINARY_EXECUTED','staged native Linux executable cannot run'
+    native_probe = """import json,os,shutil,subprocess,sys,tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as directory:
+    executable=Path(directory)/"native-probe"
+    shutil.copy2(sys.executable,executable)
+    marker=subprocess.check_output([str(executable),"-c","print('STAGED_NATIVE_BINARY_EXECUTED')"],text=True).strip()
+    info=os.statvfs(directory)
+    print(json.dumps({"marker":marker,"temporary_root":tempfile.gettempdir(),
+        "filesystem":subprocess.check_output(["stat","-f","--format=%T",directory],text=True).strip(),
+        "capacity_bytes":info.f_frsize*info.f_blocks}))
+"""
+    log=command(str(binary),'-c',native_probe)
+    scratch=json.loads(log.read_text())
+    assert scratch['marker']=='STAGED_NATIVE_BINARY_EXECUTED','staged native Linux executable cannot run'
     report=output/'measurements/report.json'
     report.parent.mkdir(parents=True)
     report.write_text(json.dumps({'status':'passed','candidate_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}))
-    observed.update(profile_output=str(output.relative_to('/evidence')),reused_release=reused is not None)
+    observed.update(profile_output=str(output.relative_to('/evidence')),reused_release=reused is not None,scratch=scratch)
 checks.benchmark=workload
 assert sys.argv[1]=='/inputs/runner/.github/local-acceptance/checks.py'
 sys.argv=sys.argv[1:]
@@ -176,6 +188,12 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         observed = json.loads((evidence / "observed.json").read_text())
         assert observed["sources"] == expected["sources"]
         assert observed["profile_output"] == f"container/{profile}"
+        if profile == "rendering":
+            assert observed["scratch"]["temporary_root"] == "/benchmark-tmp"
+            assert observed["scratch"]["filesystem"] == "tmpfs"
+            assert observed["scratch"]["capacity_bytes"] == 512 * 1024 * 1024
+        else:
+            assert observed["scratch"]["temporary_root"] != "/benchmark-tmp"
         if profile == "browser":
             assert observed["trusted_gui_harness"]
         assert not (evidence / "scode-candidate").exists(), "Fixture bypassed the production output layout"
@@ -187,6 +205,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         assert provenance["image_id"] in actual_run and provenance["image_tag"] not in actual_run
         assert f"type=volume,source={cache},target=/state" in actual_run
         assert f"type=bind,source={storage},target=/legacy-state,readonly" in actual_run
+        assert ("--tmpfs" in actual_run) == (profile == "rendering")
         return provenance
 
     try:

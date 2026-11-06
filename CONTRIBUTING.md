@@ -410,6 +410,20 @@ candidate, which also judges dependency-only changes; see
 [Release acceptance coverage](#release-acceptance-coverage). Their functional
 PTY cases keep the native suite's per-PR scope.
 
+The repeated-turn stress scenario samples 20 typed keys per input phase per
+turn, instead of 60. All 24 paired processes and 30 turns per process remain:
+600 observations per phase per process, or 43,200 overall instead of 129,600.
+Single-turn core scenarios retain 60 keys per phase. Resize (40 per turn),
+cancel (20 per process), paste, resource measurements, budgets and the relative
+evaluator remain unchanged. This reduces repeated typing coverage and can miss
+intermittent latency spikes; equivalent statistical sensitivity is not claimed.
+`RENDERING_SAMPLING` prints each effective policy before measurement. Each sample
+retains the exact resolved workload policy and its SHA256; the original judged
+policy remains in the parent report. Policies without overrides retain 60.
+The public process controls refuse missing input, resize or turn observations
+and unsupported reductions. Fresh product stress execution is required before
+claiming runtime savings; observation counts alone do not prove faster delivery.
+
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
 Docker runs the candidate in pinned

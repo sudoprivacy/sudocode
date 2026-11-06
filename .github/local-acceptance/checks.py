@@ -1202,6 +1202,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
             or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
         raise RuntimeError("Rendering policy changed after its pre-build validation")
+    if policy.get("case_sampling") and set(plan.get("sampling", {})) != set(cases):
+        raise RuntimeError("Rendering sampling overrides require a complete resolved per-case plan")
     if not cases or len(cases) != len(set(cases)) or any(
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
@@ -1212,6 +1214,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
               "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
               "unjudged_warmups": 0}
+    if "sampling" in plan:
+        report["sampling"] = plan["sampling"]
     metadata = None
 
     def save():
@@ -1241,6 +1245,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
                     child = json.loads(child_path.read_text(encoding="utf-8"))
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    if "sampling" in plan and child.get("sampling") != {case: plan["sampling"][case]}:
+                        raise RuntimeError(f"Rendering scenario {case} used different resolved sampling")
                     if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
                         raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
                                            f"required {plan['samples'][case]} judged observations and no extra warm-ups")

@@ -53,6 +53,25 @@ def wait_until(action, timeout=30):
         time.sleep(.1)
 
 
+def nexus_proto_root():
+    """Use the same resolved Nexus source as the workspace's typed client."""
+    workspace = Path(__file__).resolve().parents[2] / 'rust'
+    metadata = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1'],
+        cwd=workspace, text=True, encoding='utf-8', timeout=60))
+    client, = [package for package in metadata['packages']
+               if Path(package['manifest_path']).resolve()
+               == workspace / 'crates/nexus-vfs-client/Cargo.toml']
+    node, = [node for node in metadata['resolve']['nodes'] if node['id'] == client['id']]
+    dependency, = [dependency for dependency in node['deps'] if dependency['name'] == 'kernel']
+    kernel, = [package for package in metadata['packages'] if package['id'] == dependency['pkg']]
+    root = Path(kernel['manifest_path']).resolve().parents[2] / 'proto'
+    for name in ['nexus/grpc/vfs/vfs.proto', 'nexus/grpc/vfs/zone_runtime.proto',
+                 'nexus/raft/transport.proto']:
+        assert (root / name).is_file(), f'Resolved Nexus protocol source is absent: {name}'
+    return root
+
+
 def run(args, root):
     grpcurl_version = subprocess.check_output([str(args.grpcurl), '--version'],
         stderr=subprocess.STDOUT, text=True, timeout=5).strip()
@@ -105,12 +124,11 @@ def run(args, root):
         'bindAddr': bind_addr, 'clientEndpoint': endpoint}
 
     def grpc(method, payload, raft=False, zones=False):
-        proto = Path(__file__).with_name('cluster-info.proto') if raft else (
-            Path(__file__).with_name('zone-status.proto') if zones else
-            Path(__file__).resolve().parents[2] / 'rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto')
+        proto = 'nexus/raft/transport.proto' if raft else (
+            'nexus/grpc/vfs/zone_runtime.proto' if zones else 'nexus/grpc/vfs/vfs.proto')
         command = [str(args.grpcurl), '-max-time', '3', '-cacert', str(data / 'tls/ca.pem'),
             '-cert', str(data / 'tls/node.pem'), '-key', str(data / 'tls/node-key.pem'),
-            '-servername', 'nexus-node', '-import-path', str(proto.parent), '-proto', proto.name, '-d', json.dumps(payload),
+            '-servername', 'nexus-node', '-import-path', str(args.proto_root), '-proto', proto, '-d', json.dumps(payload),
             endpoint, ('nexus.raft.ZoneApiService/' if raft else 'nexus.grpc.vfs.ZoneRuntimeService/' if zones
                        else 'nexus.grpc.vfs.NexusVFSService/') + method]
         result = subprocess.run(command, capture_output=True, timeout=5)
@@ -354,6 +372,7 @@ if __name__ == '__main__':
         setattr(options, name, getattr(options, name).resolve(strict=True))
     if options.daemon:
         options.daemon = options.daemon.resolve(strict=True)
+    options.proto_root = nexus_proto_root()
     hosts = [options.bind_host] if options.bind_host else ['127.0.0.1', '0.0.0.0']
     for host in hosts:
         case = argparse.Namespace(**vars(options))

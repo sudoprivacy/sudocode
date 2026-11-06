@@ -791,7 +791,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "6353d4b13ab2a119e502dc0748a8b01479860223027b17bcb44cc82ea3619f54":
+    if actual_scope != "56f0733c5e4408244547b2ad47a2fea0e1836bcb25d8674d82938a1aac7298cc":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -804,9 +804,12 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "7bf79728e2ec8d1115fb357ead698f0b24ab9bbb8bda6c3972fce89d188bafbf"
-    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
-        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    expected = {'native-release': 'fddb32707007f84b5f920da15dfc7a64b98366b9a8c50e88ee67a78ac758d61b', 'native-context': 'c21329765d3b539cc111b81675e32ff645b2af2200658206e3e15e6ab026092f'}
+    observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
+    for name, digest in expected.items():
+        if observed[name] != digest:
+            label = "Native release" if name == "native-release" else "Native compiler-context"
+            raise RuntimeError(f"{label} guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
     return policy_root / ".github/local-acceptance/native_guard.py"

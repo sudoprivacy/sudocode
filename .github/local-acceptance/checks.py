@@ -410,6 +410,18 @@ def terminal_installer_scope(root, base):
     return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
 
 
+def validate_before_host_lease(names, root, output):
+    """Reject invalid guard inputs early; execution still stages its own copy."""
+    if "guard-contract" not in names:
+        return
+    print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
+          "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
+    stage_profile_executor(root, execution_policy_ref(), "guard-contract",
+                           output / "guard-contract" / "prequeue-static-policy")
+    print("GUARD_STATIC_PREFLIGHT: passed; execution will restage and revalidate the protected Git inputs.",
+          flush=True)
+
+
 def prepare_native_checks(names, root, output, execute):
     """Install selected Windows terminal inputs before long native compilation."""
     prepared = {}
@@ -675,7 +687,7 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "6d7a2be470e37bce2914eb89449f60612e75f233e2f8ed7323812a4d5e60618a",
+        ".github/scripts/local_acceptance.py": "ed99a507cb25b20784a22a6c10dfc321763bf2b2934d0d30c57c4bb44d26869a",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
@@ -686,7 +698,7 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "a060ae86954e8ad5ff4507551b3adc83346f335fff9421c31ddf0f38f1ed801d",
-        "e2e/local-acceptance/host_lease_acceptance.py": "72c11c2b0f45301bd662f0a5d2e9962b4ef651313866bba793572b1b360ec289",
+        "e2e/local-acceptance/host_lease_acceptance.py": "8b5914b541f2cdcc1eb1fe9671a4642c42b5e80bf61cc10bceb935468ea2628e",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",

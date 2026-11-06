@@ -1743,6 +1743,9 @@ def perform_check(args, attempt):
     try:
         if "preflight" in needed:
             perform_profile("preflight")
+        validate = getattr(module, "validate_before_host_lease", None)
+        if validate and pending:
+            validate(pending, ROOT, output)
         prepared = False
         for name in serialized:
             fresh = name in pending

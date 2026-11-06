@@ -1,5 +1,6 @@
 """Exercise the host acceptance lease through concurrent CLI processes, Git and SSH."""
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -253,20 +254,27 @@ def verify_host_lease(directory, source, command, environment):
     verify_external_index(fixture, sources["A"], isolated)
     verify_service_order(fixture, source, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated)
+    verify_static_before_queue(fixture, source, run, isolated)
+
+
+def clone_private_policy(fixture, authority, run, directory):
+    """Give each cloned policy its own identity and the original fixture key."""
+    repository = directory / "policy"
+    run("git", "clone", "--no-hardlinks", "--branch", "main", fixture / "work", repository, cwd=directory)
+    run("git", "config", "user.name", "Host Lease E2E", cwd=repository)
+    run("git", "config", "user.email", "host-lease@example.invalid", cwd=repository)
+    shutil.copyfile(authority / ".github/scripts/local_acceptance.py",
+                    repository / ".github/scripts/local_acceptance.py")
+    run("git", "config", "localAcceptance.signer", "fixture", cwd=repository)
+    run("git", "config", "localAcceptance.key", fixture / "device-key", cwd=repository)
+    return repository
 
 
 def verify_profile_handoff(fixture, authority, run, environment):
     """Let an existing waiter run between profiles and verify cumulative wait."""
     directory = fixture / "profile-handoff"
     directory.mkdir()
-    repository = directory / "policy"
-    run("git", "clone", "--no-hardlinks", "--branch", "main", fixture / "work", repository, cwd=directory)
-    run("git", "config", "user.name", "Profile FIFO E2E", cwd=repository)
-    run("git", "config", "user.email", "profile-fifo@example.invalid", cwd=repository)
-    helper = repository / ".github/scripts/local_acceptance.py"
-    shutil.copyfile(authority / ".github/scripts/local_acceptance.py", helper)
-    run("git", "config", "localAcceptance.signer", "fixture", cwd=repository)
-    run("git", "config", "localAcceptance.key", fixture / "device-key", cwd=repository)
+    repository = clone_private_policy(fixture, authority, run, directory)
     policy = repository / "spec/local_acceptance.json"
     rules = json.loads(policy.read_text())
     rules["checks"]["native-services"] = {"include": ["second.txt"]}
@@ -357,6 +365,98 @@ def verify_profile_handoff(fixture, authority, run, environment):
         for label in ["Holder", "Long", "Short", "Long-two"]:
             (directory / ("release-" + label)).touch()
         for process in processes:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=10)
+
+
+def verify_static_before_queue(fixture, authority, run, environment):
+    """Refuse a real production pin mismatch while another private profile holds the host."""
+    directory = fixture / "static-before-queue"
+    directory.mkdir()
+    repository = clone_private_policy(fixture, authority, run, directory)
+    holder_policy = run("git", "rev-parse", "HEAD", cwd=repository)
+    home = directory / "home"
+    home.mkdir()
+    env = {key: value for key, value in environment.items() if key != LEASE_ENV}
+    env.update(HOME=str(home), USERPROFILE=str(home))
+    processes = []
+
+    def start(label, policy):
+        work = directory / ("source-" + label)
+        run("git", "worktree", "add", "--detach", work, policy, cwd=repository)
+        (work / "input.txt").write_text(label)
+        run("git", "add", ".", cwd=work)
+        run("git", "commit", "-m", "Candidate " + label, cwd=work)
+        with (directory / (label + ".log")).open("wb") as stream:
+            process = subprocess.Popen([sys.executable, str(work / ".github/scripts/local_acceptance.py"),
+                "check", "--base", policy, "--policy-ref", policy, "--output", str(directory / label)],
+                cwd=work, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        processes.append(process)
+        return process
+
+    # Keep the actual production validator and staging code. Only preflight's
+    # executable is private, so this control never starts Docker or native tests.
+    source = Path(__file__).resolve().parents[2]
+    contents = (source / ".github/local-acceptance/checks.py").read_text(encoding="utf-8")
+    lines = contents.splitlines(keepends=True)
+    definition = next(node for node in ast.parse(contents).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "run")
+    lines[definition.lineno - 1] = lines[definition.lineno - 1].replace("def run(", "def production_run(", 1)
+    contents = "".join(lines) + (
+        '\ndef run(name, root, output, base, execute):\n'
+        '    if name == "preflight":\n'
+        '        return [execute([sys.executable,"-c","print(\'metadata passed\')"],root,output/"000.log")]\n'
+        '    return production_run(name, root, output, base, execute)\n')
+    try:
+        holder = start("Holder", holder_policy)
+        events = directory / "events.log"
+        deadline = time.monotonic() + 120
+        while not events.exists() or events.read_text().splitlines() != ["start:Holder"]:
+            assert time.monotonic() < deadline, "Private holder never entered its profile"
+            time.sleep(0.05)
+        (repository / ".github/local-acceptance/checks.py").write_text(contents, encoding="utf-8")
+        # This is the first input staged by native_guard_files. Its real pin
+        # remains unchanged; a committed mismatch must fail before host admission.
+        (repository / ".github/scripts/check_pr_history.py").write_text("raise SystemExit('DO_NOT_EXECUTE')\n")
+        policy = repository / "spec/local_acceptance.json"
+        rules = json.loads(policy.read_text())
+        rules["checks"] = {"preflight": {"include": ["*"]}, "guard-contract": {"include": ["input.txt"]}}
+        policy.write_text(json.dumps(rules))
+        run("git", "add", ".", cwd=repository)
+        run("git", "commit", "-m", "Protected invalid guard pin fixture", cwd=repository)
+        bad_policy = run("git", "rev-parse", "HEAD", cwd=repository)
+        bad = start("Bad", bad_policy)
+        assert bad.wait(timeout=30) == 1
+        log = (directory / "Bad.log").read_text(encoding="utf-8")
+        assert "GUARD_STATIC_PREFLIGHT:" in log, log
+        assert "Native guard input .github/scripts/check_pr_history.py changed: SHA256" in log, log
+        assert "Update its protected pin" in log, log
+        assert "Waiting for this host" not in log and "Acquired this host" not in log, log
+        assert "DOCKER_ENGINE_PROBE" not in log, log
+        assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
+        attempt = json.loads((directory / "Bad/attempt.json").read_text())
+        assert attempt["outcome"] == "failure" and attempt["host_lease_wait_seconds"] == 0, attempt
+        assert attempt["host_lease_acquisitions"] == [], attempt
+        assert not (directory / "Bad/envelope.json").exists()
+        checkpoint = sorted((directory / "Bad/checkpoints").iterdir())[-1]
+        assert set(json.loads((checkpoint / "receipt.json").read_text())["checks"]) == {"preflight"}
+        assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+        (directory / "release-Holder").touch()
+        assert holder.wait(timeout=30) == 0
+        print("PASS: actual protected pin mismatch fails before a held host queue, without Docker/native entry; signed preflight progress remains incomplete")
+    finally:
+        # Terminate only this private refused contender before releasing its
+        # holder, including when the unchanged-helper counterexample times out.
+        for process in processes[1:]:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+        (directory / "release-Holder").touch()
+        for process in processes[:1]:
             if process.poll() is None:
                 try:
                     process.wait(timeout=15)

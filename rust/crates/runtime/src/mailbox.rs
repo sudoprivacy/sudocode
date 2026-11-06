@@ -232,6 +232,36 @@ pub(crate) enum MailboxBackend {
     Resolving(Arc<BackendResolver>),
 }
 
+/// How long each of the two late-commit checks waits after an append error.
+const RECONCILE_WAIT_MS: u64 = 1_000;
+
+/// Whether a frame equal to `bytes` is in the stream at `path` after `cursor`,
+/// advancing `cursor` past what was read. The first read waits up to
+/// `block_ms` for new frames; the rest drain without waiting.
+fn frame_after(
+    backend: &dyn FsBackend,
+    path: &str,
+    cursor: &mut u64,
+    bytes: &[u8],
+    block_ms: u64,
+) -> std::io::Result<bool> {
+    let mut wait = block_ms;
+    loop {
+        let (data, next, eof) = backend.tail_read(path, *cursor, wait)?;
+        wait = 0;
+        if eof {
+            return Ok(false);
+        }
+        if data == bytes {
+            return Ok(true);
+        }
+        if next <= *cursor {
+            return Ok(false);
+        }
+        *cursor = next;
+    }
+}
+
 impl MailboxBackend {
     #[inline]
     pub(crate) fn resolve(&self) -> Result<Arc<dyn FsBackend>, String> {
@@ -715,11 +745,22 @@ impl Mailbox {
         self.ensure_provisioned(&envelope.to)?;
 
         if self.backend_frames(&path)? {
-            return self
-                .backend
-                .resolve()?
-                .append(&path, &envelope.to_bytes())
-                .map_err(|e| format!("mailbox send to {path}: {e}"));
+            let backend = self.backend.resolve()?;
+            let bytes = envelope.to_bytes();
+            return match backend.append(&path, &bytes) {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+                    ) =>
+                {
+                    Err(format!("mailbox send to {path}: {error}"))
+                }
+                Err(error) => {
+                    self.reconcile_append(backend.as_ref(), &path, &envelope.to, &bytes, &error)
+                }
+            };
         }
 
         // Non-framed transcript: a message is one JSONL line at the
@@ -737,6 +778,48 @@ impl Mailbox {
         // writing one log) as if it were a special case, and with conventions
         // collapsed there is exactly one shape to write.
         crate::agent_mailbox::append_envelope_via(self.backend.resolve()?.as_ref(), &path, envelope)
+    }
+
+    /// Settle an append that returned an error but may have committed.
+    ///
+    /// A replicated append that times out can still commit after the error,
+    /// and a sender told "failed" resends, so its peer gets the message
+    /// twice. This envelope's bytes include its send time (to the second), so
+    /// finding them in the conversation means this send landed, and an earlier
+    /// message with the same words from another second does not match. Not
+    /// finding them proves nothing: the commit may still land, so the error
+    /// says the outcome is unconfirmed rather than that nothing was sent.
+    fn reconcile_append(
+        &self,
+        backend: &dyn FsBackend,
+        path: &str,
+        peer: &str,
+        bytes: &[u8],
+        error: &std::io::Error,
+    ) -> Result<(), String> {
+        // Everything after this agent's read position, which includes its own
+        // writes since then. Never read means a conversation read from the top.
+        let mut cursor = self.read_position(peer).ok().flatten().unwrap_or(0);
+        for wait_ms in [0, RECONCILE_WAIT_MS, RECONCILE_WAIT_MS] {
+            match frame_after(backend, path, &mut cursor, bytes, wait_ms) {
+                Ok(true) => {
+                    tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(read_error) => {
+                    return Err(format!(
+                        "delivery unknown: append to {path} failed ({error}) and the \
+                         conversation could not be read to check ({read_error})"
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "delivery unconfirmed: append to {path} failed ({error}); the message was not \
+             in the conversation when checked, but a timed-out append can still commit, so \
+             check the conversation before resending"
+        ))
     }
 
     /// Read new messages from own inbox starting at `cursor`.

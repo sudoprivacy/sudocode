@@ -345,6 +345,16 @@ verify the connection deadline. Its container image includes the official
 Docker CLI pinned by image digest for the nested policy checks. The guard
 preserves an ordinary client error as a
 failure. Healthy Engine execution still requires the full container matrix.
+The guard image provisions nextest before the matrix using the exact frozen
+`nextest_binary` function, including its original URL and checksums. Image
+preparation runs archive/executable corruption-refusal controls and restores the
+verified files. Docker reuses that layer while its tool script and image inputs
+stay unchanged. Each selected attempt rechecks the actual cached CLI with
+`--network none` before running the full matrix and author-native guards.
+`GUARD_TOOL_PREFLIGHT` names these stages. Image/tool preparation errors point
+to the saved build log and installed retry command before tests begin.
+This caches tool preparation; the full matrix and native checks retain their
+original cases, assertions and deadlines.
 
 On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads
@@ -807,6 +817,11 @@ Within one verification, identical immutable source/policy references share the
 computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
 receipts retain their original verification path. Signatures, source/base,
 current required checks, equivalence rules and refusal conditions remain.
+Both fingerprint formats share one AST projection helper. It copies the module
+shell and the dispatcher that projection mutates; other nodes remain read-only.
+Each profile and later invocation keeps its own dispatch projection. Fingerprint
+bytes and conservative reflection/import behavior remain unchanged, so this
+computation change requires no new equivalence rule or repeated product run.
 Provider tests require explicit local execution or manual provider dispatch;
 PR, queue and main events never authorize paid calls. Real-daemon queue tests
 still run for changed daemon inputs without a model credential. Documentation/CI-only

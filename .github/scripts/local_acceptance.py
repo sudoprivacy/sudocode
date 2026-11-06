@@ -119,6 +119,14 @@ def profile_ast_value(value):
     raise RuntimeError(f"Unsupported acceptance AST value: {type(value).__name__}")
 
 
+def copy_profile_module(module):
+    """Copy the dispatcher we mutate; keep other read-only nodes shared."""
+    projected = copy.copy(module)
+    projected.body = [copy.deepcopy(node) if isinstance(node, ast.FunctionDef) and node.name == "run"
+                      else node for node in module.body]
+    return projected
+
+
 def profile_commands_hashes(ref, names):
     """Bind each literal dispatch branch and all common code without importing it."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
@@ -126,7 +134,7 @@ def profile_commands_hashes(ref, names):
     image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
     result = {}
     for name in names:
-        projected = copy.deepcopy(module)
+        projected = copy_profile_module(module)
         dispatcher = next(node for node in projected.body
                           if isinstance(node, ast.FunctionDef) and node.name == "run")
         parameter = dispatcher.args.args[0].arg
@@ -169,7 +177,7 @@ def reachable_profile_commands_hashes(ref, names):
                         | {"__dict__", "__globals__", "modules", "f_globals", "f_locals", "_getframe", "get_objects"})
                     for node in ast.walk(module))
     for name in names:
-        projected = copy.deepcopy(module)
+        projected = copy_profile_module(module)
         dispatcher = next(node for node in projected.body
                           if isinstance(node, ast.FunctionDef) and node.name == "run")
         parameter = dispatcher.args.args[0].arg

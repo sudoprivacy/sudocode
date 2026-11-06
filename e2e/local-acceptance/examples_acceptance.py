@@ -1,9 +1,11 @@
 """Exercise the production compile-only example profile with real Cargo processes."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -23,7 +25,8 @@ def run(output):
     (rust / "src").mkdir(parents=True)
     (rust / "examples").mkdir()
     (rust / "Cargo.toml").write_text(
-        '[workspace]\n[package]\nname="engine-acp"\nversion="0.0.0"\nedition="2021"\n'
+        '[workspace]\nmembers=["crates/rusty-sudocode-cli"]\nresolver="2"\n'
+        '[package]\nname="engine-acp"\nversion="0.0.0"\nedition="2021"\n'
         '[features]\nmailbox=[]\n', encoding="utf-8")
     (rust / "src/lib.rs").write_text('pub fn marker() -> &\'static str { "example-retained" }\n', encoding="utf-8")
     example = rust / "examples/canary.rs"
@@ -33,10 +36,41 @@ def run(output):
     helper = load("example_executor", SOURCE / ".github/scripts/local_acceptance.py")
     profiles = load("example_profiles", SOURCE / ".github/local-acceptance/checks.py")
     helper.ROOT = SOURCE
+    cli = rust / "crates/rusty-sudocode-cli"
+    (cli / "src").mkdir(parents=True)
+    (cli / "tests/acceptance_groups").mkdir(parents=True)
+    (cli / "Cargo.toml").write_text(
+        '[package]\nname="rusty-sudocode-cli"\nversion="0.0.0"\nedition="2021"\n'
+        '[dependencies]\nengine-acp={path="../.."}\n'
+        '[[test]]\nname="acceptance_cli_01"\npath="tests/acceptance_groups/acceptance_cli_01.rs"\ntest=false\n',
+        encoding="utf-8")
+    (cli / "src/main.rs").write_text('fn main() { println!("native-cli-42"); }\n', encoding="utf-8")
+    test = cli / "tests/native_driver.rs"
+    test.write_text('''#[test]
+fn actual_cli_process() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rusty-sudocode-cli")).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "native-cli-42");
+}
+''', encoding="utf-8")
+    (cli / "tests/acceptance_groups/acceptance_cli_01.rs").write_text(
+        profiles.test_group_source(["native_driver"]), encoding="utf-8")
+    for relative in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((SOURCE / relative).read_bytes())
     commands = [helper.run_command(["cargo", "generate-lockfile", "--offline"], rust, output / "lock.log")]
     previous = os.environ.get("CARGO_TARGET_DIR")
     os.environ["CARGO_TARGET_DIR"] = str(output / "target")
     try:
+        commands.append(helper.run_command(["cargo", "fmt", "--all"], rust, output / "format.log"))
+        for index, arguments in enumerate([
+            ["init", "--initial-branch=main"], ["config", "user.name", "Example scope acceptance"],
+            ["config", "user.email", "examples@example.invalid"], ["config", "core.autocrlf", "false"],
+            ["add", "."], ["commit", "-m", "Baseline example and native inputs"],
+        ]):
+            commands.append(helper.run_command(["git", *arguments], root, output / f"git-{index}.log"))
+        base = profiles.committed_git(root, "rev-parse", "HEAD").decode().strip()
         commands += profiles.run("native-examples", root, output / "good", "HEAD", helper.run_command)
         assert not (rust / "example-ran").exists(), "Compile-only profile ran an example entry point"
         binary = output / "target/debug/examples" / ("canary.exe" if os.name == "nt" else "canary")
@@ -45,6 +79,32 @@ def run(output):
         commands.append(helper.run_command([str(binary)], rust, observed))
         assert observed.read_text(encoding="utf-8").strip() == "example-retained"
         assert (rust / "example-ran").read_text() == "ran"
+        (rust / "example-ran").unlink()
+        binary_sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+        test.write_text(test.read_text(encoding="utf-8") + "// Change only the native acceptance module.\n", encoding="utf-8")
+        for index, arguments in enumerate([["add", "rust"], ["commit", "-m", "Change an isolated native test"]]):
+            commands.append(helper.run_command(["git", *arguments], root, output / f"test-git-{index}.log"))
+        plan_log = output / "isolated-plan.log"
+        commands.append(helper.run_command([
+            sys.executable, str(root / ".github/scripts/local_acceptance.py"), "plan",
+            "--base", base, "--policy-ref", base, "--host", "windows", "--architecture", "AMD64",
+        ], root, plan_log))
+        plan = json.loads(next(line.split("=", 1)[1] for line in plan_log.read_text(encoding="utf-8").splitlines()
+                               if line.startswith("ACCEPTANCE_PLAN=")))
+        assert "native-examples" not in plan["local_checks"], plan
+        assert "native-workspace" in plan["local_checks"], plan
+        assert profiles.changed_cli_test_targets(root, base) == ["native_driver"]
+        commands += profiles.run("native-workspace", root, output / "isolated-native", base, helper.run_command)
+        fresh_log = output / "unchanged-example-build.log"
+        commands.append(helper.run_command([
+            "cargo", "build", "--workspace", "--locked", "--features", "engine-acp/mailbox",
+            "--examples", "--message-format=json",
+        ], rust, fresh_log))
+        artifacts = [json.loads(line) for line in fresh_log.read_text(encoding="utf-8").splitlines() if line.startswith("{")]
+        examples = [entry for entry in artifacts if entry.get("reason") == "compiler-artifact"
+                    and entry["target"]["kind"] == ["example"]]
+        assert len(examples) == 1 and examples[0]["fresh"], examples
+        assert hashlib.sha256(binary.read_bytes()).hexdigest() == binary_sha
         example.write_text('compile_error!("BROKEN_COMPILE_ONLY_EXAMPLE");\nfn main() {}\n', encoding="utf-8")
         try:
             profiles.run("native-examples", root, output / "broken", "HEAD", helper.run_command)
@@ -61,6 +121,8 @@ def run(output):
             os.environ["CARGO_TARGET_DIR"] = previous
     result = {"status": "PASS", "normal_example_built": True, "profile_did_not_run_example": True,
               "actual_example_process_passed": True, "broken_example_refused": True,
+              "isolated_test_plan": plan, "isolated_native_process_retained": True,
+              "unchanged_example_fresh_and_same_hash": True,
               "commands": commands, "expected_failure": failed,
               "scope": "Real production dispatcher, Cargo compilation/linking and native example execution. Tiny infrastructure fixture; no product/provider coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

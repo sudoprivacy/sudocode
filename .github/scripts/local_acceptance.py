@@ -292,15 +292,19 @@ def compatible_profile_commands(receipt, policy_ref, required):
             recorded = profile_commands_hashes(previous, required)
         if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
             return False
-        current = profile_commands_hashes(policy_ref, required)
-        if "reachable_profile_commands_sha256" not in receipt and all(
-                recorded.get(name) == current[name] for name in required):
-            return True
+        # Modern receipts validate both maps against their original source;
+        # only the reachable map is compared with the current policy.
+        current = None
+        if "reachable_profile_commands_sha256" not in receipt:
+            current = profile_commands_hashes(policy_ref, required)
+            if all(recorded.get(name) == current[name] for name in required):
+                return True
         # A changed recipe is recovered from attested source, never from a
         # supplied hash alone. This also validates both maps on new receipts.
         if previous is None:
             return False
-        original = profile_commands_hashes(previous, required)
+        original = (current if previous == policy_ref and current is not None
+                    else profile_commands_hashes(previous, required))
         if not all(recorded.get(name) == original[name] for name in required):
             return False
         original_reachable = reachable_profile_commands_hashes(previous, required)
@@ -309,7 +313,8 @@ def compatible_profile_commands(receipt, policy_ref, required):
             if not isinstance(reachable, dict) or any(
                     reachable.get(name) != original_reachable[name] for name in required):
                 return False
-        expected = reachable_profile_commands_hashes(policy_ref, required)
+        expected = (original_reachable if previous == policy_ref
+                    else reachable_profile_commands_hashes(policy_ref, required))
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
         ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
         for name in required:
@@ -1002,10 +1007,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
     checks = receipt.get("checks", {})
     if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
-    compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
-    if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
-            or (not compatible and "commands_sha256" in receipt)):
-        compatible = compatible_profile_commands(receipt, policy_ref, list(checks) if completed_only else required)
+    profiles = list(checks) if completed_only else required
+    if "profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt:
+        compatible = compatible_profile_commands(receipt, policy_ref, profiles)
+    else:
+        compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+        if not compatible and "commands_sha256" in receipt:
+            compatible = compatible_profile_commands(receipt, policy_ref, profiles)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and

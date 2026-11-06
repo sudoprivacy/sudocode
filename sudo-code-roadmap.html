@@ -866,6 +866,18 @@ unfinished work remain explicit; the one-tenth goal is not met. The audit retain
 all 27 source observations and the earlier five-history snapshot. These code PRs
 merged before the latest worker/scheduling rollouts, whose prospective effect must
 be measured separately.</p>
+<p><strong>Avoid repeated signature-verification computation (2026-11-06).</strong>
+Modern receipts still validate both recorded fingerprint maps against their
+attested original source. Verification skips an overwritten whole-policy hash
+and shares computed maps within one call when the immutable source/policy
+references match. There is no global cache. Legacy whole-hash/bootstrap paths,
+signatures, source/base, required checks and strict refusal conditions remain.
+Two alternating observations per implementation on one original nine-profile
+SSH receipt produced identical verified data and diagnostics: median verification
+was 4.331/2.514 seconds, with 28/19 Git object reads. This component measurement
+does not establish a population or whole-PR speedup. Existing real Git/push/SSH
+compatibility and full Docker/native guards remain required; no product case,
+assertion or deadline is removed.</p>
 <p><strong>Keep older source branches compatible.</strong> The hosted
 increase requires the measured canonical resume-test fingerprint, with CRLF
 normalized. Old or unknown fixtures retain four without merging main. Later

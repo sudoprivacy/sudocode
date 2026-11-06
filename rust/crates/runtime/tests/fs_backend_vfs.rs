@@ -1808,7 +1808,6 @@ fn install_conditional_alias_mounts(
 #[cfg(target_os = "linux")]
 fn conditional_content_cohost_and_mtls_share_the_committed_image() {
     use runtime::fs_backend::{VersionToken, WriteOutcome};
-    use std::sync::Barrier;
 
     let root = tempfile::tempdir().unwrap();
     let manager =
@@ -1839,23 +1838,7 @@ fn conditional_content_cohost_and_mtls_share_the_committed_image() {
         }
     );
 
-    let barrier = Arc::new(Barrier::new(2));
-    let writers: Vec<Arc<dyn FsBackend>> = vec![local.clone(), remote.clone()];
-    let tasks: Vec<_> = writers
-        .into_iter()
-        .zip([b"cohost".as_slice(), b"remote".as_slice()])
-        .map(|(writer, image)| {
-            let barrier = barrier.clone();
-            let expected = first.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                writer
-                    .write_if_version(alias, Some(&expected), image)
-                    .unwrap()
-            })
-        })
-        .collect();
-    let outcomes: Vec<_> = tasks.into_iter().map(|task| task.join().unwrap()).collect();
+    let outcomes = race_conditional_writers([local.clone(), remote.clone()], alias, &first);
     assert_eq!(
         outcomes
             .iter()
@@ -1913,6 +1896,28 @@ fn conditional_content_cohost_and_mtls_share_the_committed_image() {
     drop(local);
     kernel.release_metastores();
     manager.shutdown();
+}
+
+#[cfg(target_os = "linux")]
+fn race_conditional_writers(
+    writers: [Arc<dyn FsBackend>; 2],
+    path: &'static str,
+    expected: &runtime::fs_backend::VersionToken,
+) -> Vec<runtime::fs_backend::WriteOutcome> {
+    let barrier = Arc::new(std::sync::Barrier::new(writers.len()));
+    let tasks: Vec<_> = writers
+        .into_iter()
+        .zip([b"cohost".as_slice(), b"remote".as_slice()])
+        .map(|(writer, image)| {
+            let barrier = barrier.clone();
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                writer.write_if_version(path, Some(&expected), image).unwrap()
+            })
+        })
+        .collect();
+    tasks.into_iter().map(|task| task.join().unwrap()).collect()
 }
 
 #[test]

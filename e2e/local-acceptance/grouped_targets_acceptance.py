@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 from unittest.mock import patch
@@ -276,7 +277,8 @@ pub fn record(name: &str) {
     cpus = os.cpu_count() or 0
     hosted_qualified = (os.environ.get("GITHUB_ACTIONS") == "true"
                         and profiles.supports_hosted_eight_workers(root))
-    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= 4) else 4
+    hosted_minimum = 3 if platform.system() == "Darwin" else 4
+    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= hosted_minimum) else 4
     assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
     observed_workers = {}
     for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
@@ -289,15 +291,22 @@ pub fn record(name: &str) {
         observed_workers[label] = maximum
     # Control reported host inputs, then execute the real native cases with
     # those selected options after restoring the caller's compiler environment.
-    for label, hosted, cpus, source_ready, limit, expected_count, minimum in [
-        ("hosted-four-core-pool", "true", 4, True, None, 8, 5),
-        ("hosted-unqualified-source", "true", 4, False, None, 4, 1),
-        ("local-four-core-pool", "false", 4, True, None, 4, 1),
-        ("hosted-small-pool", "true", 3, True, None, 4, 1),
-        ("hosted-unknown-pool", "true", None, True, None, 4, 1),
-        ("hosted-explicit-small-pool", "true", 4, True, "2", 2, 1),
+    for label, hosted, cpus, system, source_ready, limit, expected_count, minimum in [
+        ("hosted-four-core-pool", "true", 4, "Windows", True, None, 8, 5),
+        ("hosted-unqualified-source", "true", 4, "Windows", False, None, 4, 1),
+        ("local-four-core-pool", "false", 4, "Windows", True, None, 4, 1),
+        ("hosted-small-pool", "true", 3, "Linux", True, None, 4, 1),
+        ("hosted-unknown-pool", "true", None, "Darwin", True, None, 4, 1),
+        ("hosted-explicit-small-pool", "true", 4, "Windows", True, "2", 2, 1),
+        ("hosted-three-core-macos", "true", 3, "Darwin", True, None, 8, 5),
+        ("hosted-unqualified-macos", "true", 3, "Darwin", False, None, 4, 1),
+        ("local-three-core-macos", "false", 3, "Darwin", True, None, 4, 1),
+        ("hosted-small-macos", "true", 2, "Darwin", True, None, 4, 1),
+        ("hosted-explicit-small-macos", "true", 3, "Darwin", True, "2", 2, 1),
     ]:
-        with patch.object(os, "cpu_count", return_value=cpus), patch.dict(os.environ, {"GITHUB_ACTIONS": hosted}):
+        with patch.object(os, "cpu_count", return_value=cpus), \
+                patch.object(platform, "system", return_value=system), \
+                patch.dict(os.environ, {"GITHUB_ACTIONS": hosted}):
             os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
             if limit is not None:
                 os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = limit

@@ -114,7 +114,7 @@ sys.exit(result.returncode)
 
 
 def supports_hosted_eight_workers(root):
-    """Qualify the measured four-core increase; old or unknown fixtures keep four."""
+    """Qualify the measured hosted increase; old or unknown fixtures keep four."""
     path = Path(root) / "rust/crates/rusty-sudocode-cli/tests/pty_bash_compact_results.rs"
     try:
         contents = path.read_bytes().replace(b"\r\n", b"\n")
@@ -128,10 +128,11 @@ def workspace_nextest_options(output, grouped, hosted_source_ready):
     options = nextest_options(output)
     cpus = os.cpu_count() or 0
     hosted = os.environ.get('GITHUB_ACTIONS') == 'true'
-    eligible = cpus >= 8 or (hosted and cpus >= 4 and hosted_source_ready)
+    hosted_minimum = 3 if platform.system() == 'Darwin' else 4
+    eligible = cpus >= 8 or (hosted and cpus >= hosted_minimum and hosted_source_ready)
     if grouped and eligible and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
         options[options.index('--test-threads') + 1] = '8'
-    if grouped and hosted and 4 <= cpus < 8:
+    if grouped and hosted and hosted_minimum <= cpus < 8:
         print('NATIVE_TEST_SOURCE_COMPATIBILITY=' + json.dumps({
             'qualified_resume_source': hosted_source_ready,
             'scope': 'Known measured source enables eight; old/unknown source retains four. '
@@ -140,8 +141,9 @@ def workspace_nextest_options(output, grouped, hosted_source_ready):
     print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
           + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
           'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool. Grouped suites retain eight on hosts '
-          'with at least eight logical CPUs; qualified hosted sources also use eight from four CPUs. '
-          'Old/unknown four-core sources, smaller/unknown hosts and legacy/isolated/other profiles retain four.',
+          'with at least eight logical CPUs; qualified hosted sources also use eight from four CPUs, '
+          'or three on macOS. Old/unknown hosted sources below eight CPUs, smaller/unknown hosts '
+          'and legacy/isolated/other profiles retain four.',
           flush=True)
     return options
 
@@ -683,7 +685,7 @@ def native_guard_files():
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "abfd1b1dfe6c007d16df11cc1df9863b344e80dd77a2d2ee6641fc8c6d4e52af",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "6e8928b9d5d36e9e76a9b7e50c91f9e1033defffbfb59ce80d045c31ae4558de",
         "e2e/local-acceptance/host_lease_acceptance.py": "9889de100125304be8ff6630e78cf57341ab54a1b6da0df6272a7a524703a48e",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",

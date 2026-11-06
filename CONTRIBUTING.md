@@ -502,7 +502,8 @@ Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
 Deterministic workspace cases use the checksum-pinned nextest runner. Full
 grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
-resume-test source fingerprint; old/unknown source retains four. Smaller/unknown hosts,
+resume-test source fingerprint; macOS also qualifies from three CPUs after its
+matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
 older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
 pool explicitly. Compiler jobs stay at one locally, with only compiler workers
 at BelowNormal priority; test processes stay Normal. A matched Windows run on
@@ -513,11 +514,11 @@ and does not establish whole-PR or cross-hardware savings. A test that previousl
 left its ACP child holding output pipes now awaits its existing shutdown helper.
 Native guards run actual case processes, observe overlap and enforce an explicit
 four-worker limit; they add no product journey coverage.
-The four-core hosted increase checks the canonical resume-test source fingerprint,
+The hosted increase checks the canonical resume-test source fingerprint,
 normalizing CRLF. Older branches can retain four without merging main. A later
 fixture edit conservatively restores four until separately qualified; required
 CLI output reports this source decision. Existing eight-core behavior is retained.
-One exact protected recipe pair retains earlier signed native workspace results
+Exact protected recipe pairs retain earlier signed native workspace results
 with their recorded commands and worker counts. Explicit lower counts remain
 allowed; local thresholds, cases, assertions and deadlines are unchanged.
 Earlier execution is never relabelled as an eight-worker field. Changed
@@ -534,6 +535,14 @@ Linux, Windows and macOS. The cold-resume test uses the existing acknowledged-in
 helper before recognizing a new turn; its actual-provider-request and persisted
 result byte assertions remain required. Native controls execute real cases for
 hosted/local CPU thresholds, unknown CPU counts and explicit lower concurrency.
+A standard three-core macOS runner separately passed an ordered eight-then-four
+comparison on clean protected source `cffe7dad`: the same 1,161 cases and 134
+captured binaries took 649.779/1,000.493 seconds, 35.1% less test time at eight.
+Both phases retained 76 ignored cases and the original assertions/deadlines.
+This single-VM comparison excludes setup, compilation and queues and proves no
+population or whole-PR saving. Only qualified hosted macOS gains the three-core
+threshold; three-core Windows/Linux, local hosts and explicit limits retain
+their existing selection. Real native controls execute every threshold branch.
 The runner lives in a private acceptance cache; it does not
 replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo

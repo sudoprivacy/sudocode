@@ -112,12 +112,12 @@ def main():
              'originalDeadlinesAndAssertions': True, 'workers': 4, 'rounds': [],
              'scope': args.scope, 'selection': selection}
     try:
-        code = run_observed(['cargo', 'test', '--no-run', *arguments], source, output, 'compile', compiling=True)
-        assert code == 0, 'Original native test targets must build'
         options = (checks.workspace_nextest_options(output, bool(targets),
                    hosted_source_ready=checks.supports_hosted_eight_workers(source))
                    if args.scope == 'workspace' else checks.nextest_options(output))
         assert options[options.index('--test-threads') + 1] == '4'
+        code = run_observed(['cargo', 'test', '--no-run', *arguments], source, output, 'compile', compiling=True)
+        assert code == 0, 'Original native test targets must build'
         for number in range(1, args.rounds + 1):
             code = run_observed([nextest, 'nextest', 'run', *options, *arguments], source, output, f'round-{number}')
             proof['rounds'].append({'round': number, 'exit': code})

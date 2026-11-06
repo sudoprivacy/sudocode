@@ -21,6 +21,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_BUILD_JOBS: '1'
+      SCODE_ACCEPTANCE_TEST_THREADS: '4'
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4

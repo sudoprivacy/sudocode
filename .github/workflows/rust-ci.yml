@@ -472,7 +472,7 @@ jobs:
         run: |
           set -euo pipefail
           MANIFEST_TAGS=$(grep 'nexus-vfs' rust/Cargo.toml \
-            | grep -oE 'tag = "[^"]+"' | grep -oE 'v[0-9][0-9.]*' | sort -u)
+            | grep -oE 'tag = "[^"]+"' | sed 's/^tag = "//; s/"$//' | sort -u)
           LOCK_PAIRS=$(grep -oE 'nexus-vfs\?tag=[^#]+#[a-f0-9]{40}' rust/Cargo.lock \
             | sed 's/.*tag=//' | sort -u)
           LOCK_TAGS=$(echo "$LOCK_PAIRS" | sed 's/#.*//' | sort -u)

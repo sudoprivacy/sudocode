@@ -1774,23 +1774,19 @@ fn remote_backend(
     (fs, host, client)
 }
 
-#[test]
 #[cfg(target_os = "linux")]
-fn conditional_content_cohost_and_mtls_share_the_committed_image() {
+fn install_conditional_alias_mounts(
+    kernel: &Kernel,
+    manager: &nexus_raft::ZoneManager,
+    root: &std::path::Path,
+) {
     use nexus_raft::zone_meta_store::ZoneMetaStore;
-    use runtime::fs_backend::{VersionToken, WriteOutcome};
-    use std::sync::Barrier;
     use std::time::Duration;
 
-    let root = tempfile::tempdir().unwrap();
-    let manager =
-        nexus_raft::ZoneManager::isolated(root.path().join("raft").to_str().unwrap()).unwrap();
     let zone = manager.create_zone("root", vec![]).unwrap();
     assert!(zone.wait_for_leader(Duration::from_secs(10)));
-    let kernel = kernel_with_root_backend();
     let cas = Arc::new(
-        backends::storage::cas_local::CasLocalBackend::new_durable(&root.path().join("cas"))
-            .unwrap(),
+        backends::storage::cas_local::CasLocalBackend::new_durable(&root.join("cas")).unwrap(),
     );
     for mount in ["/control", "/control-alias"] {
         kernel
@@ -1806,6 +1802,19 @@ fn conditional_content_cohost_and_mtls_share_the_committed_image() {
             )),
         );
     }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn conditional_content_cohost_and_mtls_share_the_committed_image() {
+    use runtime::fs_backend::{VersionToken, WriteOutcome};
+    use std::sync::Barrier;
+
+    let root = tempfile::tempdir().unwrap();
+    let manager =
+        nexus_raft::ZoneManager::isolated(root.path().join("raft").to_str().unwrap()).unwrap();
+    let kernel = kernel_with_root_backend();
+    install_conditional_alias_mounts(&kernel, &manager, root.path());
     let local = Arc::new(vfs_backend(&kernel));
     local.create_dir_all("/ws").unwrap();
     local.write("/ws/ready.txt", b"ready").unwrap();
@@ -1818,7 +1827,7 @@ fn conditional_content_cohost_and_mtls_share_the_committed_image() {
     let WriteOutcome::Committed(first) = local.write_if_version(path, None, b"").unwrap() else {
         panic!("first image must commit");
     };
-    assert!(!first.0.is_empty());
+    assert_ne!(first.0, [] as [u8; 0]);
     assert_eq!(
         remote.read_versioned(alias).unwrap(),
         Some((Vec::new(), first.clone()))

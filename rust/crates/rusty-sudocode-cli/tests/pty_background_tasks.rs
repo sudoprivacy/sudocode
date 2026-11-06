@@ -7,7 +7,6 @@ use common::TestEnv;
 use pty_expect::PtySession;
 use serde_json::{json, Value};
 use std::{
-    cell::RefCell,
     fmt::Write as _,
     fs,
     time::{Duration, Instant},
@@ -45,28 +44,7 @@ fn expect_stable_region<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    // Match the shared four-poll guard's 100ms, while allowing unrelated status
-    // animation. None resets the wait, so a transient empty redraw cannot pass.
-    let previous = RefCell::new(None::<(String, Instant)>);
-    common::expect_screen_rows(
-        session,
-        |rows| {
-            let mut previous = previous.borrow_mut();
-            if let Some(current) = region(rows) {
-                if let Some((last, since)) = previous.as_ref() {
-                    if *last == current {
-                        return since.elapsed() >= Duration::from_millis(100);
-                    }
-                }
-                *previous = Some((current, Instant::now()));
-            } else {
-                *previous = None;
-            }
-            false
-        },
-        budget,
-        context,
-    )
+    common::expect_screen_rows_region_settled_snapshot(session, region, budget, context, |_| ()).0
 }
 
 fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
@@ -264,17 +242,16 @@ fn close(mut session: PtySession) {
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
 
+fn detail_frame_rows(view: &str) -> Option<(usize, usize)> {
+    let mut rows = view.lines().enumerate();
+    let (top, header) = rows.find(|(_, row)| row.contains("╭─ Output tail"))?;
+    let (bottom, footer) = rows.find(|(_, row)| row.contains('╰'))?;
+    (header.contains('╮') && footer.contains('╯')).then_some((top, bottom))
+}
+
 fn detail_frame_region(view: &str) -> Option<String> {
     let rows = view.lines().collect::<Vec<_>>();
-    let top = rows
-        .iter()
-        .position(|row| row.contains("╭─ Output tail") && row.contains('╮'))?;
-    let bottom = rows
-        .iter()
-        .enumerate()
-        .skip(top + 1)
-        .find(|(_, row)| row.contains('╰') && row.contains('╯'))?
-        .0;
+    let (top, bottom) = detail_frame_rows(view)?;
     Some(format!("{top}:{}", rows[top..=bottom].join("\n")))
 }
 
@@ -299,67 +276,55 @@ fn detail_command_region(view: &str, marker: &str) -> Option<String> {
 }
 
 fn assert_detail_frame(session: &PtySession, border_color: &str) {
-    // Settle every frame corner, row and position while the task's runtime
-    // and status animation continue outside this output frame.
-    expect_stable_region(
+    // The wait and cell assertions must inspect the same completed frame,
+    // even if another repaint starts immediately after the wait succeeds.
+    let (view, raw) = common::expect_screen_rows_region_settled_snapshot(
         session,
+        detail_frame_region,
         common::DEFAULT_TIMEOUT,
         "output frame rows and corners are stable",
-        detail_frame_region,
+        |screen| screen.raw().clone(),
     );
-    session.render(|screen| {
-        let raw = screen.raw();
-        let rows = raw.rows(0, raw.size().1).collect::<Vec<_>>();
-        let top = rows
-            .iter()
-            .position(|row| row.contains("╭─ Output tail"))
-            .unwrap();
-        let bottom = rows
-            .iter()
-            .enumerate()
-            .skip(top + 1)
-            .find(|(_, row)| row.contains('╰'))
-            .unwrap()
-            .0;
-        let column = |row: usize, glyph: &str| {
-            (0..raw.size().1)
-                .find(|col| {
-                    raw.cell(u16::try_from(row).unwrap(), *col)
-                        .is_some_and(|cell| cell.contents() == glyph)
-                })
-                .unwrap_or_else(|| {
-                    let cells = (0..raw.size().1)
-                        .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
-                        .map(|cell| cell.contents().to_string())
-                        .collect::<Vec<_>>();
-                    panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
-                })
+    let rows = raw.rows(0, raw.size().1).collect::<Vec<_>>();
+    let (top, bottom) = detail_frame_rows(&view).unwrap();
+    let column = |row: usize, glyph: &str| {
+        (0..raw.size().1)
+            .find(|col| {
+                raw.cell(u16::try_from(row).unwrap(), *col)
+                    .is_some_and(|cell| cell.contents() == glyph)
+            })
+            .unwrap_or_else(|| {
+                let cells = (0..raw.size().1)
+                    .filter_map(|col| raw.cell(u16::try_from(row).unwrap(), col))
+                    .map(|cell| cell.contents().to_string())
+                    .collect::<Vec<_>>();
+                panic!("no {glyph} cell in frame row {row}; cells={cells:?}; rows={rows:?}")
+            })
+    };
+    let left = column(top, "╭");
+    let right = column(top, "╮");
+    for row in top..=bottom {
+        let (a, b) = if row == top {
+            ("╭", "╮")
+        } else if row == bottom {
+            ("╰", "╯")
+        } else {
+            ("│", "│")
         };
-        let left = column(top, "╭");
-        let right = column(top, "╮");
-        for row in top..=bottom {
-            let (a, b) = if row == top {
-                ("╭", "╮")
-            } else if row == bottom {
-                ("╰", "╯")
-            } else {
-                ("│", "│")
-            };
-            for (col, glyph) in [(left, a), (right, b)] {
-                let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
-                assert_eq!(
-                    cell.contents(),
-                    glyph,
-                    "aligned border at {row}:{col}; rows={rows:?}"
-                );
-                assert_eq!(format!("{:?}", cell.fgcolor()), border_color);
-                assert!(
-                    !cell.bold() && !cell.dim(),
-                    "output style cannot change border weight"
-                );
-            }
+        for (col, glyph) in [(left, a), (right, b)] {
+            let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
+            assert_eq!(
+                cell.contents(),
+                glyph,
+                "aligned border at {row}:{col}; rows={rows:?}"
+            );
+            assert_eq!(format!("{:?}", cell.fgcolor()), border_color);
+            assert!(
+                !cell.bold() && !cell.dim(),
+                "output style cannot change border weight"
+            );
         }
-    });
+    }
 }
 
 #[test]
@@ -398,7 +363,7 @@ fn assert_background_activity(session: &PtySession, view: &str, background: &str
     assert!(logo
         .chars()
         .all(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch)));
-    let changed = common::expect_screen_rows(
+    let (changed, raw) = common::expect_screen_rows_snapshot(
         session,
         |view| {
             view.lines().any(|line| {
@@ -407,65 +372,63 @@ fn assert_background_activity(session: &PtySession, view: &str, background: &str
         },
         common::DEFAULT_TIMEOUT,
         "background logo animates after the foreground finishes",
+        |screen| screen.raw().clone(),
     );
     assert_eq!(
         first.chars().skip(4).collect::<String>(),
         status(&changed).chars().skip(4).collect::<String>(),
         "only the fixed-width icon changes; the task conclusion and turn stay still"
     );
-    session.render(|screen| {
-        let raw = screen.raw();
-        let (row, line) = raw
-            .rows(0, raw.size().1)
-            .enumerate()
-            .find(|(_, line)| line.contains("1 task still running · turn "))
+    let (row, line) = raw
+        .rows(0, raw.size().1)
+        .enumerate()
+        .find(|(_, line)| line.contains("1 task still running · turn "))
+        .unwrap();
+    let (activity, metadata) = if no_color {
+        ("Default", "Default")
+    } else if background == "0;15" {
+        ("Rgb(148, 93, 5)", "Rgb(118, 118, 118)")
+    } else {
+        ("Rgb(245, 158, 11)", "Rgb(158, 158, 158)")
+    };
+    // ConPTY may retain the preceding style on invisible separator spaces.
+    // Assert every visible metadata glyph, including the separator itself.
+    let metadata_start = line.find("· turn ").unwrap();
+    let metadata_cells = line[metadata_start..]
+        .char_indices()
+        .filter(|(_, ch)| !ch.is_whitespace())
+        .map(|(offset, _)| {
+            (
+                unicode_width::UnicodeWidthStr::width(&line[..metadata_start + offset]),
+                metadata,
+            )
+        });
+    for (column, color) in [(0, activity), (5, activity)]
+        .into_iter()
+        .chain(metadata_cells)
+    {
+        let cell = raw
+            .cell(row.try_into().unwrap(), column.try_into().unwrap())
             .unwrap();
-        let (activity, metadata) = if no_color {
-            ("Default", "Default")
-        } else if background == "0;15" {
-            ("Rgb(148, 93, 5)", "Rgb(118, 118, 118)")
-        } else {
-            ("Rgb(245, 158, 11)", "Rgb(158, 158, 158)")
-        };
-        // ConPTY may retain the preceding style on invisible separator spaces.
-        // Assert every visible metadata glyph, including the separator itself.
-        let metadata_start = line.find("· turn ").unwrap();
-        let metadata_cells = line[metadata_start..]
-            .char_indices()
-            .filter(|(_, ch)| !ch.is_whitespace())
-            .map(|(offset, _)| {
-                (
-                    unicode_width::UnicodeWidthStr::width(&line[..metadata_start + offset]),
-                    metadata,
-                )
-            });
-        for (column, color) in [(0, activity), (5, activity)]
-            .into_iter()
-            .chain(metadata_cells)
-        {
-            let cell = raw
-                .cell(row.try_into().unwrap(), column.try_into().unwrap())
-                .unwrap();
-            assert_eq!(
-                format!("{:?}", cell.fgcolor()),
-                color,
-                "status cell at row {row}, column {column}: {:?}; line {line:?}; nearby cells {:?}",
-                cell.contents(),
-                (column.saturating_sub(3)..(column + 20).min(usize::from(raw.size().1)))
-                    .map(|column| {
-                        let cell = raw
-                            .cell(row.try_into().unwrap(), column.try_into().unwrap())
-                            .unwrap();
-                        (column, cell.contents(), format!("{:?}", cell.fgcolor()))
-                    })
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                !cell.dim() && !cell.bold(),
-                "theme spans have normal font weight"
-            );
-        }
-    });
+        assert_eq!(
+            format!("{:?}", cell.fgcolor()),
+            color,
+            "status cell at row {row}, column {column}: {:?}; line {line:?}; nearby cells {:?}",
+            cell.contents(),
+            (column.saturating_sub(3)..(column + 20).min(usize::from(raw.size().1)))
+                .map(|column| {
+                    let cell = raw
+                        .cell(row.try_into().unwrap(), column.try_into().unwrap())
+                        .unwrap();
+                    (column, cell.contents(), format!("{:?}", cell.fgcolor()))
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !cell.dim() && !cell.bold(),
+            "theme spans have normal font weight"
+        );
+    }
 }
 
 fn background_status_theme(background: &str, no_color: bool) {

@@ -185,6 +185,24 @@ where
     expect_screen_view(sess, pred, budget, context, screen_rows)
 }
 
+/// Retain physical rows and cells together without requiring animation to stop.
+pub fn expect_screen_rows_snapshot<F, C, T>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    capture: C,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    C: Fn(&pty_expect::Screen<'_>) -> T,
+{
+    let deadline = Instant::now() + at_least(budget);
+    expect_screen_observation_before(sess, pred, deadline, budget, context, |screen| {
+        (screen_rows(screen), capture(screen))
+    })
+}
+
 fn expect_screen_view<F>(
     sess: &PtySession,
     pred: F,
@@ -210,10 +228,28 @@ fn expect_screen_before_view<F>(
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_observation_before(sess, pred, deadline, budget, context, |screen| {
+        (contents(screen), ())
+    })
+    .0
+}
+
+fn expect_screen_observation_before<F, O, T>(
+    sess: &PtySession,
+    pred: F,
+    deadline: Instant,
+    budget: Duration,
+    context: &str,
+    observe: O,
+) -> (String, T)
+where
+    F: Fn(&str) -> bool,
+    O: Fn(&pty_expect::Screen<'_>) -> (String, T),
+{
     loop {
-        let screen = sess.render(contents);
+        let (screen, observation) = sess.render(&observe);
         if pred(&screen) {
-            return screen;
+            return (screen, observation);
         }
         assert!(
             Instant::now() < deadline,
@@ -273,9 +309,40 @@ where
     C: Fn(&pty_expect::Screen<'_>) -> T,
 {
     let deadline = Instant::now() + at_least(budget);
-    expect_screen_observation_settled_before(sess, pred, deadline, budget, context, |screen| {
-        (screen_rows(screen), capture(screen))
-    })
+    expect_screen_observation_settled_before(
+        sess,
+        |view| ScreenStabilityKey::WholeScreen {
+            is_satisfied: pred(view),
+        },
+        deadline,
+        budget,
+        context,
+        |screen| (screen_rows(screen), capture(screen)),
+    )
+}
+
+/// Retain one observation while only the selected region must stop changing.
+/// Region selection runs outside the parser lock, like other wait predicates.
+pub fn expect_screen_rows_region_settled_snapshot<F, C, T>(
+    sess: &PtySession,
+    region: F,
+    budget: Duration,
+    context: &str,
+    capture: C,
+) -> (String, T)
+where
+    F: Fn(&str) -> Option<String>,
+    C: Fn(&pty_expect::Screen<'_>) -> T,
+{
+    let deadline = Instant::now() + at_least(budget);
+    expect_screen_observation_settled_before(
+        sess,
+        |view| ScreenStabilityKey::Region(region(view)),
+        deadline,
+        budget,
+        context,
+        |screen| (screen_rows(screen), capture(screen)),
+    )
 }
 
 fn expect_screen_settled_view<F>(
@@ -303,22 +370,34 @@ fn expect_screen_settled_before_view<F>(
 where
     F: Fn(&str) -> bool,
 {
-    expect_screen_observation_settled_before(sess, pred, deadline, budget, context, |screen| {
-        (contents(screen), ())
-    })
+    expect_screen_observation_settled_before(
+        sess,
+        |view| ScreenStabilityKey::WholeScreen {
+            is_satisfied: pred(view),
+        },
+        deadline,
+        budget,
+        context,
+        |screen| (contents(screen), ()),
+    )
     .0
+}
+
+enum ScreenStabilityKey {
+    WholeScreen { is_satisfied: bool },
+    Region(Option<String>),
 }
 
 fn expect_screen_observation_settled_before<F, O, T>(
     sess: &PtySession,
-    pred: F,
+    stability: F,
     deadline: Instant,
     budget: Duration,
     context: &str,
     observe: O,
 ) -> (String, T)
 where
-    F: Fn(&str) -> bool,
+    F: Fn(&str) -> ScreenStabilityKey,
     O: Fn(&pty_expect::Screen<'_>) -> (String, T),
 {
     let mut previous: Option<String> = None;
@@ -326,9 +405,16 @@ where
     let mut satisfied = false;
     loop {
         let (screen, observation) = sess.render(&observe);
-        if pred(&screen) {
+        let key = stability(&screen);
+        let (is_satisfied, current) = match &key {
+            ScreenStabilityKey::WholeScreen { is_satisfied } => {
+                (*is_satisfied, Some(screen.as_str()))
+            }
+            ScreenStabilityKey::Region(value) => (value.is_some(), value.as_deref()),
+        };
+        if is_satisfied {
             satisfied = true;
-            if previous.as_deref() == Some(screen.as_str()) {
+            if previous.as_deref() == current {
                 stable += 1;
                 if stable >= SETTLE_POLLS {
                     return (screen, observation);
@@ -347,7 +433,10 @@ where
             };
             panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
         }
-        previous = Some(screen);
+        previous = match key {
+            ScreenStabilityKey::WholeScreen { .. } => Some(screen),
+            ScreenStabilityKey::Region(value) => value,
+        };
         std::thread::sleep(SCREEN_POLL);
     }
 }

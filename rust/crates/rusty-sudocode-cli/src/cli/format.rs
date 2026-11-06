@@ -866,8 +866,10 @@ impl ToolCardContent {
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
-/// syntax-theme green (ok), or red (error). All frame strokes use regular
-/// weight without dimming so the corners align with the vertical border.
+/// syntax-theme green (ok), or red (error). A call that is still queued or
+/// running has not finished, so its frame stays open with a `╎` tail and closes
+/// when the result is committed. All frame strokes use regular weight without
+/// dimming so the corners align with the vertical border.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -894,6 +896,11 @@ pub(crate) fn render_tool_card_with_width(
         ToolStatus::Error => TextRole::Error,
         ToolStatus::Review => TextRole::Secondary,
     });
+    let tail = if matches!(status, ToolStatus::Queued | ToolStatus::Running) {
+        left_frame::Tail::Open
+    } else {
+        left_frame::Tail::Closed
+    };
     // Keep the full identity cached so a running card reveals more on resize.
     let header = content.header.replace(['\n', '\r', '\t'], " ");
     let is_truncated = display_width(&header) > left_frame::header_width(term_width);
@@ -919,6 +926,7 @@ pub(crate) fn render_tool_card_with_width(
             .map(String::as_str),
         term_width,
         color,
+        tail,
     )
 }
 
@@ -2990,7 +2998,12 @@ mod tests {
         let running = render_tool_card(&content, ToolStatus::Running);
         let ok = render_tool_card(&content, ToolStatus::Ok);
         if crate::render::ColorSupport::detect() == crate::render::ColorSupport::NoColor {
-            assert_eq!(running, ok, "plain output must not contain status colors");
+            // Only the shape tells them apart: a running card is still open.
+            assert_eq!(
+                running.replace('╎', "╰─"),
+                ok,
+                "plain output must not contain status colors"
+            );
         } else {
             assert_ne!(
                 running, ok,

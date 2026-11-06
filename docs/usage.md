@@ -434,6 +434,8 @@ selected, so an answer can be changed before the last one is given. MCP tools
 can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
 other MCP transports and resource/prompt wrappers remain serial. A visible
 tool card may still be queued: the amber border marks actual execution.
+Until its result arrives, a card stays open with a dashed `╎` tail; the
+completed card closes with `╰─`.
 Completed results appear immediately, even while another call is still running.
 Captured stdout/stderr belongs to that Bash invocation; a concurrently spawned
 sibling cannot keep its output pipes open after the command exits.

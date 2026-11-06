@@ -121,13 +121,15 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     }
 }
 
-fn expect_frame_caps(sess: &PtySession, color: &str) {
+/// `tail` is how the frame ends: `╎` while a call is in flight, `╰─` once
+/// it is finished.
+fn expect_frame_caps(sess: &PtySession, color: &str, tail: &str) {
     // Bold corners shift inside their cells in Menlo even though plain text
     // and column positions match. This contract also covers live overlays.
     if let Some(root) = std::env::var_os("SCODE_FRAME_SNAPSHOT_DIR") {
         common::expect_screen(
             sess,
-            |screen| screen.contains("╭─") && screen.contains("╰─"),
+            |screen| screen.contains("╭─") && screen.contains(tail),
             common::DEFAULT_TIMEOUT,
             "complete frame before raster capture",
         );
@@ -152,7 +154,7 @@ fn expect_frame_caps(sess: &PtySession, color: &str) {
         )
         .unwrap();
     }
-    for cap in ["╭─", "╰─"] {
+    for cap in ["╭─", tail] {
         expect_style(sess, cap, (color, false, false));
     }
 }
@@ -542,7 +544,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
-    expect_frame_caps(&sess, green);
+    expect_frame_caps(&sess, green, "╰─");
     expect_style(&sess, "│", (green, false, false));
     exit(&mut sess);
 }
@@ -601,14 +603,14 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     } else {
         DARK_SECONDARY
     };
-    expect_frame_caps(&sess, border);
+    expect_frame_caps(&sess, border, "╎");
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
     sess.send("\t").expect("queue draft");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
-    expect_frame_caps(&sess, border);
+    expect_frame_caps(&sess, border, "╎");
     sess.send("\x1b[A").expect("recall queued message");
     common::expect_input_line(
         &sess,

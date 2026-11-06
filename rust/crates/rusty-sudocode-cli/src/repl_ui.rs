@@ -2847,7 +2847,7 @@ mod tests {
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
         let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
-        // Each running call is a Running L-frame card (╭─ header … ╰─).
+        // Each in-flight call is an open L-frame card (╭─ header … ╎).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
         // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
         // label the completed scrollback card resolves, so a tool never
@@ -2884,7 +2884,7 @@ mod tests {
     #[test]
     fn pending_overlay_collapses_overflow_beyond_height_budget() {
         // The full projection has a ten-line card budget. Each card is 3 lines
-        // (╭─ / │ / ╰─ — bash with a "{}" input has a $ body line), so ~3 cards
+        // (╭─ / │ / ╎ — bash with a "{}" input has a $ body line), so ~3 cards
         // fit and the rest collapse into a "+N more pending" line.
         let items: Vec<PendingItem> = (0..8)
             .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))

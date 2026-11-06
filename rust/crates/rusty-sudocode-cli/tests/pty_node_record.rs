@@ -328,6 +328,11 @@ fn expect_receiver_diagnostic(session: &mut pty_expect::PtySession, cause: &str)
 }
 
 fn read_receiver_status(session: &mut pty_expect::PtySession) -> String {
+    // The whole report must stay on screen, "Peers" heading included. Its
+    // failure lines carry the transport's full error chain, which on Windows
+    // runs to ~440 characters each: at 24x80 that scrolled the first two lines
+    // off and the wait below could never succeed.
+    session.resize(60, 80).unwrap();
     session
         .send("/status")
         .expect("type receiver status command");

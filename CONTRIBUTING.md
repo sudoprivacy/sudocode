@@ -643,6 +643,17 @@ sources retain their existing selection without adding a duplicate example
 build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
 native guard proves normal linking, no implicit example execution and refusal
 of a deliberately broken example. These checks add no product PTY coverage.
+Changes confined to ordinary individual CLI test files can omit the separate
+example build on both the author and complementary hosts. README and Markdown
+files under `docs/` may accompany them. The selector reads committed Git blobs;
+deleted, redirected or unknown inputs, shared helpers, manifests and production
+sources retain ordinary scope. `EXAMPLE_BUILD_SCOPE` reports `isolated_cli_tests`
+on this path. Native test selection and execution stay required. Real Git/Cargo
+guards execute the changed CLI test, then independently confirm that the example
+artifact remains fresh with the same binary hash. Mixed/shared changes retain
+example compilation and a broken example still fails. This removes unchanged
+compile-only work; it does not add product journey coverage or prove a whole-PR
+time reduction.
 Contract validation checks the Docker Git/signature/authorization matrix before
 Cargo fixtures and author-host native guards. Passing runs keep every existing
 check; an early metadata failure leaves later compilation unrun.

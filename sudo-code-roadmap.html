@@ -1008,6 +1008,18 @@ selection and avoid a duplicate build. The mandatory plan prints
 linking, no implicit execution and refusal of a broken example. Existing signed
 workspace execution stays reusable for the same head when its recipe is
 unchanged; the newly selected example check still requires actual execution.</p>
+<p><strong>Omit unchanged examples for isolated CLI tests.</strong> When committed
+changes contain only ordinary individual CLI test files, optionally accompanied
+by README or Markdown files under <code>docs/</code>, author and complementary
+plans omit the separate example build. Shared helpers, production sources,
+manifests, deletion, redirection and unknown inputs retain ordinary scope.
+The mandatory <code>EXAMPLE_BUILD_SCOPE</code> output reports
+<code>isolated_cli_tests</code>. Native test execution remains required. Real
+Git/Cargo controls execute the changed CLI test and independently verify that
+the example artifact remains fresh with an identical binary hash. Mixed changes
+and broken-example refusal remain covered. This removes unchanged compile-only
+work; population and whole-PR savings remain unmeasured. Compaction and
+cache-prefix cases retain their existing scope and assertions.</p>
 <p>Only newly added <code>test=false</code> declarations with exact name/path/test
 fields and previously absent names/paths can skip unchanged product and named
 performance builds. Workspace and existing manifest inputs must be unchanged;
@@ -1292,7 +1304,9 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Compile-only examples</td>
       <td>Normal example binaries are compiled and linked. Grouped/unknown
       sources use <code>native-examples</code>; original selection retains its
-      existing behavior. Entry points are not run by this check.</td>
+      existing behavior. Isolated individual CLI test changes omit the separate
+      unchanged example build; shared/production/unknown inputs retain it.
+      Entry points are not run by this check.</td>
       <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
       <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
     </tr>

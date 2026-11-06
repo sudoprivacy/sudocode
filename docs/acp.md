@@ -583,6 +583,23 @@ Rules:
   true` and `_meta.sudocode.systemPromptAppend: true` so clients can
   feature-detect.
 
+### Per-server MCP call budgets
+
+An agent advertising `_meta.sudocode.mcpToolCallTimeout.version: 1` accepts
+`_meta.sudocode.toolCallTimeoutMs` on each ACP `McpServer` (stdio, HTTP or SSE).
+The value must be a positive integer in milliseconds. Omission preserves the
+60-second default. Clients should check the capability before relying on the
+extension; older agents ignore it.
+
+For example, a host whose browser server installs its runtime on first use can
+set `_meta: {"sudocode": {"toolCallTimeoutMs": 600000}}` on that server only.
+This budget covers the `tools/call` request, including the server's lazy setup.
+It does not extend discovery, other servers, or cancellation/host pause fences.
+The setting survives model changes and cold `session/load`; loading a changed
+budget rebuilds the cached server configuration. CLI HTTP/SSE configurations
+accept the same `toolCallTimeoutMs` field alongside `url` and `headers`, as
+stdio configurations already do.
+
 ### Per-session memory (`_meta.sudocode.memory`)
 
 `session/new` and `session/load` accept an optional `memory` key under

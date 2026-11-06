@@ -293,6 +293,7 @@ mod tests {
 
     fn transport(addr: std::net::SocketAddr) -> McpRemoteTransport {
         McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("ws://{addr}/ws"),
             headers: BTreeMap::new(),
             headers_helper: None,
@@ -439,6 +440,7 @@ mod tests {
         });
 
         let transport2 = McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("ws://{addr2}/ws"),
             headers: BTreeMap::new(),
             headers_helper: None,
@@ -482,6 +484,7 @@ mod tests {
     #[tokio::test]
     async fn ws_connect_failure_surfaces_error() {
         let transport = McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: "ws://127.0.0.1:1/nonexistent".to_string(),
             headers: BTreeMap::new(),
             headers_helper: None,

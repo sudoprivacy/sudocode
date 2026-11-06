@@ -1786,6 +1786,7 @@ mod tests {
                 ScopedMcpServerConfig {
                     scope: ConfigSource::Local,
                     config: McpServerConfig::Http(McpRemoteServerConfig {
+                        tool_call_timeout_ms: None,
                         url: "https://example.test/mcp".to_string(),
                         headers: BTreeMap::new(),
                         headers_helper: None,

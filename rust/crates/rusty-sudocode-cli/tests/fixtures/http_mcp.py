@@ -3,12 +3,14 @@
 import json
 import pathlib
 import sys
+import time
 from http.server import BaseHTTPRequestHandler
 
 from loopback_http import LoopbackHTTPServer
 
 proof = pathlib.Path(sys.argv[1])
 token = sys.argv[2]
+call_delay = float(sys.argv[3]) if len(sys.argv) > 3 else 0
 
 
 class MCP(BaseHTTPRequestHandler):
@@ -35,6 +37,7 @@ class MCP(BaseHTTPRequestHandler):
         elif method == "tools/list":
             value = {"tools": [{"name": "echo", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
         elif method == "tools/call":
+            time.sleep(call_delay)
             value = {"content": [{"type": "text", "text": "echo:" + request["params"]["arguments"]["text"]}]}
         else:
             value = {}
@@ -43,7 +46,11 @@ class MCP(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # A deadline/cancellation is allowed to close an in-flight call.
+            pass
 
 
 server = LoopbackHTTPServer(("127.0.0.1", 0), MCP)

@@ -323,6 +323,16 @@ jobs:
           NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
 
+      - name: Conditional owner content survives a co-host process restart
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        working-directory: rust
+        env:
+          NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+        run: >-
+          cargo --config "$NEXUS_A2A_COHOST_CARGO_CONFIG"
+          test --locked -p nexusd-cohost --features daemon,driver-ai
+          --test conditional_content -- --nocapture
+
       - name: Checkout the VFS contract used by the co-host
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         uses: ./.github/actions/vfs-search-cache

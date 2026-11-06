@@ -103,7 +103,8 @@ def scope_acceptance(directory):
         return json.loads(command(sys.executable, "-c", code,
             SOURCE / ".github/scripts/local_acceptance.py", policy, diff_base, cwd=repository))
 
-    cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, False, False),
+    cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, True, True),
+             (".github/scripts/ci_input_scope.py", False, True, True),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
              ("spec/cache_metrics.json", True, True, True), ("rust/crates/runtime/src/prompt.md", True, True, True),
              ("spec/local_acceptance.json", False, False, False),
@@ -165,17 +166,17 @@ def scope_acceptance(directory):
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
             expect_scope(event_name, event, live, daemon, clippy, path in {
-                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py",
                 "e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
                 "e2e/terminal-resize/gui-benchmark.py", "e2e/terminal-resize/gui-policy.json"}, path in {
-                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/container_inputs_acceptance.py"}, path in {
-                ".github/workflows/rust-ci.yml", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
-                ".github/workflows/rust-ci.yml", ".github/local-acceptance/checks.py",
+                ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", "e2e/local-acceptance/clippy_fail_fast.py"}, path in {
+                ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
                 "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
-                ".github/workflows/rust-ci.yml", ".github/scripts/vfs_search_cache.py",
+                ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", ".github/scripts/vfs_search_cache.py",
                 ".github/actions/vfs-search-cache/action.yml", ".github/workflows/ci-vfs-search-cache.yml",
                 "e2e/local-acceptance/vfs_search_cache_acceptance.py"},
                 cohost=False if path == ".github/local-acceptance/checks.py" else None,

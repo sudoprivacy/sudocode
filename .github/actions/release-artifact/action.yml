@@ -1,0 +1,47 @@
+name: Validate the built native release artifact
+description: Require source identity, optimized stream/resume, startup and context checks before packaging
+inputs:
+  binary:
+    description: Newly built native executable, relative to the repository root
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.14'
+    - name: Install the native process observer
+      shell: python
+      working-directory: ${{ github.workspace }}
+      run: |
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 'psutil==7.2.2'], check=True)
+    - name: Prepare the native Windows compiler
+      if: runner.os == 'Windows'
+      shell: pwsh
+      working-directory: ${{ github.workspace }}
+      run: ./.github/actions/release-artifact/msvc.ps1
+    - name: Check the exact built executable before packaging
+      shell: python
+      working-directory: ${{ github.workspace }}
+      env:
+        RELEASE_ARTIFACT_BIN: ${{ inputs.binary }}
+      run: |
+        import os, subprocess, sys
+        subprocess.run([sys.executable, '.github/scripts/release_artifact_acceptance.py',
+                        '--binary', os.environ['RELEASE_ARTIFACT_BIN'],
+                        '--output', os.path.join(os.environ['RUNNER_TEMP'], 'release-artifact-acceptance')], check=True)
+    - name: Retain native release acceptance evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-acceptance-${{ runner.os }}-${{ runner.arch }}
+        path: |
+          ${{ runner.temp }}/release-artifact-acceptance/report.json
+          ${{ runner.temp }}/release-artifact-acceptance/*.log
+          ${{ runner.temp }}/release-artifact-acceptance/startup.json
+          ${{ runner.temp }}/release-artifact-acceptance/compiler-context/*.json
+        retention-days: 30

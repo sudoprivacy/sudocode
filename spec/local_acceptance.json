@@ -12,6 +12,9 @@
       "include": [
         ".github/local-acceptance/**",
         ".github/scripts/local_acceptance.py",
+        ".github/scripts/release_artifact_acceptance.py",
+        ".github/actions/release-artifact/**",
+        ".github/workflows/release.yml",
         ".github/scripts/check_pr_history.py",
         "e2e/local-acceptance/**",
         "spec/local_acceptance*.json",
@@ -133,6 +136,19 @@
     },
     "native-release": {
       "include": [
+        "rust/crates/scode-benchmark-drivers/Cargo.toml",
+        "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
+        ".github/scripts/release_artifact_acceptance.py",
+        ".github/actions/release-artifact/**",
+        ".github/workflows/release.yml",
+        "e2e/startup/**"
+      ],
+      "exclude": [
+        "**/README.md"
+      ]
+    },
+    "native-context": {
+      "include": [
         "rust/Cargo.toml",
         "rust/Cargo.lock",
         "rust/.cargo/**",
@@ -147,6 +163,7 @@
         "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",
         "e2e/startup/**",
         "e2e/compiler-context/**",
+        ".github/scripts/release_artifact_acceptance.py",
         "rust/crates/engine-core/src/session.rs",
         "rust/crates/engine-core/src/attachment.rs",
         "rust/crates/engine-events/src/lib.rs",

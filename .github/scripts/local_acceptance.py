@@ -678,13 +678,15 @@ def selected(policy, paths, *, base=None, head=None):
                             "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
     opt_in = opt_in_test_target_inputs(paths, base, head) if base and head else set()
     product_paths = production_build_paths(paths, base, head, opt_in=opt_in) if base and head else paths
+    functional_native = "native-context" if "native-context" in policy["checks"] else "native-release"
+    product_profiles = {functional_native, "native-services", "native-cohost"}
     if product_paths != paths:
         print("Development-only Cargo metadata skips unchanged normal product builds; "
               + ("native workspace validation remains selected." if opt_in
                  else "native test and performance input scopes remain unchanged."), flush=True)
         print("BUILD_INPUT_SCOPE=" + json.dumps({"base": base, "head": head,
               "normal_product_ignored": [p for p in paths if p not in product_paths],
-              "applies_to": ["native-release", "native-services", "native-cohost"],
+              "applies_to": [functional_native, "native-services", "native-cohost"],
               "native_tests_and_performance_scope_unchanged": not bool(opt_in)}), flush=True)
     if opt_in:
         print("New disabled acceptance targets preserve existing product and named performance builds; "
@@ -695,7 +697,7 @@ def selected(policy, paths, *, base=None, head=None):
             if (name != "native-examples" or separate_examples)
             and (name == "preflight" or any(any(fnmatch.fnmatchcase(p, pattern) for pattern in rule["include"])
                    and not any(fnmatch.fnmatchcase(p, pattern) for pattern in rule.get("exclude", []))
-                   for p in (product_paths if name in {"native-release", "native-services", "native-cohost"}
+                   for p in (product_paths if name in product_profiles
                              else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
                              else paths)))]
     harness = [path for path in paths if path.startswith("e2e/nexus-a2a/")
@@ -769,9 +771,11 @@ def report_plan(plan):
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
     release = "native-release" in plan["local_checks"] or any("native-release" in job["checks"] for job in plan["ci"])
     lines.append("Native release build/startup: " + ("selected on the author and complementary native hosts." if release else
-                 "not selected; release acceptance judges native optimized stream/resume behavior and the 100 ms startup budget.")
-                 + " Trigger scope: Cargo/build/vendor inputs, CLI entry/startup/parser, runtime config, stream-capture test or startup harness. "
-                   "Ordinary functional checks and selected Linux release rendering keep their own scopes.")
+                 "not selected for ordinary product edits; every newly built release artifact must pass optimized "
+                 "stream/resume, the 100 ms startup budget and compiler context before packaging/publication.")
+                 + " Optimized acceptance harness edits still require local validation. Source compiler-context "
+                   "acceptance uses the current dev/mailbox binary; native functional checks and selected Linux "
+                   "release rendering remain required. Optimization-specific failures may surface at release.")
     lines.append("The browser terminal functional smoke runs locally." if "browser" in plan["local_checks"]
                  else "No browser terminal input changed.")
     for job in plan["ci"]:
@@ -783,6 +787,7 @@ def report_plan(plan):
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
     print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
+          "new_release_artifacts": "mandatory_before_packaging_and_publication",
           "ordinary_source_optimized_native_coverage_reduced": True}, separators=(",", ":")), flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:

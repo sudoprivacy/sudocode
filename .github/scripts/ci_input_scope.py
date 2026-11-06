@@ -224,6 +224,10 @@ def main():
                     for path in paths)
     container = any(path in executor_inputs | {"e2e/local-acceptance/container_inputs_acceptance.py"}
                     for path in paths)
+    release_artifact = any(path in executor_inputs | {".github/workflows/release.yml",
+        ".github/scripts/release_artifact_acceptance.py", "e2e/local-acceptance/release_artifact_acceptance.py",
+        "rust/crates/rusty-sudocode-cli/build.rs"} or path.startswith(".github/actions/release-artifact/")
+        for path in paths)
     clippy_executor = any(path in {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py",
                                   ".github/scripts/ci_clippy.py",
                                   "e2e/local-acceptance/clippy_fail_fast.py",
@@ -242,7 +246,8 @@ def main():
               "cohost_required": str(cohost).lower(),
               "benchmark_required": str(benchmark).lower(), "container_required": str(container).lower(),
               "clippy_required": str(clippy).lower(), "clippy_executor_required": str(clippy_executor).lower(),
-              "gzip_codec_required": str(gzip_codec).lower()}
+              "gzip_codec_required": str(gzip_codec).lower(),
+              "release_artifact_required": str(release_artifact).lower()}
     result["vfs_cache_required"] = str(vfs_cache).lower()
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():

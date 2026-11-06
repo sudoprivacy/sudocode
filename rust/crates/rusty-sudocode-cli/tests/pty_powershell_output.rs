@@ -84,9 +84,27 @@ fn powershell_drains_both_streams_before_exit_and_next_turn_reads_the_result() {
         .flat_map(|message| &message.blocks)
         .filter_map(|block| match block {
             runtime::ContentBlock::ToolResult {
-                tool_name, output, ..
+                tool_use_id,
+                tool_name,
+                output,
+                is_error,
+                ..
             } if tool_name == "PowerShell" => {
-                Some(serde_json::from_str(output).expect("structured shell result"))
+                assert!(!is_error, "shell result must succeed");
+                // Large results are persisted separately; the transcript keeps
+                // their bounded preview and opaque read-more identity.
+                let full = if output.starts_with("<persisted-output ") {
+                    fs::read_to_string(
+                        session
+                            .tool_results_dir()
+                            .expect("persisted tool results")
+                            .join(session.tool_output_id(tool_use_id)),
+                    )
+                    .expect("complete persisted shell result")
+                } else {
+                    output.clone()
+                };
+                Some(serde_json::from_str(&full).expect("structured shell result"))
             }
             _ => None,
         })
@@ -94,6 +112,14 @@ fn powershell_drains_both_streams_before_exit_and_next_turn_reads_the_result() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0]["exit_code"], 0);
     assert_eq!(results[1]["exit_code"], 0);
+    for (field, byte) in [("stdout", b'O'), ("stderr", b'E')] {
+        let stream = results[0][field]
+            .as_str()
+            .expect("drained output stream")
+            .trim_end_matches(['\r', '\n']);
+        assert_eq!(stream.len(), 1_048_576, "complete {field}");
+        assert!(stream.bytes().all(|value| value == byte), "exact {field}");
+    }
     let recovered: serde_json::Value =
         serde_json::from_str(results[1]["stdout"].as_str().expect("follow-up stdout")).unwrap();
     assert_eq!(

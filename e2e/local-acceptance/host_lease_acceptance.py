@@ -252,6 +252,115 @@ def verify_host_lease(directory, source, command, environment):
                     process.wait(timeout=10)
     verify_external_index(fixture, sources["A"], isolated)
     verify_service_order(fixture, source, run, isolated)
+    verify_profile_handoff(fixture, source, run, isolated)
+
+
+def verify_profile_handoff(fixture, authority, run, environment):
+    """Let an existing waiter run between profiles and verify cumulative wait."""
+    directory = fixture / "profile-handoff"
+    directory.mkdir()
+    repository = directory / "policy"
+    run("git", "clone", "--no-hardlinks", "--branch", "main", fixture / "work", repository, cwd=directory)
+    helper = repository / ".github/scripts/local_acceptance.py"
+    shutil.copyfile(authority / ".github/scripts/local_acceptance.py", helper)
+    run("git", "config", "localAcceptance.signer", "fixture", cwd=repository)
+    run("git", "config", "localAcceptance.key", fixture / "device-key", cwd=repository)
+    policy = repository / "spec/local_acceptance.json"
+    rules = json.loads(policy.read_text())
+    rules["checks"]["native-services"] = {"include": ["second.txt"]}
+    policy.write_text(json.dumps(rules))
+    (repository / "phase.py").write_text(
+        'from pathlib import Path\nimport sys,time\n'
+        'events,release,label=map(str,sys.argv[1:])\n'
+        'with Path(events).open("a") as stream: stream.write("start:"+label+"\\n")\n'
+        'deadline=time.monotonic()+120\n'
+        'while not Path(release).exists() and time.monotonic()<deadline: time.sleep(0.05)\n'
+        'assert Path(release).exists(), "release never arrived"\n'
+        'with Path(events).open("a") as stream: stream.write("end:"+label+"\\n")\n', encoding="utf-8")
+    (repository / ".github/local-acceptance/checks.py").write_text(
+        'import sys\n'
+        'def run(name, root, output, base, execute):\n'
+        '    if name == "preflight":\n'
+        '        return [execute([sys.executable,"-c","print(\'metadata passed\')"],root,output/"000.log")]\n'
+        '    label=output.parent.name+("-two" if name=="native-services" else "")\n'
+        '    return [execute([sys.executable,str(root/"phase.py"),str(root.parent/"events.log"),'
+        'str(root.parent/("release-"+label)),label],root,output/"000.log")]\n', encoding="utf-8")
+    run("git", "add", ".", cwd=repository)
+    run("git", "commit", "-m", "Protected two-profile FIFO fixture", cwd=repository)
+    home = directory / "home"
+    home.mkdir()
+    env = {key: value for key, value in environment.items() if key != LEASE_ENV}
+    env.update(HOME=str(home), USERPROFILE=str(home))
+    processes = []
+
+    def events():
+        path = directory / "events.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def wait_until(condition, description):
+        deadline = time.monotonic() + 120
+        while not condition():
+            assert time.monotonic() < deadline, f"Timed out waiting for {description}: {events()}"
+            time.sleep(0.05)
+
+    def start(label, second=False):
+        work = directory / ("source-" + label)
+        run("git", "worktree", "add", "--detach", work, "main", cwd=repository)
+        (work / "input.txt").write_text(label)
+        if second:
+            (work / "second.txt").write_text("second required profile")
+        run("git", "add", ".", cwd=work)
+        run("git", "commit", "-m", "Candidate " + label, cwd=work)
+        with (directory / (label + ".log")).open("wb") as stream:
+            process = subprocess.Popen([sys.executable, str(work / ".github/scripts/local_acceptance.py"),
+                "check", "--base", "main", "--policy-ref", "main", "--output", str(directory / label)],
+                cwd=work, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        processes.append(process)
+        return process
+
+    def queued(process):
+        return bool(list((home / ".nexus/local-acceptance/queue").glob(f"*-{process.pid}.ticket")))
+
+    try:
+        holder = start("Holder")
+        wait_until(lambda: events() == ["start:Holder"], "the private holder")
+        long = start("Long", second=True)
+        wait_until(lambda: queued(long), "the two-profile contender to queue")
+        short = start("Short")
+        wait_until(lambda: queued(short), "the existing one-profile contender to queue")
+        (directory / "release-Holder").touch()
+        wait_until(lambda: "start:Long" in events(), "the first long profile")
+        (directory / "release-Long").touch()
+        wait_until(lambda: "start:Short" in events() or "start:Long-two" in events(), "the next actual profile")
+        assert "start:Short" in events() and "start:Long-two" not in events(), events()
+        wait_until(lambda: queued(long), "the next long profile to rejoin the FIFO")
+        (directory / "release-Short").touch()
+        wait_until(lambda: "start:Long-two" in events(), "the second long profile after the existing waiter")
+        (directory / "release-Long-two").touch()
+        for process in processes:
+            assert process.wait(timeout=120) == 0
+        assert events() == ["start:Holder", "end:Holder", "start:Long", "end:Long",
+                            "start:Short", "end:Short", "start:Long-two", "end:Long-two"], events()
+        receipt = json.loads((directory / "Long/receipt.json").read_text())
+        assert set(receipt["checks"]) == {"preflight", "native-workspace", "native-services"}, receipt
+        assert (directory / "Long/envelope.json").is_file()
+        attempt = json.loads((directory / "Long/attempt.json").read_text())
+        acquisitions = attempt["host_lease_acquisitions"]
+        assert [entry["profile"] for entry in acquisitions] == ["native-workspace", "native-services"], attempt
+        assert all(entry["wait_seconds"] > 0 for entry in acquisitions), attempt
+        assert abs(attempt["host_lease_wait_seconds"] - sum(entry["wait_seconds"] for entry in acquisitions)) < 0.002, attempt
+        assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+        print("PASS: existing contender completes between two exclusive required profiles; all signed profiles finish once and cumulative FIFO wait is retained")
+    finally:
+        for label in ["Holder", "Long", "Short", "Long-two"]:
+            (directory / ("release-" + label)).touch()
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=10)
 
 
 def verify_external_index(fixture, source, environment):

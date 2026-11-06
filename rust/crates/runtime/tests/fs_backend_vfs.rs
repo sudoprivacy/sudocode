@@ -1913,7 +1913,9 @@ fn race_conditional_writers(
             let expected = expected.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                writer.write_if_version(path, Some(&expected), image).unwrap()
+                writer
+                    .write_if_version(path, Some(&expected), image)
+                    .unwrap()
             })
         })
         .collect();

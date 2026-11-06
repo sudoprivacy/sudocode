@@ -65,7 +65,8 @@ def workflow_scope(output, environment):
         return lines[start:end]
 
     condition = "        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'"
-    for name in ["Co-host duet against a daemon built from this checkout", "Checkout the VFS contract used by the co-host",
+    for name in ["Co-host duet against a daemon built from this checkout",
+                 "Conditional owner content survives a co-host process restart", "Checkout the VFS contract used by the co-host",
                  "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines

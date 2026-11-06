@@ -1,0 +1,61 @@
+name: Browser workline Mac shell diagnostic
+
+on:
+  push:
+    branches: [diagnostics/bash-render-pc3-20261106]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        source:
+          - 9a0e38777199654d57e04f652e096be295501410
+          - af214f33f97593c29aeb064524890ee0ed5329e5
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: driver
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source }}
+          path: candidate
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve the existing native cache
+        id: cache
+        run: python candidate/.github/local-acceptance/cache_layout.py --source candidate/rust --github-output
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.cache.outputs.workspaces }}
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - run: python -m pip install psutil
+      - name: Diagnose the original grouped PTY tests without changing their deadlines
+        run: python driver/.github/diagnostics/pc3_bash_diagnostic.py --source candidate --expected-source ${{ matrix.source }} --output "${{ runner.temp }}/bash-diagnostic"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bash-diagnostic-${{ matrix.source }}
+          path: ${{ runner.temp }}/bash-diagnostic
+          if-no-files-found: error
+          retention-days: 7

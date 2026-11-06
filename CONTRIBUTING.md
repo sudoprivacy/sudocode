@@ -801,6 +801,11 @@ Within one verification, identical immutable source/policy references share the
 computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
 receipts retain their original verification path. Signatures, source/base,
 current required checks, equivalence rules and refusal conditions remain.
+Both fingerprint formats share one AST projection helper. It copies the module
+shell and the dispatcher that projection mutates; other nodes remain read-only.
+Each profile and later invocation keeps its own dispatch projection. Fingerprint
+bytes and conservative reflection/import behavior remain unchanged, so this
+computation change requires no new equivalence rule or repeated product run.
 Provider tests require explicit local execution or manual provider dispatch;
 PR, queue and main events never authorize paid calls. Real-daemon queue tests
 still run for changed daemon inputs without a model credential. Documentation/CI-only

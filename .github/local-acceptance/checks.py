@@ -684,7 +684,7 @@ def native_guard_files():
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
-        "e2e/local-acceptance/examples_acceptance.py": "544fce4b31c3bcee2e6d927673bbb9570aa9ef914edee85ffd334da8560b6a84",
+        "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "a060ae86954e8ad5ff4507551b3adc83346f335fff9421c31ddf0f38f1ed801d",
         "e2e/local-acceptance/host_lease_acceptance.py": "9889de100125304be8ff6630e78cf57341ab54a1b6da0df6272a7a524703a48e",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",

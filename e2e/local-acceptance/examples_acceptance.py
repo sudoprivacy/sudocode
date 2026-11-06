@@ -99,10 +99,12 @@ fn actual_cli_process() {
         commands.append(helper.run_command([
             "cargo", "build", "--workspace", "--locked", "--features", "engine-acp/mailbox",
             "--examples", "--message-format=json",
-        ], rust, fresh_log))
+        ], rust, fresh_log, {"CARGO_TARGET_DIR": str(output / "target")}))
         artifacts = [json.loads(line) for line in fresh_log.read_text(encoding="utf-8").splitlines() if line.startswith("{")]
         examples = [entry for entry in artifacts if entry.get("reason") == "compiler-artifact"
                     and entry["target"]["kind"] == ["example"]]
+        assert all(Path(entry["executable"]).resolve().is_relative_to((output / "target").resolve())
+                   for entry in examples), examples
         assert len(examples) == 1 and examples[0]["fresh"], examples
         assert hashlib.sha256(binary.read_bytes()).hexdigest() == binary_sha
         example.write_text('compile_error!("BROKEN_COMPILE_ONLY_EXAMPLE");\nfn main() {}\n', encoding="utf-8")

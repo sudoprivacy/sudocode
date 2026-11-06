@@ -67,7 +67,9 @@ def sha(data):
 
 
 def tracked(ref, path):
-    return git("show", f"{ref}:{path}").stdout
+    # Explicitly end revision arguments: Git for Windows otherwise probes this
+    # object name as a filesystem path and can reject deep evidence directories.
+    return git("show", f"{ref}:{path}", "--").stdout
 
 
 def load_policy(ref):
@@ -290,15 +292,19 @@ def compatible_profile_commands(receipt, policy_ref, required):
             recorded = profile_commands_hashes(previous, required)
         if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
             return False
-        current = profile_commands_hashes(policy_ref, required)
-        if "reachable_profile_commands_sha256" not in receipt and all(
-                recorded.get(name) == current[name] for name in required):
-            return True
+        # Modern receipts validate both maps against their original source;
+        # only the reachable map is compared with the current policy.
+        current = None
+        if "reachable_profile_commands_sha256" not in receipt:
+            current = profile_commands_hashes(policy_ref, required)
+            if all(recorded.get(name) == current[name] for name in required):
+                return True
         # A changed recipe is recovered from attested source, never from a
         # supplied hash alone. This also validates both maps on new receipts.
         if previous is None:
             return False
-        original = profile_commands_hashes(previous, required)
+        original = (current if previous == policy_ref and current is not None
+                    else profile_commands_hashes(previous, required))
         if not all(recorded.get(name) == original[name] for name in required):
             return False
         original_reachable = reachable_profile_commands_hashes(previous, required)
@@ -307,7 +313,8 @@ def compatible_profile_commands(receipt, policy_ref, required):
             if not isinstance(reachable, dict) or any(
                     reachable.get(name) != original_reachable[name] for name in required):
                 return False
-        expected = reachable_profile_commands_hashes(policy_ref, required)
+        expected = (original_reachable if previous == policy_ref
+                    else reachable_profile_commands_hashes(policy_ref, required))
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
         ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
         for name in required:
@@ -335,7 +342,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
 def changed_paths(base, head):
     # --no-renames includes both sides of a rename so moving a file out of a
     # guarded directory cannot make its checks disappear.
-    return git("diff", "--name-only", "--no-renames", "-z", base, head).stdout.decode().split("\0")[:-1]
+    return git("diff", "--name-only", "--no-renames", "-z", base, head, "--").stdout.decode().split("\0")[:-1]
 
 
 def manifest_dependencies(manifest, workspace, kind):
@@ -1000,10 +1007,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
     checks = receipt.get("checks", {})
     if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
-    compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
-    if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
-            or (not compatible and "commands_sha256" in receipt)):
-        compatible = compatible_profile_commands(receipt, policy_ref, list(checks) if completed_only else required)
+    profiles = list(checks) if completed_only else required
+    if "profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt:
+        compatible = compatible_profile_commands(receipt, policy_ref, profiles)
+    else:
+        compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+        if not compatible and "commands_sha256" in receipt:
+            compatible = compatible_profile_commands(receipt, policy_ref, profiles)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and
@@ -1145,7 +1155,14 @@ def verify_carried(group, head, base, base_ref, policy_ref, host_info):
         raise RuntimeError("Carried evidence predates attested commands")
     origin_policy = value("rev-parse", payload["commands_ref"])
     if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
-        raise RuntimeError("Carried evidence policy is not an ancestor of the current protected policy")
+        raise RuntimeError(
+            "Carried evidence policy is not an ancestor of the current protected policy: "
+            f"origin={origin_policy}, protected={policy_ref}. "
+            "If this is an earlier unmerged contract update, land its reviewed PR through CI and the merge queue, "
+            "fetch protected main, then rerun the acceptance or push command. "
+            "Otherwise produce fresh evidence under the current protected policy. "
+            "Preserve the original evidence; do not relax the ancestry check."
+        )
     receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=policy_ref,
                               completed_only=payload.get("kind") == "completed-profiles")
     if receipt["host"] != host_info:
@@ -1179,14 +1196,12 @@ def carry_checks(head, base, base_ref, policy_ref, output, needed):
     envelope, so the verifier re-checks the origin, its ancestry and the change
     set instead of trusting this receipt's copy.
     """
-    results = Path.home() / ".nexus/local-acceptance/results"
     remaining = [name for name in needed if name != "preflight"]
     carried, groups, refused = {}, {}, set()
     for candidate in value("rev-list", "--topo-order", head, "--not", base_ref).splitlines()[1:200]:
         if not remaining:
             break
-        directories = sorted((results / candidate).iterdir(), reverse=True) if (results / candidate).is_dir() else []
-        for directory in directories:
+        for directory in local_output_directories(candidate):
             try:
                 proof = local_proof_directory(directory)
                 envelope = json.loads((proof / "envelope.json").read_text())
@@ -1208,10 +1223,7 @@ def carry_checks(head, base, base_ref, policy_ref, output, needed):
                     try:
                         origin_receipt = verify_carried({"head": origin, "profiles": [name], "envelope": origin_envelope},
                                                         head, base, base_ref, policy_ref, host())
-                        logs = {path.name: path.read_bytes() for path in (directory / name).glob("*.log") if path.is_file()}
-                        expected = {command["log_sha256"] for command in origin_receipt["checks"][name]}
-                        if not expected.issubset({sha(contents) for contents in logs.values()}):
-                            raise RuntimeError(f"Carried log missing or changed for {name}")
+                        logs = verified_profile_logs(directory, origin_receipt, name, "Carried")
                     except (RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
                         refused.add(key)
                         print(f"Not carrying {name} from {origin[:12]}: {error}", flush=True)
@@ -1219,8 +1231,7 @@ def carry_checks(head, base, base_ref, policy_ref, output, needed):
                     target = output / name
                     target.mkdir()
                     for filename, contents in logs.items():
-                        if sha(contents) in expected:
-                            (target / filename).write_bytes(contents)
+                        (target / filename).write_bytes(contents)
                     carried[name] = origin_receipt["checks"][name]
                     groups.setdefault(origin, {"head": origin, "envelope": origin_envelope, "profiles": []})["profiles"].append(name)
                     remaining.remove(name)
@@ -1248,6 +1259,98 @@ def local_proof_directory(directory):
     return directory / "checkpoint"
 
 
+def local_output_directories(head):
+    """Discover default outputs and external locators; a locator grants no trust."""
+    parent = Path.home() / ".nexus/local-acceptance/results" / head
+    if not parent.is_dir():
+        return []
+    entries = []
+    try:
+        paths = list(parent.iterdir())
+    except OSError as error:
+        print(f"Automatic local progress discovery is unavailable: {error}; required checks remain.", flush=True)
+        return []
+    for path in paths:
+        try:
+            entries.append((path.stat().st_mtime_ns, path.name, path))
+        except OSError:
+            continue
+    directories = []
+    for _, _, path in sorted(entries, reverse=True):
+        if path.is_dir():
+            directory = path
+        elif path.name.startswith("external-") and path.suffix == ".json":
+            try:
+                value = json.loads(path.read_bytes())
+                if (not isinstance(value, dict) or value.get("version") != 1 or value.get("head") != head
+                        or not isinstance(value.get("directory"), str)):
+                    continue
+                directory = Path(value["directory"])
+                if not directory.is_absolute() or not directory.is_dir():
+                    continue
+            except (OSError, ValueError, TypeError):
+                continue
+        else:
+            continue
+        directory = directory.resolve()
+        if directory not in directories:
+            directories.append(directory)
+    return directories
+
+
+def register_local_output(head, directory):
+    """Index an existing output without modifying or re-signing its evidence."""
+    if not re.fullmatch(r"[a-f0-9]{40}", head):
+        raise RuntimeError("Invalid local progress head")
+    directory = Path(directory).resolve()
+    parent = (Path.home() / ".nexus/local-acceptance/results" / head).resolve()
+    if directory.parent == parent:
+        return directory
+    parent.mkdir(parents=True, exist_ok=True)
+    reference = parent / ("external-" + sha(str(directory).encode("utf-8")) + ".json")
+    existed = reference.exists()
+    temporary = reference.with_suffix(f".{os.getpid()}.next")
+    temporary.write_bytes(canonical({"version": 1, "head": head, "directory": str(directory)}))
+    os.replace(temporary, reference)
+    if not existed:
+        print("LOCAL_ACCEPTANCE_OUTPUT_INDEX=" + canonical({"head": head, "directory": str(directory),
+              "reference": str(reference), "scope": "discovery only; signatures, source, host, recipes and logs are reverified"}).decode(), flush=True)
+    return reference
+
+
+def verified_profile_logs(directory, receipt, name, context):
+    """Verify original command log bytes before copying or indexing them."""
+    logs = {path.name: path.read_bytes() for path in (directory / name).glob("*.log") if path.is_file()}
+    digests = {filename: sha(contents) for filename, contents in logs.items()}
+    expected = {command["log_sha256"] for command in receipt["checks"][name]}
+    if not expected.issubset(set(digests.values())):
+        raise RuntimeError(f"{context} log missing or changed for {name}")
+    return {filename: contents for filename, contents in logs.items() if digests[filename] in expected}
+
+
+def index_existing_output(directory, policy_ref):
+    """Validate original signed progress before adding only its discovery locator."""
+    directory = Path(directory).resolve()
+    proof = local_proof_directory(directory)
+    envelope = json.loads((proof / "envelope.json").read_bytes())
+    payload = base64.b64decode(envelope["payload"], validate=True)
+    if payload != (proof / "receipt.json").read_bytes():
+        raise RuntimeError("Indexed receipt differs from its signed payload")
+    previous = json.loads(payload)
+    origin_policy = value("rev-parse", previous["commands_ref"])
+    if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
+        raise RuntimeError("Indexed policy is not an ancestor of the current protected policy")
+    receipt = verify_envelope(envelope, previous["head"], previous["base"], origin_policy,
+                              signers_ref=policy_ref, completed_only=previous.get("kind") == "completed-profiles")
+    if receipt["host"] != host():
+        raise RuntimeError("Indexed receipt belongs to a different native host")
+    for name in receipt["checks"]:
+        verified_profile_logs(directory, receipt, name, "Indexed")
+    register_local_output(receipt["head"], directory)
+    print(f"Indexed original signed progress for {receipt['head'][:12]}. No checks ran; "
+          "reuse still verifies the source, host, recipe, signature and original logs.", flush=True)
+
+
 def resume_checks(directory, head, base, policy_ref, output, needed):
     """Reuse signed exact-source checks only while their commands and logs match."""
     directory = Path(directory).resolve()
@@ -1270,15 +1373,11 @@ def resume_checks(directory, head, base, policy_ref, output, needed):
     for name in needed:
         if name not in previous["checks"] or not compatible_profile_commands(previous, policy_ref, [name]):
             continue
-        logs = {path.name: path.read_bytes() for path in (directory / name).glob("*.log") if path.is_file()}
-        expected = {command["log_sha256"] for command in previous["checks"][name]}
-        if not expected.issubset({sha(contents) for contents in logs.values()}):
-            raise RuntimeError(f"Resume log missing or changed for {name}")
+        logs = verified_profile_logs(directory, previous, name, "Resume")
         target = output / name
         target.mkdir()
         for filename, contents in logs.items():
-            if sha(contents) in expected:
-                (target / filename).write_bytes(contents)
+            (target / filename).write_bytes(contents)
         reusable[name] = previous["checks"][name]
     # A reused profile that the earlier attempt carried keeps its origin group.
     groups = {}
@@ -1315,14 +1414,16 @@ def save_completed_profiles(receipt, output, identity, key, head, base_ref, poli
     pointer = output / "checkpoint.next.json"
     pointer.write_bytes(canonical({"version": 1, "generation": generation}))
     os.replace(pointer, output / "checkpoint.json")
+    try:
+        register_local_output(head, output)
+    except OSError as error:
+        print(f"LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE: signed progress remains at {output}; "
+              f"resume with --resume-from that directory. Index error: {error}", flush=True)
 
 
 def previous_local_output(head, base):
     """Find exact-source local progress automatically for the installed push hook."""
-    parent = Path.home() / ".nexus/local-acceptance/results" / head
-    if not parent.is_dir():
-        return None
-    for directory in sorted(parent.iterdir(), reverse=True):
+    for directory in local_output_directories(head):
         proof = local_proof_directory(directory)
         if not (proof / "envelope.json").is_file():
             continue
@@ -1476,6 +1577,20 @@ def check(args):
         print("LOCAL_ACCEPTANCE_TIMING=" + canonical(attempt).decode(), flush=True)
 
 
+def scheduled_checks(needed):
+    """Keep service bootstrap ahead of expensive profiles after workspace setup."""
+    ordered = list(needed)
+    if "native-services" in ordered:
+        position = next((index for index, name in enumerate(ordered)
+                         if name in {"native-release", "rendering", "browser"}), len(ordered))
+        if "native-workspace" in ordered:
+            position = max(position, ordered.index("native-workspace") + 1)
+        service = ordered.index("native-services")
+        if position < service:
+            ordered.insert(position, ordered.pop(service))
+    return ordered
+
+
 def perform_check(args, attempt):
     import importlib.util
 
@@ -1559,30 +1674,45 @@ def perform_check(args, attempt):
             receipt["carried"] = current
         else:
             receipt.pop("carried", None)
+
+    def perform_profile(name):
+        if name in reusable:
+            print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
+            results[name] = reusable[name]
+        elif name in carried:
+            origin = next(group["head"] for group in groups if name in group["profiles"])
+            print(f"Carrying signed {name} from {origin[:12]}; changes since then do not select it", flush=True)
+            results[name] = carried[name]
+        else:
+            print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
+            results[name] = module.run(name, ROOT, output / name, base, run_command)
+        timing["checks_finished_at"] = time.time()
+        sign_carried()
+        save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+        print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
+              "If this process exits, resume with: "
+              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+              f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+
+    serialized = scheduled_checks(name for name in needed if name != "preflight")
+    pending = [name for name in serialized if name not in reusable and name not in carried]
+    attempt["host_lease_wait_seconds"] = 0.0
+    print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({
+        "preflight": "metadata_before_host_lease" if "preflight" in needed else "not_selected",
+        "serialized_checks": serialized,
+        "pending_serialized_checks": pending,
+    }).decode(), flush=True)
     try:
-        with host_acceptance_lease(attempt, head):
-            prepare = getattr(module, "prepare_native_checks", None)
-            if prepare:
-                module.run.prepared_native = prepare(
-                    [name for name in needed if name not in reusable and name not in carried], ROOT, output, run_command)
-            for name in needed:
-                if name in reusable:
-                    print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
-                    results[name] = reusable[name]
-                elif name in carried:
-                    origin = next(group["head"] for group in groups if name in group["profiles"])
-                    print(f"Carrying signed {name} from {origin[:12]}; changes since then do not select it", flush=True)
-                    results[name] = carried[name]
-                else:
-                    print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
-                    results[name] = module.run(name, ROOT, output / name, base, run_command)
-                timing["checks_finished_at"] = time.time()
-                sign_carried()
-                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
-                print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-                      "If this process exits, resume with: "
-                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
-                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+        if "preflight" in needed:
+            perform_profile("preflight")
+        if serialized:
+            lease = host_acceptance_lease(attempt, head) if pending else contextlib.nullcontext()
+            with lease:
+                prepare = getattr(module, "prepare_native_checks", None)
+                if prepare and pending:
+                    module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                for name in serialized:
+                    perform_profile(name)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()
@@ -1794,6 +1924,9 @@ def main():
     command = sub.add_parser("install")
     command.add_argument("--signer")
     command.add_argument("--key")
+    command = sub.add_parser("index-output", help="Discover existing signed local progress without running or waiving checks")
+    command.add_argument("--directory", type=Path, required=True)
+    command.add_argument("--policy-ref", default="origin/main")
     command = sub.add_parser("pre-push")
     command.add_argument("remote")
     command.add_argument("url")
@@ -1833,6 +1966,8 @@ def main():
             if args.policy_ref == "origin/main":
                 args.policy_ref = authorized_policy(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
             check(args)
+        elif args.operation == "index-output":
+            index_existing_output(args.directory, value("rev-parse", args.policy_ref))
         elif args.operation == "install":
             install(args)
         elif args.operation == "contract-update":

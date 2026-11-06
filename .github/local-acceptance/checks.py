@@ -100,15 +100,50 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
-def workspace_nextest_options(output, grouped):
-    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+def docker_engine_probe_command(timeout):
+    """Bound the Engine version request without discovering optional CLI plugins."""
+    script = """import subprocess,sys
+try:
+    result = subprocess.run(sys.argv[2:], timeout=float(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    sys.exit(f"DOCKER_ENGINE_PROBE_TIMEOUT: Docker Engine did not answer within {sys.argv[1]} seconds. Check Docker Desktop and this shell's DOCKER_HOST/context; container/native guards have not started.")
+sys.exit(result.returncode)
+"""
+    return [sys.executable, "-c", script, str(timeout), shutil.which("docker") or "docker",
+            "version", "--format", "{{.Server.Version}}"]
+
+
+def supports_hosted_eight_workers(root):
+    """Qualify the measured hosted increase; old or unknown fixtures keep four."""
+    path = Path(root) / "rust/crates/rusty-sudocode-cli/tests/pty_bash_compact_results.rs"
+    try:
+        contents = path.read_bytes().replace(b"\r\n", b"\n")
+    except OSError:
+        return False
+    return hashlib.sha256(contents).hexdigest() == "8c157cf9088b931a7d98ad3434a48a3fe2ab0cf23d1ea61be395da6c45bc7ed6"
+
+
+def workspace_nextest_options(output, grouped, hosted_source_ready):
+    """Raise the qualified grouped pool and preserve existing explicit limits."""
     options = nextest_options(output)
-    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+    cpus = os.cpu_count() or 0
+    hosted = os.environ.get('GITHUB_ACTIONS') == 'true'
+    hosted_minimum = 3 if platform.system() == 'Darwin' else 4
+    eligible = cpus >= 8 or (hosted and cpus >= hosted_minimum and hosted_source_ready)
+    if grouped and eligible and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
         options[options.index('--test-threads') + 1] = '8'
+    if grouped and hosted and hosted_minimum <= cpus < 8:
+        print('NATIVE_TEST_SOURCE_COMPATIBILITY=' + json.dumps({
+            'qualified_resume_source': hosted_source_ready,
+            'scope': 'Known measured source enables eight; old/unknown source retains four. '
+                     'No source update is required to keep using four.',
+        }), flush=True)
     print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
           + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
-          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
-          'counts, legacy/isolated/other profiles retain four.',
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool. Grouped suites retain eight on hosts '
+          'with at least eight logical CPUs; qualified hosted sources also use eight from four CPUs, '
+          'or three on macOS. Old/unknown hosted sources below eight CPUs, smaller/unknown hosts '
+          'and legacy/isolated/other profiles retain four.',
           flush=True)
     return options
 
@@ -417,7 +452,10 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
                                "then retry this push or the printed acceptance command.")
         try:
-            command("docker", "info", "--format", "{{.ServerVersion}}")
+            print("DOCKER_ENGINE_PROBE: require a server version within 30 seconds before starting "
+                  "container/native validation. Optional CLI plugin discovery is outside this probe.",
+                  flush=True)
+            command(*docker_engine_probe_command(30))
         except (RuntimeError, OSError) as error:
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
@@ -480,7 +518,8 @@ def run(name, root, output, base, execute):
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
             command(str(nextest_binary(output)), "nextest", "run",
-                    *workspace_nextest_options(output, bool(targets)),
+                    *workspace_nextest_options(output, bool(targets),
+                                              hosted_source_ready=supports_hosted_eight_workers(root)),
                     "--workspace", "--locked", "--features", "engine-acp/mailbox",
                     *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
@@ -631,12 +670,12 @@ def native_guard_files():
         **preflight_guard_files(),
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
-        ".github/local-acceptance/gate.py": "aa14a70ee90b43cb5924e76255636598993145aabb08e5c65337bcee8592ef78",
-        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
+        ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
+        ".github/local-acceptance/gate.py": "f89e0f15ca412956b2a32e86644acf351e6784a437d42a3faefb35b3886bd96a",
+        ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "6fd29d3cc0e18f2892193adf445ffb12b85dce36fa960c57b01216ed9ec5de1b",
+        ".github/scripts/local_acceptance.py": "b2df864ed01392ad9f3ea5f681517529468871d71b4369f098fe242b9e463452",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
@@ -644,18 +683,19 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "3249cb47c0dc416c915f3080d27e42184d58566a80ab58433ee03e066ed1aab9",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
+        "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
-        "e2e/local-acceptance/host_lease_acceptance.py": "c6eadb50fda038f07b6d1c511f9d6417d2347f3e8caf2d47ae8046d3fee7facf",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "6e8928b9d5d36e9e76a9b7e50c91f9e1033defffbfb59ce80d045c31ae4558de",
+        "e2e/local-acceptance/host_lease_acceptance.py": "9889de100125304be8ff6630e78cf57341ab54a1b6da0df6272a7a524703a48e",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
         "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/publication_acceptance.py": "b814cf43d3322c2edc50ff015beddfca8d356e7553b6a560e2fa35888bc61e76",
+        "e2e/local-acceptance/publication_acceptance.py": "209ca63435e8e42d2c15d90f0f3c4f93fa17f0e74ca615e7b0eecf9746f05120",
         "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
-        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
+        "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
         "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
@@ -744,7 +784,7 @@ def contract_container(root, output, command):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "6e43e2b96e7da5bc4515fce3579a91e3ceab7da0a29894dd52d52f8694b8bad7",
+        "Dockerfile.guard": "1ed8c463f04bc643dedaa5c237b398da95bed6c7fc48a82a2b3710784b0e0477",
         "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:

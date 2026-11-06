@@ -862,6 +862,10 @@ async fn ensure_a2a_receiver(
     let Some(mailbox) = mailbox else {
         return;
     };
+    if !tools::cron_tools_disabled() {
+        let firing = Arc::clone(&mailbox);
+        runtime::cron_scheduler::start_once(|| runtime::cron_scheduler::Firing::new(firing));
+    }
     let verified = mailbox.authenticates_senders();
     let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
     else {
@@ -3631,6 +3635,9 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_dispatch(
             {
                 let registry = Arc::clone(&registry);
+                // A client that manages cron gets change notifications from
+                // its first cron request on; one watcher per connection.
+                let cron_watching = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
                     Dispatch::Request(message, responder)
                         if message.method() == RUNTIME_STATUS_METHOD =>
@@ -3662,6 +3669,21 @@ pub(crate) async fn run_acp_on_transport(
                             responder.respond_with_result(result)?;
                             Ok(())
                         })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if crate::cron_control::matches(message.method()) =>
+                    {
+                        if !cron_watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            let watcher = cx.clone();
+                            cx.spawn(async move {
+                                crate::cron_control::watch(watcher).await;
+                                Ok(())
+                            })?;
+                        }
+                        let (method, params) = message.into_parts();
+                        responder
+                            .respond_with_result(crate::cron_control::call(&method, params))?;
                         Ok(Handled::Yes)
                     }
                     Dispatch::Request(message, responder)

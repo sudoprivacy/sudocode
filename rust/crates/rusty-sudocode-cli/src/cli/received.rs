@@ -38,6 +38,7 @@ fn envelope_header(line: &str) -> Option<EnvelopeHeader> {
         "shutdown-request" => ("shutdown-request", "shutdown request"),
         "shutdown-response" => ("shutdown-response", "shutdown response"),
         "plan-approval-response" => ("plan-approval-response", "plan approval response"),
+        "scheduled-message" => ("scheduled-message", "scheduled"),
         _ => return None,
     };
     let (sender, mut rest) = attributes.strip_prefix("from=\"")?.split_once('"')?;

@@ -1081,7 +1081,7 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
         if name not in checks:
             raise RuntimeError(f"Carried {name} is missing from the signed checks")
     for group in receipt.get("carried", []):
-        origin = verify_carried(group, head, receipt["base"], base, signers_ref or policy_ref, receipt["host"])
+        origin = verify_carried(group, head, receipt["base"], base, policy_ref, receipt["host"], signers_ref)
         for name in group["profiles"]:
             if checks[name] != origin["checks"][name]:
                 raise RuntimeError(f"Carried {name} differs from its origin's signed execution")
@@ -1171,8 +1171,8 @@ def carried_change_paths(origin, origin_base, head, base):
     return sorted(since & (set(changed_paths(base, head)) | set(changed_paths(origin_base, origin))))
 
 
-def verify_carried(group, head, base, base_ref, policy_ref, host_info):
-    """Check one carried group against its origin's own signed receipt; return that receipt."""
+def verify_carried(group, head, base, base_ref, policy_ref, host_info, signers_ref=None):
+    """Check candidate recipe compatibility under the publication authority's trust."""
     origin, profiles, envelope = group.get("head"), group.get("profiles"), group.get("envelope")
     if (not isinstance(origin, str) or origin == head or not isinstance(profiles, list) or not profiles
             or "preflight" in profiles or not isinstance(envelope, dict)):
@@ -1183,16 +1183,17 @@ def verify_carried(group, head, base, base_ref, policy_ref, host_info):
     if not isinstance(payload.get("commands_ref"), str):
         raise RuntimeError("Carried evidence predates attested commands")
     origin_policy = value("rev-parse", payload["commands_ref"])
-    if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
+    authority_ref = signers_ref or policy_ref
+    if git("merge-base", "--is-ancestor", origin_policy, authority_ref, check=False).returncode:
         raise RuntimeError(
             "Carried evidence policy is not an ancestor of the current protected policy: "
-            f"origin={origin_policy}, protected={policy_ref}. "
+            f"origin={origin_policy}, protected={authority_ref}. "
             "If this is an earlier unmerged contract update, land its reviewed PR through CI and the merge queue, "
             "fetch protected main, then rerun the acceptance or push command. "
             "Otherwise produce fresh evidence under the current protected policy. "
             "Preserve the original evidence; do not relax the ancestry check."
         )
-    receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=policy_ref,
+    receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=authority_ref,
                               completed_only=payload.get("kind") == "completed-profiles")
     if receipt["host"] != host_info:
         raise RuntimeError("Carried evidence belongs to a different native host")
@@ -1218,12 +1219,13 @@ def carried_profiles(receipt):
     return owners
 
 
-def carry_checks(head, base, base_ref, policy_ref, output, needed):
+def carry_checks(head, base, base_ref, policy_ref, output, needed, signers_ref=None):
     """Carry signed profiles from this branch's earlier heads when later changes do not select them.
 
     Same-host evidence only. Each carried group keeps its origin's signed
     envelope, so the verifier re-checks the origin, its ancestry and the change
-    set instead of trusting this receipt's copy.
+    set instead of trusting this receipt's copy. A candidate command policy
+    never substitutes for the protected authority used at publication.
     """
     remaining = [name for name in needed if name != "preflight"]
     carried, groups, refused = {}, {}, set()
@@ -1251,7 +1253,7 @@ def carry_checks(head, base, base_ref, policy_ref, output, needed):
                         continue
                     try:
                         origin_receipt = verify_carried({"head": origin, "profiles": [name], "envelope": origin_envelope},
-                                                        head, base, base_ref, policy_ref, host())
+                                                        head, base, base_ref, policy_ref, host(), signers_ref)
                         logs = verified_profile_logs(directory, origin_receipt, name, "Carried")
                     except (RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
                         refused.add(key)
@@ -1380,7 +1382,7 @@ def index_existing_output(directory, policy_ref):
           "reuse still verifies the source, host, recipe, signature and original logs.", flush=True)
 
 
-def resume_checks(directory, head, base, policy_ref, output, needed):
+def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref=None):
     """Reuse signed exact-source checks only while their commands and logs match."""
     directory = Path(directory).resolve()
     proof = local_proof_directory(directory)
@@ -1393,7 +1395,7 @@ def resume_checks(directory, head, base, policy_ref, output, needed):
     previous_policy = value("rev-parse", previous["commands_ref"])
     if git("merge-base", "--is-ancestor", previous_policy, policy_ref, check=False).returncode:
         raise RuntimeError("Resume policy is not an ancestor of the current protected policy")
-    previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=policy_ref,
+    previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=signers_ref or policy_ref,
                                completed_only=completed_only)
     if previous["host"] != host():
         raise RuntimeError("Resume receipt belongs to a different native host")
@@ -1431,14 +1433,14 @@ def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
             "signature": base64.b64encode(signature.read_bytes()).decode()}
 
 
-def save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref):
+def save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref=None):
     """Publish complete signed files before atomically advertising their generation."""
     clean(head)
     checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
     generation = str(time.time_ns())
     directory = output / "checkpoints" / generation
     envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
-    verify_envelope(envelope, head, base_ref, policy_ref, completed_only=True)
+    verify_envelope(envelope, head, base_ref, policy_ref, signers_ref=signers_ref, completed_only=True)
     (directory / "envelope.json").write_bytes(canonical(envelope))
     pointer = output / "checkpoint.next.json"
     pointer.write_bytes(canonical({"version": 1, "generation": generation}))
@@ -1627,10 +1629,15 @@ def perform_check(args, attempt):
     clean(head)
     policy_ref = value("rev-parse", args.policy_ref)
     base_ref = value("rev-parse", args.base)
+    # Older managed parents already pass their protected base and the exact
+    # candidate head. Preserve that authority before those parents are upgraded.
+    default_authority = base_ref if policy_ref == head else policy_ref
+    signers_ref = value("rev-parse", getattr(args, "signers_ref", None) or default_authority)
     # A candidate cannot replace its required command definitions unnoticed.
     check_contract_changes(head, base_ref, policy_ref)
     base = value("merge-base", base_ref, head)
-    print(f"Local acceptance inputs: head={head[:12]} base={base[:12]} policy={policy_ref[:12]}", flush=True)
+    print(f"Local acceptance inputs: head={head[:12]} base={base[:12]} policy={policy_ref[:12]} "
+          f"authority={signers_ref[:12]}", flush=True)
     needed = selected(load_policy(policy_ref), changed_paths(base, head), base=base, head=head)
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
@@ -1647,7 +1654,7 @@ def perform_check(args, attempt):
     output.mkdir(parents=True, exist_ok=False)
     attempt.update(head=head, tree=value("rev-parse", f"{head}^{{tree}}"), base=base,
                    branch=git("symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None,
-                   host=host(), policy_ref=policy_ref, output=str(output))
+                   host=host(), policy_ref=policy_ref, signers_ref=signers_ref, output=str(output))
     (output / "attempt.json").write_bytes(canonical(attempt))
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
@@ -1663,10 +1670,10 @@ def perform_check(args, attempt):
     reusable, resumed, groups = {}, None, []
     previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
     if previous:
-        reusable, resumed, groups = resume_checks(previous, head, base_ref, policy_ref, output, needed)
+        reusable, resumed, groups = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
     # Earlier heads of this branch lend profiles that later changes do not select.
     carried, new_groups = carry_checks(head, base, base_ref, policy_ref, output,
-                                       [name for name in needed if name not in reusable])
+                                       [name for name in needed if name not in reusable], signers_ref)
     for group in new_groups:
         existing = next((item for item in groups if item["head"] == group["head"]), None)
         if existing:
@@ -1717,10 +1724,10 @@ def perform_check(args, attempt):
             results[name] = module.run(name, ROOT, output / name, base, run_command)
         timing["checks_finished_at"] = time.time()
         sign_carried()
-        save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+        save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref)
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
               "If this process exits, resume with: "
-              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
               f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
@@ -1748,9 +1755,9 @@ def perform_check(args, attempt):
         if results:
             try:
                 sign_carried()
-                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref)
+                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref)
                 print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
-                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
                       f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
@@ -1759,7 +1766,7 @@ def perform_check(args, attempt):
     receipt["finished_at"] = int(time.time())
     sign_carried()
     envelope = sign_receipt(receipt, output, identity, key)
-    verify_envelope(envelope, head, base_ref, policy_ref)
+    verify_envelope(envelope, head, base_ref, policy_ref, signers_ref)
     (output / "envelope.json").write_bytes(canonical(envelope))
     if args.publish:
         publish(head, envelope, args.remote)
@@ -1924,7 +1931,8 @@ def run_candidate_checks(head, trusted, remote, output=None):
     # A contract update can change run_command itself. Execute that exact
     # checked-out runner after authority verification, not this older copy.
     command = [sys.executable, str(ROOT / ".github/scripts/local_acceptance.py"), "check",
-               "--head", head, "--base", trusted, "--policy-ref", head, "--publish", "--remote", remote]
+               "--head", head, "--base", trusted, "--policy-ref", head, "--signers-ref", trusted,
+               "--publish", "--remote", remote]
     if output:
         command += ["--output", output]
     subprocess.run(command, cwd=ROOT, check=True)
@@ -1946,6 +1954,7 @@ def main():
             command.add_argument("--architecture")
         if name == "check":
             command.add_argument("--output")
+            command.add_argument("--signers-ref", help=argparse.SUPPRESS)
             command.add_argument("--resume-from", type=Path,
                                  help="Reuse unchanged checks from a signed exact-source output directory")
             command.add_argument("--publish", action="store_true")

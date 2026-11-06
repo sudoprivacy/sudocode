@@ -627,6 +627,10 @@ ACP clients get the same behaviour: a `session/prompt` whose text starts
 with `!` runs in the session's workspace and streams the output back as
 agent text.
 
+Foreground PowerShell tools drain stdout and stderr while the command runs,
+so large context or query replies do not block on full operating-system pipes.
+Their existing timeout and process-tree cancellation still apply.
+
 For the canonical, live command list:
 
 ```bash

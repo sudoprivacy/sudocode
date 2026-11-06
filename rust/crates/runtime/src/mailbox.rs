@@ -781,6 +781,17 @@ impl Mailbox {
         Ok((messages, next))
     }
 
+    /// Whether `env` is for this reader rather than an echo of its own write.
+    ///
+    /// Our own writes are skipped so a conversation never echoes back to us.
+    /// The one exception is a scheduled message addressed to us: a job an agent
+    /// schedules for itself is written under its own name into its
+    /// conversation with itself, and must still arrive.
+    fn is_delivery(&self, env: &MailboxEnvelope) -> bool {
+        env.from != self.self_id
+            || (env.kind == crate::agent_mailbox::kinds::SCHEDULED && env.to == self.self_id)
+    }
+
     /// Drain backend-owned chunks without a separate type lookup. A chunk is
     /// either a complete envelope frame or a batch of JSONL envelope records.
     fn poll_tail(
@@ -806,7 +817,7 @@ impl Mailbox {
                 |envelope| vec![envelope],
             );
             for env in envelopes {
-                if !env.from.is_empty() && env.from != self.self_id && !env.body.is_empty() {
+                if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
                     out.push(env);
                 }
             }
@@ -2663,6 +2674,39 @@ mod tests {
         let (msgs, _) = mb.poll_conversation("agent-b", 0, 0).unwrap();
         assert_eq!(msgs.len(), 1, "self-writes must be filtered");
         assert_eq!(msgs[0].body, "from peer");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A job an agent schedules for itself is a write under its own name into
+    /// its conversation with itself. It must arrive; nothing else of its own
+    /// may echo back, including a scheduled message it sent someone else.
+    #[test]
+    fn a_scheduled_message_to_self_arrives_and_nothing_else_echoes() {
+        let ws = temp_workspace("scheduled-self");
+        let mb = local_mailbox(&ws, "agent-a");
+        let scheduled = |to: &str, body: &str| MailboxEnvelope {
+            kind: crate::agent_mailbox::kinds::SCHEDULED.to_string(),
+            ..note("agent-a", to, body)
+        };
+        mb.send(scheduled("agent-a", "reminder for me")).unwrap();
+        mb.send(note("agent-a", "agent-a", "plain note to self"))
+            .unwrap();
+        mb.send(scheduled("agent-b", "reminder for b")).unwrap();
+
+        let (own, _) = mb.poll_conversation("agent-a", 0, 0).unwrap();
+        let bodies: Vec<_> = own.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["reminder for me"]);
+        let (with_b, _) = mb.poll_conversation("agent-b", 0, 0).unwrap();
+        assert!(
+            with_b.is_empty(),
+            "a scheduled message to b is b's, not an echo"
+        );
+
+        let b = local_mailbox(&ws, "agent-b");
+        let (for_b, _) = b.poll_conversation("agent-a", 0, 0).unwrap();
+        assert_eq!(for_b.len(), 1);
+        assert_eq!(for_b[0].body, "reminder for b");
 
         let _ = std::fs::remove_dir_all(&ws);
     }

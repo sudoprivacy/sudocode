@@ -14,7 +14,7 @@ const host = createHost(config);
 const { child, state, viewport, settle, sleep, close } = host;
 const report = { version: 1, status: 'running', enabled: config.enabled,
   measurement: 'OS PTY dispatch to parsed xterm cells; headless terminal, no browser raster/GPU measurement.',
-  metric_scope: 'cpu_ms and wire_kib sum the identical wait/stream/history typing phases. Total workload and additional scrolling costs remain explicit; baseline has no application history scrolling.',
+  metric_scope: 'cpu_ms and wire_kib sum the identical wait/stream/history typing phases. Both modes use native terminal scrolling; scrolling costs are retained separately.',
   environment: host.metadata, samples: {}, metrics: { cpu_ms: 0, wire_kib: 0 }, resources: [] };
 
 function resource(label) {
@@ -87,22 +87,20 @@ async function keys(phase) {
     const scrollStart = resource('scroll-start'), scrollBytes = state.bytes;
     const scroll = report.samples.scroll = [];
     for (let i = 0; i < 20; i++) {
-      const input = i % 2 === 0 ? '\x1b[<64;20;5M' : '\x1b[<65;20;5M';
-      if (config.enabled) {
-        const before = viewport().split('\n').slice(1, 8).join('\n');
-        scroll.push(await parsed(() => viewport().split('\n').slice(1, 8).join('\n') !== before,
-          () => child.write(input)));
-      } else { child.write(input); await sleep(8); }
+      const before = host.terminal.buffer.active.viewportY;
+      const start = performance.now();
+      host.terminal.scrollLines(i % 2 === 0 ? -3 : 3);
+      assert.notEqual(host.terminal.buffer.active.viewportY, before);
+      scroll.push(performance.now() - start);
+      await sleep(8);
     }
-    if (config.enabled) {
-      report.metrics.scroll_p95_ms = p95(scroll);
-    }
+    report.metrics.scroll_p95_ms = p95(scroll);
     const scrollEnd = resource('scroll-end');
     report.metrics.scroll_cpu_ms = scrollEnd.cpu_ms - scrollStart.cpu_ms;
     report.metrics.scroll_wire_kib = (state.bytes - scrollBytes) / 1024;
-    // Both modes receive the same input count; the opt-in view holds history.
+    // Both modes keep one editor and one native history buffer.
     await keys('reading');
-    child.write('\x1b[1;3F');
+    host.terminal.scrollToBottom();
     await host.wait(() => viewport().includes('ViewportRow089'));
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await settle(text => text.includes('Σ') && !text.includes('Working...'));

@@ -3328,20 +3328,13 @@ fn run_repl_iocraft_dispatch(
     // Banner + restored history: on resume the iocraft REPL must replay the
     // session's messages to scrollback, not just the banner — otherwise a resumed conversation looks empty. Both come from
     // one println in spawn_repl_ui, before raw mode.
-    let (banner, startup_prompts) = {
+    let banner = {
         let banner = cli.startup_banner();
-        let (history, prompts) = cli.render_restored_scrollback();
+        let history = cli.render_restored_scrollback();
         if history.is_empty() {
-            (banner, Vec::new())
+            banner
         } else {
-            let offset = banner.len() + 1;
-            (
-                format!("{banner}\n{history}"),
-                prompts
-                    .into_iter()
-                    .map(|position| position + offset)
-                    .collect(),
-            )
+            format!("{banner}\n{history}")
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
@@ -3396,7 +3389,6 @@ fn run_repl_iocraft_dispatch(
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
-        startup_prompts,
         seed_todos,
         input_history,
         Some(dequeue_hook),
@@ -3537,6 +3529,13 @@ fn run_repl_iocraft_dispatch(
     // mailbox, including a pending binding that this receiver retries.
     let mailbox_abort = runtime::HookAbortSignal::new();
     let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
     // Whether this namespace authenticated the senders it delivers.
     let peer_verified = peer.mailbox().authenticates_senders();
     let mailbox_receiver = peer.spawn_receiver(
@@ -3640,7 +3639,7 @@ fn run_repl_iocraft_dispatch(
                             input_queue::QueuedKind::Human => {
                                 echo_submit_to_scrollback(&repl_output, &echo.display);
                             }
-                            input_queue::QueuedKind::Peer => {
+                            input_queue::QueuedKind::Peer | input_queue::QueuedKind::Scheduled => {
                                 echo_peer_to_scrollback(&repl_output, &echo.display);
                             }
                             input_queue::QueuedKind::Subagent
@@ -3672,16 +3671,18 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
+                        // A scheduled job's message arrives through the same
+                        // inbox; only its origin differs.
+                        let kind = if msg.kind == runtime::agent_mailbox::kinds::SCHEDULED {
+                            input_queue::QueuedKind::Scheduled
+                        } else {
+                            input_queue::QueuedKind::Peer
+                        };
                         let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
                             &[msg],
                             peer_verified,
                         );
-                        (
-                            prompt.clone(),
-                            prompt,
-                            input_queue::QueuedKind::Peer,
-                            Some(ack),
-                        )
+                        (prompt.clone(), prompt, kind, Some(ack))
                     }
                     CoordinatorEvent::SubagentCompleted { prompt, display } => {
                         (prompt, display, input_queue::QueuedKind::Subagent, None)
@@ -4835,21 +4836,14 @@ impl LiveCli {
     /// Render the restored conversation history to a scrollback string, or an
     /// empty string when there is none (a fresh session), through the shared
     /// `render_messages`, so a resumed session's history stays visible.
-    fn render_restored_scrollback(&self) -> (String, Vec<usize>) {
+    fn render_restored_scrollback(&self) -> String {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
-            return (String::new(), Vec::new());
+            return String::new();
         }
         let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
         let renderer = render::TerminalRenderer::new();
-        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
-            cli::format::render_messages_with_prompts(session.messages(), term_width, &renderer)
-        } else {
-            (
-                render_messages(session.messages(), term_width, &renderer),
-                Vec::new(),
-            )
-        }
+        render_messages(session.messages(), term_width, &renderer)
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the

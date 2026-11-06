@@ -181,6 +181,7 @@ impl MailboxEnvelope {
             kinds::SHUTDOWN_REQUEST => "shutdown-request",
             kinds::SHUTDOWN_RESPONSE => "shutdown-response",
             kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
+            kinds::SCHEDULED => "scheduled-message",
             _ => "mailbox-message",
         };
         let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&self.from));
@@ -250,7 +251,8 @@ fn xml_attr_escape(s: &str) -> String {
 /// organisation — so a body spelling one of these either impersonates the
 /// harness or closes the frame built around it.
 const HARNESS_OWNED_TAGS: &str = "system-reminder|task-notification|mailbox-message|\
-                                  shutdown-request|shutdown-response|plan-approval-response|channel";
+                                  shutdown-request|shutdown-response|plan-approval-response|\
+                                  scheduled-message|channel";
 
 /// Render an envelope `body` for a prompt with the harness's own markup inert.
 ///
@@ -303,6 +305,10 @@ pub mod kinds {
     /// drains these between turns and prepends them to the next
     /// user prompt so the model sees them mid-conversation.
     pub const TASK_NOTIFICATION: &str = "task_notification";
+    /// A scheduled job's message, sent by the cron scheduler. It enters the
+    /// receiver's message queue like a peer message, steered or queued per the
+    /// envelope's `delivery`, and is the one kind an agent can send itself.
+    pub const SCHEDULED: &str = "scheduled";
 }
 
 pub(crate) fn now_secs() -> u64 {

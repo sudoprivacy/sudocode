@@ -6,8 +6,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
+from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -255,12 +257,13 @@ pub fn record(name: &str) {
     explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
     environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
     try:
-        dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
-        legacy = profiles.workspace_nextest_options(output, False)
+        with patch.dict(os.environ, {"CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]}):
+            dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        legacy = profiles.workspace_nextest_options(output, False, False)
         assert legacy[legacy.index("--test-threads") + 1] == "4"
         os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
         environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
-        limited = profiles.workspace_nextest_options(output, True)
+        limited = profiles.workspace_nextest_options(output, True, False)
         command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
     finally:
         if explicit_workers is None:
@@ -271,7 +274,11 @@ pub fn record(name: &str) {
     actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
     assert "--lib" not in actual and "--bins" not in actual
     assert actual[-len(integration_arguments):] == integration_arguments
-    expected_workers = 8 if (os.cpu_count() or 0) >= 8 else 4
+    cpus = os.cpu_count() or 0
+    hosted_qualified = (os.environ.get("GITHUB_ACTIONS") == "true"
+                        and profiles.supports_hosted_eight_workers(root))
+    hosted_minimum = 3 if platform.system() == "Darwin" else 4
+    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= hosted_minimum) else 4
     assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
     observed_workers = {}
     for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
@@ -279,6 +286,38 @@ pub fn record(name: &str) {
         observed = output / label / "observed"
         maximum = max(int(path.read_text()) for path in observed.iterdir())
         assert lower <= maximum <= upper, (label, maximum)
+        assert len(list(observed.iterdir())) == 7
+        assert not list((output / label / "active").iterdir()), label
+        observed_workers[label] = maximum
+    # Control reported host inputs, then execute the real native cases with
+    # those selected options after restoring the caller's compiler environment.
+    for label, hosted, cpus, system, source_ready, limit, expected_count, minimum in [
+        ("hosted-four-core-pool", "true", 4, "Windows", True, None, 8, 5),
+        ("hosted-unqualified-source", "true", 4, "Windows", False, None, 4, 1),
+        ("local-four-core-pool", "false", 4, "Windows", True, None, 4, 1),
+        ("hosted-small-pool", "true", 3, "Linux", True, None, 4, 1),
+        ("hosted-unknown-pool", "true", None, "Darwin", True, None, 4, 1),
+        ("hosted-explicit-small-pool", "true", 4, "Windows", True, "2", 2, 1),
+        ("hosted-three-core-macos", "true", 3, "Darwin", True, None, 8, 5),
+        ("hosted-unqualified-macos", "true", 3, "Darwin", False, None, 4, 1),
+        ("local-three-core-macos", "false", 3, "Darwin", True, None, 4, 1),
+        ("hosted-small-macos", "true", 2, "Darwin", True, None, 4, 1),
+        ("hosted-explicit-small-macos", "true", 3, "Darwin", True, "2", 2, 1),
+    ]:
+        with patch.object(os, "cpu_count", return_value=cpus), \
+                patch.object(platform, "system", return_value=system), \
+                patch.dict(os.environ, {"GITHUB_ACTIONS": hosted}):
+            os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+            if limit is not None:
+                os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = limit
+            controlled = profiles.workspace_nextest_options(
+                output, True, hosted_source_ready=source_ready)
+        assert controlled[controlled.index("--test-threads") + 1] == str(expected_count)
+        environment["SCODE_GROUP_POOL_DIR"] = str(output / label)
+        command(str(executable), "nextest", "run", *controlled, "--workspace", "--locked", *integration_arguments)
+        observed = output / label / "observed"
+        maximum = max(int(path.read_text()) for path in observed.iterdir())
+        assert minimum <= maximum <= expected_count, (label, maximum)
         assert len(list(observed.iterdir())) == 7
         assert not list((output / label / "active").iterdir()), label
         observed_workers[label] = maximum
@@ -344,6 +383,20 @@ pub fn record(name: &str) {
         assert "native-workspace" in checks
         if expected:
             assert "native-examples" in checks, text
+        if not scope_cases:
+            # Exercise the public planner in a deep output directory without
+            # another Cargo build or checkout. All inputs remain Git objects.
+            deep = output / "deep-plan"
+            while len(str(deep.resolve())) < 221:
+                deep /= "committed-source"
+            command("git", "clone", "--no-checkout", "--shared",
+                    "--separate-git-dir", str(output / "deep-plan-git"), str(root), str(deep), cwd=output)
+            deep_text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"),
+                                "plan", "--base", base, "--policy-ref", base,
+                                "--host", "windows", "--architecture", "AMD64", cwd=deep).read_text(encoding="utf-8")
+            deep_plan = json.loads(next(line.split("=", 1)[1] for line in deep_text.splitlines()
+                                        if line.startswith("ACCEPTANCE_PLAN=")))
+            assert deep_plan == planned, (str(deep), deep_text, text)
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)
@@ -363,6 +416,18 @@ pub fn record(name: &str) {
     selected = profiles.changed_cli_test_targets(root, newer_main)
     assert selected == ["kept_driver"], f"Newer-main-only changes widened isolated native scope: {selected}"
     assert profiles.changed_cli_test_targets(root, git("merge-base", newer_main, "HEAD")) == selected
+
+    def example_scope(expected):
+        text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"), "plan",
+                       "--base", newer_main, "--policy-ref", base,
+                       "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
+        plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                               if line.startswith("ACCEPTANCE_PLAN=")))
+        assert ("native-examples" in plan["local_checks"]) == expected, text
+        assert "native-workspace" in plan["local_checks"], text
+        return plan
+
+    isolated_plan = example_scope(False)
     previous_pids = environment["SCODE_GROUP_PID_DIR"]
     environment["SCODE_GROUP_PID_DIR"] = str(output / "isolated-target-pids")
     selected_args = [argument for name in selected for argument in ["--test", name]]
@@ -370,7 +435,8 @@ pub fn record(name: &str) {
     assert {path.name for path in (output / "isolated-target-pids").iterdir()} == {"driver"}
     environment["SCODE_GROUP_PID_DIR"] = previous_pids
     behind_main = {"newer_main": newer_main, "head": isolated_head, "selected": selected,
-                   "actual_native_targets": ["driver"], "conservative_cases": []}
+                   "actual_native_targets": ["driver"], "isolated_plan": isolated_plan,
+                   "conservative_cases": []}
     for index, (label, path) in enumerate([
         ("shared test helper", package + "tests/common/mod.rs"),
         ("production source", package + "src/main.rs"),
@@ -381,6 +447,7 @@ pub fn record(name: &str) {
         write(path, (file.read_text() if file.exists() else "") + "// Changed actual branch input.\n")
         head = commit("Keep full scope for " + label)
         assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        example_scope(True)
         behind_main["conservative_cases"].append({"case": label, "head": head})
         if index == 0:
             environment["SCODE_GROUP_PID_DIR"] = str(output / "mixed-target-pids")
@@ -395,11 +462,13 @@ pub fn record(name: &str) {
             git("mv", package + "tests/kept_driver.rs", package + "src/moved.rs")
         head = commit(label)
         assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        example_scope(True)
         behind_main["conservative_cases"].append({"case": label, "head": head})
     git("switch", "isolated-native-test")
     write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
     head = commit("Keep actual branch source changes even when main has identical bytes")
     assert profiles.changed_cli_test_targets(root, newer_main) is None
+    example_scope(True)
     behind_main["conservative_cases"].append({"case": "coincident main and PR source bytes", "head": head})
     git("switch", "-c", "grouping-controls", grouped_scope_head)
     for label, replacement, workspace_text, remove in [

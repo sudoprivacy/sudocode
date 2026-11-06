@@ -1,4 +1,4 @@
-"""Compare viewport costs against normal input or a previous release binary.
+"""Compare prompt presentation costs against normal input or a previous release binary.
 
 This additional workload uses the existing paired evaluator and budgets. The
 browser observer also measures painted keys and browser resources. It does not
@@ -41,7 +41,7 @@ def main():
     metrics = headless_metrics if args.observer == "headless" else {
         "input_history_parsed_p95_ms", "input_history_frame_p95_ms", "terminal_cpu_ms",
         "terminal_rss_peak_mib", "terminal_rss_growth_mib"}
-    comparison = "Before/after binaries, viewport enabled in both" if args.baseline else "Same release binary, experiment disabled/enabled"
+    comparison = "Before/after binaries, prompt shading enabled in both" if args.baseline else "Same release binary, experiment disabled/enabled"
     comparison_policy = dict(policy, cases={"viewport": {}})
     controls, comparisons = {"viewport": []}, {"viewport": []}
     report = {"status": "running", "samples": [], "policy": policy, "observer": args.observer,
@@ -71,7 +71,7 @@ def main():
         env = dict(os.environ, SCODE_TEST_BIN=str(binary.resolve()),
                    SCODE_TEST_BACKEND="mock", SCODE_VIEWPORT_MEASURE_ENABLED=str(int(enabled)),
                    SCODE_VIEWPORT_MEASURE_DIR=str(location.resolve()))
-        print(f"{location.name}: viewport={enabled}", flush=True)
+        print(f"{location.name}: shaded_prompts={enabled}", flush=True)
         location.mkdir()
         with (location / "driver.log").open("w") as log:
             test = "viewport_terminal_measurements" if args.observer == "headless" else "viewport_browser_interaction"
@@ -131,7 +131,7 @@ def main():
         report.update(status="invalid", failures=[str(error)])
     finally:
         (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    lines = ["## Inline prompt viewport", "", f"Result: **{report['status']}**", "",
+    lines = ["## Inline prompt surfaces", "", f"Result: **{report['status']}**", "",
              f"{comparison}; observer: {args.observer}. Existing budgets are unchanged. Headless CPU/output comparisons use shared typing phases; browser CPU/memory cover the complete browser workflow.", ""]
     left_label, right_label = ("Before", "After") if args.baseline else ("Disabled", "Enabled")
     lines.extend(f"- {failure}" for failure in report.get("failures", []))
@@ -152,8 +152,7 @@ def main():
             right = statistics.median(value[metric] for value in final["candidate"])
             lines.append(f"| {metric} | {left:.2f} | {right:.2f} |")
         scroll = statistics.median(value["scroll_p95_ms"] for value in final["candidate"])
-        note = "" if args.baseline else " The disabled REPL has no application history viewport."
-        lines.extend(["", f"Twenty wheel events: candidate scroll P95 **{scroll:.2f} ms**.{note}"])
+        lines.extend(["", f"Twenty programmatic native scroll operations: candidate scroll P95 **{scroll:.2f} ms**. Both modes use native terminal history; actual wheel and scrollbar gestures are checked by the browser observer."])
     summary = "\n".join(lines) + "\n"
     (args.output / "summary.md").write_text(summary, encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):

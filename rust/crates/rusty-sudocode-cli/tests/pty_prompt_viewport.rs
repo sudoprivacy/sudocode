@@ -1,4 +1,4 @@
-//! Exercise the opt-in viewport through the real binary and terminal parser.
+//! Exercise shaded prompts on the shared native-history path through real PTYs.
 mod common;
 
 use common::TestEnv;
@@ -60,278 +60,128 @@ fn begin_history(env: &TestEnv, session: &mut PtySession) {
 }
 
 #[test]
-fn scrolling_keeps_the_editor_and_context_and_preserves_the_draft() {
-    let env = TestEnv::new_mock("prompt-viewport-scroll");
-    let mut session = start(&env, true, false);
-    let marker = common::turn_status_marker(&session);
-    begin_history(&env, &mut session);
-    session.send("draft界").unwrap();
-    common::expect_input_line(&session, "draft界", env.timeout(), "draft entered");
-    session.send("\x1b[5~").unwrap();
-    common::expect_screen(
-        &session,
-        |s| !s.contains("ViewportRow089") && s.contains("ViewportRow"),
-        env.timeout(),
-        "browse older answer",
-    );
-    assert_browsing_editor_surface(&session);
-    let before = session.render(|screen| {
-        screen
-            .raw()
-            .rows(0, screen.raw().size().1)
-            .skip(1)
-            .take(6)
-            .collect::<Vec<_>>()
-    });
-    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    common::expect_screen_settled(
-        &session,
-        |screen| {
-            let status = common::turn_status_identity(screen);
-            !status.is_empty() && status != marker && common::input_line_of(screen) == "draft界"
-        },
-        env.timeout(),
-        "turn ends while retaining the draft and reading position",
-    );
-    assert_eq!(
-        before,
-        session.render(|screen| screen
-            .raw()
-            .rows(0, screen.raw().size().1)
-            .skip(1)
-            .take(6)
-            .collect::<Vec<_>>()),
-        "stream completion preserves the reading anchor"
-    );
-    common::expect_input_line(
-        &session,
-        "draft界",
-        env.timeout(),
-        "draft survives streaming",
-    );
-    session.resize(36, 64).unwrap();
-    common::expect_input_line(&session, "draft界", env.timeout(), "draft survives reflow");
-    session.send("\x1b[<64;20;5M").unwrap();
-    common::expect_input_line(
-        &session,
-        "draft界",
-        env.timeout(),
-        "mouse wheel preserves editor",
-    );
-    session.send("\x1b[1;3F").unwrap();
-    common::expect_screen(
-        &session,
-        |s| s.contains("ViewportRow089"),
-        env.timeout(),
-        "return to latest",
-    );
-    finish(&mut session, &env);
-    let requests_before = env.captured_message_bodies().len();
-    let mut resumed = env.spawn_with_env(
-        &["--resume", "latest", "--permission-mode", "read-only"],
-        &[
-            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            ("SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT", "1"),
-        ],
-    );
-    resumed.resize(32, 96).unwrap();
-    common::expect_screen(
-        &resumed,
-        |s| s.contains("ViewportRow089") && s.contains("PROSE_CONTROL"),
-        env.timeout(),
-        "resume restores the answer and its semantic prompt header",
-    );
-    assert_eq!(
-        env.captured_message_bodies().len(),
-        requests_before,
-        "presentation resume makes no model request"
-    );
-    finish(&mut resumed, &env);
+fn streaming_and_resume_share_the_inline_editor() {
+    for enabled in [false, true] {
+        let env = TestEnv::new_mock("prompt-native-stream");
+        let mut session = start(&env, enabled, false);
+        let marker = common::turn_status_marker(&session);
+        begin_history(&env, &mut session);
+        session.send("draft界").unwrap();
+        common::expect_input_line(&session, "draft界", env.timeout(), "draft during streaming");
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        common::expect_screen_settled(
+            &session,
+            |screen| {
+                let status = common::turn_status_identity(screen);
+                !status.is_empty() && status != marker && common::input_line_of(screen) == "draft界"
+            },
+            env.timeout(),
+            "history handoff preserves the draft",
+        );
+        session.resize(36, 64).unwrap();
+        common::expect_input_line(&session, "draft界", env.timeout(), "draft survives resize");
+        finish(&mut session, &env);
+        let requests_before = env.captured_message_bodies().len();
+        let mut resumed = env.spawn_with_env(
+            &["--resume", "latest", "--permission-mode", "read-only"],
+            &[
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                (
+                    "SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT",
+                    if enabled { "1" } else { "0" },
+                ),
+            ],
+        );
+        resumed.resize(32, 96).unwrap();
+        common::expect_screen(
+            &resumed,
+            |s| s.contains("ViewportRow089") && s.contains('❯'),
+            env.timeout(),
+            "resume replays history through the existing native output path",
+        );
+        common::expect_input_line(&resumed, "", env.timeout(), "resumed editor is ready");
+        assert_eq!(
+            env.captured_message_bodies().len(),
+            requests_before,
+            "presentation resume makes no model request"
+        );
+        finish(&mut resumed, &env);
+    }
 }
 
 #[test]
-fn shaded_prompts_replay_into_native_history_on_exit() {
-    let env = TestEnv::new_mock("prompt-viewport-replay");
-    let mut session = start(&env, true, true);
-    let marker = common::turn_status_marker(&session);
-    let prompt = env.prompt("Say hello briefly", "single_turn_text");
-    session.send(&format!("{prompt}\r")).unwrap();
-    common::expect_turn_complete_after(&session, &marker, env.timeout(), "answer completes");
+fn live_and_resumed_prompts_share_the_editor_surface() {
+    for light in [false, true] {
+        let env = TestEnv::new_mock("prompt-native-style");
+        let mut session = start(&env, true, light);
+        session.send("surface-draft").unwrap();
+        common::expect_input_line(&session, "surface-draft", env.timeout(), "shaded editor");
+        let surface = prompt_surface(&session, "surface-draft", light);
+        session.send("\x15").unwrap();
+        let marker = common::turn_status_marker(&session);
+        let prompt = env.prompt("Say hello briefly", "single_turn_text");
+        session.send(&format!("{prompt}\r")).unwrap();
+        common::expect_turn_complete_after(&session, &marker, env.timeout(), "answer completes");
+        assert_eq!(
+            prompt_surface(&session, "Say hello briefly", light),
+            surface,
+            "submitted and live prompts use one style"
+        );
+        finish(&mut session, &env);
+        let mut resumed = env.spawn_with_env(
+            &["--resume", "latest", "--permission-mode", "read-only"],
+            &[
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                ("SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT", "1"),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor"),
+                ("NO_COLOR", ""),
+                ("COLORFGBG", if light { "0;15" } else { "15;0" }),
+            ],
+        );
+        resumed.resize(32, 96).unwrap();
+        common::expect_screen(
+            &resumed,
+            |s| s.contains("Say hello briefly") && s.contains('❯'),
+            env.timeout(),
+            "shaded prompt restored",
+        );
+        common::expect_input_line(&resumed, "", env.timeout(), "resumed editor is ready");
+        assert_eq!(
+            prompt_surface(&resumed, "Say hello briefly", light),
+            surface,
+            "resume reuses the same prompt formatter and style"
+        );
+        finish(&mut resumed, &env);
+    }
+}
+
+fn prompt_surface(session: &PtySession, text: &str, light: bool) -> (String, String) {
     session.render(|screen| {
         let raw = screen.raw();
         let row = raw
             .rows(0, raw.size().1)
-            .position(|row| row.contains("Say hello briefly"))
-            .expect("submitted user prompt visible");
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("missing prompt {text}: {}", screen.contents()));
+        let cell = raw.cell(row.try_into().unwrap(), 0).unwrap();
+        let foreground = format!("{:?}", cell.fgcolor());
+        let background = format!("{:?}", cell.bgcolor());
+        assert_eq!(
+            foreground,
+            if light { "Idx(0)" } else { "Idx(15)" },
+            "prompt text stays readable"
+        );
+        assert_ne!(background, "Default", "prompt surface is shaded");
         assert_eq!(
             format!(
                 "{:?}",
-                raw.cell(row.try_into().unwrap(), 0).unwrap().fgcolor()
+                raw.cell(row.try_into().unwrap(), 80).unwrap().bgcolor()
             ),
-            "Idx(0)",
-            "light prompt surface keeps dark text"
+            background,
+            "the prompt background fills the row"
         );
-        assert_ne!(
-            format!(
-                "{:?}",
-                raw.cell(row.try_into().unwrap(), 1).unwrap().bgcolor()
-            ),
-            "Default"
-        );
-    });
-    finish(&mut session, &env);
-    assert!(
-        session
-            .render(common::screen_contents)
-            .contains("Say hello briefly"),
-        "native record restored after the viewport closes"
-    );
-}
-
-#[test]
-fn unfinished_long_prose_keeps_prompt_context_and_the_draft() {
-    let env = TestEnv::new_mock("prompt-viewport-live-context");
-    let mut session = start(&env, true, false);
-    let marker = common::turn_status_marker(&session);
-    let document = format!(
-        "ViewportLiveStart {} ViewportLiveEnd",
-        "ordinary flowing words ".repeat(160)
-    );
-    let prompt = common::terminal_host::prose_prompt(
-        &env,
-        &document,
-        json!({ "chunk_chars": 8192, "delay_ms": 1 }),
-    );
-    session.send(&format!("{prompt}\r")).unwrap();
-    common::expect_screen(
-        &session,
-        |s| s.contains("ViewportLiveEnd") && env.workspace_root().join("prose-ready").exists(),
-        env.timeout(),
-        "unfinished paragraph is visible before EOF",
-    );
-    session.render(|screen| {
-        assert!(
-            screen
-                .raw()
-                .rows(0, screen.raw().size().1)
-                .take(2)
-                .any(|row| row.contains("PROSE_CONTROL")),
-            "prompt context remains above the live paragraph: {}",
-            screen.contents()
-        );
-    });
-    session.send("long-draft").unwrap();
-    common::expect_input_line(
-        &session,
-        "long-draft",
-        env.timeout(),
-        "typing during an unfinished paragraph",
-    );
-    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    common::expect_screen_settled(
-        &session,
-        |screen| {
-            let status = common::turn_status_identity(screen);
-            !status.is_empty() && status != marker && common::input_line_of(screen) == "long-draft"
-        },
-        env.timeout(),
-        "paragraph handoff preserves the draft",
-    );
-    finish(&mut session, &env);
-}
-
-#[test]
-fn older_history_remains_readable_after_many_pages() {
-    let env = TestEnv::new_mock("prompt-viewport-many-pages");
-    let mut session = start(&env, true, false);
-    let marker = common::turn_status_marker(&session);
-    let document = (0..600).fold(String::new(), |mut fixture_text, row| {
-        let _ = std::fmt::Write::write_fmt(
-            &mut fixture_text,
-            format_args!("ArchiveRow{row:03} ordinary answer text.\n\n"),
-        );
-        fixture_text
-    });
-    let prompt = common::terminal_host::prose_prompt(
-        &env,
-        &document,
-        json!({ "chunk_chars": 8192, "delay_ms": 1 }),
-    );
-    session.send(&format!("{prompt}\r")).unwrap();
-    common::expect_screen(
-        &session,
-        |s| s.contains("ArchiveRow599") && env.workspace_root().join("prose-ready").exists(),
-        env.timeout(),
-        "large history is available",
-    );
-    session.send("history-draft").unwrap();
-    common::expect_input_line(
-        &session,
-        "history-draft",
-        env.timeout(),
-        "draft before paging",
-    );
-    session.send(&"\x1b[5~".repeat(150)).unwrap();
-    common::expect_screen(
-        &session,
-        |s| s.contains("Auth mode") && !s.contains("ArchiveRow599"),
-        env.timeout(),
-        "paging reaches the startup record beyond the layout cache",
-    );
-    // The banner can occupy more than one viewport. Walk overlapping pages
-    // forward to the first answer instead of assuming the banner's height.
-    for _ in 0..16 {
-        if session.render(|screen| screen.contents().contains("ArchiveRow000")) {
-            break;
-        }
-        let before = session.render(|screen| {
-            screen
-                .raw()
-                .rows(0, screen.raw().size().1)
-                .take(20)
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-        session.send("\x1b[6~").unwrap();
-        common::expect_screen_rows(
-            &session,
-            |screen| screen.lines().take(20).collect::<Vec<_>>().join("\n") != before,
-            env.timeout(),
-            "page forward from the startup banner",
-        );
-    }
-    common::expect_screen(
-        &session,
-        |s| s.contains("ArchiveRow000"),
-        env.timeout(),
-        "the first answer remains readable after cache eviction",
-    );
-    common::expect_input_line(
-        &session,
-        "history-draft",
-        env.timeout(),
-        "paging retains the draft",
-    );
-    session.send("\x1b[1;3F").unwrap();
-    common::expect_screen(
-        &session,
-        |s| s.contains("ArchiveRow599"),
-        env.timeout(),
-        "return from old history",
-    );
-    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    common::expect_screen_settled(
-        &session,
-        |screen| {
-            let status = common::turn_status_identity(screen);
-            !status.is_empty()
-                && status != marker
-                && common::input_line_of(screen) == "history-draft"
-        },
-        env.timeout(),
-        "large history completion preserves input",
-    );
-    finish(&mut session, &env);
+        (foreground, background)
+    })
 }
 
 #[test]
@@ -358,7 +208,7 @@ fn disabled_experiment_retains_inline_input() {
 }
 
 #[test]
-fn no_color_keeps_the_pinned_editor_plain() {
+fn no_color_keeps_the_editor_plain() {
     let env = TestEnv::new_mock("prompt-viewport-no-color");
     let mut session = env.spawn_with_env(
         &["--permission-mode", "read-only"],
@@ -373,7 +223,7 @@ fn no_color_keeps_the_pinned_editor_plain() {
         &session,
         |s| s.contains('❯'),
         env.timeout(),
-        "plain pinned editor",
+        "plain inline editor",
     );
     session.send("plain-surface").unwrap();
     common::expect_input_line(&session, "plain-surface", env.timeout(), "plain draft");
@@ -471,46 +321,4 @@ fn run_viewport_observer_with_exit(observer: &str, enabled: bool, verify_process
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
     assert_eq!(value["status"], "complete", "{value}");
     assert_eq!(value["enabled"], enabled);
-}
-
-fn assert_browsing_editor_surface(session: &PtySession) {
-    session.render(|screen| {
-        let raw = screen.raw();
-        assert!(
-            raw.rows(0, raw.size().1)
-                .next()
-                .unwrap()
-                .contains("PROSE_CONTROL"),
-            "context header: {}",
-            screen.contents()
-        );
-        let input_row = raw
-            .rows(0, raw.size().1)
-            .position(|row| row.contains("draft界"))
-            .unwrap();
-        assert!(
-            input_row >= 27,
-            "composer remains at the bottom: {input_row}"
-        );
-        assert_ne!(
-            format!(
-                "{:?}",
-                raw.cell(input_row.try_into().unwrap(), 80)
-                    .unwrap()
-                    .bgcolor()
-            ),
-            "Default",
-            "filled composer"
-        );
-        assert_ne!(
-            format!(
-                "{:?}",
-                raw.cell(input_row.try_into().unwrap(), 0)
-                    .unwrap()
-                    .fgcolor()
-            ),
-            "Default",
-            "fallback surface keeps readable text"
-        );
-    });
 }

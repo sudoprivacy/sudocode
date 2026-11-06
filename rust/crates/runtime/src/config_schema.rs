@@ -390,7 +390,7 @@ const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
         "promptViewport",
         FieldType::Bool,
-        "Experimental bounded transcript viewport with a pinned composer",
+        "Experimental shaded prompts using native inline history",
     ),
     FieldSchema::leaf(
         "peerDescriptions",

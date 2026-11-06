@@ -415,48 +415,36 @@ impl ColorTheme {
         ansi_fg(self.color(role))
     }
 
-    /// Shared prompt surfaces for live input, committed prompts and context headers.
+    /// One prompt surface for live input, committed prompts and restored history.
     /// Resolve the terminal palette once, outside redraw and typing hot paths.
-    pub(crate) fn prompt_style(self, live: bool) -> ContentStyle {
-        static STYLES: [OnceLock<[ContentStyle; 2]>; 2] = [const { OnceLock::new() }; 2];
-        STYLES[usize::from(self.light_background)].get_or_init(|| {
+    pub(crate) fn prompt_style(self) -> ContentStyle {
+        static STYLES: [OnceLock<ContentStyle>; 2] = [const { OnceLock::new() }; 2];
+        *STYLES[usize::from(self.light_background)].get_or_init(|| {
             let support = ColorSupport::detect();
             if support == ColorSupport::NoColor {
-                return [ContentStyle::default(); 2];
+                return ContentStyle::default();
             }
             let light = self.light_background;
             let fallback = if light { (255, 255, 255) } else { (24, 24, 24) };
             let (r, g, b) = terminal_palette::background().unwrap_or(fallback);
-            [false, true].map(|live| {
-                let alpha: u16 = if light {
-                    if live {
-                        8
-                    } else {
-                        4
-                    }
-                } else if live {
-                    16
-                } else {
-                    10
-                };
-                let target: u16 = if light { 0 } else { 255 };
-                let blend = |channel: u8| {
-                    u8::try_from((u16::from(channel) * (100 - alpha) + target * alpha) / 100)
-                        .expect("blended channel")
-                };
-                ContentStyle {
-                    // A fallback background must remain legible when the terminal
-                    // cannot report its default foreground on Windows.
-                    foreground_color: Some(if light { Color::Black } else { Color::White }),
-                    background_color: Some(support.color(Color::Rgb {
-                        r: blend(r),
-                        g: blend(g),
-                        b: blend(b),
-                    })),
-                    ..ContentStyle::default()
-                }
-            })
-        })[usize::from(live)]
+            let alpha: u16 = if light { 4 } else { 12 };
+            let target: u16 = if light { 0 } else { 255 };
+            let blend = |channel: u8| {
+                u8::try_from((u16::from(channel) * (100 - alpha) + target * alpha) / 100)
+                    .expect("blended channel")
+            };
+            ContentStyle {
+                // A fallback background must remain legible when the terminal
+                // cannot report its default foreground on Windows.
+                foreground_color: Some(if light { Color::Black } else { Color::White }),
+                background_color: Some(support.color(Color::Rgb {
+                    r: blend(r),
+                    g: blend(g),
+                    b: blend(b),
+                })),
+                ..ContentStyle::default()
+            }
+        })
     }
 
     pub fn selection_style(self, support: ColorSupport) -> ContentStyle {

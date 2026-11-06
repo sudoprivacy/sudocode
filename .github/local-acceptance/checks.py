@@ -113,15 +113,37 @@ sys.exit(result.returncode)
             "version", "--format", "{{.Server.Version}}"]
 
 
-def workspace_nextest_options(output, grouped):
-    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+def supports_hosted_eight_workers(root):
+    """Qualify the measured hosted increase; old or unknown fixtures keep four."""
+    path = Path(root) / "rust/crates/rusty-sudocode-cli/tests/pty_bash_compact_results.rs"
+    try:
+        contents = path.read_bytes().replace(b"\r\n", b"\n")
+    except OSError:
+        return False
+    return hashlib.sha256(contents).hexdigest() == "8c157cf9088b931a7d98ad3434a48a3fe2ab0cf23d1ea61be395da6c45bc7ed6"
+
+
+def workspace_nextest_options(output, grouped, hosted_source_ready):
+    """Raise the qualified grouped pool and preserve existing explicit limits."""
     options = nextest_options(output)
-    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+    cpus = os.cpu_count() or 0
+    hosted = os.environ.get('GITHUB_ACTIONS') == 'true'
+    hosted_minimum = 3 if platform.system() == 'Darwin' else 4
+    eligible = cpus >= 8 or (hosted and cpus >= hosted_minimum and hosted_source_ready)
+    if grouped and eligible and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
         options[options.index('--test-threads') + 1] = '8'
+    if grouped and hosted and hosted_minimum <= cpus < 8:
+        print('NATIVE_TEST_SOURCE_COMPATIBILITY=' + json.dumps({
+            'qualified_resume_source': hosted_source_ready,
+            'scope': 'Known measured source enables eight; old/unknown source retains four. '
+                     'No source update is required to keep using four.',
+        }), flush=True)
     print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
           + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
-          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
-          'counts, legacy/isolated/other profiles retain four.',
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool. Grouped suites retain eight on hosts '
+          'with at least eight logical CPUs; qualified hosted sources also use eight from four CPUs, '
+          'or three on macOS. Old/unknown hosted sources below eight CPUs, smaller/unknown hosts '
+          'and legacy/isolated/other profiles retain four.',
           flush=True)
     return options
 
@@ -496,7 +518,8 @@ def run(name, root, output, base, execute):
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
             command(str(nextest_binary(output)), "nextest", "run",
-                    *workspace_nextest_options(output, bool(targets)),
+                    *workspace_nextest_options(output, bool(targets),
+                                              hosted_source_ready=supports_hosted_eight_workers(root)),
                     "--workspace", "--locked", "--features", "engine-acp/mailbox",
                     *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
@@ -647,12 +670,12 @@ def native_guard_files():
         **preflight_guard_files(),
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
+        ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
         ".github/local-acceptance/gate.py": "f89e0f15ca412956b2a32e86644acf351e6784a437d42a3faefb35b3886bd96a",
         ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "bb59af7ebbbe021d8df1cc95d695d72bfe8c220b8b4b6547b3feb0924d433c4d",
+        ".github/scripts/local_acceptance.py": "b2df864ed01392ad9f3ea5f681517529468871d71b4369f098fe242b9e463452",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
@@ -662,8 +685,8 @@ def native_guard_files():
         "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "4821b8c008b45326038a29df300dcadccbc1c2b36e673d0e5fcde6c47a2dcb76",
-        "e2e/local-acceptance/host_lease_acceptance.py": "ff82421f79590a3b618d47a7d268f1552b1ddb3645403c9dfde519f25568ab1c",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "6e8928b9d5d36e9e76a9b7e50c91f9e1033defffbfb59ce80d045c31ae4558de",
+        "e2e/local-acceptance/host_lease_acceptance.py": "9889de100125304be8ff6630e78cf57341ab54a1b6da0df6272a7a524703a48e",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
         "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",

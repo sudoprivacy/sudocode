@@ -750,8 +750,11 @@ doctests remain. Real native controls poison library and binary units, observe
 the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
 <p><strong>Bound grouped workspace concurrency (2026-11-02).</strong> Complete
-grouped native suites default to eight test processes on hosts with at least
-eight logical CPUs. Smaller/unknown hosts, older ungrouped workspaces, isolated
+grouped native suites retain eight processes on hosts with at least eight CPUs.
+Qualified hosted resume-test source also enables eight from four CPUs, or three
+on macOS after its matched full-suite comparison; old or
+unknown source keeps four. Smaller/unknown
+hosts, older ungrouped workspaces, isolated
 targets and other profiles retain four. An explicit
 <code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
 still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
@@ -817,6 +820,10 @@ coverage remain required, and the declared signed plan retains its order.
 Required output reports actual execution order. Real Git, SSH signatures and
 child processes prove service failure prevents slow-profile entry, successful
 execution retains every profile, and verified restore repeats no commands.
+The complementary native CI entrypoint shares the local ordering helper;
+<code>CI_NATIVE_EXECUTION_ORDER</code> reports the declared and executed order.
+Real entrypoint/child-process controls verify service failure stops before
+release, success runs all selected checks, and release-only jobs still run.
 These controls add infrastructure coverage without product journey credit.</p>
 <p><strong>Discover signed external outputs (2026-11-06).</strong>
 Explicit <code>--output</code> directories now register one atomic discovery
@@ -845,6 +852,71 @@ minutes from observed local start to merge; this subset cannot replace the whole
 source cohort. Unknown local histories and unfinished work remain explicit.
 The 10% delivery goal is not met. These rollout observations establish no causal
 speedup for one change; case and coverage counts retain their declared scopes.</p>
+<p><strong>Verify the initial local clock (2026-11-06).</strong>
+For the same 27 merged Rust source/build PRs observed through November 6,
+00:02 UTC, original SSH notes provide a verified local start before the first
+CI trigger for every PR. Earliest available signed local start to merge averages
+<strong>329.648 minutes</strong> (median 247.156); this is a lower bound,
+because earlier manual, unpublished or failed work can be missing. These clocks
+add a mean 127.804 minutes before the first observed CI; overlapping time
+is not summed. Hosted clocks alone average 51.135 minutes from the final candidate
+and 201.843 minutes across all observed candidates. The historical hosted
+baseline cannot establish an exact total-delivery ratio. Missing history and
+unfinished work remain explicit; the one-tenth goal is not met. The audit retains
+all 27 source observations and the earlier five-history snapshot. These code PRs
+merged before the latest worker/scheduling rollouts, whose prospective effect must
+be measured separately.</p>
+<p><strong>Avoid repeated signature-verification computation (2026-11-06).</strong>
+Modern receipts still validate both recorded fingerprint maps against their
+attested original source. Verification skips an overwritten whole-policy hash
+and shares computed maps within one call when the immutable source/policy
+references match. There is no global cache. Legacy whole-hash/bootstrap paths,
+signatures, source/base, required checks and strict refusal conditions remain.
+Two alternating observations per implementation on one original nine-profile
+SSH receipt produced identical verified data and diagnostics: median verification
+was 4.331/2.514 seconds, with 28/19 Git object reads. This component measurement
+does not establish a population or whole-PR speedup. Existing real Git/push/SSH
+compatibility and full Docker/native guards remain required; no product case,
+assertion or deadline is removed.</p>
+<p><strong>Keep older source branches compatible.</strong> The hosted
+increase requires the measured canonical resume-test fingerprint, with CRLF
+normalized. Old or unknown fixtures retain four without merging main. Later
+fixture edits conservatively return to four until qualified; required output
+reports the decision. Existing eight-core behavior remains.</p>
+<p><strong>Retain completed author evidence across the worker default (2026-11-06).</strong>
+Exact protected recipe pairs preserve prior signed workspace results with
+their original commands and worker counts. Local thresholds and explicit
+lower counts remain valid; cases, assertions and deadlines are unchanged.
+Earlier execution is never presented as a new eight-worker run. Original
+source, signatures and logs still verify; further criteria changes and forged
+recipe maps refuse reuse. Pending unmerged origin policies remain refused,
+with origin/current policy and reviewed-merge recovery in required CLI output.
+These controls add no product journey coverage.</p>
+<p><strong>Measure hosted worker throughput (2026-11-06).</strong>
+One ordered 4/8-worker comparison per VM kept identical captured binaries and
+full case inventories. Windows (four CPUs, 1,104 cases) took 600.998/438.974
+seconds; macOS (five CPUs, 1,157 cases) took 868.141/459.716 seconds. Observed
+test-stage reductions were 27.0% and 47.0%. Setup, compilation and queues are
+excluded; this does not establish population or whole-PR savings. Separate full
+eight-worker runs passed on all three platforms. The resume test acknowledges
+live input before recognizing a new completed turn and still requires a fresh
+provider request and identical persisted results. Real native control processes
+verify hosted/local thresholds, small/unknown hosts and explicit lower limits.
+No product case, assertion, retry policy or deadline is removed; these execution
+controls add no product journey coverage.</p>
+<p><strong>Use the measured three-core Mac pool (2026-11-06).</strong>
+On clean protected source <code>cffe7dad</code>, one standard three-core Mac ran
+eight then four workers using identical captured binaries and complete case
+inventories. Both phases passed all 1,161 cases with 76 unchanged ignored cases;
+134 binary hashes stayed identical. Test execution took 649.779/1,000.493 seconds,
+35.1% less at eight. Setup, compilation and queues are excluded; one ordered
+comparison establishes no population or whole-PR saving. Qualified hosted macOS
+now also uses eight from three CPUs. Three-core Windows/Linux, unknown source,
+local thresholds and explicit lower limits retain their existing behavior.
+Real native case processes cover qualified/unqualified three-core Mac selection,
+two-core refusal, local-host behavior and explicit limits. Existing valid signed
+results retain their original commands through exact protected recipe pairs;
+no old result is relabelled. No product case, assertion or deadline is removed.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

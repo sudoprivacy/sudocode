@@ -292,15 +292,19 @@ def compatible_profile_commands(receipt, policy_ref, required):
             recorded = profile_commands_hashes(previous, required)
         if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
             return False
-        current = profile_commands_hashes(policy_ref, required)
-        if "reachable_profile_commands_sha256" not in receipt and all(
-                recorded.get(name) == current[name] for name in required):
-            return True
+        # Modern receipts validate both maps against their original source;
+        # only the reachable map is compared with the current policy.
+        current = None
+        if "reachable_profile_commands_sha256" not in receipt:
+            current = profile_commands_hashes(policy_ref, required)
+            if all(recorded.get(name) == current[name] for name in required):
+                return True
         # A changed recipe is recovered from attested source, never from a
         # supplied hash alone. This also validates both maps on new receipts.
         if previous is None:
             return False
-        original = profile_commands_hashes(previous, required)
+        original = (current if previous == policy_ref and current is not None
+                    else profile_commands_hashes(previous, required))
         if not all(recorded.get(name) == original[name] for name in required):
             return False
         original_reachable = reachable_profile_commands_hashes(previous, required)
@@ -309,7 +313,8 @@ def compatible_profile_commands(receipt, policy_ref, required):
             if not isinstance(reachable, dict) or any(
                     reachable.get(name) != original_reachable[name] for name in required):
                 return False
-        expected = reachable_profile_commands_hashes(policy_ref, required)
+        expected = (original_reachable if previous == policy_ref
+                    else reachable_profile_commands_hashes(policy_ref, required))
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
         ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
         for name in required:
@@ -337,7 +342,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
 def changed_paths(base, head):
     # --no-renames includes both sides of a rename so moving a file out of a
     # guarded directory cannot make its checks disappear.
-    return git("diff", "--name-only", "--no-renames", "-z", base, head).stdout.decode().split("\0")[:-1]
+    return git("diff", "--name-only", "--no-renames", "-z", base, head, "--").stdout.decode().split("\0")[:-1]
 
 
 def manifest_dependencies(manifest, workspace, kind):
@@ -1002,10 +1007,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
     checks = receipt.get("checks", {})
     if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
-    compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
-    if ("profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt
-            or (not compatible and "commands_sha256" in receipt)):
-        compatible = compatible_profile_commands(receipt, policy_ref, list(checks) if completed_only else required)
+    profiles = list(checks) if completed_only else required
+    if "profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt:
+        compatible = compatible_profile_commands(receipt, policy_ref, profiles)
+    else:
+        compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
+        if not compatible and "commands_sha256" in receipt:
+            compatible = compatible_profile_commands(receipt, policy_ref, profiles)
     if not compatible and "commands_sha256" not in receipt:
         # Bootstrap receipts used the whole protected contract. Accept them
         # only when that signed hash matches their actual protected base and
@@ -1147,7 +1155,14 @@ def verify_carried(group, head, base, base_ref, policy_ref, host_info):
         raise RuntimeError("Carried evidence predates attested commands")
     origin_policy = value("rev-parse", payload["commands_ref"])
     if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
-        raise RuntimeError("Carried evidence policy is not an ancestor of the current protected policy")
+        raise RuntimeError(
+            "Carried evidence policy is not an ancestor of the current protected policy: "
+            f"origin={origin_policy}, protected={policy_ref}. "
+            "If this is an earlier unmerged contract update, land its reviewed PR through CI and the merge queue, "
+            "fetch protected main, then rerun the acceptance or push command. "
+            "Otherwise produce fresh evidence under the current protected policy. "
+            "Preserve the original evidence; do not relax the ancestry check."
+        )
     receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=policy_ref,
                               completed_only=payload.get("kind") == "completed-profiles")
     if receipt["host"] != host_info:
@@ -1562,6 +1577,20 @@ def check(args):
         print("LOCAL_ACCEPTANCE_TIMING=" + canonical(attempt).decode(), flush=True)
 
 
+def scheduled_checks(needed):
+    """Keep service bootstrap ahead of expensive profiles after workspace setup."""
+    ordered = list(needed)
+    if "native-services" in ordered:
+        position = next((index for index, name in enumerate(ordered)
+                         if name in {"native-release", "rendering", "browser"}), len(ordered))
+        if "native-workspace" in ordered:
+            position = max(position, ordered.index("native-workspace") + 1)
+        service = ordered.index("native-services")
+        if position < service:
+            ordered.insert(position, ordered.pop(service))
+    return ordered
+
+
 def perform_check(args, attempt):
     import importlib.util
 
@@ -1665,16 +1694,7 @@ def perform_check(args, attempt):
               f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
               f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
 
-    serialized = [name for name in needed if name != "preflight"]
-    # Service bootstrap failures should precede optimized builds and measurements.
-    if "native-services" in serialized:
-        position = next((index for index, name in enumerate(serialized)
-                         if name in {"native-release", "rendering", "browser"}), len(serialized))
-        if "native-workspace" in serialized:
-            position = max(position, serialized.index("native-workspace") + 1)
-        service = serialized.index("native-services")
-        if position < service:
-            serialized.insert(position, serialized.pop(service))
+    serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
     attempt["host_lease_wait_seconds"] = 0.0
     print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({

@@ -1,11 +1,14 @@
 """Install the checksum-pinned Electron/ConPTY/xterm runtime used by the PTY test."""
 
 from contextlib import contextmanager
+import argparse
 import errno
 import hashlib
 from http.client import IncompleteRead
+import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import sys
 import tempfile
@@ -15,6 +18,10 @@ import zipfile
 
 COMMIT = "07f806f999227108933c2e30515b26eecc1fda74"
 SHA256 = "52f47072473375767d63ea5be9ffb96a3092124223fe5ce036834a299715014e"
+ARCHIVE_HASHES = {
+    "x64": SHA256,
+    "arm64": "d55904f6048e351890bac7ac70d2380a8daa5e9ca2290a184ad4988c9f4d3432",
+}
 
 
 @contextmanager
@@ -57,6 +64,11 @@ def extract_member(package, member, root):
     if member.is_dir():
         target.mkdir(parents=True, exist_ok=True)
         return
+    extract_file(package, member, target)
+
+
+def extract_file(package, member, target):
+    """Retain identical mapped files and replace changed files atomically."""
     if target.is_file() and target.stat().st_size == member.file_size:
         with package.open(member) as expected, target.open("rb") as actual:
             while chunk := expected.read(1024 * 1024):
@@ -77,17 +89,17 @@ def extract_member(package, member, root):
         temporary.unlink(missing_ok=True)
 
 
-def verify_archive(archive):
+def verify_archive(archive, architecture="x64"):
     with archive.open("rb") as data:
         actual = hashlib.file_digest(data, "sha256").hexdigest()
-    if actual != SHA256:
+    if actual != ARCHIVE_HASHES[architecture]:
         raise ValueError(
             f"terminal archive checksum mismatch: {actual} ({archive.stat().st_size} bytes)"
         )
 
 
-def download_archive(archive):
-    url = f"https://update.code.visualstudio.com/commit:{COMMIT}/win32-x64-archive/stable"
+def download_archive(archive, architecture="x64"):
+    url = f"https://update.code.visualstudio.com/commit:{COMMIT}/win32-{architecture}-archive/stable"
     temporary = archive.with_suffix(".partial")
     temporary.unlink(missing_ok=True)
     stalled = 0
@@ -108,7 +120,7 @@ def download_archive(archive):
                     raise IncompleteRead(b"", response.length)
             # A CDN may return a truncated or incorrect body without an HTTP
             # error. Never promote it to the cache before checking the pin.
-            verify_archive(temporary)
+            verify_archive(temporary, architecture)
             temporary.replace(archive)
             return
         except ValueError as error:
@@ -129,8 +141,69 @@ def download_archive(archive):
         time.sleep(min(attempt, 5))
 
 
+def pe_machine(data):
+    """Read a PE file's declared ABI before placing it beside native drivers."""
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError("Native terminal file is not a PE executable")
+    offset = int.from_bytes(data[60:64], "little")
+    if offset + 6 > len(data) or data[offset:offset + 4] != b"PE\0\0":
+        raise ValueError("Native terminal file has an invalid PE header")
+    return int.from_bytes(data[offset + 4:offset + 6], "little")
+
+
+def install_native_conpty(package, target, architecture):
+    """Use the same verified ConPTY for ordinary Rust PTYs and visual journeys."""
+    prefix = f"{COMMIT[:10]}/resources/app/node_modules.asar.unpacked/node-pty/"
+    members = {member.filename.casefold(): member for member in package.infolist()}
+    pairs = []
+    for member in package.infolist():
+        if member.filename.startswith(prefix) and member.filename.casefold().endswith("/conpty.dll"):
+            companion = member.filename.rsplit("/", 1)[0] + "/OpenConsole.exe"
+            if companion.casefold() in members:
+                pairs.append((member, members[companion.casefold()]))
+    if len(pairs) != 1:
+        raise ValueError("Expected one ConPTY/OpenConsole pair in the pinned native host")
+    expected_machine = {"x64": 0x8664, "arm64": 0xAA64}[architecture]
+    directory = target.resolve() / "debug/deps"
+    if not directory.resolve().is_relative_to(target.resolve()):
+        raise ValueError(f"Native terminal driver directory escapes its target: {directory}")
+    directory.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for member, name in zip(pairs[0], ["conpty.dll", "OpenConsole.exe"]):
+        data = package.read(member)
+        if pe_machine(data) != expected_machine:
+            raise ValueError(f"Pinned native terminal ABI differs from {architecture}: {member.filename}")
+        path = directory / name
+        if not path.resolve().is_relative_to(directory.resolve()):
+            raise ValueError(f"Native terminal sidecar escapes its driver directory: {path}")
+        extract_file(package, member, path)
+        digest = hashlib.sha256(data).hexdigest()
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"Installed native terminal differs from the verified archive: {path}")
+        installed.append({"path": str(path), "member": member.filename, "sha256": digest})
+    dynamic_load_checked = False
+    if os.name == "nt" and pe_machine(Path(sys.executable).read_bytes()) == expected_machine:
+        import ctypes
+        library = ctypes.WinDLL(str(directory / "conpty.dll"))
+        for symbol in ["CreatePseudoConsole", "ResizePseudoConsole", "ClosePseudoConsole"]:
+            getattr(library, symbol)
+        dynamic_load_checked = True
+    identity = {"distribution_commit": COMMIT, "architecture": architecture,
+                "archive_sha256": ARCHIVE_HASHES[architecture], "files": installed,
+                "driver_directory": str(directory), "dynamic_load_checked": dynamic_load_checked}
+    print("NATIVE_CONPTY_HOST=" + json.dumps(identity, sort_keys=True), flush=True)
+    return identity
+
+
 def main():
-    root = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("--native-target", type=Path)
+    parser.add_argument("--native-arch", choices=ARCHIVE_HASHES)
+    args = parser.parse_args()
+    if args.native_arch is not None and args.native_target is None:
+        parser.error("--native-arch requires --native-target")
+    root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
     with cache_lock(root):
         archive = root / "host.zip"
@@ -152,6 +225,19 @@ def main():
                     f"{version}/resources/app/package.json",
                 } or name.startswith(f"{version}/resources/app/node_modules.asar.unpacked/node-pty/"):
                     extract_member(package, member, root)
+        if args.native_target is not None:
+            architecture = args.native_arch or {
+                "amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm64",
+            }.get(platform.machine().lower())
+            if architecture not in ARCHIVE_HASHES:
+                raise ValueError(f"No pinned native ConPTY for {platform.machine()}")
+            native_archive = archive if architecture == "x64" else root / f"host-{architecture}.zip"
+            if not native_archive.exists():
+                download_archive(native_archive, architecture)
+            else:
+                verify_archive(native_archive, architecture)
+            with zipfile.ZipFile(native_archive) as package:
+                install_native_conpty(package, args.native_target, architecture)
     print(f"Verified terminal host: {root / 'Code.exe'}")
 
 

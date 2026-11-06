@@ -8,11 +8,66 @@
 
 mod common;
 
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 use common::TestEnv;
+
+/// A bare `!` follows the ordinary conversation path on every platform.
+/// Keep the first completed turn in the next request and send the bare input
+/// unchanged. This also keeps this target meaningful on Windows, where the
+/// shell-specific cases below are excluded by their Unix configuration.
+#[test]
+fn bare_bang_is_a_model_message_with_conversation_history() {
+    let env = TestEnv::new("bare-bang");
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    let budget = if env.is_live() {
+        common::LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
+    // The protocol fixture selects its response from the conversation history,
+    // so the second input remains exactly what the human typed.
+    let first = env.prompt("What is 2+2? Answer briefly.", "single_turn_text");
+    common::run_turn(&mut sess, &first, budget, "the initial conversation turn");
+    common::run_turn(&mut sess, "!", budget, "the bare bang conversation turn");
+
+    if env.is_mock() {
+        let bodies = env.captured_message_bodies();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "each ordinary input should start one model turn"
+        );
+        let request: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        let messages = request["messages"].as_array().expect("request messages");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["role"] == "assistant"),
+            "the second request should retain the first completed turn: {request}"
+        );
+        let latest_user = messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .expect("the second user message");
+        let blocks = latest_user["content"]
+            .as_array()
+            .expect("user content blocks");
+        assert!(
+            blocks.iter().any(|block| block["text"] == "!"),
+            "the bare bang should reach the model unchanged: {latest_user}"
+        );
+        assert!(
+            !latest_user.to_string().contains("<bash-input>"),
+            "the ordinary message should retain its conversation shape: {latest_user}"
+        );
+    }
+
+    sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
+    assert_eq!(sess.expect_eof().expect("REPL should exit cleanly"), 0);
+}
 
 /// Human types `! printf …` at the prompt. The command runs immediately, its
 /// stdout appears under the echoed input, no model request is made, and the

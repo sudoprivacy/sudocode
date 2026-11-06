@@ -1126,17 +1126,30 @@ fn repeated_provider_call_ids_in_one_runtime_keep_distinct_assistants_and_output
     common::expect_input_line_cleared(&cli, env.timeout(), "runtime ready");
     for label in ["A", "B"] {
         begin_gate(&env, &mut cli, label);
+        let turn = common::turn_status_marker(&cli);
         fs::write(root.join(format!("{label}.release")), "complete this turn").unwrap();
         cli.expect("Concurrency batch done.")
             .expect("actual repeated-ID tool completes");
-        common::expect_input_line_cleared(&cli, env.timeout(), "turn complete");
+        common::expect_turn_complete_after(&cli, &turn, env.timeout(), "gated turn complete");
         assert_eq!(
             fs::read_to_string(root.join(format!("{label}.effect"))).unwrap(),
             format!("{label} durable effect")
         );
     }
-    cli.send("/session fork inherited-outputs\r").unwrap();
-    cli.expect("Session forked").expect("fork through the CLI");
+    cli.send("/session fork inherited-outputs").unwrap();
+    common::expect_input_line(
+        &cli,
+        "/session fork inherited-outputs",
+        env.timeout(),
+        "fork command entered",
+    );
+    cli.send("\r").unwrap();
+    cli.expect("Session forked").unwrap_or_else(|error| {
+        panic!(
+            "fork through the CLI: {error:?}\n{}",
+            cli.render(common::screen_contents)
+        );
+    });
     common::expect_input_line_cleared(&cli, env.timeout(), "fork published");
     let store = runtime::SessionStore::from_cwd(root).unwrap();
     let forks: Vec<_> = store
@@ -1163,14 +1176,15 @@ fn repeated_provider_call_ids_in_one_runtime_keep_distinct_assistants_and_output
         );
     }
     assert_eq!(calls.len(), 2);
-    cli.send(&format!(
-        "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}\r",
-        json!(calls)
-    ))
-    .unwrap();
-    cli.expect("Concurrency batch done.")
-        .expect("fork reads inherited full outputs");
-    common::expect_input_line_cleared(&cli, env.timeout(), "fork reads complete");
+    common::run_turn(
+        &mut cli,
+        &format!(
+            "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
+            json!(calls)
+        ),
+        env.timeout(),
+        "fork reads inherited full outputs",
+    );
     exit_cli(&env, &mut cli);
     let restored = Session::load_from_path(&fork.path).unwrap();
     for label in ["A", "B"] {

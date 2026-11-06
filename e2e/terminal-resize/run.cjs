@@ -72,8 +72,9 @@ async function parallelTools() {
     await frame(text => {
       const rows = text.split('\n');
       const starts = rows.flatMap((row, i) => row.startsWith('╭─ Bash(') ? [i] : []);
-      return starts.length === 2 && rows.filter(row => row.trim() === '╰─').length === 2
-        && starts.every(i => rows[i + 1]?.trim() === '╰─'
+      // In-flight cards stay open with a dashed tail until their results land.
+      return starts.length === 2 && rows.filter(row => row.trim() === '╎').length === 2
+        && starts.every(i => rows[i + 1]?.trim() === '╎'
           && (width < 100 ? rows[i].endsWith('…') : rows[i].includes('resizes_END_')));
     }, started);
     child.write('x');

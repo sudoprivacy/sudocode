@@ -135,6 +135,7 @@ def independent_cli_sources(*refs):
 def main():
     ignored_product_inputs = []
     ignored_cohost_cli_sources = []
+    queue_inputs = {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
@@ -165,7 +166,7 @@ def main():
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
             daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**",
                              ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/**",
-                             ".github/workflows/ci-vfs-search-cache.yml"]
+                             ".github/workflows/ci-vfs-search-cache.yml", *queue_inputs]
             # Acceptance metadata changes execution authorization, not provider
             # requests. Keep these identities with the acceptance authority.
             live = any(fnmatch.fnmatchcase(path, rule)
@@ -183,7 +184,8 @@ def main():
             # Exercise a changed queue entry on the real workspace/platforms,
             # in addition to its small compiler controls in PR preflight.
             clippy = bool(native_specs) or any(
-                path.startswith("rust/") or path == ".github/scripts/ci_clippy.py" for path in relevant)
+                path.startswith("rust/") or path in queue_inputs | {".github/scripts/ci_clippy.py"}
+                for path in relevant)
             # CLI integration modules are not inputs to the daemon/cohost
             # binaries or shell journeys. Native PTYs and live model scope
             # remain unchanged; manifests, src and moved source still qualify.

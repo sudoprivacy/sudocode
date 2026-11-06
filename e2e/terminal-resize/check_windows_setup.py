@@ -15,6 +15,11 @@ import threading
 import time
 
 
+# The actual installer before native preparation support, not a simulated reply.
+LEGACY_INSTALLER_BLOB = "20829f60e316bfc2fe07e3d75959be304f57e0cf"
+INSTALLER_TIMEOUT = 120
+
+
 # Redirect only the download boundary; run the unchanged installer entry point
 # in a child process with actual HTTP, ZIP extraction and filesystem writes.
 INSTALL = """import runpy, sys, urllib.request
@@ -39,7 +44,7 @@ def run_concurrent_installers(command):
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             ))
         for process in processes:
-            stdout, stderr = process.communicate(timeout=120)
+            stdout, stderr = process.communicate(timeout=INSTALLER_TIMEOUT)
             assert process.returncode == 0, stdout + stderr
     finally:
         for process in processes:
@@ -51,6 +56,7 @@ def run_concurrent_installers(command):
 def main():
     installer = Path(__file__).with_name("setup_windows.py")
     settings = runpy.run_path(str(installer))
+    profiles = runpy.run_path(str(Path(__file__).resolve().parents[2] / ".github/local-acceptance/checks.py"))
     commit = settings["COMMIT"]
     archive = Path(sys.argv[1]).resolve()
     with archive.open("rb") as source:
@@ -105,7 +111,7 @@ def main():
                         f"http://127.0.0.1:{server.server_port}/{label}",
                         str(installer), str(destination),
                     ],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                 )
                 assert not (destination / "host.partial").exists()
                 if label == "resume":
@@ -163,12 +169,72 @@ def main():
                             host.wait(timeout=10)
                             host.stderr.close()
                     print("Installer in-use concurrent cache acceptance passed", flush=True)
+                    # Ordinary Rust drivers load ConPTY beside their executable.
+                    # Exercise repair and in-use provisioning against the same
+                    # real verified distribution, retaining mapped file identity.
+                    native_target = (root / "native-target").resolve()
+                    native_command = [sys.executable, str(installer), str(destination),
+                                      "--native-target", str(native_target), "--native-arch", "x64"]
+                    native = subprocess.run(native_command, capture_output=True, text=True, timeout=INSTALLER_TIMEOUT)
+                    assert native.returncode == 0, native.stdout + native.stderr
+                    print(native.stdout, end="", flush=True)
+                    native_log = root / "native-install.log"
+                    native_log.write_text(native.stdout, encoding="utf-8")
+                    verified = profiles["verify_native_terminal"](native_log, native_target)
+                    identities = [json.loads(line.removeprefix("NATIVE_CONPTY_HOST="))
+                                  for line in native.stdout.splitlines() if line.startswith("NATIVE_CONPTY_HOST=")]
+                    assert len(identities) == 1 and identities[0]["archive_sha256"] == settings["SHA256"]
+                    assert verified == identities[0]
+                    files = [Path(entry["path"]) for entry in identities[0]["files"]]
+                    assert {file.name for file in files} == {"conpty.dll", "OpenConsole.exe"}
+                    assert all(file.parent == native_target / "debug/deps" for file in files)
+                    original = {file: (hashlib.sha256(file.read_bytes()).hexdigest(), file.stat().st_mtime_ns)
+                                for file in files}
+                    with files[0].open("rb") as data, mmap.mmap(data.fileno(), 0, access=mmap.ACCESS_READ):
+                        run_concurrent_installers(native_command)
+                    assert original == {file: (hashlib.sha256(file.read_bytes()).hexdigest(), file.stat().st_mtime_ns)
+                                        for file in files}
+                    # A real legacy installer exits successfully while ignoring
+                    # the new option. Even existing sidecars must not let its
+                    # missing preparation observation qualify a new invocation.
+                    legacy = root / "legacy-installer.py"
+                    legacy.write_bytes(subprocess.check_output(
+                        ["git", "show", LEGACY_INSTALLER_BLOB],
+                        cwd=Path(__file__).resolve().parents[2],
+                    ))
+                    ignored = subprocess.run(
+                        [sys.executable, str(legacy), str(destination), "--native-target", str(native_target)],
+                        capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
+                    )
+                    assert ignored.returncode == 0, ignored.stderr
+                    legacy_log = root / "legacy-install.log"
+                    legacy_log.write_text(ignored.stdout, encoding="utf-8")
+                    try:
+                        profiles["verify_native_terminal"](legacy_log, native_target)
+                    except RuntimeError as error:
+                        assert "did not report exactly one verified provider" in str(error), error
+                    else:
+                        raise AssertionError("A legacy successful installer qualified unobserved native preparation")
+                    files[0].write_bytes(b"corrupt native host")
+                    try:
+                        profiles["verify_native_terminal"](native_log, native_target)
+                    except RuntimeError as error:
+                        assert "differs from the prepared provider" in str(error), error
+                    else:
+                        raise AssertionError("Changed sidecar bytes were accepted after preparation")
+                    repaired = subprocess.run(native_command, capture_output=True, text=True, timeout=INSTALLER_TIMEOUT)
+                    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+                    native_log.write_text(repaired.stdout, encoding="utf-8")
+                    profiles["verify_native_terminal"](native_log, native_target)
+                    assert all(hashlib.sha256(file.read_bytes()).hexdigest() == original[file][0] for file in files)
+                    assert counts[label] == 2, "Native host provisioning must reuse the verified archive"
+                    print("Native ConPTY mapped identity, legacy-installer refusal and corrupted-sidecar recovery passed", flush=True)
                     # Corrupted cache entries also fail closed, without being
                     # silently accepted or initiating an unobserved download.
                     (destination / "host.zip").write_bytes(b"corrupt")
                     corrupt = subprocess.run(
                         [sys.executable, str(installer), str(destination)],
-                        capture_output=True, text=True, timeout=120,
+                        capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                     )
                     assert corrupt.returncode != 0 and "checksum mismatch" in corrupt.stderr
                     assert counts[label] == 2

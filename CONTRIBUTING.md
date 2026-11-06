@@ -191,6 +191,12 @@ require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
+the visual and performance journeys. The shared installer provisions native
+sidecars beside the dev-profile test drivers and reports their exact hashes;
+the explicit system-host diagnostic retains its legacy compatibility findings.
+See [the terminal host contract](e2e/terminal-resize/README.md) for scope and
+architecture details.
 Pre-merge co-host acceptance uses the workspace dev profile with the deployed
 `daemon,driver-ai,egress-gate-presidio` features and runs the resulting binary to
 verify its exact source revision stamp. This avoids a separate optimized build
@@ -305,16 +311,30 @@ the earliest recorded start time keep their existing requirements. The required
 command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
-`host-lease.json` and its queue position. Waiters start in arrival order when the
-holder exits, including an abrupt exit; each holds a ticket under
+`host-lease.json`, its active profile and the queue position. Each fresh profile
+rejoins the FIFO after the previous profile completes, so existing waiters run
+before this invocation's next profile. A running profile keeps the lease through
+its execution and checkpoint. Waiters start in arrival order when that profile
+releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
 Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
 fixture checks nested inside an acceptance run without waiting for their parent.
-`attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
-is unchanged.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
+records the total wait across acquisitions as `host_lease_wait_seconds` and each
+profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+
+A fresh `guard-contract` also validates its protected input pins, selection
+digest and release recipe before joining the host queue. The required
+`GUARD_STATIC_PREFLIGHT` output states that full execution remains required.
+A mismatch reports the path and observed hash, retains signed preflight progress,
+and exits without taking a queue ticket or starting Docker/native checks.
+Execution stages and validates a separate copy from the protected Git ref again;
+the preliminary snapshot grants no acceptance or execution credit. Already
+verified results and policies without this optional early validator keep their
+existing paths.
 
 After the selected native workspace checks, service acceptance runs before
 optimized release builds and rendering/browser measurements. Service bootstrap
@@ -339,6 +359,16 @@ verify the connection deadline. Its container image includes the official
 Docker CLI pinned by image digest for the nested policy checks. The guard
 preserves an ordinary client error as a
 failure. Healthy Engine execution still requires the full container matrix.
+The guard image provisions nextest before the matrix using the exact frozen
+`nextest_binary` function, including its original URL and checksums. Image
+preparation runs archive/executable corruption-refusal controls and restores the
+verified files. Docker reuses that layer while its tool script and image inputs
+stay unchanged. Each selected attempt rechecks the actual cached CLI with
+`--network none` before running the full matrix and author-native guards.
+`GUARD_TOOL_PREFLIGHT` names these stages. Image/tool preparation errors point
+to the saved build log and installed retry command before tests begin.
+This caches tool preparation; the full matrix and native checks retain their
+original cases, assertions and deadlines.
 
 On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads
@@ -385,6 +415,36 @@ and repeated-turn comparisons run in the `stress` profile on every release
 candidate, which also judges dependency-only changes; see
 [Release acceptance coverage](#release-acceptance-coverage). Their functional
 PTY cases keep the native suite's per-PR scope.
+
+The repeated-turn stress scenario samples 20 typed keys per input phase per
+turn, instead of 60. All 24 paired processes and 30 turns per process remain:
+600 observations per phase per process, or 43,200 overall instead of 129,600.
+Single-turn core scenarios retain 60 keys per phase and 40 resizes per turn.
+Repeated turns retain one narrow/wide resize pair: 60 resizes per process,
+1,440 overall instead of 28,800. Cancel (20 per process), paste, resource
+measurements, budgets and the relative evaluator remain unchanged. This reduces
+repeated typing and resize pressure; intermittent latency spikes and small
+resize-dependent memory leaks may be missed. Equivalent sensitivity is not claimed.
+`RENDERING_SAMPLING` prints each effective policy before measurement. Each sample
+retains the exact resolved workload policy and its SHA256; the original judged
+policy remains in the parent report. Policies without overrides retain 60.
+The parent counts raw arrays using the evaluator's shared helper. The public
+process controls refuse missing input, resize or turn observations, tampered
+summaries and unsupported reductions. Fresh product stress execution is required before
+claiming runtime savings; observation counts alone do not prove faster delivery.
+
+Rendering's throwaway sessions use a private 512 MiB tmpfs in its local Docker
+container. Reports, copied binaries and Cargo caches keep their existing storage.
+The frozen historical baseline serialized response-archive disk flushes; real
+debugger stacks show that backlog delaying exit, while a controlled native
+disk/tmpfs comparison isolates the storage cost. Exit assertions, deadlines and
+all performance budgets remain unchanged. This gate now isolates rendering from
+host disk flush latency, reducing coverage of slow persistent storage. It does
+not qualify filesystem durability. Other profiles, including the browser,
+native persistence, response gzip, compaction and cache checks retain their
+storage paths. A real Docker regression executes a native process from the
+temporary directory and verifies the mount type, capacity, frozen sources and
+durable evidence location.
 
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
@@ -627,6 +687,17 @@ sources retain their existing selection without adding a duplicate example
 build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
 native guard proves normal linking, no implicit example execution and refusal
 of a deliberately broken example. These checks add no product PTY coverage.
+Changes confined to ordinary individual CLI test files can omit the separate
+example build on both the author and complementary hosts. README and Markdown
+files under `docs/` may accompany them. The selector reads committed Git blobs;
+deleted, redirected or unknown inputs, shared helpers, manifests and production
+sources retain ordinary scope. `EXAMPLE_BUILD_SCOPE` reports `isolated_cli_tests`
+on this path. Native test selection and execution stay required. Real Git/Cargo
+guards execute the changed CLI test, then independently confirm that the example
+artifact remains fresh with the same binary hash. Mixed/shared changes retain
+example compilation and a broken example still fails. This removes unchanged
+compile-only work; it does not add product journey coverage or prove a whole-PR
+time reduction.
 Contract validation checks the Docker Git/signature/authorization matrix before
 Cargo fixtures and author-host native guards. Passing runs keep every existing
 check; an early metadata failure leaves later compilation unrun.
@@ -735,6 +806,17 @@ unchanged profile commands and matching original logs; `preflight` always runs.
 The receipt records each origin head with its signed envelope, and the verifier
 re-checks that envelope, its ancestry, the change set and the copied command
 records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+For a contract update, the managed child keeps the candidate command recipe and
+protected signing authority separate. Carry admission, checkpoints, resume and
+publication use the same protected authority; an earlier unmerged candidate
+policy cannot qualify as its own protected ancestor. Ineligible carried profiles
+run fresh. Exact-source recovery still checks compatibility with the candidate
+recipe and verifies its signatures against the protected enrolled keys.
+Older managed parents already name the protected base and exact candidate policy;
+that child argument form keeps the same authority before the parent is upgraded.
+Real Git/SSH/child-process controls retain the former local-pass/publication-refusal
+counterexample and require the actual managed child to refuse that carry before
+executing and publishing fresh checks. They add no product journey coverage.
 When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
 record includes preparation commands and the author-host runner arguments.
 Run preparation first: mainline recovery fetches protected main before resolving
@@ -801,6 +883,11 @@ Within one verification, identical immutable source/policy references share the
 computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
 receipts retain their original verification path. Signatures, source/base,
 current required checks, equivalence rules and refusal conditions remain.
+Both fingerprint formats share one AST projection helper. It copies the module
+shell and the dispatcher that projection mutates; other nodes remain read-only.
+Each profile and later invocation keeps its own dispatch projection. Fingerprint
+bytes and conservative reflection/import behavior remain unchanged, so this
+computation change requires no new equivalence rule or repeated product run.
 Provider tests require explicit local execution or manual provider dispatch;
 PR, queue and main events never authorize paid calls. Real-daemon queue tests
 still run for changed daemon inputs without a model credential. Documentation/CI-only

@@ -953,6 +953,46 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
 }
 
 #[test]
+fn task_details_use_the_live_panel_when_history_contains_an_output_frame() {
+    let env = TestEnv::new_mock("background-details-retained-history");
+    let _release = ReleaseOnDrop(env.workspace_root().to_path_buf());
+    let mut call = shell(
+        "background",
+        "echo CURRENT_TASK_OUTPUT; while [ ! -f release ]; do sleep 0.1; done # CURRENT_COMMAND_MARKER",
+        "Task details with literal history",
+    );
+    // Literal transcript content may resemble a retained partial UI after
+    // resize. It must remain visible without becoming the current task frame.
+    call["stream_prelude"] = json!(
+        "```text\nCommand: RETAINED_COMMAND\n╭─ Output tail · retained history\nHISTORY_FRAME_SENTINEL\n```\n"
+    );
+    let mut session = start_with_env(
+        &env,
+        &[call],
+        &[
+            ("COLORFGBG", "15;0"),
+            ("NO_COLOR", ""),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    open(&mut session);
+    let view = screen(&session, "  CURRENT_TASK_OUTPUT");
+    let (history, _) = view.rsplit_once("Background tasks").unwrap();
+    assert!(history.contains("HISTORY_FRAME_SENTINEL"), "{view}");
+    assert!(history.contains("╭─ Output tail"), "{view}");
+    expect_stable_region(
+        &session,
+        common::DEFAULT_TIMEOUT,
+        "current command remains separate from literal history",
+        |view| detail_command_region(view, "CURRENT_COMMAND_MARKER"),
+    );
+    assert_detail_frame(&session, "Rgb(158, 158, 158)");
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    close(session);
+}
+
+#[test]
 fn task_browser_resizes_and_returns_to_fast_prompt_input() {
     let (env, _release) = task_env("background-resize-input");
     let mut session = start_with_env(

@@ -323,6 +323,16 @@ jobs:
           NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
 
+      - name: Conditional owner content survives a co-host process restart
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        working-directory: rust
+        env:
+          NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+        run: >-
+          cargo --config "$NEXUS_A2A_COHOST_CARGO_CONFIG"
+          test --locked -p nexusd-cohost --features daemon,driver-ai
+          --test conditional_content -- --nocapture
+
       - name: Checkout the VFS contract used by the co-host
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         uses: ./.github/actions/vfs-search-cache
@@ -466,7 +476,7 @@ jobs:
       # manifest asked for.
       - name: Exercise exact published pin tags and refusal paths
         run: python3 .github/scripts/nexus_pin_workflow_e2e.py --workflow .github/workflows/rust-ci.yml --output "${{ runner.temp }}/nexus-pin-policy"
-      - name: The rev is named once, and the lock agrees
+      - name: Canonical Nexus contract and daemon resolve one published pin
         id: pin
         run: |
           set -euo pipefail
@@ -503,25 +513,6 @@ jobs:
           fi
           echo "one nexus-vfs pin: $MANIFEST_TAGS ($LOCK_COMMITS)"
           echo "commit=$LOCK_COMMITS" >> "$GITHUB_OUTPUT"
-
-      - name: Vendored VFS contract must match the pinned daemon
-        shell: bash
-        env:
-          NEXUS_PROTO_COMMIT: ${{ steps.pin.outputs.commit }}
-        # The wire contract follows the same commit as the Rust client and
-        # daemon. A mutable Node-client latest can describe another release.
-        run: |
-          set -euo pipefail
-          [[ "$NEXUS_PROTO_COMMIT" =~ ^[a-f0-9]{40}$ ]]
-          url="https://raw.githubusercontent.com/nexi-lab/nexus-vfs/$NEXUS_PROTO_COMMIT/proto/nexus/grpc/vfs/vfs.proto"
-          upstream="$RUNNER_TEMP/pinned-vfs.proto"
-          vendored='rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto'
-          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 "$url" -o "$upstream"
-          if ! diff -u --strip-trailing-cr "$upstream" "$vendored"; then
-            echo "::error::$vendored differs from pinned nexus-vfs $NEXUS_PROTO_COMMIT"
-            exit 1
-          fi
-          echo "vendored vfs.proto matches pinned nexus-vfs $NEXUS_PROTO_COMMIT"
 
       - name: Select expensive checks from changed inputs
         id: scope

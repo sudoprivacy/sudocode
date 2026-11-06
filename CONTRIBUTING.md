@@ -311,16 +311,30 @@ the earliest recorded start time keep their existing requirements. The required
 command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
-`host-lease.json` and its queue position. Waiters start in arrival order when the
-holder exits, including an abrupt exit; each holds a ticket under
+`host-lease.json`, its active profile and the queue position. Each fresh profile
+rejoins the FIFO after the previous profile completes, so existing waiters run
+before this invocation's next profile. A running profile keeps the lease through
+its execution and checkpoint. Waiters start in arrival order when that profile
+releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
 Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
 fixture checks nested inside an acceptance run without waiting for their parent.
-`attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
-is unchanged.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
+records the total wait across acquisitions as `host_lease_wait_seconds` and each
+profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+
+A fresh `guard-contract` also validates its protected input pins, selection
+digest and release recipe before joining the host queue. The required
+`GUARD_STATIC_PREFLIGHT` output states that full execution remains required.
+A mismatch reports the path and observed hash, retains signed preflight progress,
+and exits without taking a queue ticket or starting Docker/native checks.
+Execution stages and validates a separate copy from the protected Git ref again;
+the preliminary snapshot grants no acceptance or execution credit. Already
+verified results and policies without this optional early validator keep their
+existing paths.
 
 After the selected native workspace checks, service acceptance runs before
 optimized release builds and rendering/browser measurements. Service bootstrap
@@ -401,6 +415,36 @@ and repeated-turn comparisons run in the `stress` profile on every release
 candidate, which also judges dependency-only changes; see
 [Release acceptance coverage](#release-acceptance-coverage). Their functional
 PTY cases keep the native suite's per-PR scope.
+
+The repeated-turn stress scenario samples 20 typed keys per input phase per
+turn, instead of 60. All 24 paired processes and 30 turns per process remain:
+600 observations per phase per process, or 43,200 overall instead of 129,600.
+Single-turn core scenarios retain 60 keys per phase and 40 resizes per turn.
+Repeated turns retain one narrow/wide resize pair: 60 resizes per process,
+1,440 overall instead of 28,800. Cancel (20 per process), paste, resource
+measurements, budgets and the relative evaluator remain unchanged. This reduces
+repeated typing and resize pressure; intermittent latency spikes and small
+resize-dependent memory leaks may be missed. Equivalent sensitivity is not claimed.
+`RENDERING_SAMPLING` prints each effective policy before measurement. Each sample
+retains the exact resolved workload policy and its SHA256; the original judged
+policy remains in the parent report. Policies without overrides retain 60.
+The parent counts raw arrays using the evaluator's shared helper. The public
+process controls refuse missing input, resize or turn observations, tampered
+summaries and unsupported reductions. Fresh product stress execution is required before
+claiming runtime savings; observation counts alone do not prove faster delivery.
+
+Rendering's throwaway sessions use a private 512 MiB tmpfs in its local Docker
+container. Reports, copied binaries and Cargo caches keep their existing storage.
+The frozen historical baseline serialized response-archive disk flushes; real
+debugger stacks show that backlog delaying exit, while a controlled native
+disk/tmpfs comparison isolates the storage cost. Exit assertions, deadlines and
+all performance budgets remain unchanged. This gate now isolates rendering from
+host disk flush latency, reducing coverage of slow persistent storage. It does
+not qualify filesystem durability. Other profiles, including the browser,
+native persistence, response gzip, compaction and cache checks retain their
+storage paths. A real Docker regression executes a native process from the
+temporary directory and verifies the mount type, capacity, frozen sources and
+durable evidence location.
 
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local

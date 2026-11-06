@@ -82,7 +82,6 @@ impl RegisterCursor {
         backend: Arc<dyn FsBackend>,
         path: String,
         holder: String,
-        lease_expires_at: u64,
     ) -> Result<Option<(Self, u64)>, String> {
         let plain = |guarantee| -> Result<Option<(Self, u64)>, String> {
             let offset = load_plain(backend.as_ref(), &path)?.map_or(0, |r| r.read_offset);
@@ -94,7 +93,7 @@ impl RegisterCursor {
                 token: None,
                 guarantee,
             };
-            cursor.store_plain(offset, lease_expires_at)?;
+            cursor.store_plain(offset)?;
             Ok(Some((cursor, offset)))
         };
         if backend.fenced_locks() {
@@ -118,7 +117,6 @@ impl RegisterCursor {
             .ok_or_else(|| format!("reader register {path}: claim epoch exhausted"))?;
         let fence = ReaderRegister {
             holder: holder.clone(),
-            lease_expires_at,
             read_offset: previous.read_offset,
             epoch,
         };
@@ -158,13 +156,12 @@ impl RegisterCursor {
     /// # Errors
     /// The write failed, or on a conditional cursor a newer holder fenced this
     /// one out. Either way the delivery stays unacknowledged.
-    pub(crate) fn commit(&mut self, offset: u64, lease_expires_at: u64) -> Result<(), String> {
+    pub(crate) fn commit(&mut self, offset: u64) -> Result<(), String> {
         let Some(expected) = self.token.clone() else {
-            return self.store_plain(offset, lease_expires_at);
+            return self.store_plain(offset);
         };
         let register = ReaderRegister {
             holder: self.holder.clone(),
-            lease_expires_at,
             read_offset: offset,
             epoch: self.epoch,
         };
@@ -196,7 +193,7 @@ impl RegisterCursor {
         Ok(())
     }
 
-    fn store_plain(&self, offset: u64, lease_expires_at: u64) -> Result<(), String> {
+    fn store_plain(&self, offset: u64) -> Result<(), String> {
         let path = &self.path;
         // Cursor replacement must not replace the inode holding the OS lock.
         if let Some((dir, _)) = path.rsplit_once('/') {
@@ -206,7 +203,6 @@ impl RegisterCursor {
         }
         let register = ReaderRegister {
             holder: self.holder.clone(),
-            lease_expires_at,
             read_offset: offset,
             epoch: 0,
         };

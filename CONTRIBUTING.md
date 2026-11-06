@@ -324,6 +324,11 @@ acceptance plan and every profile's commands remain required; completed signed
 results retain their existing restore and carry rules. Real Git/SSH/child-process
 checks cover failure before slow-profile entry, complete success and verified
 restore with the original plan.
+The complementary native CI entrypoint uses the same ordering helper and prints
+`CI_NATIVE_EXECUTION_ORDER` with both the declared checks and actual order.
+Its first failed service profile stops the job before release execution; jobs
+selecting only release still run it. Real production-entrypoint child-process
+controls cover failure, complete success and release-only selection.
 
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the

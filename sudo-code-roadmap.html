@@ -819,6 +819,10 @@ coverage remain required, and the declared signed plan retains its order.
 Required output reports actual execution order. Real Git, SSH signatures and
 child processes prove service failure prevents slow-profile entry, successful
 execution retains every profile, and verified restore repeats no commands.
+The complementary native CI entrypoint shares the local ordering helper;
+<code>CI_NATIVE_EXECUTION_ORDER</code> reports the declared and executed order.
+Real entrypoint/child-process controls verify service failure stops before
+release, success runs all selected checks, and release-only jobs still run.
 These controls add infrastructure coverage without product journey credit.</p>
 <p><strong>Discover signed external outputs (2026-11-06).</strong>
 Explicit <code>--output</code> directories now register one atomic discovery

@@ -794,6 +794,13 @@ preserves that evidence. Legacy receipts require the exact attested executor to
 be recoverable from their immutable signed source or base; their signatures stay unchanged.
 The versioned semantic AST encoding ignores empty optional fields so author and
 CI Python versions compute the same execution fingerprint.
+Modern receipt verification validates both recorded maps against the attested
+original source, then compares its reachable map with the current policy. It
+does not first compute a whole-policy hash that this decision would overwrite.
+Within one verification, identical immutable source/policy references share the
+computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
+receipts retain their original verification path. Signatures, source/base,
+current required checks, equivalence rules and refusal conditions remain.
 Provider tests require explicit local execution or manual provider dispatch;
 PR, queue and main events never authorize paid calls. Real-daemon queue tests
 still run for changed daemon inputs without a model credential. Documentation/CI-only

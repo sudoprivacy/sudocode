@@ -751,7 +751,8 @@ the old selection fail and the production dispatcher pass every integration
 case. This adds no e2e coverage credit.</p>
 <p><strong>Bound grouped workspace concurrency (2026-11-02).</strong> Complete
 grouped native suites retain eight processes on hosts with at least eight CPUs.
-Qualified hosted resume-test source also enables eight from four CPUs; old or
+Qualified hosted resume-test source also enables eight from four CPUs, or three
+on macOS after its matched full-suite comparison; old or
 unknown source keeps four. Smaller/unknown
 hosts, older ungrouped workspaces, isolated
 targets and other profiles retain four. An explicit
@@ -851,13 +852,13 @@ minutes from observed local start to merge; this subset cannot replace the whole
 source cohort. Unknown local histories and unfinished work remain explicit.
 The 10% delivery goal is not met. These rollout observations establish no causal
 speedup for one change; case and coverage counts retain their declared scopes.</p>
-<p><strong>Keep older source branches compatible.</strong> The four-core hosted
+<p><strong>Keep older source branches compatible.</strong> The hosted
 increase requires the measured canonical resume-test fingerprint, with CRLF
 normalized. Old or unknown fixtures retain four without merging main. Later
 fixture edits conservatively return to four until qualified; required output
 reports the decision. Existing eight-core behavior remains.</p>
 <p><strong>Retain completed author evidence across the worker default (2026-11-06).</strong>
-One exact protected recipe pair preserves prior signed workspace results with
+Exact protected recipe pairs preserve prior signed workspace results with
 their original commands and worker counts. Local thresholds and explicit
 lower counts remain valid; cases, assertions and deadlines are unchanged.
 Earlier execution is never presented as a new eight-worker run. Original
@@ -877,6 +878,19 @@ provider request and identical persisted results. Real native control processes
 verify hosted/local thresholds, small/unknown hosts and explicit lower limits.
 No product case, assertion, retry policy or deadline is removed; these execution
 controls add no product journey coverage.</p>
+<p><strong>Use the measured three-core Mac pool (2026-11-06).</strong>
+On clean protected source <code>cffe7dad</code>, one standard three-core Mac ran
+eight then four workers using identical captured binaries and complete case
+inventories. Both phases passed all 1,161 cases with 76 unchanged ignored cases;
+134 binary hashes stayed identical. Test execution took 649.779/1,000.493 seconds,
+35.1% less at eight. Setup, compilation and queues are excluded; one ordered
+comparison establishes no population or whole-PR saving. Qualified hosted macOS
+now also uses eight from three CPUs. Three-core Windows/Linux, unknown source,
+local thresholds and explicit lower limits retain their existing behavior.
+Real native case processes cover qualified/unqualified three-core Mac selection,
+two-core refusal, local-host behavior and explicit limits. Existing valid signed
+results retain their original commands through exact protected recipe pairs;
+no old result is relabelled. No product case, assertion or deadline is removed.</p>
 <p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
 lint shares the validated test-group inventory with nextest, checking covered
 modules through their wrappers once: 91 instead of 211 integration targets in

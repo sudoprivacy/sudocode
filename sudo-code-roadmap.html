@@ -1237,6 +1237,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
     </tr>
     <tr>
+      <td>Bash input routing</td>
+      <td>A bare <code>!</code> completes an ordinary model turn on Windows,
+      Linux and macOS. The PTY first completes a conversation turn, then sends
+      the bare input and verifies the second request retains that input and
+      the previous assistant turn. The existing shell-command cases run on
+      Unix. This gives the isolated target meaningful Windows coverage while
+      preserving the required <code>--no-tests fail</code> rule.</td>
+      <td>Yes: native PTY with controlled HTTP/SSE responses.</td>
+      <td><code>pty_bash_mode</code></td>
+    </tr>
+    <tr>
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact

@@ -116,6 +116,8 @@ fn unselected_case_must_not_run() { panic!("artifact gate widened its exact work
     write("rust/crates/scode-benchmark-drivers/Cargo.toml", '[package]\nname="scode-benchmark-drivers"\nversion="0.0.1"\nedition="2021"\nautotests=false\n[[test]]\nname="release_stream_capture"\npath="../rusty-sudocode-cli/tests/pty_model_stream_close.rs"\ntest=false\n')
     for name in ["run.py", "reference.rs"]:
         write("e2e/startup/" + name, (SOURCE / "e2e/startup" / name).read_text())
+    write("e2e/terminal-resize/setup_windows.py",
+          (SOURCE / "e2e/terminal-resize/setup_windows.py").read_text())
     write("e2e/compiler-context/run.py", '''import argparse, hashlib, json, os, subprocess
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('--engine',type=Path); p.add_argument('--directory',type=Path); a=p.parse_args()
@@ -160,6 +162,14 @@ if os.environ.get('FIXTURE_FAIL_CONTEXT'): raise SystemExit(17)
             assert report["binary_sha256"] == original
             assert not any(row["command"][:3] == ["cargo", "build", "--release"] for row in report["commands"])
             assert (destination / "compiler-context/actual-engine.json").is_file()
+            if os.name == "nt":
+                preparation = [row for row in report["commands"]
+                               if "e2e/terminal-resize/setup_windows.py" in row["command"]]
+                assert len(preparation) == 1
+                terminal = destination / "native/native-release/000.log"
+                assert "NATIVE_CONPTY_HOST=" in terminal.read_text()
+                assert (target / "debug/deps/conpty.dll").is_file()
+                assert (target / "debug/deps/OpenConsole.exe").is_file()
         results[mode] = {"status": report["status"], "error": report.get("error")}
     command("git", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Later source rejects an older executable")
     try:

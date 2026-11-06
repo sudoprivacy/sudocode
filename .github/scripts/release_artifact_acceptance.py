@@ -65,6 +65,9 @@ def accept(root, artifact, output, execute, profiles):
         report.update(binary_sha256=original, artifact=str(artifact), binary=str(binary), target=target)
         print("RELEASE_ARTIFACT_GATE: original built bytes and source verified; shared optimized stream/resume, "
               "100ms startup and compiler-context checks must pass before packaging. No second release build.", flush=True)
+        prepared = profiles.prepare_native_checks(["native-release"], root, output / "native", execute)
+        for commands in prepared.values():
+            report["commands"].extend(commands)
         profiles.native_release_journeys(root, binary, output, "HEAD", cargo, command, env)
         if digest(artifact) != original or digest(binary) != original:
             raise RuntimeError("Release artifact changed during acceptance")

@@ -191,6 +191,12 @@ require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
+the visual and performance journeys. The shared installer provisions native
+sidecars beside the dev-profile test drivers and reports their exact hashes;
+the explicit system-host diagnostic retains its legacy compatibility findings.
+See [the terminal host contract](e2e/terminal-resize/README.md) for scope and
+architecture details.
 Pre-merge co-host acceptance uses the workspace dev profile with the deployed
 `daemon,driver-ai,egress-gate-presidio` features and runs the resulting binary to
 verify its exact source revision stamp. This avoids a separate optimized build
@@ -804,6 +810,17 @@ unchanged profile commands and matching original logs; `preflight` always runs.
 The receipt records each origin head with its signed envelope, and the verifier
 re-checks that envelope, its ancestry, the change set and the copied command
 records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+For a contract update, the managed child keeps the candidate command recipe and
+protected signing authority separate. Carry admission, checkpoints, resume and
+publication use the same protected authority; an earlier unmerged candidate
+policy cannot qualify as its own protected ancestor. Ineligible carried profiles
+run fresh. Exact-source recovery still checks compatibility with the candidate
+recipe and verifies its signatures against the protected enrolled keys.
+Older managed parents already name the protected base and exact candidate policy;
+that child argument form keeps the same authority before the parent is upgraded.
+Real Git/SSH/child-process controls retain the former local-pass/publication-refusal
+counterexample and require the actual managed child to refuse that carry before
+executing and publishing fresh checks. They add no product journey coverage.
 When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
 record includes preparation commands and the author-host runner arguments.
 Run preparation first: mainline recovery fetches protected main before resolving

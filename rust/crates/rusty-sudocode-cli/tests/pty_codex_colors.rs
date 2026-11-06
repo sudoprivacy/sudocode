@@ -579,7 +579,9 @@ fn expect_bash_sample(sess: &PtySession, sample: &Value, prefix: &str, no_color:
     );
 }
 
-fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str) {
+/// `tail` is how the frame ends: `╎` while the call is in flight, `╰─` once
+/// its result is committed.
+fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str, tail: &str) {
     common::expect_screen(
         sess,
         |_| {
@@ -594,16 +596,21 @@ fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str) {
                 if !rows[start].starts_with(&format!("╭─ {header}")) {
                     return false;
                 }
-                let Some(end) = (start + 1..rows.len()).find(|&row| rows[row].starts_with("╰─"))
+                let Some(end) = (start + 1..rows.len()).find(|&row| rows[row].starts_with(tail))
                 else {
                     return false;
                 };
                 (start..=end).all(|row| {
-                    let cap = row == start || row == end;
-                    if !cap && !rows[row].starts_with('│') {
+                    let strokes = if row == start {
+                        2
+                    } else if row == end {
+                        u16::try_from(tail.chars().count()).unwrap()
+                    } else if rows[row].starts_with('│') {
+                        1
+                    } else {
                         return false;
-                    }
-                    (0..if cap { 2 } else { 1 }).all(|col| {
+                    };
+                    (0..strokes).all(|col| {
                         let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
                         format!("{:?}", cell.fgcolor()) == foreground
                             && format!("{:?}", cell.bgcolor()) == "Default"
@@ -632,8 +639,9 @@ fn expect_completed_bash_borders(sess: &PtySession, light: bool, no_color: bool)
         sess,
         &format!("Bash({})", mock_anthropic_service::CODEX_BASH_SINGLE),
         success,
+        "╰─",
     );
-    expect_tool_border(sess, "Bash(# Shell colors", success);
+    expect_tool_border(sess, "Bash(# Shell colors", success, "╰─");
 }
 
 fn assert_running_title_resizes(sess: &mut PtySession, header: &str, light: bool, no_color: bool) {
@@ -677,7 +685,7 @@ fn expect_single_row_bash_title(
                 rows.windows(2).any(|pair| {
                     pair[0].starts_with("╭─ Bash(")
                         && matches_title(&pair[0])
-                        && pair[1].trim() == "╰─"
+                        && pair[1].trim() == "╎"
                 })
             })
         },
@@ -753,7 +761,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     } else {
         "Rgb(158, 158, 158)"
     };
-    expect_tool_border(&sess, &header, queued);
+    expect_tool_border(&sess, &header, queued, "╎");
     assert_running_title_resizes(&mut sess, &header, light, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
@@ -766,7 +774,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
     sess.resize(80, 78).unwrap();
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
-    expect_tool_border(&sess, &header, queued);
+    expect_tool_border(&sess, &header, queued, "╎");
     sess.send("\x15").unwrap();
     common::expect_screen(
         &sess,
@@ -829,7 +837,7 @@ fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
         common::DEFAULT_TIMEOUT,
         "denied Bash result",
     );
-    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(1)");
+    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(1)", "╰─");
     finish(&mut sess);
 }
 

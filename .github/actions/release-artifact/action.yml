@@ -41,7 +41,7 @@ runs:
         name: release-acceptance-${{ runner.os }}-${{ runner.arch }}
         path: |
           ${{ runner.temp }}/release-artifact-acceptance/report.json
-          ${{ runner.temp }}/release-artifact-acceptance/*.log
+          ${{ runner.temp }}/release-artifact-acceptance/**/*.log
           ${{ runner.temp }}/release-artifact-acceptance/startup.json
           ${{ runner.temp }}/release-artifact-acceptance/compiler-context/*.json
         retention-days: 30

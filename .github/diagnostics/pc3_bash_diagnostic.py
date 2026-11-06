@@ -16,6 +16,17 @@ def git(source, *arguments):
     return subprocess.check_output(['git', *arguments], cwd=source).decode().strip()
 
 
+def permission_cause(error):
+    """psutil's C wrapper can surface an OS PermissionError as SystemError."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (psutil.AccessDenied, PermissionError)):
+            return error
+        error = error.__cause__ or error.__context__
+    return None
+
+
 def run_observed(command, source, output, name, *, compiling=False):
     started = time.monotonic()
     captured = set()
@@ -32,6 +43,7 @@ def run_observed(command, source, output, name, *, compiling=False):
             for process in descendants:
                 if process.pid in denied:
                     continue
+                observed_pid = process.pid
                 try:
                     executable = process.name()
                     if compiling or executable in ('rustc', 'cc', 'ld', 'clang'):
@@ -48,7 +60,12 @@ def run_observed(command, source, output, name, *, compiling=False):
                     # PTY still owns its scode child, before the test cleans up.
                     if not compiling and executable == 'scode' and process.pid not in captured:
                         parent = process.parent()
-                        if parent and parent.pid not in denied and any('bang_runs_shell_command_without_model_turn' in arg for arg in parent.cmdline()):
+                        parent_arguments = []
+                        if parent and parent.pid not in denied:
+                            observed_pid = parent.pid
+                            parent_arguments = parent.cmdline()
+                            observed_pid = process.pid
+                        if any('bang_runs_shell_command_without_model_turn' in arg for arg in parent_arguments):
                             age = time.time() - process.create_time()
                             if age >= 10:
                                 captured.add(process.pid)
@@ -64,17 +81,23 @@ def run_observed(command, source, output, name, *, compiling=False):
                                     raise RuntimeError('Stack observation failed; preserve its exact result without another attachment method')
                 except psutil.NoSuchProcess:
                     pass
-                except psutil.AccessDenied as error:
+                except (psutil.AccessDenied, PermissionError, SystemError) as error:
+                    cause = permission_cause(error)
+                    if cause is None:
+                        raise
                     # Preserve the refusal and never read this PID again. Do
                     # not query another tool, change identity or elevate.
                     denied.add(process.pid)
-                    if error.pid is not None:
-                        denied.add(error.pid)
+                    denied.add(observed_pid)
+                    if getattr(cause, 'pid', None) is not None:
+                        denied.add(cause.pid)
                     proof['permissionRejections'].append({
-                        'pid': process.pid, 'reason': str(error),
-                        'cause': str(error.__cause__) if error.__cause__ else None,
+                        'pid': observed_pid, 'reason': str(error),
+                        'cause': str(cause),
                         'seconds': round(time.monotonic() - started, 2),
                     })
+                    # Retain the refusal even if a later observation fails.
+                    (output / (name + '.json')).write_text(json.dumps(proof, indent=2))
             proof['samples'].append(sample)
             time.sleep(.5)
         proof.update(exit=child.wait(), seconds=round(time.monotonic() - started, 2))

@@ -675,7 +675,7 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "b2df864ed01392ad9f3ea5f681517529468871d71b4369f098fe242b9e463452",
+        ".github/scripts/local_acceptance.py": "5e5529f18b136a73c4b2c37c3867cc8c5461ee2abb7eab7845e9aac3b1cc3ee8",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
@@ -768,6 +768,88 @@ def container_image_tag(repository, digest):
     return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
 
 
+def guard_tool_source(root, policy_ref):
+    """Provision the frozen tool function without duplicating its URL/checksums."""
+    import ast
+
+    source = subprocess.check_output(
+        ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py", "--"], cwd=root).decode("utf-8")
+    functions = [node for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef) and node.name == "nextest_binary"]
+    if len(functions) != 1:
+        raise RuntimeError("Protected nextest_binary must have exactly one top-level definition before building the guard image")
+    prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
+              "from pathlib import Path\n\n")
+    main = '''
+
+if __name__ == "__main__":
+    socket.setdefaulttimeout(30)
+    output = Path("/opt/nextest-provision")
+    output.mkdir(parents=True, exist_ok=True)
+    executable = nextest_binary(output)
+    receipt = json.loads((output / "nextest-source.json").read_text())
+    version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+    assert " " + receipt["version"] in version, version
+    refused = []
+    if "--verify-cache" in sys.argv:
+        archive = executable.parent / receipt["url"].rsplit("/", 1)[1]
+        for label, path, message in [
+            ("archive", archive, "Cached nextest archive checksum mismatch"),
+            ("executable", executable, "Cached nextest executable differs from the verified archive"),
+        ]:
+            original = path.read_bytes()
+            path.write_bytes(original + b"controlled guard cache corruption")
+            try:
+                try:
+                    nextest_binary(output)
+                except RuntimeError as error:
+                    assert message in str(error), str(error)
+                    refused.append(label)
+                else:
+                    raise AssertionError("Modified guard tool cache was accepted: " + label)
+            finally:
+                path.write_bytes(original)
+        assert nextest_binary(output) == executable
+        assert json.loads((output / "nextest-source.json").read_text()) == receipt
+        assert subprocess.check_output([str(executable), "--version"], text=True).strip() == version
+    print("GUARD_NEXTEST_PROVISION=" + json.dumps({
+        **receipt, "actual_cli": version, "corrupt_cache_refused": refused,
+    }), flush=True)
+'''
+    return (prefix + ast.get_source_segment(source, functions[0]) + main).encode("utf-8")
+
+
+def guard_image_context(root, policy_ref, context):
+    """Build the canonical image context used by production and Docker controls."""
+    context.mkdir()
+    inputs_hash = hashlib.sha256()
+    # Keep image bindings inside the existing executable fingerprint format.
+    # A changed image/entrypoint must update its pin before any Docker work.
+    pins = {
+        "Dockerfile.guard": "31205fa178d40cf2ffcd1df0650f0f848db544436f119d57a87ee52a03774704",
+        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+    }
+    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:.github/local-acceptance/{name}", "--"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != pins[name]:
+            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its protected pin in "
+                               ".github/local-acceptance/checks.py guard_image_context, then rerun the installed "
+                               "contract-update command; no image build started.")
+        (context / destination).write_bytes(contents)
+        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    seed = guard_tool_source(root, policy_ref)
+    (context / "nextest_seed.py").write_bytes(seed)
+    inputs_hash.update(b"nextest_seed.py\0" + seed + b"\0")
+    return inputs_hash.hexdigest()
+
+
+def verify_guard_image(image, command):
+    """Recheck the image's verified tool offline before the decision matrix."""
+    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
+            image, "/opt/nextest_seed.py")
+
+
 def contract_container(root, output, command):
     """Keep the full decision matrix local without serial Windows Git startup costs."""
     try:
@@ -779,35 +861,29 @@ def contract_container(root, output, command):
     protected = revision(policy_ref or "origin/main")
     candidate = revision(candidate_ref or "HEAD")
     context = output / "guard-image"
-    context.mkdir()
-    inputs_hash = hashlib.sha256()
-    # Keep image bindings inside the existing executable fingerprint format.
-    # A changed image/entrypoint must update its pin before any Docker work.
-    pins = {
-        "Dockerfile.guard": "1ed8c463f04bc643dedaa5c237b398da95bed6c7fc48a82a2b3710784b0e0477",
-        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
-    }
-    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
-        contents = subprocess.check_output(["git", "show", f"{protected}:.github/local-acceptance/{name}"], cwd=root)
-        actual = hashlib.sha256(contents).hexdigest()
-        if actual != pins[name]:
-            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its contract_container pin "
-                               "with the reviewed input, then rerun acceptance; no image build started.")
-        (context / destination).write_bytes(contents)
-        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    context_sha256 = guard_image_context(root, protected, context)
     image_receipt = output / "guard-image-id.txt"
-    image_tag = container_image_tag("sudocode-contract-guard", inputs_hash.hexdigest())
-    command("docker", "build", "--iidfile", str(image_receipt), "--tag",
-            image_tag, str(context),
-            extra={"DOCKER_BUILDKIT": "1"})
+    image_tag = container_image_tag("sudocode-contract-guard", context_sha256)
+    print("GUARD_TOOL_PREFLIGHT: prepare the checksum-pinned nextest image layer before test execution; "
+          "the image cache retains verified tools for later runs.", flush=True)
+    try:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag",
+                image_tag, str(context), extra={"DOCKER_BUILDKIT": "1"})
+    except RuntimeError as error:
+        raise RuntimeError("Guard image/tool preparation failed before the decision matrix and native guards. "
+                           "Inspect the saved Docker build log, correct that error and retry the printed "
+                           f"acceptance command: {error}") from error
     image = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise RuntimeError("Contract image build did not return an immutable image ID")
+    print("GUARD_TOOL_PREFLIGHT: verified pinned nextest is provisioned during image build; "
+          "image preparation retains corruption controls; check offline execution before the full matrix.", flush=True)
+    verify_guard_image(image, command)
     inputs = output / "guard-inputs"
     snapshot(root, candidate, inputs)
     (output / "guard-provenance.json").write_text(json.dumps({
         "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
-        "context_sha256": inputs_hash.hexdigest()}, indent=2))
+        "context_sha256": context_sha256}, indent=2))
     # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
             "--mount", f"type=bind,source={inputs},target=/inputs,readonly", image)

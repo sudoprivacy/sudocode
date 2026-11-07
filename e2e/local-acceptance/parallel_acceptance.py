@@ -59,7 +59,8 @@ def run_case(output, order):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
     platform = load("parallel_owner", SOURCE / ".github/scripts/local_acceptance.py").host()
     for relative in [".github/scripts/local_acceptance.py", ".github/local-acceptance/gate.py",
-                     ".github/local-acceptance/publish.py", ".github/workflows/local-acceptance.yml",
+                     ".github/local-acceptance/publish.py", ".github/local-acceptance/cross_platform.py",
+                     ".github/workflows/local-acceptance.yml",
                      ".github/workflows/local-acceptance-publish.yml"]:
         destination = work / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -288,6 +289,7 @@ def run_case(output, order):
             "reduced-native-plan": {**pending, "plan": {**pending["plan"], "ci": []}},
             "claimed-completed-checks": {**pending, "checks": {"native-workspace": []}},
             "unprotected-policy": {**pending, "policy": head},
+            "changed-original-contract-hash": {**pending, "contract_sha256": "0" * 64},
         }
         for label, contents in variants.items():
             signed = helper.sign_receipt(contents, output / "negative-signatures" / label,
@@ -314,6 +316,81 @@ def run_case(output, order):
                 raise AssertionError("Publisher accepted " + label)
             finally:
                 publisher_run[field] = original
+
+        # A protected metadata update must not invalidate the still-authentic
+        # launch plan or rerun its completed native jobs. Use actual newer Git
+        # commits and the unchanged SSH notes, then reject changed execution.
+        completed = next(iter(helper.read_note(head)["attestations"].values()))
+        notes_before = helper.canonical(helper.read_note(head)), helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF))
+        metadata_controls = []
+
+        def protected_commit(relative, contents, message, parent):
+            git("switch", "--detach", parent, cwd=trusted)
+            destination = trusted / relative
+            destination.write_text(contents, encoding="utf-8")
+            git("add", "--", relative, cwd=trusted)
+            git("-c", "commit.gpgsign=false", "commit", "-m", message, cwd=trusted)
+            changed = git("rev-parse", "HEAD", cwd=trusted)
+            git("push", "origin", changed + ":refs/heads/main", cwd=trusted)
+            git("fetch", "origin", "+refs/heads/main:refs/remotes/origin/main")
+            return changed
+
+        policy_path = "spec/local_acceptance.json"
+        metadata = protected_commit(policy_path, json.dumps({**policy, "observation": "new diagnostics"}),
+                                    "Advance protected metadata only", base)
+        for label, relative, contents in [
+            ("unrelated policy metadata", None, None),
+            ("another enrolled signer", "spec/local_acceptance_signers.json", json.dumps({
+                "version": 1, "signers": {
+                    "fixture": {"platform": platform["system"], "public_key": key.with_suffix(".pub").read_text().strip()},
+                    "additional": {"platform": platform["system"], "public_key": key.with_suffix(".pub").read_text().strip()},
+                }})),
+        ]:
+            # The second independent update is a descendant of the first.
+            if relative:
+                metadata = protected_commit(relative, contents, "Keep the original enrolled signer", metadata)
+            helper.verify_execution_plan(envelope, head, metadata, metadata)
+            helper.verify_envelope(completed, head, metadata, metadata)
+            publisher_run["head_sha"] = metadata
+            publish({"workflow_run": source_run}, 906 + len(metadata_controls))
+            assert statuses[-1]["state"] == "success"
+            assert notes_before == (helper.canonical(helper.read_note(head)), helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+            assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+            assert len(started_workers) == 2
+            metadata_controls.append({"case": label, "policy": metadata, "accepted": True,
+                                      "original_notes_and_processes_reused": True})
+        checks_path = ".github/local-acceptance/checks.py"
+        helper_path = ".github/scripts/local_acceptance.py"
+        executor = (trusted / helper_path).read_text()
+        signature = next(line for line in executor.splitlines() if line.startswith("def run_command("))
+        for label, relative, contents in [
+            ("changed command assertion", checks_path,
+             (trusted / checks_path).read_text().replace(' return [execute', ' assert False, "changed command assertion"\n return [execute')),
+            ("changed process executor", helper_path,
+             executor.replace(signature, signature + '\n    assert False, "changed process executor"', 1)),
+            ("changed native workflow", ".github/workflows/local-acceptance.yml",
+             (trusted / '.github/workflows/local-acceptance.yml').read_text() + '\n# Changed native workflow.\n'),
+            ("changed native dispatcher", ".github/local-acceptance/cross_platform.py",
+             (trusted / '.github/local-acceptance/cross_platform.py').read_text() + '\n# Changed native dispatch.\n'),
+            ("changed acceptance image", ".github/local-acceptance/Dockerfile", 'FROM scratch\n# Changed image.\n'),
+            ("newly required profile", policy_path, json.dumps({**policy, "checks": {
+                **policy["checks"], "native-context": {"include": ["input.txt"]}}})),
+            ("revoked original signer", "spec/local_acceptance_signers.json", json.dumps({"version": 1, "signers": {}})),
+        ]:
+            # Each refusal is its own forward-only protected branch. Keep the
+            # origin transport on the accepted parent between these controls.
+            git("--git-dir", str(origin), "update-ref", "refs/heads/main", metadata, cwd=output)
+            changed = protected_commit(relative, contents, "Refuse " + label, metadata)
+            try:
+                helper.verify_execution_plan(envelope, head, changed, changed)
+            except RuntimeError as error:
+                metadata_controls.append({"case": label, "policy": changed, "accepted": False, "reason": str(error)})
+            else:
+                raise AssertionError("An old scheduling plan accepted " + label)
+        git("--git-dir", str(origin), "update-ref", "refs/heads/main", base, cwd=output)
+        git("switch", "--detach", base, cwd=trusted)
+        git("fetch", "origin", "+refs/heads/main:refs/remotes/origin/main")
+        publisher_run["head_sha"] = base
 
         # This separate later failed-attempt control runs a real failing
         # native process. It must supersede the earlier successful fixture run.
@@ -342,6 +419,7 @@ def run_case(output, order):
             "retry_preserves_author_log_and_native_processes": True,
             "native_jobs_executed_once": True, "complete_actual_author_signature_verified": True,
             "outer_setup_included_in_signed_timing": True, "commands": commands, "requests": requests,
+            "metadata_controls": metadata_controls,
             "scope": "Real local Git remote/hooks, SSH, HTTP metadata, author command and native children. Metadata models GitHub; every actual child uses this one OS. No hosted or cross-OS coverage inferred."}
         (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         return result

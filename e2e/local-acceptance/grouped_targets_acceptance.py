@@ -506,6 +506,7 @@ pub fn record(name: &str) {
     queue_scope("committed symlink grouping source", queue_base, True, [])
     git("switch", "--detach", queue_head)
     git("rm", helper_wrapper)
+    (root / helper_wrapper).parent.mkdir(parents=True, exist_ok=True)
     git("mv", "rust/crates/helper/tests/independent.rs", helper_wrapper)
     commit("Moving an original integration source retains daemon checks")
     queue_scope("original source renamed into group", queue_base, True, [helper_wrapper])

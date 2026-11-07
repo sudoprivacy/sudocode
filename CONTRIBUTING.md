@@ -1109,6 +1109,15 @@ rechecks the source and reuses those jobs; retries reuse exact-source author
 proof rather than rerunning completed work. Its signed timing includes setup
 and publication before the author checks. Rule changes still use the complete
 `contract-update` route below; ordinary `git push` retains serial acceptance.
+Protected metadata can advance while a plan is running. Its original SSH
+signature and contract hash must still authenticate an ancestor of current
+main, and the source contract must remain unchanged. The current responsibility
+plan, every selected command identity, native workflow and dispatcher must match.
+The required output prints `LOCAL_ACCEPTANCE_PLAN_REUSED` when these conditions
+permit reuse. Changed commands/assertions, images, native dispatch/workflow,
+required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
+controls verify both completion orders, unchanged notes/logs and native jobs
+executed once. A scheduling plan still cannot satisfy completed acceptance.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and

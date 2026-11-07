@@ -141,7 +141,8 @@ def main():
             if launch["plan"] != receipt["plan"] or launch["base"] != receipt["base"]:
                 raise RuntimeError("Early native execution plan differs from the final author responsibility plan; rerun acceptance")
             # The independently verified note binds this immutable executor.
-            # verify_execution_plan also requires identical current contract bytes.
+            # Current responsibilities, commands and native workflow/dispatcher
+            # must still match; unrelated protected metadata can advance.
             execution_ref = launch["policy"]
         verified_base = receipt["base"]
         current = acceptance.selected(acceptance.load_policy(execution_ref), acceptance.changed_paths(receipt["base"], head),

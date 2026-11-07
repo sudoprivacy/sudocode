@@ -13,7 +13,7 @@ import sys
 
 
 SOURCE = Path(__file__).resolve().parents[2]
-PRODUCT = {"native-release", "native-services", "native-cohost"}
+PRODUCT = {"native-context", "native-services", "native-cohost"}
 
 
 def workflow_scope(output, environment):
@@ -459,7 +459,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n')
     commit("CLI source keeps daemon journeys without rebuilding the independent co-host")
     expect("CLI source retains normal CLI checks and skips the unchanged co-host", base,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(base, True, cohost_required=False)
     assert cohost() == original_cohost
     refused_log = output / "independent-cli-refusal.log"
@@ -475,7 +475,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/lib.rs", 'pub fn shared() {}\n')
     library_head = commit("Automatic CLI library target retains co-host scope")
     expect("a new CLI library target retains conservative co-host scope", base,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(base, True)
     command("git", "rm", "rust/crates/rusty-sudocode-cli/src/lib.rs")
     binary_head = commit("Removing a prior CLI library also retains co-host scope")
@@ -489,7 +489,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n// consumer boundary\n')
     commit("CLI source with a declared consumer keeps co-host acceptance")
     expect("a declared CLI consumer retains scope for later CLI source", importer,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(importer, True)
     command("git", "switch", "--detach", binary_head)
     write("rust/Cargo.toml", workspace.replace('["crates/*"]',
@@ -498,7 +498,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n// workspace boundary\n')
     commit("CLI source with an unfamiliar workspace layout keeps co-host acceptance")
     expect("an unfamiliar workspace layout retains scope for later CLI source", layout,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(layout, True)
     command("git", "switch", "--detach", binary_head)
     write("rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n')
@@ -524,16 +524,16 @@ def run(output):
         ("normal lock package changed", "rust/Cargo.lock", positive_lock.replace('name = "runtime"\nversion = "0.1.0"', 'name = "runtime"\nversion = "0.2.0"'), PRODUCT),
         ("ambiguous additional lock version", "rust/Cargo.lock", positive_lock + '\n[[package]]\nname="runtime"\nversion="0.2.0"\n', PRODUCT),
         ("lock format changed", "rust/Cargo.lock", positive_lock.replace('version = 4', 'version = 3'), PRODUCT),
-        ("ordinary runtime source keeps services without the separate release build", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT - {"native-release"}),
+        ("ordinary runtime source keeps services without the context-specific journey", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT - {"native-context"}),
         ("CLI build script keeps conservative co-host scope", "rust/crates/rusty-sudocode-cli/build.rs",
-         'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-release", "native-services"}),
-        ("release assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-release"}),
+         'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-context", "native-services"}),
+        ("source stream assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-context"}),
         ("service assertion stays required", "e2e/shared-services/scope.py", '# actual changed service fixture\n', {"native-services"}),
         ("target-specific development alias", "rust/crates/rusty-sudocode-cli/Cargo.toml",
          application + '[target.\'cfg(windows)\'.dev-dependencies]\nalias={package="scope-helper",path="../helper"}\n', []),
         ("standalone benchmark driver metadata", "rust/crates/scode-benchmark-drivers/Cargo.toml",
          # This test package is outside the policy's explicit co-host inputs.
-         '[package]\nname="scode-benchmark-drivers"\nversion="0.1.0"\nedition="2021"\n', {"native-release", "native-services"}),
+         '[package]\nname="scode-benchmark-drivers"\nversion="0.1.0"\nedition="2021"\n', {"native-context", "native-services"}),
     ]
     for index, (label, path, text, expected) in enumerate(variants):
         command("git", "switch", "--detach", changed)
@@ -542,7 +542,7 @@ def run(output):
             assert text != positive_lock, label
         commit("Scope boundary " + str(index))
         expect(label, base, expected)
-        if label in {"ordinary runtime source keeps services without the separate release build", "CLI build script keeps conservative co-host scope",
+        if label in {"ordinary runtime source keeps services without the context-specific journey", "CLI build script keeps conservative co-host scope",
                      "normal dependency features", "build dependency", "normal lock package changed"}:
             ci_scope(base, True)
         elif label == "standalone benchmark driver metadata":
@@ -550,7 +550,7 @@ def run(output):
     command("git", "switch", "--detach", changed)
     command("git", "mv", "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/renamed.rs")
     commit("Keep both sides of a renamed source")
-    expect("renamed ordinary source keeps services without the separate release build", base, PRODUCT - {"native-release"})
+    expect("renamed ordinary source keeps services without the context-specific journey", base, PRODUCT - {"native-context"})
     command("git", "switch", "--detach", changed)
     assert not command("git", "status", "--porcelain")
     # An earlier broader receipt/checkpoint must retain actual completed work
@@ -563,7 +563,7 @@ def run(output):
         "native-workspace": {"include": ["rust/**"]},
         **{name: {"include": ["rust/Cargo.lock", "rust/crates/*/Cargo.toml",
                               "rust/crates/rusty-sudocode-cli/tests/**"]}
-           for name in ["native-release", "native-services", "native-cohost"]},
+           for name in ["native-context", "native-services", "native-cohost"]},
     }}
     write("spec/local_acceptance.json", json.dumps(policy))
     write("spec/local_acceptance_signers.json", json.dumps({"signers": {"fixture": {

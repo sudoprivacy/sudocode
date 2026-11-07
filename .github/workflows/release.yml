@@ -87,6 +87,11 @@ jobs:
             exit 1
           fi
 
+      - name: Accept the built native artifact before packaging
+        uses: ./.github/actions/release-artifact
+        with:
+          binary: rust/target/x86_64-unknown-linux-musl/release/scode
+
       - name: Stage release payload
         shell: bash
         run: |
@@ -175,6 +180,11 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
+
+      - name: Accept the built native artifact before packaging
+        uses: ./.github/actions/release-artifact
+        with:
+          binary: rust/target/release/${{ matrix.bin }}
 
       - name: Stage release payload
         shell: bash
@@ -274,6 +284,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: scode-*
           merge-multiple: true
 
       - name: Generate checksums

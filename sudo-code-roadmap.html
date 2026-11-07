@@ -567,8 +567,8 @@ Product commands, assertions and budgets remain unchanged. Protected equivalence
 entries retain earlier successful exact-head evidence; the expanded policy guard
 requires a fresh run. This removes an environment-dependent local failure and
 adds no product feature-coverage credit.</p>
-<p>Native release acceptance reuses the workspace test-profile driver, with its
-mailbox feature graph, instead of compiling release dev-dependencies again.
+<p>Native release acceptance uses a standalone test-profile driver from the
+original stream/capture source, without compiling an unused debug CLI.
 <code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release
 <code>scode</code>; the stream/resume assertions and 40-sample, 100 ms startup
 budget remain. The driver and its in-process fixture helpers run in the test
@@ -592,16 +592,24 @@ the baseline spent 163.5 of 307.0 seconds compiling the separate graph; the
 revised run spent 16.9 of 159.8 seconds verifying/building the available workspace
 graph. Both original service suites passed. This warm reuse observation is not
 a controlled cold-build comparison or a whole-PR saving.</p>
-<p><strong>Scope native optimized builds (2026-11-01).</strong> The separate
-native release profile runs for Cargo/build/vendor inputs, CLI entry/startup/parser
-modules, runtime configuration, its stream-capture test and startup harness.
-Ordinary business/source and shared PTY helper changes keep applicable native
-functional/resize/service checks and selected Linux release rendering, while
-omitting the additional optimized build/startup profile on each native host.
-Optimized-only Windows/macOS behavior and the 100 ms startup budget are therefore
-outside ordinary source acceptance. Existing release-tag platform builds remain;
-full artifact journey acceptance is not added there. Required plan output includes
-<code>RELEASE_ACCEPTANCE_SCOPE</code> and explains the reduction. Real committed
+<p><strong>Gate optimized artifacts before publication (2026-11-06).</strong>
+Each newly built artifact must pass its native release gate before packaging:
+Linux x64 musl and ARM64, both Mac architectures, and both Windows architectures.
+The gate verifies actual Git revision, native architecture and SHA256, then runs
+the original stream/resume journey, 40-sample 100 ms startup budget and connected
+compiler-context journey against those exact bytes. A standalone driver avoids
+building an unused debug CLI; the optimized artifact is not rebuilt.
+Failure, stale source or changed bytes blocks packaging and publication.
+Evidence artifacts stay outside the packaged assets. Existing-asset publication
+resumes keep their original validation and create no new executable.
+Ordinary product changes retain native functional/resize/service checks and
+selected Linux release rendering. <code>native-context</code> reuses the current
+workspace dev/mailbox binary for the compiler-context journey; optimized
+acceptance harness edits still select <code>native-release</code> locally.
+<strong>Coverage reduction:</strong> native optimization-specific failures and
+startup regressions can surface at release instead of before merge.
+Required <code>RELEASE_ACCEPTANCE_SCOPE</code> and <code>NATIVE_CONTEXT_SCOPE</code>
+output explain this boundary. Real committed
 Git plans exercise ordinary, retained, mixed, renamed and deleted inputs; the
 selected release executor retains actual Cargo/native artifact identity checks.
 Two earlier Windows receipts spent 406.49 and 409.98 seconds in this profile;
@@ -1402,14 +1410,15 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Native release stream/resume and startup</td>
-      <td>Normal optimized binary, exact artifact identity and the 40-sample,
-      100 ms startup budget on build/startup/configuration and dedicated test
-      inputs. Ordinary business/source edits omit this profile on native hosts;
-      their applicable functional tests and selected Linux release rendering remain.
-      Optimized-only Windows/macOS behavior is outside that reduced scope.</td>
+      <td>Every newly built artifact passes native identity, optimized stream/resume,
+      40-sample 100 ms startup and compiler-context checks before packaging/publication,
+      on all six release platforms. Ordinary PRs retain functional tests, dev/mailbox
+      compiler context and selected Linux optimized rendering. Native optimization-only
+      and startup regressions may surface at release; harness edits still require local optimized checks.</td>
       <td>The existing stream/resume PTY journey counts once. Optimized variants
       and startup measurements add no extra unique journey credit.</td>
-      <td><code>native-release</code> / <code>release_acceptance.py</code></td>
+      <td><code>native-context</code> · <code>native-release</code> ·
+      <code>release_artifact_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Native terminal resize and installer inputs</td>

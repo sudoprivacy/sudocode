@@ -1076,14 +1076,23 @@ controls record the child process's actual default file encoding. The gate
 and publisher share one event-file decoder;
 PR text and workflow metadata do not depend on the runner's locale.
 In the queue, independent failure-only callers stop unfinished jobs in the same
-Rust CI run after either Clippy or real daemon acceptance fails. Each caller
+Rust CI run after Clippy, CLI daemon or cohost acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the
 Actions write permission and runs no checkout or candidate executable. Successful
 runs allocate no cancellation runner. The original failed step remains visible;
 the command prints how to inspect it and rerun failed work after repair. A live
-GitHub fixture exercises both failure directions and the uncancelled success
+GitHub fixture exercises all three failure directions and the uncancelled success
 path on a disposable branch. These are CI execution checks and add no product
 journey coverage.
+CLI A2A and cohost journeys use independent fresh-node jobs after the same pin
+preflight. Each selected job must pass; an unselected job must be skipped.
+Their original shell commands, features, cases and fault assertions remain.
+An isolated matched GitHub comparison with identical source and full cache hits
+took 825 seconds sequentially and 506 seconds in parallel. Total runner time
+was 825 versus 837 seconds. This one run demonstrates a shorter daemon path,
+with a small compute increase; it does not establish population or full
+author-to-merge savings. Required output identifies the separate cohost job,
+and native Bash guards reject missing, failed, cancelled or unexpected results.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions remain available through explicit acceptance;

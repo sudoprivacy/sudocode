@@ -805,14 +805,25 @@ workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
 after a failure without reducing passing-run product or lint coverage; its small
 fixture timings are not a production PR latency claim.</p>
 <p><strong>Stop independent Rust CI peers after a known failure
-(2026-11-01).</strong> Queue Clippy and daemon failures independently invoke one
+(2026-11-01; extended 2026-11-08).</strong> Queue Clippy, CLI daemon and cohost failures independently invoke one
 shared cancellation job. It stops only its own workflow run, preserves the
 original failed step and prints inspection and repair commands. The Actions
 write token stays in a job without a candidate checkout. Successful runs skip
-both callers and allocate no cancellation runner. A real GitHub fixture tests
-both failure directions and a clean run; its controlled timings do not establish
+all three callers and allocate no cancellation runner. A real GitHub fixture tests
+all three failure directions and a clean run; its controlled timings do not establish
 production lifecycle savings. Passing-run coverage, budgets and assertions stay
 unchanged.</p>
+<p><strong>Run independent daemon paths together (2026-11-08).</strong>
+CLI A2A and cohost each start and clean their own nodes, so their original
+journeys run on independent Ubuntu jobs after the same pin preflight. Every
+selected job must succeed and every unselected job must be skipped. The real
+GitHub comparison retained identical source, shell commands, features, fault
+cases, budgets and full cache hits: 825 seconds sequentially versus 506 seconds
+in parallel (38.7% less elapsed time); total runner time was 825 versus 837
+seconds (1.5% more). This is one daemon-phase observation, with no population
+or whole author-to-merge saving established. Native Bash and real hosted failure
+controls protect the independent results, all three cancellation directions
+and the no-cancellation success path.</p>
 <p><strong>Prepare selected Windows terminal inputs before compilation
 (2026-11-02).</strong> The author hook and complementary CI install the
 checksum-pinned terminal host before long native builds when resize acceptance
@@ -1499,7 +1510,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       CLI binary is built with standalone drivers. Actual Cargo metadata protects
       unique opt-in targets and shared sources; real Git events require this
       guard when the driver package changes. A real GitHub fixture also verifies
-      cancellation of independent Rust CI peers in both failure directions,
+      cancellation of independent Rust CI peers in all three failure directions,
       retention of the original failed step, and no cancellation runner on
       successful runs. Native Bash guards reject failed, skipped or cancelled
       selected queue lint and bind its three platforms, queue-only scheduling

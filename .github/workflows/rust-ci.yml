@@ -141,11 +141,20 @@ jobs:
     with:
       failed-job: Real daemon acceptance
 
+  stop-after-cohost-failure:
+    if: always() && github.event_name == 'merge_group' && needs.cohost-live.result == 'failure'
+    needs: cohost-live
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Co-host daemon acceptance
+
   integrated-acceptance:
     # A required job must fail when a dependency fails or is unexpectedly
     # skipped; GitHub treats a skipped required job as successful.
     if: always() && github.event_name == 'merge_group'
-    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]
+    needs: [one-nexus-vfs-pin, a2a-live, cohost-live, clippy-workspace]
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
     defaults:
@@ -160,6 +169,7 @@ jobs:
           COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
           CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
           A2A_RESULT: ${{ needs.a2a-live.result }}
+          COHOST_RESULT: ${{ needs.cohost-live.result }}
           CLIPPY_RESULT: ${{ needs.clippy-workspace.result }}
         run: |
           set -eu
@@ -190,13 +200,14 @@ jobs:
               exit 1
             fi
           }
-          require_result daemon "$DAEMON_REQUIRED" "$A2A_RESULT"
+          require_result CLI-A2A "$A2A_REQUIRED" "$A2A_RESULT"
+          require_result cohost "$COHOST_REQUIRED" "$COHOST_RESULT"
           require_result clippy "$CLIPPY_REQUIRED" "$CLIPPY_RESULT"
 
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
     # once, rather than repeating on the PR and on push/main too.
-    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.daemon_required == 'true'
+    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
     needs: one-nexus-vfs-pin
     name: nexus-A2A journeys (real daemon)
     runs-on: ubuntu-latest
@@ -307,6 +318,37 @@ jobs:
         if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-auth-on.sh
 
+
+  cohost-live:
+    # Independent fresh-node journeys overlap CLI A2A; every original cohost,
+    # restart, search and feature assertion remains required when selected.
+    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+    needs: one-nexus-vfs-pin
+    name: nexus co-host journeys (real daemon)
+    runs-on: ubuntu-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain selected co-host acceptance
+        env:
+          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+        run: |
+          set -eu
+          test "$COHOST_REQUIRED" = true
+          echo 'DAEMON_ACCEPTANCE_SCOPE: cohost/search runs independently of CLI A2A; both selected jobs must pass.'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
       # Everything above is an agent that TALKS TO a daemon. This one runs
       # INSIDE one: `nexusd-cohost` is built from this checkout, so the agent
       # under test is the code in this diff — which is the whole reason the crate

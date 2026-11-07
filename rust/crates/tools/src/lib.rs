@@ -9357,6 +9357,23 @@ fn run_in_process_group(
     // pipes open, hanging the drain forever.
     let mut child = runtime::shell_process_group(process.group()).spawn()?;
 
+    // Drain both pipes while the process runs. Waiting for exit first deadlocks
+    // as soon as a tool fills either OS pipe (for example a model context JSON).
+    let stdout_handle = child.inner().stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.inner().stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            buf
+        })
+    });
+
     let started = Instant::now();
     let outcome = loop {
         if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
@@ -9373,7 +9390,12 @@ fn run_in_process_group(
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    let drained = drain_group_child(child, drain_budget_for(timeout_ms));
+    let drained = drain_group_child(
+        child,
+        stdout_handle,
+        stderr_handle,
+        drain_budget_for(timeout_ms),
+    );
     Ok(ShellRunResult {
         outcome,
         stdout: drained.stdout,
@@ -9416,28 +9438,15 @@ struct DrainedShellOutput {
 /// The reader threads run on a detached worker so a stuck pipe (e.g. a descendant we did
 /// not manage to kill that still holds the write end) cannot pin the calling thread
 /// past `budget`. If the watchdog fires, callers get empty stdio rather than a hang.
-fn drain_group_child(child: command_group::GroupChild, budget: Duration) -> DrainedShellOutput {
+fn drain_group_child(
+    child: command_group::GroupChild,
+    stdout_handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr_handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    budget: Duration,
+) -> DrainedShellOutput {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut child = child;
-        let stdout_pipe = child.inner().stdout.take();
-        let stderr_pipe = child.inner().stderr.take();
-
-        let stdout_handle = stdout_pipe.map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-        let stderr_handle = stderr_pipe.map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-
         // Reap the leader; the polling loop already decided the outcome.
         let _ = child.wait();
 

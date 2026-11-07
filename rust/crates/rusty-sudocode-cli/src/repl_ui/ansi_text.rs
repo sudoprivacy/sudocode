@@ -154,6 +154,7 @@ mod tests {
                     }],
                     40,
                     width,
+                    false,
                 );
                 let canvas = element! { AnsiText(content: overlay) }.render(Some(width));
                 let mut wire = Vec::new();

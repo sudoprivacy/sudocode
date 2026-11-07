@@ -1055,8 +1055,23 @@ pub enum PendingItem {
     },
 }
 
+/// Half of a running card's frame pulse, so one breath takes about a second:
+/// slow enough to read as breathing rather than blinking.
+const PULSE_HALF_PERIOD_MS: u128 = 480;
+
+/// Whether running cards' frames are at the quiet point of their pulse now.
+/// Wall-clock based, so event-driven redraws never speed it up. The 80 ms
+/// Running tick samples it, and the canvas diff writes only the frame cells
+/// that changed colour.
+fn is_pulse_low_now() -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .is_ok_and(|now| now.as_millis() / PULSE_HALF_PERIOD_MS % 2 == 1)
+}
+
 /// Render the pending overlay: in-flight tool cards and queued messages in one
-/// ordered list, joined into one multi-line string.
+/// ordered list, joined into one multi-line string. `is_pulse_low` is the
+/// running cards' frame pulse phase.
 ///
 /// Queued messages take priority in the height budget — they are the thing the
 /// user is waiting to see (a queued input, an inbound A2A), and each is one
@@ -1068,7 +1083,12 @@ pub enum PendingItem {
 /// engine commits finished tool cards; the coordinator echoes flushed messages).
 /// The layout owner budgets the resulting projection alongside all other slots.
 /// `max_lines` bounds full tool cards, not the terminal height.
-fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: usize) -> String {
+fn render_pending_overlay(
+    items: &[PendingItem],
+    max_lines: usize,
+    term_width: usize,
+    is_pulse_low: bool,
+) -> String {
     use crate::render::{DIM, RESET};
 
     if items.is_empty() {
@@ -1094,6 +1114,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
                     &card.content,
                     card.status,
                     term_width,
+                    is_pulse_low,
                 )
                 .lines()
                 .map(str::to_string)
@@ -2381,7 +2402,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         [
             Slot {
                 minimum_full_rows: 0,
-                full: ansi(render_pending_overlay(&pending_items, 10, w)),
+                full: ansi(render_pending_overlay(
+                    &pending_items,
+                    10,
+                    w,
+                    activity_state == EngineState::Running && is_pulse_low_now(),
+                )),
                 summary: ansi(pending_summary),
             },
             Slot {
@@ -2827,7 +2853,7 @@ mod tests {
 
     #[test]
     fn pending_overlay_empty_when_nothing_pending() {
-        assert_eq!(render_pending_overlay(&[], 40, 80), "");
+        assert_eq!(render_pending_overlay(&[], 40, 80, false), "");
     }
 
     #[test]
@@ -2836,6 +2862,7 @@ mod tests {
             &[PendingItem::Tool(tool_card("1", "bash"))],
             0,
             80,
+            false,
         ));
         assert!(plain.contains("+1 more tools"), "{plain}");
     }
@@ -2846,8 +2873,8 @@ mod tests {
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
-        // Each running call is a Running L-frame card (╭─ header … ╰─).
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80, false));
+        // Each in-flight call is an open L-frame card (╭─ header … ╎).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
         // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
         // label the completed scrollback card resolves, so a tool never
@@ -2870,7 +2897,7 @@ mod tests {
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80, false));
         let bash_at = plain.find("Bash").expect("bash card");
         let msg_at = plain.find("Message from mac-ai").expect("queued message");
         let read_at = plain.find("Read").expect("read card");
@@ -2884,12 +2911,12 @@ mod tests {
     #[test]
     fn pending_overlay_collapses_overflow_beyond_height_budget() {
         // The full projection has a ten-line card budget. Each card is 3 lines
-        // (╭─ / │ / ╰─ — bash with a "{}" input has a $ body line), so ~3 cards
+        // (╭─ / │ / ╎ — bash with a "{}" input has a $ body line), so ~3 cards
         // fit and the rest collapse into a "+N more pending" line.
         let items: Vec<PendingItem> = (0..8)
             .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))
             .collect();
-        let plain = strip_ansi(&render_pending_overlay(&items, 10, 80));
+        let plain = strip_ansi(&render_pending_overlay(&items, 10, 80, false));
         assert!(
             plain.contains("more tools"),
             "expected overflow summary: {plain}"

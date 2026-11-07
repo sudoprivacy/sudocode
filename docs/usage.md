@@ -442,6 +442,10 @@ selected, so an answer can be changed before the last one is given. MCP tools
 can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
 other MCP transports and resource/prompt wrappers remain serial. A visible
 tool card may still be queued: the amber border marks actual execution.
+Until its result arrives, a card stays open with a dashed `╎` tail; the
+completed card closes with `╰─`. While a call runs, its border breathes between
+amber and a fainter shade about once a second; with 16 colors or `NO_COLOR`
+it stays steady.
 Completed results appear immediately, even while another call is still running.
 Captured stdout/stderr belongs to that Bash invocation; a concurrently spawned
 sibling cannot keep its output pipes open after the command exits.
@@ -630,6 +634,10 @@ with the default tool timeout; a bare `!` is sent to the model as text.
 ACP clients get the same behaviour: a `session/prompt` whose text starts
 with `!` runs in the session's workspace and streams the output back as
 agent text.
+
+Foreground PowerShell tools drain stdout and stderr while the command runs,
+so large context or query replies do not block on full operating-system pipes.
+Their existing timeout and process-tree cancellation still apply.
 
 For the canonical, live command list:
 

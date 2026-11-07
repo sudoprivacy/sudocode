@@ -521,7 +521,7 @@ jobs:
           echo "::notice::Native acceptance retains per-host lint. Queue Clippy checks all features on three platforms. Ordinary/shared inputs retain all-targets; isolated CLI test edits select changed originals and their groups. Missing history or dirty inputs retain full lint. Feature-only errors may first appear there. Main reuses completed queue preflight."
 
       - name: Install focused executor observer dependencies
-        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true')
+        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true' || steps.scope.outputs.release_artifact_required == 'true')
         run: python3 -m pip install psutil
       - name: Exercise acceptance executors with real Cargo, Git and Docker
         # Only changed executor/fixture inputs, once on the PR. Queue/main
@@ -534,6 +534,9 @@ jobs:
           if [[ '${{ steps.scope.outputs.container_required }}' == 'true' ]]; then
             python3 e2e/local-acceptance/container_inputs_acceptance.py --output "$RUNNER_TEMP/container-inputs"
           fi
+      - name: Exercise native artifact gates and publication refusal paths
+        if: github.event_name == 'pull_request' && steps.scope.outputs.release_artifact_required == 'true'
+        run: python3 e2e/local-acceptance/release_artifact_acceptance.py --output "$RUNNER_TEMP/release-artifact-gates"
       - name: Verify lint stops on the first error and covers a clean workspace
         id: clippy_executor
         if: github.event_name == 'pull_request' && steps.scope.outputs.clippy_executor_required == 'true'

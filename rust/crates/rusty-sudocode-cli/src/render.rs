@@ -675,6 +675,7 @@ impl TerminalRenderer {
                     .skip(if plan_file.is_empty() { 2 } else { 0 }),
                 width,
                 theme().color(TextRole::Brand),
+                left_frame::Tail::Closed,
             )
         )
     }

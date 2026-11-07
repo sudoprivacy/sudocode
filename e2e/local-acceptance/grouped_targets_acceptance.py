@@ -375,8 +375,11 @@ pub fn record(name: &str) {
                        "--policy-ref", base, "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
         planned = json.loads(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ACCEPTANCE_PLAN=")))
         checks = set(planned["local_checks"])
-        costly = {"native-release", "native-services", "native-cohost"}
+        costly = {"native-context", "native-services", "native-cohost"}
         assert (checks & costly == set()) if expected else (costly - {"native-cohost"}) <= checks, (label, text)
+        # These manifest/group changes retain functional checks; optimized
+        # artifact acceptance belongs to release and its own harness inputs.
+        assert "native-release" not in checks, (label, text)
         # Manifests and test-group wrappers are not browser terminal inputs.
         assert "browser" not in checks, (label, text)
         assert "rendering" not in checks, (label, text)

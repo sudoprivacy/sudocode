@@ -1,6 +1,24 @@
 //! The real CLI exposes startup phases only when explicitly enabled.
 mod common;
 
+#[cfg(windows)]
+#[test]
+fn native_startup_answers_conpty_before_its_device_attributes_timeout() {
+    let env = common::TestEnv::new("startup-conpty-handshake");
+    let started = std::time::Instant::now();
+    let mut child = env.spawn_with_env(&["version"], &[]);
+    child.expect("Sudo Code").unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(child.expect_eof().unwrap(), 0);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "ConPTY device attributes handshake delayed native startup: {elapsed:?}"
+    );
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
 #[test]
 fn startup_information_fits_terminal_cells_without_losing_long_unicode_paths() {
     let env = common::TestEnv::new(

@@ -1983,7 +1983,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             footer_tips.write().status(source, tip);
                             frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
+                        Ok(UiCommand::BeginTurn) => {
+                            footer_tips.write().begin_turn();
+                            tasks_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .turn_began();
+                        }
                         Ok(UiCommand::SetTurnResult { text, turn }) => {
                             turn_result.set(Some((turn, text)));
                             // A fire or another process may have changed the jobs.

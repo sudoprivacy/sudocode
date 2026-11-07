@@ -191,3 +191,74 @@ Qualification must include:
 The separate cumulative CLI work in #1049 keeps its own exact-head CI, review
 and normal merge-queue gates. This investigation neither replaces that work nor
 qualifies a live upgrade of either Mac or Windows.
+
+## Integration handoff after native lifecycle qualification
+
+The shared connection (#1080), lifecycle fixture (#1089), and diagnostic work
+(#1049) have landed. The installable autojoin adapter has not. Root owns the
+overall integration, package qualification, Windows installation and staged
+six-party acceptance. The Mac owner has completed the common connection work
+and supplies Mac qualification and local installation/rollback preparation.
+Further common runtime work must keep one writer; the runtime/file split below
+is a proposed handoff until that owner confirms it.
+
+First reconnect the existing six authorized Agents. Their private bindings may
+reference their existing credentials and ACP sessions after owner verification.
+This does not enroll every newly discovered native thread. An unknown root is
+`needs_enrollment` until the existing authority grants admission. There is no
+CA copy, alternate issuer, or workspace-based adoption of another Agent.
+
+| Delivery | Owner and boundary |
+| --- | --- |
+| Overall integration and acceptance sequence | Root: one release/rollback contract and the final go/no-go decision |
+| Common native discovery, binding and retirement adapter | Proposed Mac continuation in `sdk/typescript`, reusing `connectCodex`, the ACP client and callback; confirm before editing shared host files |
+| Common installer and Windows installation | Root in `sdk/typescript`; consume the same adapter artifact, preserve native user configuration and reject conflicting legacy entries |
+| Mac installation and actual local owner facts | Mac: consume the same package, preserve original thread/SID/approvals and prepare rollback |
+| Agent admission and local Box preparation | Existing Nexus authority and scode shared-service owner; the adapter stores references and invokes their supported entrypoints |
+
+The proposed installer/runtime boundary has three responsibilities:
+
+1. A private machine configuration selects the existing Box and native endpoint,
+   records the explicit multi-agent choice, and references approved bindings.
+   A binding includes the native runtime instance, exact root thread, authorized
+   Agent/namespace and existing ACP-session reference. Paths and credentials
+   are private installation state. These references do not grant authorization.
+2. The runtime verifies native context before attaching a binding and before
+   routing a tool call or callback. Tool arguments cannot select an actor or
+   substitute a thread. Native roots, feature workers, loaded inventory and live
+   frontend ownership are separate facts. The existing callback remains the
+   only implementation of active/idle delivery.
+3. The connection owner retires its actual owned children and observes exit
+   before a replacement attaches. Native inventory remaining loaded after a
+   frontend exits is not sufficient to retain ownership. Do not create another
+   receiver or a new lock manager to compensate for a missing lifetime signal.
+
+Resolve the endpoint and frontend-lifetime contract in the shared adapter before
+marking an installer ready. In the inspected native source, ordinary CLI startup
+probes the default daemon socket and otherwise uses an embedded server; the
+proxy only connects to an existing endpoint. The private fixture's explicit
+server launch therefore does not establish automatic production startup. Reuse
+the native daemon-management entry if supported by the actual installed binary,
+and qualify that choice privately first. No generated npm shim or shared shell
+launcher needs to be patched to disguise an undiscoverable embedded server.
+
+The first installable candidate must prove ordinary `codex` and `codex resume`
+with two roots in the same workspace, original-history restoration, native
+caller binding, zero additional startup/resume model requests, actual Node
+send/receive and original-thread active/idle callback. It must also prove close
+and replacement ownership, offline behavior, conflicting configuration refusal
+and rollback. Preserve the actual CLI/account/model and on-request/user route.
+
+The Windows `55e79179` fixture passed cancelled and completed resume against
+native 0.163.0: one explicit mock seed request per case, zero additional requests
+on resume, three normal CLI exits per case. The observed roots report
+`source: vscode`; filtering exclusively on `source == cli` would reject these
+real roots. Windows server termination in that fixture does not prove graceful
+server shutdown. These limits remain distinct from adapter acceptance.
+
+No installation or restart follows from this document. Before a live window,
+publish each participant's exact steps, versions/identities, expected receipts,
+stop conditions, rollback and an out-of-band contact path. Confirm actual owner
+readiness, then perform single-side recovery before a joint outage. The final
+six-party result includes 30 directed edges and natural commits. HA and the real
+DGX deploy/cross-domain join retain their subsequent acceptance stages.

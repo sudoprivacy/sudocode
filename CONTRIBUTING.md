@@ -302,6 +302,12 @@ command when publication is incomplete. Real Git/SSH/HTTP process fixtures
 exercise both the stale aggregate and these refusals.
 
 Checks that run tests, builds or containers share one host lease.
+The reviewed compiler-priority migration preserves exact earlier recipes for
+ten otherwise unchanged profiles through explicit protected hash pairs. It does
+not approve the changed workspace or contract guard recipes. Original source,
+SSH signatures, current required profiles and original log hashes still apply;
+a changed executor, assertion, image or newly required profile needs validation.
+
 Every `check`, whether from the hook, `contract-update` or a manual run,
 executes metadata preflight before joining that queue. Revisions requiring
 only preflight and runs restoring already verified complete results finish

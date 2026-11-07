@@ -336,6 +336,21 @@ the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their
 existing paths.
 
+When both a fresh contract guard and native workspace are required, the workspace's
+existing formatting, metadata and warning-denying lint commands run before the
+contract matrix. `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports
+`workspace_lint_before_guard`; `NATIVE_LINT_PREPARATION` explains completion and
+failure on the mandatory command path. Preparation takes the existing host lease,
+then releases it and rejoins the FIFO for the guard. After the guard passes, the
+workspace verifies and consumes those original command records/logs once before
+executing every remaining test. The preparation binds clean HEAD, base, protected
+executor, output and Cargo target; altered logs or mismatched bindings are refused.
+It never signs a completed workspace. A later failure preserves only actually
+completed profiles; a new process repeats unsigned preparation, while a fully
+verified workspace keeps ordinary signed resume. Executors without this optional
+preparation retain their original flow. Actual Git/SSH/child-process and native
+Cargo/Clippy controls cover refusal, consumption, failure order and signed resume.
+
 After the selected native workspace checks, service acceptance runs before
 optimized release builds and rendering/browser measurements. Service bootstrap
 failures therefore stop the attempt before those expensive profiles start.

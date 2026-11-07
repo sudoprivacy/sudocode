@@ -540,7 +540,17 @@ longer repeated natively; that OS-specific infrastructure coverage is reduced.
 The full Linux matrix retains its cases, while product native checks and the
 complementary CI platforms remain unchanged. Guard image/entrypoint inputs bind
 the guard fingerprint without invalidating unrelated completed native profiles.
-The container takes no shared benchmark lease. In a same-source probe, the full
+The container takes no shared benchmark lease. Full Linux and author-native
+guards now overlap after the original protected staging and Docker/tool
+preflight, under the same exclusive host FIFO. Both full results and original
+command hashes remain required. Seven real native/Docker controls verify both
+failure directions, clean completion, interruption, owner/image refusal and
+empty container-ID recovery. Failed or interrupted work removes only its exact
+owned container and native descendants. An unchanged experimental full field
+took 501 seconds; an earlier serial author run took 907 seconds. These are
+different runs, not proof of a fixed or population delivery-time reduction.
+Product cases, guard assertions and Docker resource limits remain unchanged.
+In a same-source probe, the full
 matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
 single trials concern infrastructure validation, not production PR latency.</p>
 <p>Changes limited to the independent Cargo benchmark, Docker input or Clippy
@@ -1498,7 +1508,12 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Concurrent signed workflows verify that an existing FIFO waiter
+      identity. Independent complete Docker/native guards overlap after original
+      preflight. Seven real process/engine controls require clean success,
+      cancellation in either failure direction, interruption cleanup,
+      owner/image refusal and empty-ID recovery. Both whole guards and original
+      command logs remain mandatory; no guard or product cases are removed.
+      Concurrent signed workflows verify that an existing FIFO waiter
       runs between two exclusive profiles, both profiles complete once, and
       accumulated wait includes every acquisition. A real protected pin mismatch
       also fails before a held host queue, retaining incomplete signed metadata

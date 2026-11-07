@@ -112,6 +112,101 @@ impl Drop for Release {
     }
 }
 
+/// Observe the real monitor at the journal's publication boundary, before it
+/// can continue. An ACP consumer must never receive completion while the same
+/// terminal is still counted as running.
+#[test]
+fn background_completion_publication_observes_terminal_status() {
+    const CHILD: &str = "SCODE_COMPLETION_PUBLICATION_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        std::fs::write(root.join("ready"), b"ready").unwrap();
+        wait_for(
+            || root.join("release").exists(),
+            "publication child release",
+        );
+        println!("publication child output");
+        std::process::exit(7);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let release = Release(root.to_path_buf());
+    let path = root.join("session.jsonl");
+    let mut session = Session::new()
+        .with_workspace_root(root)
+        .with_persistence_path(&path);
+    std::fs::write(
+        &path,
+        HistoryRecord::initialize(&session)
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    session.activate_persistence().unwrap();
+    let journal = CompletionJournal::open(&session, root, true).unwrap();
+    journal.set_task_protocol(true);
+    journal.begin("publication-boundary", None).unwrap();
+    let tasks = BackgroundTasks::default()
+        .with_completion(Some(Arc::clone(&journal)))
+        .for_tool(None, Some("publication-child"));
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "background_completion_publication_observes_terminal_status",
+            "--nocapture",
+        ])
+        .env(CHILD, root)
+        .current_dir(root);
+    let (task, output) = runtime::launch_background_command(
+        command,
+        ShellKind::Bash,
+        "native publication child",
+        "publication acceptance",
+        Some(&tasks),
+    )
+    .unwrap();
+    wait_for(|| root.join("ready").exists(), "publication child ready");
+    journal
+        .tool_result(
+            None,
+            "publication-child",
+            "Bash",
+            &serde_json::json!({"backgroundTaskId":task}).to_string(),
+        )
+        .unwrap();
+    journal.commit("publication-boundary").unwrap();
+    assert_eq!(tasks.summary().terminals, 1);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let observer = tasks.clone();
+    let weak = Arc::downgrade(&journal);
+    journal.set_wake(move || {
+        if weak
+            .upgrade()
+            .is_some_and(|journal| !journal.pending_tasks().is_empty())
+        {
+            let state = observer.get(&task).unwrap();
+            let _ = sender.send((observer.summary(), state));
+        }
+    });
+    std::fs::write(root.join("release"), b"release").unwrap();
+    let observed = receiver.recv_timeout(Duration::from_secs(10));
+    // Release the observer before asserting, including on the old failing path.
+    journal.set_wake(|| {});
+    let (summary, state) = observed.expect("durable terminal publication");
+    assert_eq!(
+        summary.terminals, 0,
+        "completion exposed an active terminal"
+    );
+    assert_eq!(state.status, BackgroundTaskStatus::Failed);
+    assert_eq!(state.exit_code, Some(7));
+    assert!(state.output.contains("publication child output"));
+    tasks.shutdown();
+    std::fs::remove_file(output).unwrap();
+    drop(release);
+}
+
 /// Exercise the real background monitor, including its post-exit persistence
 /// loop. A protocol-level rejection alone cannot show that this worker retires.
 #[test]

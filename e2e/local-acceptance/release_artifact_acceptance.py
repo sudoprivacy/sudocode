@@ -58,6 +58,55 @@ def workflow_contract():
     return observed
 
 
+def windows_compiler_environment(output, execute):
+    """Compile and run native code through both real shells and a spaced SDK path."""
+    if os.name != "nt":
+        return {"status": "not-applicable", "system": sys.platform}
+    shells = [Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe",
+              Path(shutil.which("pwsh.exe") or "missing-pwsh")]
+    if not all(shell.is_file() for shell in shells):
+        raise RuntimeError("Release compiler acceptance requires Windows PowerShell and PowerShell 7 on PATH")
+    script = SOURCE / ".github/actions/release-artifact/msvc.ps1"
+    baseline = output / "compiler-environment.txt"
+    execute([str(shells[-1]), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script),
+             "-EnvironmentFile", str(baseline)], SOURCE, output / "compiler-discovery.log")
+
+    def settings(path):
+        return {key.upper(): value for line in path.read_text(encoding="utf-8-sig").splitlines()
+                for key, value in [line.split("=", 1)]}
+
+    discovered = settings(baseline)
+    compiler = Path(discovered["VSINSTALLDIR"]) / "Common7/Tools/VsDevCmd.bat"
+    assert compiler.is_file()
+    wrapper = output / "Visual Studio path with spaces" / "VsDevCmd.bat"
+    wrapper.parent.mkdir()
+    wrapper.write_text(f'@echo off\ncall "{compiler}" %*\n', encoding="utf-8")
+    controls = []
+    for shell in shells:
+        case = output / ("compiler-" + shell.stem)
+        case.mkdir()
+        environment = case / "environment.txt"
+        execute([str(shell), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script),
+                 "-EnvironmentFile", str(environment)], SOURCE, case / "prepare.log",
+                {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "localAcceptance.vsdevcmd",
+                 "GIT_CONFIG_VALUE_0": str(wrapper)})
+        exported = settings(environment)
+        assert all(exported.get(key) for key in ["PATH", "LIB", "INCLUDE"])
+        assert exported["VSCMD_ARG_TGT_ARCH"] == discovered["VSCMD_ARG_TGT_ARCH"]
+        native_compiler = shutil.which("cl.exe", path=exported["PATH"])
+        assert native_compiler
+        source, binary = case / "compiler.c", case / "compiler.exe"
+        source.write_text('#include <stdio.h>\nint main(void) { puts("release compiler accepted"); return 0; }\n')
+        execute([native_compiler, "/nologo", "/W4", "/WX", str(source), "/Fe:" + str(binary),
+                 "/Fo:" + str(case / "compiler.obj"), "/link", "/incremental:no"],
+                case, case / "build.log", exported)
+        execute([str(binary)], case, case / "run.log")
+        assert (case / "run.log").read_text().strip() == "release compiler accepted"
+        controls.append({"shell": str(shell), "target": exported["VSCMD_ARG_TGT_ARCH"],
+                         "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()})
+    return {"status": "PASS", "controls": controls}
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     helper = load("artifact_fixture_executor", SOURCE / ".github/scripts/local_acceptance.py")
@@ -75,6 +124,8 @@ def run(output):
 
     def command(*arguments, extra=None):
         return execute(arguments, root, output / f"{len(commands):03d}.log", extra)
+
+    compiler_environment = windows_compiler_environment(output, execute)
 
     def write(relative, contents):
         path = root / relative
@@ -196,6 +247,7 @@ if os.environ.get('FIXTURE_FAIL_CONTEXT'): raise SystemExit(17)
         assert f"release_artifact_required={str(expected).lower()}" in selected.read_text()
         scope_controls[relative] = expected
     record = {"status": "PASS", "controls": results, "commands": commands,
+              "windows_compiler_environment": compiler_environment,
               "real_ci_input_scope": scope_controls,
               "workflow_gate_before_packaging": workflow_contract(),
               "scope": "Real Git/Cargo/native entrypoint controls, not product performance or provider coverage."}

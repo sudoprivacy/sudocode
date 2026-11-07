@@ -15,7 +15,7 @@ if (-not $compilerBatch) {
     $compilerBatch = Join-Path $installation 'Common7/Tools/VsDevCmd.bat'
 }
 if (-not (Test-Path -LiteralPath $compilerBatch -PathType Leaf)) { throw 'Native MSVC tools are missing; install the target architecture C++ tools before release acceptance' }
-$invocation = '""{0}" -no_logo -arch={1} -host_arch={1} >nul && set"' -f $compilerBatch, $nativeArchitecture
+$invocation = 'call "{0}" -no_logo -arch={1} -host_arch={1} >nul && set' -f $compilerBatch, $nativeArchitecture
 $settings = & cmd.exe /d /s /c $invocation
 if ($LASTEXITCODE -ne 0) { throw 'Native MSVC environment setup failed; release acceptance has not started' }
 $allowed = @('PATH', 'LIB', 'LIBPATH', 'INCLUDE', 'VCToolsInstallDir', 'VCINSTALLDIR', 'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH')

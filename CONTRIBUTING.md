@@ -726,9 +726,19 @@ artifact remains fresh with the same binary hash. Mixed/shared changes retain
 example compilation and a broken example still fails. This removes unchanged
 compile-only work; it does not add product journey coverage or prove a whole-PR
 time reduction.
-Contract validation checks the Docker Git/signature/authorization matrix before
-Cargo fixtures and author-host native guards. Passing runs keep every existing
-check; an early metadata failure leaves later compilation unrun.
+Contract validation finishes protected input staging and Docker/tool preflight
+before overlapping the full Linux matrix with the full author-native guard.
+The Linux matrix keeps its metadata-before-Cargo order. Both complete results
+remain mandatory; the first failed branch cancels only its owned sibling.
+Original commands still use the shared executor, one Cargo worker and reduced
+compiler priority. The original Docker limits, workloads and assertions remain.
+Seven required real Docker/native controls check success, either branch failure,
+native interruption, wrong owner/image refusal and empty container-ID recovery.
+Cleanup verifies the exact image/owner and removal; original child command logs
+and hashes remain in the signed profile. The existing host FIFO stays exclusive.
+An unchanged full-guard experiment completed in 501 seconds; the earlier serial
+author run took 907 seconds. These different runs support further qualification,
+not a fixed or population author-to-merge saving. No check coverage is removed.
 Every newly built release artifact must pass native acceptance before packaging
 and publication. Both Linux builds, both Mac builds and both Windows builds use
 their actual native executable. The gate verifies its Git revision, architecture

@@ -655,7 +655,8 @@ def run(name, root, output, base, execute):
         command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
         print("Local contract validation: full private Docker matrix, with Git/signature checks before Cargo; "
-              "then author-host native recovery, nextest, release, grouping and example guards. "
+              "independent author-host native recovery, nextest, release, grouping and example guards overlap "
+              "after the original Docker/tool preflight. Both full results are required. "
               "No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
@@ -671,12 +672,7 @@ def run(name, root, output, base, execute):
                                f"guard log above. Native smoke and matrix have not started: {error}") from error
         policy_ref = execution_policy_ref()
         entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
-        contract_container(root, output, command)
-        command(sys.executable, str(entry), "--repository", str(root),
-                "--output", str(output / "native-guard"),
-                "--executable", str(nextest_binary(output)),
-                "--source-receipt", str(output / "nextest-source.json"),
-                "--options", json.dumps(nextest_options(output)))
+        parallel_contract_guards(root, output, entry, command, results)
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -867,6 +863,8 @@ def native_guard_files():
         ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
         ".github/local-acceptance/native_guard.py": "495e8e52aac5f419d28e0e03010065c965c8f580ec3d30057e5df07433916f0c",
+        "e2e/local-acceptance/parallel_guards_acceptance.py": "72ce1f709b2049bba4cb62a81f20877d4fdf77a3da4642bcda22adce2b6a9458",
+        ".github/local-acceptance/parallel_guard.py": "36c4bab4dec3233837c2302bfb32e63b1eba2dc7caaeef03ce21716a8b8c7028",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
         ".github/scripts/local_acceptance.py": "82b71d24bc872ea6e1b91b38be73494fbd5cd5dbeb3e49db7b1ec12e6f1d0016",
@@ -1049,8 +1047,8 @@ def verify_guard_image(image, command):
             image, "/opt/nextest_seed.py")
 
 
-def contract_container(root, output, command):
-    """Keep the full decision matrix local without serial Windows Git startup costs."""
+def prepare_contract_container(root, output, command):
+    """Finish the original image, tool and source checks before either guard starts."""
     try:
         policy_ref, candidate_ref = run.execution_refs
     except AttributeError:
@@ -1084,8 +1082,63 @@ def contract_container(root, output, command):
         "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
         "context_sha256": context_sha256}, indent=2))
     # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
-    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
+    return ("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
             "--mount", f"type=bind,source={inputs},target=/inputs,readonly", image)
+
+
+def contract_container(root, output, command):
+    """Retain the original complete serial Docker entry for existing callers."""
+    command(*prepare_contract_container(root, output, command))
+
+
+def parallel_contract_guards(root, output, entry, command, results):
+    """Keep original command evidence while supervising both independent guards."""
+    import uuid
+
+    docker_args = prepare_contract_container(root, output, command)
+    native_args = [sys.executable, str(entry), "--repository", str(root),
+                   "--output", str(output / "native-guard"),
+                   "--executable", str(nextest_binary(output)),
+                   "--source-receipt", str(output / "nextest-source.json"),
+                   "--options", json.dumps(nextest_options(output))]
+    runner_path = entry.parent / "parallel_guard.py"
+    spec = importlib.util.spec_from_file_location("protected_parallel_guard", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    owner = uuid.uuid4().hex
+    cidfile = output / "guard-container-id.txt"
+    configuration = output / "parallel-guards.json"
+    image = json.loads((output / "guard-provenance.json").read_text())["image_id"]
+    docker = shutil.which("docker") or "docker"
+    assert docker_args[:2] == ("docker", "run")
+    command(sys.executable, str(entry.parents[2] / "e2e/local-acceptance/parallel_guards_acceptance.py"),
+            "--output", str(output / "parallel-guard-controls"), "--image", image)
+    index = len(results) + 1  # The coordinator command owns the preceding log.
+    data = {"version": 1, "root": str(root), "container": {
+        "docker": docker, "cidfile": str(cidfile), "image": image, "owner": owner,
+    }, "branches": [
+        {"name": "docker", "command": [docker, "run", "--cidfile", str(cidfile),
+            "--label", f"{runner.LABEL}={owner}", *docker_args[2:]],
+         "log": str(output / f"{index:03d}.log")},
+        {"name": "native", "command": native_args,
+         "log": str(output / f"{index + 1:03d}.log")},
+    ]}
+    try:
+        configuration.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        command(sys.executable, str(runner_path), "--configuration", str(configuration))
+        for branch in data["branches"]:
+            log = Path(branch["log"])
+            result = json.loads(log.with_suffix(".command.json").read_text())
+            expected = [shutil.which(branch["command"][0]) or branch["command"][0], *branch["command"][1:]]
+            if (result["command"] != expected or result["exit_code"] != 0
+                    or hashlib.sha256(log.read_bytes()).hexdigest() != result["log_sha256"]):
+                raise RuntimeError(f"Original parallel guard command evidence differs: {log}")
+            results.append(result)
+    finally:
+        # Also runs after the outer executor interrupts/kills the coordinator.
+        # A cleanup error still refuses completed acceptance.
+        cleanup = runner.cleanup_container(data)
+        (output / "parallel-guards-cleanup.json").write_text(json.dumps(cleanup, indent=2) + "\n")
 
 
 def snapshot(root, ref, destination):

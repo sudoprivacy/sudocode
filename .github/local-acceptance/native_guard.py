@@ -35,6 +35,10 @@ def main():
         commands.append(helper.run_command(["git", "config", "localAcceptance.vsdevcmd", configured],
                                           SOURCE, output / "toolchain-config.log"))
     commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/contract_reads_acceptance.py"),
+        "--output", str(output / "contract-reads"),
+    ], SOURCE, output / "contract-reads.log"))
+    commands.append(helper.run_command([
         sys.executable, str(SOURCE / "e2e/local-acceptance/docker_health_acceptance.py"),
         "--output", str(output / "docker-health"),
     ], SOURCE, output / "docker-health.log"))

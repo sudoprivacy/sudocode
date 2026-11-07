@@ -802,6 +802,8 @@ def enforcement_acceptance(*, profile_compat_only=False, publication_only=False)
         print("PASS: actual hook/push, failed process, signed notes, fresh head, tamper, preserved notes and dirty inputs")
         # Reject Git/signature/authorization errors before any Cargo fixture.
         # Passing runs retain every native build, cache and policy guard below.
+        print(command(sys.executable, str(Path(__file__).with_name("contract_reads_acceptance.py")),
+                      "--output", directory / "contract-reads", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("dependency_scope_acceptance.py")),
                       "--output", directory / "dependency-scope", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("vfs_search_cache_acceptance.py")),

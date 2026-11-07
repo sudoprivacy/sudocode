@@ -673,6 +673,18 @@ speedup. Successful end-to-end validation and all failed/retried attempts still
 count toward the delivery clock. Clippy workers join rustc/linkers at reduced
 priority while Cargo and actual test processes remain at Normal.</p>
 
+<p>Contract hashing now reads the committed tree once and batches immutable Git
+blobs through the same byte parser used by dependency-scope inspection. It
+preserves the original canonical hashes and never caches mutable refs. A real
+three-revision Windows comparison returned identical hashes, reducing one
+15-file contract read from about 0.9 seconds to 0.11 seconds (16 Git processes
+to two). This is a small repeated metadata cost, not a measured whole-PR or
+population improvement. Required Docker and native guards compare the original
+hash reference using binary/empty/duplicate blobs, Unicode paths, committed
+link text, changed refs and export-ignore attributes; missing files, objects,
+refs and unsupported Git entries still refuse acceptance. All signature,
+coverage, budget and command requirements remain in force.</p>
+
 <p>Complementary Linux CI exposed an existing terminal-completion race:
 the durable journal could publish a completion before the background registry
 recorded the observed process exit. The monitor now updates the terminal status

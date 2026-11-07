@@ -415,18 +415,18 @@ def without_development_dependencies(manifest):
     return result
 
 
-def opt_in_test_target_inputs(paths, base, head):
-    """Recognize only newly added disabled targets with previously absent names/paths."""
+def opt_in_test_target_changes(paths, base, head):
+    """Prove new disabled target declarations and their newly committed sources together."""
     manifests = [path for path in paths if path.startswith("rust/crates/")
                  and path.count("/") == 3 and path.endswith("/Cargo.toml")]
     if tomllib is None or not manifests:
-        return set()
-    ignored = set()
+        return set(), set()
+    ignored, sources = set(), set()
     try:
         def document(ref, path):
             return tomllib.loads(tracked(ref, path).decode("utf-8"))
         if document(base, "rust/Cargo.toml") != document(head, "rust/Cargo.toml"):
-            return ignored
+            return ignored, sources
         for path in manifests:
             try:
                 before, after = document(base, path), document(head, path)
@@ -444,7 +444,7 @@ def opt_in_test_target_inputs(paths, base, head):
                 rows = git("ls-tree", "-r", "-z", ref, "--", directory + "tests").stdout.decode("utf-8").split("\0")
                 return {name: info.split()[0] for row in rows if row for info, name in [row.split("\t", 1)]}
             old_files, new_files = files(base), files(head)
-            valid = True
+            valid, added_sources = True, set()
             for target in new[len(old):]:
                 name = target.get("name", "")
                 relative = target.get("path", "")
@@ -462,11 +462,19 @@ def opt_in_test_target_inputs(paths, base, head):
                 if mode not in {"100644", "100755"}:
                     valid = False
                     break
+                added_sources.add(directory + relative)
             if valid:
                 ignored.add(path)
+                sources.update(added_sources)
     except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError):
-        return set()
-    return ignored
+        return set(), set()
+    return ignored, sources
+
+
+def opt_in_test_target_inputs(paths, base, head):
+    """Retain the manifest-only scope used by the native acceptance planner."""
+    manifests, _sources = opt_in_test_target_changes(paths, base, head)
+    return manifests
 
 
 def development_lock_change(before, after, manifests):

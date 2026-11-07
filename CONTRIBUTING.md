@@ -1054,6 +1054,16 @@ selector changes; queue/main reuse its result.
 Changing the queue entry itself also selects the real all-feature workspace
 lint on all three queue platforms. Real committed PR/push/queue event controls
 verify this trigger and the exclusion of documentation-only changes.
+New integration grouping files declared with `test=false` also reuse the
+committed Git/TOML proof for their manifests. Only previously absent regular
+files under `tests/acceptance_groups`, with fresh target names and unchanged
+remaining manifest/workspace settings, can skip unchanged daemon/A2A/cohost
+journeys. Existing or ordinary test edits, enabled/unknown declarations,
+missing/indirect sources and mixed production/build changes retain those gates.
+Required preflight JSON prints `daemon_disabled_test_sources_ignored`; full
+native cases, examples, all-feature Clippy and provider/live scope remain.
+Real Git event, Cargo product/hash, nextest inventory and native-process
+controls run in the required Linux Docker and author-native contract guards.
 Draft snapshots use a separate concurrency group and explicit run title. They
 cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
 workflows allocate no publisher runner. A newer applicable ready run and its

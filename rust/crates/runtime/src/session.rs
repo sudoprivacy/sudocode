@@ -17,6 +17,8 @@ pub mod history;
 
 const SESSION_VERSION: u32 = 1;
 const UNANSWERED_TURN_TEXT: &str = "No response requested.";
+const HOST_CONTEXT_PREFIX: &str = "<host_context_snapshot>\n";
+const HOST_CONTEXT_SUFFIX: &str = "\n</host_context_snapshot>";
 /// Cold-storage retention budget (bytes) for a transcript backed by a native
 /// append-log (nexus `DT_STREAM`). `0` = keep-forever: cold segments spill out
 /// of the hot tier but are never dropped, so the whole transcript stays
@@ -2483,6 +2485,36 @@ fn durable_bytes_revision(bytes: Option<&[u8]>) -> String {
 }
 
 impl ConversationMessage {
+    /// Record trusted host context at the current conversation boundary.
+    /// Native System records are projected into provider history, never into
+    /// the fixed provider system prompt or a fabricated user input event.
+    #[must_use]
+    pub fn host_context_snapshot(text: &str) -> Self {
+        Self {
+            history: None,
+            role: MessageRole::System,
+            blocks: vec![ContentBlock::Text {
+                text: format!("{HOST_CONTEXT_PREFIX}{text}{HOST_CONTEXT_SUFFIX}"),
+            }],
+            usage: None,
+            model: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Only a harness-owned native record can supply or deduplicate context.
+    #[must_use]
+    pub fn host_context_text(&self) -> Option<&str> {
+        if self.role != MessageRole::System {
+            return None;
+        }
+        let [ContentBlock::Text { text }] = self.blocks.as_slice() else {
+            return None;
+        };
+        text.strip_prefix(HOST_CONTEXT_PREFIX)?
+            .strip_suffix(HOST_CONTEXT_SUFFIX)
+    }
+
     #[must_use]
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {

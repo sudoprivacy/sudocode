@@ -443,6 +443,7 @@ impl PreparedCompaction {
             let framing =
                 frozen_continuation("", todo.as_deref(), boundary < source.messages.len());
             estimate_message_tokens(&ConversationMessage::user_text(framing))
+                + removed_host_context(source, boundary).map_or(0, estimate_message_tokens)
                 + source.messages[boundary..]
                     .iter()
                     .map(estimate_message_tokens)
@@ -633,17 +634,7 @@ impl PreparedCompaction {
             self.keep_from < self.source.messages.len(),
         );
         let mut session = self.source.clone();
-        session.messages = vec![ConversationMessage {
-            history: None,
-            role: MessageRole::System,
-            blocks: vec![ContentBlock::Text { text: continuation }],
-            usage: None,
-            model: None,
-            duration_ms: None,
-        }];
-        session
-            .messages
-            .extend_from_slice(&self.source.messages[self.keep_from..]);
+        session.messages = compacted_messages(&self.source, self.keep_from, continuation);
         session.record_compaction_with_usage(
             summary.clone(),
             self.keep_from,
@@ -664,6 +655,42 @@ impl PreparedCompaction {
             agent_description,
         })
     }
+}
+
+/// Preserve the latest exact snapshot when compaction removes its original
+/// record. Keeping the whole old prefix would prevent useful compaction.
+fn removed_host_context(source: &Session, keep_from: usize) -> Option<&ConversationMessage> {
+    source
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.host_context_text().is_some())
+        .filter(|(index, _)| *index < keep_from)
+        .map(|(_, message)| message)
+}
+
+fn compacted_messages(
+    source: &Session,
+    keep_from: usize,
+    continuation: String,
+) -> Vec<ConversationMessage> {
+    let mut messages = vec![ConversationMessage {
+        history: None,
+        role: MessageRole::System,
+        blocks: vec![ContentBlock::Text { text: continuation }],
+        usage: None,
+        model: None,
+        duration_ms: None,
+    }];
+    if let Some(context) = removed_host_context(source, keep_from) {
+        // This is a new compacted history, so its writer assigns a new identity.
+        let mut context = context.clone();
+        context.history = None;
+        messages.push(context);
+    }
+    messages.extend_from_slice(&source.messages[keep_from..]);
+    messages
 }
 
 fn frozen_continuation(summary: &str, todo: Option<&str>, recent: bool) -> String {
@@ -1142,15 +1169,7 @@ async fn compact_session_inner<C: ApiClient>(
         Some(&session.fs_handle()),
     );
 
-    let mut compacted_messages = vec![ConversationMessage {
-        history: None,
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text: continuation }],
-        usage: None,
-        model: None,
-        duration_ms: None,
-    }];
-    compacted_messages.extend(preserved);
+    let compacted_messages = compacted_messages(session, keep_from, continuation);
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
@@ -1310,15 +1329,7 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
         Some(&session.fs_handle()),
     );
 
-    let mut compacted_messages = vec![ConversationMessage {
-        history: None,
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text: continuation }],
-        usage: None,
-        model: None,
-        duration_ms: None,
-    }];
-    compacted_messages.extend(preserved);
+    let compacted_messages = compacted_messages(session, keep_from, continuation);
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
@@ -1406,15 +1417,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         Some(&session.fs_handle()),
     );
 
-    let mut compacted_messages = vec![ConversationMessage {
-        history: None,
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text: continuation }],
-        usage: None,
-        model: None,
-        duration_ms: None,
-    }];
-    compacted_messages.extend(preserved);
+    let compacted_messages = compacted_messages(session, keep_from, continuation);
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;

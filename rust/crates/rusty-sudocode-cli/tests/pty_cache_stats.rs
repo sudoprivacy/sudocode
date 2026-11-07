@@ -94,7 +94,9 @@ fn cache_stats_json_keeps_session_intervals_and_legacy_unknowns() {
     rows.push_str("{partial row\n");
     std::fs::write(complete.join("requests.jsonl"), rows).unwrap();
     let mut sess = env.spawn(&["cache", "stats", "--output-format", "json"]);
-    sess.resize(100, 240).unwrap();
+    // Every session carries its `ttl_advisor` report; size the screen as the
+    // other advisor reports do, so the whole JSON stays on it.
+    sess.resize(180, 400).unwrap();
     sess.expect("response_completion").unwrap();
     sess.expect("unconfirmed").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);
@@ -158,11 +160,6 @@ fn ttl_advisor_report_separates_forward_scenarios_from_training_and_bad_samples(
 }
 
 fn seed_ttl_advisor_report(env: &TestEnv) {
-    std::fs::write(
-        env.config_home().join("settings.json"),
-        json!({"experimental":{"cacheTtlAdvisor":true}}).to_string(),
-    )
-    .unwrap();
     let dir = env
         .config_home()
         .join("cache/prompt-cache/private-session-name");
@@ -310,11 +307,6 @@ fn assert_fixture_totals(fixture: &Value) -> Vec<&Value> {
 /// Every snapshot becomes a ledger row, repeats included. The rollup holds the
 /// fixture's expected totals, so only the ledger rows test the report's counting.
 fn write_usage_fixture(env: &TestEnv, fixture: &Value) {
-    std::fs::write(
-        env.config_home().join("settings.json"),
-        json!({"experimental":{"cacheTtlAdvisor":true}}).to_string(),
-    )
-    .unwrap();
     let dir = env
         .config_home()
         .join("cache/prompt-cache")
@@ -610,11 +602,6 @@ fn untimed_observations_preserve_known_metadata_and_exact_repeats() {
 #[test]
 fn legacy_missing_usage_is_not_a_zero_usage_snapshot() {
     let env = TestEnv::new_mock("cache-legacy-missing-usage");
-    std::fs::write(
-        env.config_home().join("settings.json"),
-        json!({"experimental":{"cacheTtlAdvisor":true}}).to_string(),
-    )
-    .unwrap();
     let directory = env.config_home().join("cache/prompt-cache/legacy-usage");
     std::fs::create_dir_all(&directory).unwrap();
     let stats = engine_core::PromptCacheStats {

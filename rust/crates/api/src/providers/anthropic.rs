@@ -146,7 +146,6 @@ impl From<OAuthTokenSet> for AuthSource {
 #[derive(Debug, Clone)]
 pub struct CacheTtl {
     current: Arc<AtomicBool>,
-    default_one_hour: bool,
     pinned: bool,
 }
 
@@ -155,7 +154,6 @@ impl CacheTtl {
     pub fn new(one_hour: bool) -> Self {
         Self {
             current: Arc::new(AtomicBool::new(one_hour)),
-            default_one_hour: one_hour,
             pinned: false,
         }
     }
@@ -167,12 +165,6 @@ impl CacheTtl {
 
     pub fn set_one_hour(&self, one_hour: bool) {
         self.current.store(one_hour, Ordering::Release);
-    }
-
-    /// What the auth mode picks when no setting overrides it.
-    #[must_use]
-    pub fn default_one_hour(&self) -> bool {
-        self.default_one_hour
     }
 
     /// Whether `cache_ttl_1h` set the starting value. Unpinned, the engine may
@@ -269,7 +261,6 @@ impl AnthropicClient {
     pub fn with_cache_ttl_1h(mut self, enabled: bool) -> Self {
         self.cache_ttl = CacheTtl {
             current: Arc::new(AtomicBool::new(enabled)),
-            default_one_hour: self.cache_ttl.default_one_hour,
             pinned: true,
         };
         self
@@ -707,17 +698,13 @@ impl AnthropicClient {
             self.cache_diagnostics.apply_request(&mut body);
         }
         dump_request_body("messages", &body);
-        let mut observation =
-            runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor)
-                .then(|| {
-                    crate::CacheRequestObservation::from_body(
-                        &body,
-                        self.cache_advisor_route_key(),
-                        self.prompt_cache
-                            .as_ref()
-                            .map_or(0, PromptCache::context_segment),
-                    )
-                });
+        let mut observation = Some(crate::CacheRequestObservation::from_body(
+            &body,
+            self.cache_advisor_route_key(),
+            self.prompt_cache
+                .as_ref()
+                .map_or(0, PromptCache::context_segment),
+        ));
 
         let mut headers: Vec<(String, String)> =
             vec![("content-type".to_string(), "application/json".to_string())];

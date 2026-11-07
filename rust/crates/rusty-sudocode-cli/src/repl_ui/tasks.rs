@@ -1043,7 +1043,7 @@ impl TaskBrowser {
             }
         } else {
             advice.pending.map_or(" · pinned".to_owned(), |pending| {
-                format!(" · pinned, pending {}", choice_label(pending.choice))
+                format!(" · pinned, pending {}", pending.describe().0)
             })
         };
         let mut lines = vec![format!(

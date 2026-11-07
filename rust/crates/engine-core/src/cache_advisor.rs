@@ -5,7 +5,6 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use api::CacheRequestObservation;
 use serde::{Deserialize, Serialize};
@@ -372,12 +371,7 @@ fn decide_into(
     trigger: Trigger,
     applied: bool,
 ) -> Verdict {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    let now = crate::cache_ttl::now_ms();
     let (rows, _) = history(directory);
     // Never train on a later response or a still-running request.
     let rows: Vec<_> = rows
@@ -596,9 +590,7 @@ fn last_cached_tokens(directory: &Path) -> u64 {
 /// saved decision as stats. No price calculation beyond the switch cost.
 #[must_use]
 pub fn ttl_advice(session_id: &str, model: &str) -> Option<TtlAdvice> {
-    if !runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor)
-        || !valid_session_id(session_id)
-    {
+    if !valid_session_id(session_id) {
         return None;
     }
     let directory = crate::cache_root().join(session_id);
@@ -671,18 +663,8 @@ pub fn session_tip(session_id: &str, model: &str, just_switched: bool) -> Option
         return Some(crate::Tip { priority, message });
     }
     if let Some(pending) = advice.pending {
-        let message = match pending.choice {
-            crate::cache_ttl::TtlChoice::OneHour if !pending.force_now => {
-                "Cache TTL: 1h at the next cold start".to_owned()
-            }
-            crate::cache_ttl::TtlChoice::OneHour => {
-                "Cache TTL: 1h from the next request".to_owned()
-            }
-            crate::cache_ttl::TtlChoice::FiveMinutes => {
-                "Cache TTL: 5m from the next request".to_owned()
-            }
-            crate::cache_ttl::TtlChoice::Auto => "Cache TTL: auto from the next request".to_owned(),
-        };
+        let (ttl, when) = pending.describe();
+        let message = format!("Cache TTL: {ttl} {when}");
         return Some(crate::Tip {
             priority: crate::TipPriority::Normal,
             message,

@@ -43,8 +43,6 @@ pub enum Experiment {
     McpConfigServers,
     /// Independent runtime continuations over a durable session record log.
     SharedSessionHistory,
-    /// Local TTL recommendations; never changes a request's cache policy.
-    CacheTtlAdvisor,
     /// Publish short persistent peer descriptions with existing compaction calls.
     PeerDescriptions,
     /// Shaded prompt surfaces using the existing native inline history.
@@ -56,7 +54,6 @@ impl Experiment {
         Experiment::CoordinatorMode,
         Experiment::McpConfigServers,
         Experiment::SharedSessionHistory,
-        Experiment::CacheTtlAdvisor,
         Experiment::PeerDescriptions,
         Experiment::PromptViewport,
     ];
@@ -69,7 +66,6 @@ impl Experiment {
             Experiment::CoordinatorMode => "coordinatorMode",
             Experiment::McpConfigServers => "mcpConfigServers",
             Experiment::SharedSessionHistory => "sharedSessionHistory",
-            Experiment::CacheTtlAdvisor => "cacheTtlAdvisor",
             Experiment::PeerDescriptions => "peerDescriptions",
             Experiment::PromptViewport => "promptViewport",
         }
@@ -82,7 +78,6 @@ impl Experiment {
             Experiment::CoordinatorMode => "COORDINATOR_MODE",
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
-            Experiment::CacheTtlAdvisor => "CACHE_TTL_ADVISOR",
             Experiment::PeerDescriptions => "PEER_DESCRIPTIONS",
             Experiment::PromptViewport => "PROMPT_VIEWPORT",
         }
@@ -97,7 +92,6 @@ impl Experiment {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
             Experiment::SharedSessionHistory
-            | Experiment::CacheTtlAdvisor
             | Experiment::PeerDescriptions
             | Experiment::PromptViewport => None,
         }

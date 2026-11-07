@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::fmt::Write as _;
 
 use super::{
-    generic_tool_card, tool_label, truncate_for_summary, truncate_output_for_display,
+    generic_tool_card, text, tool_label, truncate_for_summary, truncate_output_for_display,
     ToolCardContent, ToolStatus, TOOL_OUTPUT_DISPLAY_MAX_LINES,
 };
 
@@ -21,11 +21,6 @@ pub(crate) fn summary_preview(text: &str) -> String {
 #[inline]
 fn message_preview(text: &str) -> String {
     truncate_output_for_display(text.trim(), 6, 960)
-}
-
-#[inline]
-fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
 }
 
 /// A successful tool call acknowledges durable inbox writes, not receiver activity.
@@ -70,19 +65,19 @@ pub(super) fn send_card(
     output: Option<&Value>,
     status: ToolStatus,
 ) -> ToolCardContent {
-    let Some(target) = string(input, "to") else {
+    let Some(target) = text(input, "to") else {
         return generic_tool_card("send", input, output, status);
     };
     let mut header = format!("{} → {target}", tool_label("send"));
     let mut body = Vec::new();
-    if let Some(summary) = string(input, "summary").filter(|s| !s.trim().is_empty()) {
+    if let Some(summary) = text(input, "summary") {
         body.push(summary_preview(summary));
     }
     if let Some(message) = input.get("message") {
         match message {
             Value::String(text) => body.push(message_preview(text)),
             Value::Object(_) => {
-                let Some(kind) = string(message, "type") else {
+                let Some(kind) = text(message, "type") else {
                     return generic_tool_card("send", input, output, status);
                 };
                 if !matches!(
@@ -105,7 +100,7 @@ pub(super) fn send_card(
                 }
                 body.push(intent);
                 for key in ["reason", "feedback"] {
-                    if let Some(text) = string(message, key) {
+                    if let Some(text) = text(message, key) {
                         body.push(message_preview(text));
                     }
                 }
@@ -132,10 +127,10 @@ pub(super) fn send_card(
                 .into(),
             );
         }
-        if let Some(id) = string(output, "request_id").or_else(|| {
+        if let Some(id) = text(output, "request_id").or_else(|| {
             input
                 .get("message")
-                .and_then(|message| string(message, "request_id"))
+                .and_then(|message| text(message, "request_id"))
         }) {
             body.push(format!("Request: {id}"));
         }
@@ -162,7 +157,7 @@ pub(super) fn agent_list_card(
     if agents.iter().any(|agent| {
         ["name", "send_to", "kind"]
             .iter()
-            .any(|key| string(agent, key).is_none())
+            .any(|key| text(agent, key).is_none())
     }) {
         return generic_tool_card("agent_list", input, Some(output), status);
     }
@@ -172,16 +167,16 @@ pub(super) fn agent_list_card(
     }
     let mut rows = Vec::new();
     for agent in agents.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
-        let name = string(agent, "name").unwrap_or_default();
-        let address = string(agent, "send_to").unwrap_or_default();
-        let kind = string(agent, "kind").unwrap_or_default();
+        let name = text(agent, "name").unwrap_or_default();
+        let address = text(agent, "send_to").unwrap_or_default();
+        let kind = text(agent, "kind").unwrap_or_default();
         let mut row = format!("{kind}  {name}");
         if address != name {
             let _ = write!(row, " · send_to={address}");
         }
-        if let Some(description) = string(agent, "description") {
+        if let Some(description) = text(agent, "description") {
             let _ = write!(row, " · {}", truncate_for_summary(description, 160));
-            if let Some(age) = string(agent, "description_updated_at")
+            if let Some(age) = text(agent, "description_updated_at")
                 .and_then(runtime::agent_description::relative_age)
             {
                 let _ = write!(row, " · updated {age}");
@@ -191,7 +186,7 @@ pub(super) fn agent_list_card(
             row.push_str(if active { " · active" } else { " · inactive" });
         }
         for key in ["role", "task_id"] {
-            if let Some(value) = string(agent, key).filter(|value| *value != address) {
+            if let Some(value) = text(agent, key).filter(|value| *value != address) {
                 let _ = write!(row, " · {key}={}", truncate_for_summary(value, 80));
             }
         }

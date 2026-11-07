@@ -3,6 +3,7 @@
 mod a2a;
 mod agent;
 mod plan;
+mod question;
 pub(crate) mod reasoning;
 use crate::render::TextRole;
 pub(super) use a2a::summary_preview;
@@ -593,6 +594,7 @@ pub(crate) enum ToolKind {
     Send,
     AgentList,
     WritePlan,
+    AskUserQuestion,
     AgentSpawn,
     PidFork,
     PidOutput,
@@ -618,6 +620,7 @@ impl ToolKind {
             Self::Send => "Send",
             Self::AgentList => "AgentList",
             Self::WritePlan => "WritePlan",
+            Self::AskUserQuestion => "AskUserQuestion",
             Self::AgentSpawn => "AgentSpawn",
             Self::PidFork => "PidFork",
             Self::PidOutput => "PidOutput",
@@ -652,6 +655,7 @@ impl ToolKind {
             "send" | "Send" => Some(Self::Send),
             "agent_list" | "AgentList" => Some(Self::AgentList),
             "write_plan" | "WritePlan" => Some(Self::WritePlan),
+            "AskUserQuestion" | "ask_user_question" => Some(Self::AskUserQuestion),
             "agent_spawn" | "AgentSpawn" => Some(Self::AgentSpawn),
             "pid_fork" | "PidFork" => Some(Self::PidFork),
             "pid_output" | "PidOutput" => Some(Self::PidOutput),
@@ -761,6 +765,7 @@ pub(crate) fn tool_card_content(
         }
         Some(ToolKind::AgentList) => a2a::agent_list_card(input, output, status),
         Some(ToolKind::WritePlan) => plan::card(output, status),
+        Some(ToolKind::AskUserQuestion) => question::card(input, output),
         Some(ToolKind::AgentSpawn | ToolKind::PidFork) => agent::spawn_card(name, input, output),
         Some(ToolKind::PidOutput | ToolKind::PidStatus | ToolKind::PidKill) => {
             agent::pid_card(name, input, output)
@@ -1036,6 +1041,16 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
     text.lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or(text)
+}
+
+/// A string field with text in it; blank counts as absent. Shared by the
+/// per-tool card modules.
+#[inline]
+pub(super) fn text<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
 }
 
 /// One theme role for every tool identity, independent of execution status.

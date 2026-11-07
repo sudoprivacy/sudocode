@@ -302,8 +302,8 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
         settle_chrome(&sess);
         let input = serde_json::json!({
             "title": "InheritedTitle \u{1b}[31mRedTitle\u{1b}[39mDefaultTitle \u{1b}[1mBoldTitle\u{1b}[0mPlainTitle",
-            "question": "Choose style answer",
-            "options": ["Accept style"],
+            "questions": [{"id":"style", "prompt":"Choose style answer",
+                "options":[{"label":"Accept style", "value":"Accept style"}]}],
         });
         let calls = serde_json::json!([{
             "id": "style_question", "name": "AskUserQuestion", "input": input,
@@ -1000,7 +1000,7 @@ fn surface_question_input(option_count: usize) -> serde_json::Value {
     options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
     serde_json::json!({
         "title": "SurfaceQuestionTitle",
-        "question": "Choose a readable surface",
-        "options": options,
+        "questions": [{"id":"surface", "prompt":"Choose a readable surface",
+            "options": options.into_iter().map(|label| serde_json::json!({"label":label, "value":label})).collect::<Vec<_>>()}],
     })
 }

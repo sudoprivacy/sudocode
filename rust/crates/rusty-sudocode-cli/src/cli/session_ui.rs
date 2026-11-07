@@ -55,7 +55,6 @@ pub(crate) fn select_session(
             back_value: None,
             initial_value: None,
         },
-        sessions.into_iter().map(|session| session.id).collect(),
         move |target, cli, out| {
             if target == current {
                 out.println(&format!("Session unchanged (already active: {target})."));
@@ -121,7 +120,6 @@ pub(crate) fn confirm_delete(
             back_value: None,
             initial_value: None,
         },
-        vec!["cancel".into(), "delete".into()],
         move |answer, cli, out| {
             if answer == "delete" {
                 run_session_action(cli, out, "delete-force", &handle.id);

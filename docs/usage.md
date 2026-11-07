@@ -426,6 +426,13 @@ finish. Recognized Bash forms include read-only `git branch`, `fd`, `diff`,
 selected `gh` queries, literal globs, and file input redirects; unknown or
 mutating flags remain serial.
 
+`AskUserQuestion` accepts a nonempty `questions[]`, with `id` and `prompt` on
+each question. Answers outside the suggested options are allowed by default;
+`allowCustomInput: false` requests a closed choice. Questions without options
+and text questions always accept typed answers. The terminal shows a `[+]` row
+for short lists. Searchable lists use Enter to select a match, or submit the
+filter text when no option matches and custom input is allowed.
+
 `AskUserQuestion` can wait alongside independent reads. Questions and permission
 requests share one input queue, so only one prompt owns the editor at a time;
 other results continue to render while it waits. When one call asks several

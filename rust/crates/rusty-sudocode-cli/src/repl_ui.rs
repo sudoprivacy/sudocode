@@ -119,7 +119,7 @@ pub struct QuestionPromptView {
     /// Used for config picker and other lists that benefit from search.
     pub force_fuzzy_select: bool,
     /// When set, Left arrow (or Shift+Tab) submits this value as the answer
-    /// (← Back). Right arrow always submits the current selection (same as Enter).
+    /// (← Back).
     pub back_value: Option<String>,
     /// An earlier answer to restore when the user comes back to this
     /// question: the option the cursor starts on, or typed text to refill.
@@ -181,13 +181,22 @@ impl FuzzySelectState {
         let filtered: Vec<usize> = (0..question.options.len()).collect();
         let cursor = question.initial_cursor();
         let scroll = cursor.saturating_sub(FUZZY_WINDOW_SIZE / 2);
-        Self {
+        let filter = question
+            .initial_text()
+            .filter(|_| question.allow_custom_input)
+            .unwrap_or_default()
+            .to_string();
+        let mut state = Self {
             question,
-            filter: String::new(),
+            filter,
             filtered,
             cursor,
             scroll,
+        };
+        if !state.filter.is_empty() {
+            state.apply_filter();
         }
+        state
     }
 
     fn apply_filter(&mut self) {
@@ -221,7 +230,7 @@ impl FuzzySelectState {
     }
 
     fn selected_value(&self) -> Option<String> {
-        self.filtered.get(self.cursor).map(|&i| (i + 1).to_string())
+        self.selected_option().map(|option| option.value.clone())
     }
 
     fn selected_option(&self) -> Option<&QuestionOptionView> {
@@ -469,12 +478,13 @@ impl UiCommandSender {
 /// Submit the currently selected DialPad option. Shared by Enter key
 /// and digit-key shortcut paths (DRY).
 fn submit_dialpad_selection(
-    _question: &QuestionPromptView,
+    question: &QuestionPromptView,
     selected_index: usize,
     input_tx: &SyncSender<InputEvent>,
 ) {
-    let answer = (selected_index + 1).to_string();
-    let _ = input_tx.send(InputEvent::QuestionAnswer(answer));
+    if let Some(option) = question.options.get(selected_index) {
+        let _ = input_tx.send(InputEvent::QuestionAnswer(option.value.clone()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,23 +667,7 @@ fn expand_paste_for_display(input: &str, store: &std::collections::HashMap<u32, 
     )
 }
 
-fn enter_key_event_for_value(
-    question: Option<&QuestionPromptView>,
-    selected_index: usize,
-    value: &str,
-) -> Option<InputEvent> {
-    if let Some(question) = question {
-        if question.options.is_empty() {
-            return (!value.trim().is_empty())
-                .then(|| InputEvent::QuestionAnswer(value.to_string()));
-        }
-        if value.trim().is_empty() {
-            let selected = selected_index.min(question.options.len().saturating_sub(1));
-            return Some(InputEvent::QuestionAnswer((selected + 1).to_string()));
-        }
-        return Some(InputEvent::QuestionAnswer(value.to_string()));
-    }
-
+fn enter_key_event_for_value(value: &str) -> Option<InputEvent> {
     if value.trim().is_empty() {
         return None;
     }
@@ -957,6 +951,8 @@ pub enum InputEvent {
         text: String,
         display: String,
     },
+    /// An option value, literal custom text, or QUESTION_BACK. The input view
+    /// already resolves digit shortcuts; consumers must preserve this value.
     QuestionAnswer(String),
     /// Inspect the frozen review without answering it.
     InspectDocument(String),
@@ -1953,7 +1949,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             {
                                 InputSlot::FuzzySelect(FuzzySelectState::new(question))
                             } else {
-                                dialpad_cursor.set(question.initial_cursor());
+                                let cursor = if question.allow_custom_input && question.initial_text().is_some() {
+                                    question.options.len()
+                                } else {
+                                    question.initial_cursor()
+                                };
+                                dialpad_cursor.set(cursor);
                                 dialpad_input.set(question.initial_text().unwrap_or_default().to_string());
                                 InputSlot::DialPad(question)
                             };
@@ -2616,7 +2617,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             if (*code == KeyCode::Enter && !modifiers.contains(KeyModifiers::SHIFT))
                                 || (*code == KeyCode::Tab && !modifiers.contains(KeyModifiers::CONTROL)
                                     && !current.starts_with('/')) => {
-                            if let Some(event) = enter_key_event_for_value(None, 0, current) {
+                            if let Some(event) = enter_key_event_for_value(current) {
                                 if !*has_submitted.read() { has_submitted.set(true); }
                                 let event = match event {
                                     InputEvent::Exit => { should_exit.set(true); InputEvent::Exit }
@@ -2958,46 +2959,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_question_mode_routes_answer_instead_of_prompt() {
-        let question = QuestionPromptView {
-            presentation: runtime::QuestionPresentation::Question,
-            title: None,
-            description: None,
-            index: 0,
-            total: 1,
-            prompt: "Paste content".to_string(),
-            options: vec![],
-            allow_custom_input: true,
-            custom_input_hint: None,
-            force_fuzzy_select: false,
-            back_value: None,
-            initial_value: None,
-        };
-
-        assert_eq!(
-            enter_key_event_for_value(Some(&question), 0, "answer"),
-            Some(InputEvent::QuestionAnswer("answer".to_string()))
-        );
-    }
-
-    #[test]
     fn enter_in_normal_mode_routes_submit() {
         assert_eq!(
-            enter_key_event_for_value(None, 0, "hello"),
+            enter_key_event_for_value("hello"),
             Some(InputEvent::Submit {
                 text: "hello".to_string(),
                 display: "hello".to_string(),
             })
-        );
-    }
-
-    #[test]
-    fn enter_in_option_question_confirms_selected_option() {
-        let question = question_with_options();
-
-        assert_eq!(
-            enter_key_event_for_value(Some(&question), 1, ""),
-            Some(InputEvent::QuestionAnswer("2".to_string()))
         );
     }
 
@@ -3063,33 +3031,27 @@ mod tests {
 
     #[test]
     fn exit_command_routes_as_exit_event() {
-        assert_eq!(
-            enter_key_event_for_value(None, 0, "/exit"),
-            Some(InputEvent::Exit)
-        );
-        assert_eq!(
-            enter_key_event_for_value(None, 0, "/quit"),
-            Some(InputEvent::Exit)
-        );
+        assert_eq!(enter_key_event_for_value("/exit"), Some(InputEvent::Exit));
+        assert_eq!(enter_key_event_for_value("/quit"), Some(InputEvent::Exit));
     }
 
     #[test]
     fn empty_input_returns_none() {
-        assert_eq!(enter_key_event_for_value(None, 0, ""), None);
-        assert_eq!(enter_key_event_for_value(None, 0, "   "), None);
+        assert_eq!(enter_key_event_for_value(""), None);
+        assert_eq!(enter_key_event_for_value("   "), None);
     }
 
     #[test]
     fn slash_commands_route_as_submit() {
         assert_eq!(
-            enter_key_event_for_value(None, 0, "/status"),
+            enter_key_event_for_value("/status"),
             Some(InputEvent::Submit {
                 text: "/status".to_string(),
                 display: "/status".to_string(),
             })
         );
         assert_eq!(
-            enter_key_event_for_value(None, 0, "/cost"),
+            enter_key_event_for_value("/cost"),
             Some(InputEvent::Submit {
                 text: "/cost".to_string(),
                 display: "/cost".to_string(),

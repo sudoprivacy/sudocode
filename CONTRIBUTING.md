@@ -1074,6 +1074,19 @@ public device key does not invalidate other devices' current receipts.
 
 #### Acceptance contract changes
 
+For ordinary frozen source with complementary native hosts, the protected
+runner also supports `start-pr --remote origin`. The normal pre-push output
+prints `LOCAL_ACCEPTANCE_PARALLEL_AVAILABLE` with the executable entry.
+It publishes the exact branch under a separate signed execution plan, readies
+the frozen PR for tests and runs every mandatory author check while native CI
+executes. It never treats the scheduling plan as completed acceptance. The
+required GitHub Actions `Local acceptance` status stays pending until both
+the full author signature and original native jobs pass. Finalization on main
+rechecks the source and reuses those jobs; retries reuse exact-source author
+proof rather than rerunning completed work. Its signed timing includes setup
+and publication before the author checks. Rule changes still use the complete
+`contract-update` route below; ordinary `git push` retains serial acceptance.
+
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and
 editing diagnostics, not only removing checks or lowering thresholds. The purpose

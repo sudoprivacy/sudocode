@@ -54,10 +54,10 @@ def main():
         if path.is_file() and "__pycache__" not in path.parts
     }
     # Windows git archive can apply core.autocrlf to the Docker input snapshot.
-    # Reconstruct only exact pinned policy bytes for this private Git fixture;
-    # arbitrary changed content must still fail the production SHA256 check.
+    # Read every pinned input from the same source, including files outside the
+    # policy directories. Arbitrary changes still fail the production SHA256 check.
     for path, expected in pins.items():
-        canonical = contents[path].replace(b"\r\n", b"\n")
+        canonical = (SOURCE / path).read_bytes().replace(b"\r\n", b"\n")
         if hashlib.sha256(canonical).hexdigest() != expected:
             raise RuntimeError(f"Guard fixture source differs from its protected byte pin: {path}")
         contents[path] = canonical

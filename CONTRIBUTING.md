@@ -701,23 +701,27 @@ time reduction.
 Contract validation checks the Docker Git/signature/authorization matrix before
 Cargo fixtures and author-host native guards. Passing runs keep every existing
 check; an early metadata failure leaves later compilation unrun.
-Release acceptance builds the normal release `scode` once, copies it outside
-Cargo outputs, and points the native workspace's test-profile driver at that
-exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
-feature graph; release-only dev-dependency compilation is no longer repeated.
-The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
-This profile runs for Cargo manifests/lock/config, build scripts, vendored inputs,
-the CLI entry point, startup/parser modules, runtime configuration, the dedicated
-stream-capture test and startup harness. Other business/source and shared PTY
-helper changes skip the additional native optimized builds on the author and
-complementary hosts. Their applicable native functional, resize and service
-checks remain; selected Docker rendering still builds and measures a real Linux
-release. Optimized-only Windows/macOS behavior and their startup budget are
-judged on every release candidate on Linux, Windows and macOS; see
-[Release acceptance coverage](#release-acceptance-coverage).
-`RELEASE_ACCEPTANCE_SCOPE` and the mandatory plan state this per-PR boundary. Real committed Git plans cover retained/omitted inputs, mixed
-edits, renames and deletions; Cargo/native controls retain the selected release
-artifact and driver identity assertions.
+Every newly built release artifact must pass native acceptance before packaging
+and publication. Both Linux builds, both Mac builds and both Windows builds use
+their actual native executable. The gate verifies its Git revision, architecture
+and SHA256, then runs the original stream/resume journey, 40-sample 100 ms startup
+budget and compiler-context journey. It does not rebuild the release executable.
+An independent test-profile driver uses the original stream/capture source and
+launches the copied artifact through `SCODE_TEST_BIN`, without building an unused
+debug CLI. Failed or changed artifacts stop their build job and prevent publication.
+Evidence uploads are excluded from the packaged assets. Existing-asset publication
+resumes retain their existing validation; they do not build a new artifact.
+
+Ordinary product edits retain applicable native functional, resize/service and
+selected Linux release-rendering checks. `native-context` reuses the current
+workspace dev/mailbox binary for the connected compiler-context journey.
+`native-release` remains mandatory locally for changes to optimized acceptance
+drivers and harnesses. **Coverage reduction:** ordinary source acceptance can
+miss native optimization-specific failures and startup regressions until release.
+`RELEASE_ACCEPTANCE_SCOPE` and `NATIVE_CONTEXT_SCOPE` explain this at the required
+interface. Real Git plans cover ordinary, retained, mixed, renamed and deleted
+inputs; real Cargo/native controls check identity, failure propagation, changed
+bytes and the publication ordering. See [Release acceptance coverage](#release-acceptance-coverage).
 An actual Cargo/native-process fixture checks driver reuse, the release binary's
 identity and rejection of a substituted debug binary. The test driver and its
 in-process fixture helpers now execute in the test profile; the product process
@@ -1264,14 +1268,15 @@ Accept every release candidate with one dispatch on its commit:
 gh workflow run rust-ci.yml --ref <tag-or-branch> -f live_only=true
 ```
 
-Per-PR acceptance is scoped to each PR's inputs. The release dispatch covers
-the candidate as a whole, comparing against the previous `v*` tag:
+Per-PR acceptance is scoped to each PR's inputs. Newly built artifacts have a
+mandatory gate in their release build jobs. The explicit full-candidate dispatch
+retains its existing rendering and provider comparisons against the previous tag:
 
-| Coverage | Per PR (local + complementary CI) | Release dispatch |
+| Coverage | Per PR (local + complementary CI) | Release acceptance |
 |---|---|---|
 | Rendering matrix against the fixed baseline | `core`: short reply and 12 KiB Markdown, 36 judged observations, for CLI, engine-core, PTY and rendering-driver inputs | `stress`: `core` plus foreground task, background task and repeated turns, 84 judged observations (`release-rendering`, Linux Docker) |
 | Cargo/dependency metadata and unrelated crate source | Native functional checks | Indirect performance effects judged by the same `stress` matrix |
-| Optimized build, stream/resume journey, 100 ms startup budget (`native-release`) | Cargo/build/vendor, CLI entry/startup/parser and runtime configuration inputs | Linux, Windows and macOS on every candidate (`release-native`) |
+| Optimized stream/resume, 100 ms startup and compiler context | Functional native suite and dev/mailbox compiler context; optimized checks for their harness/driver edits | Mandatory on each newly built artifact, on all six native platform jobs, before packaging/publication |
 | Real provider and model journeys | Scripted model transport | Live API smoke and Linux/Windows PTY suites |
 
 The rendering and native jobs use no credentials. Their evidence is uploaded as

@@ -55,6 +55,10 @@ def main():
         "--output", str(output / "release-executor"),
     ], SOURCE, output / "release.log"))
     commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/release_artifact_acceptance.py"),
+        "--output", str(output / "release-artifact"),
+    ], SOURCE, output / "release-artifact.log"))
+    commands.append(helper.run_command([
         sys.executable, str(SOURCE / "e2e/local-acceptance/grouped_targets_acceptance.py"),
         "--repository", str(repository), "--output", str(output / "grouped-targets"),
         "--executable", str(args.executable), "--options", args.options,

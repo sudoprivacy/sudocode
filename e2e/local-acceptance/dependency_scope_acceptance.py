@@ -44,7 +44,12 @@ def workflow_scope(output, environment):
     assert "      fail-fast: true" in lint
     gate = re.search(r"^  integrated-acceptance:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
     assert "    if: always() && github.event_name == 'merge_group'" in gate
-    assert "    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]" in gate
+    assert "    needs: [one-nexus-vfs-pin, a2a-live, cohost-live, clippy-workspace]" in gate
+    for job, flag in [("a2a-live", "a2a"), ("cohost-live", "cohost")]:
+        block = re.search(rf"^  {job}:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+        assert "    needs: one-nexus-vfs-pin\n" in block
+        assert f"    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.{flag}_required == 'true'" in block
+    assert "          COHOST_RESULT: ${{ needs.cohost-live.result }}" in gate
     branches = workflow.split("  push:\n    branches:\n", 1)[1].split("    paths:", 1)[0]
     assert {line.strip() for line in branches.splitlines() if line.strip().startswith("- ")} == {
         "- 'gaebal/**'", "- 'omx-issue-*'"}, branches
@@ -93,6 +98,7 @@ def workflow_scope(output, environment):
         return "set -eu\n" + "\n".join(body) + "\n"
 
     scripts = {"explain": script("Explain selected daemon acceptance"),
+               "cohost-explain": script("Explain selected co-host acceptance"),
                "required": script("Require native daemon acceptance and zero workspace warnings")}
     for name, source in scripts.items():
         (output / f"{name}.sh").write_text(source, encoding="utf-8")
@@ -115,10 +121,28 @@ def workflow_scope(output, environment):
         ("required", "true", "true", "true", "failure", False),
     ]
     cases = [(name, {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
-                     "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual}, succeeds)
+                     "DAEMON_REQUIRED": daemon,
+                     "A2A_RESULT": actual if a2a == "true" else "skipped",
+                     "COHOST_RESULT": actual if cohost == "true" else "skipped"}, succeeds)
              for name, a2a, cohost, daemon, actual, succeeds in cases]
+    cases.extend(("cohost-explain", {"COHOST_REQUIRED": value}, succeeds)
+                 for value, succeeds in [("true", True), ("false", False), ("", False)])
+    cases.extend(("required", {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
+                              "DAEMON_REQUIRED": "true", "A2A_RESULT": cli_result,
+                              "COHOST_RESULT": cohost_result}, False)
+                 for a2a, cohost, cli_result, cohost_result in [
+                     ("true", "true", "success", "failure"),
+                     ("true", "true", "cancelled", "success"),
+                     ("true", "false", "success", "success"),
+                     ("false", "true", "success", "success"),
+                     ("true", "true", "skipped", "success"),
+                     ("true", "true", "success", "cancelled"),
+                     ("true", "true", "success", ""),
+                     ("true", "true", "", "success"),
+                 ])
     cases.extend(("required", {"A2A_REQUIRED": "false", "COHOST_REQUIRED": "false",
-                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped", **values}, succeeds)
+                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped",
+                              "COHOST_RESULT": "skipped", **values}, succeeds)
                  for values, succeeds in [
                      ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success"}, True),
                      ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "failure"}, False),
@@ -142,6 +166,7 @@ def workflow_scope(output, environment):
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
     return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
             "CLI_and_cohost_steps_bound_to_independent_selectors": True,
+            "CLI_and_cohost_jobs_have_no_mutual_dependency": True,
             "three_platform_lint_required_once_on_queue": True,
             "main_preflight_removed_and_independent_cache_publishers_retained": True}
 

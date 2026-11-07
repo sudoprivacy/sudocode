@@ -232,6 +232,21 @@ pub(crate) enum MailboxBackend {
     Resolving(Arc<BackendResolver>),
 }
 
+/// The whole time an append-error check may take, its waits included.
+const RECONCILE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+/// The longest single wait for a late commit within that deadline.
+const RECONCILE_WAIT_MS: u64 = 1_000;
+/// How much of the conversation an append-error check may read.
+const RECONCILE_MAX_BYTES: usize = 8 << 20;
+
+/// The envelopes in one `tail_read` chunk: a single frame, or JSONL lines.
+fn envelopes_in(data: &[u8]) -> Vec<MailboxEnvelope> {
+    MailboxEnvelope::from_bytes(data).map_or_else(
+        || crate::agent_mailbox::parse_envelope_lines(data),
+        |envelope| vec![envelope],
+    )
+}
+
 impl MailboxBackend {
     #[inline]
     pub(crate) fn resolve(&self) -> Result<Arc<dyn FsBackend>, String> {
@@ -706,6 +721,11 @@ impl Mailbox {
         if envelope.timestamp == 0 {
             envelope.timestamp = crate::agent_mailbox::now_secs();
         }
+        // This logical send's identity (see `MailboxEnvelope::send_id`),
+        // guarded like the timestamp so a retransmission keeps it.
+        if envelope.send_id.is_none() {
+            envelope.send_id = Some(uuid::Uuid::new_v4().to_string());
+        }
         let path = self.transcript_path(&envelope.to);
 
         // Provision on BOTH branches. It used to happen only on the framed one,
@@ -715,11 +735,20 @@ impl Mailbox {
         self.ensure_provisioned(&envelope.to)?;
 
         if self.backend_frames(&path)? {
-            return self
-                .backend
-                .resolve()?
-                .append(&path, &envelope.to_bytes())
-                .map_err(|e| format!("mailbox send to {path}: {e}"));
+            let backend = self.backend.resolve()?;
+            let bytes = envelope.to_bytes();
+            return match backend.append(&path, &bytes) {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+                    ) =>
+                {
+                    Err(format!("mailbox send to {path}: {error}"))
+                }
+                Err(error) => self.reconcile_append(backend.as_ref(), &path, &envelope, &error),
+            };
         }
 
         // Non-framed transcript: a message is one JSONL line at the
@@ -737,6 +766,79 @@ impl Mailbox {
         // writing one log) as if it were a special case, and with conventions
         // collapsed there is exactly one shape to write.
         crate::agent_mailbox::append_envelope_via(self.backend.resolve()?.as_ref(), &path, envelope)
+    }
+
+    /// Settle an append that returned an error but may have committed.
+    ///
+    /// A replicated append that times out can still commit after the error,
+    /// and a sender told "failed" resends, so its peer gets the message
+    /// twice. Only this send's identity proves that it landed: two sends of
+    /// the same words in the same second are byte-identical, so matching bytes
+    /// would report a send that wrote nothing as delivered. The check reads
+    /// the conversation from this agent's read position under one deadline
+    /// and one byte budget. Not finding the message proves nothing (the commit
+    /// may still land), so every way the check can end without finding it
+    /// says the outcome is unconfirmed, never that nothing was sent.
+    fn reconcile_append(
+        &self,
+        backend: &dyn FsBackend,
+        path: &str,
+        sent: &MailboxEnvelope,
+        error: &std::io::Error,
+    ) -> Result<(), String> {
+        // `send` set it; an unset one matches nothing and ends unconfirmed.
+        let send_id = sent.send_id.as_deref().unwrap_or_default();
+        let unconfirmed = |why: &str| {
+            Err(format!(
+                "delivery unconfirmed: append to {path} failed ({error}); {why}, but a timed-out \
+                 append can still commit, so check the conversation before resending"
+            ))
+        };
+        let deadline = std::time::Instant::now() + RECONCILE_DEADLINE;
+        let mut cursor = self.read_position(&sent.to).ok().flatten().unwrap_or(0);
+        let mut scanned = 0usize;
+        let mut wait_ms = 0;
+        loop {
+            let (data, next, eof) = match backend.tail_read(path, cursor, wait_ms) {
+                Ok(read) => read,
+                Err(read_error) => {
+                    return Err(format!(
+                        "delivery unknown: append to {path} failed ({error}) and the \
+                         conversation could not be read to check ({read_error})"
+                    ));
+                }
+            };
+            scanned += data.len();
+            if envelopes_in(&data)
+                .iter()
+                .any(|env| env.send_id.as_deref() == Some(send_id) && env.from == sent.from)
+            {
+                tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
+                return Ok(());
+            }
+            let advanced = next > cursor;
+            if advanced {
+                cursor = next;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return unconfirmed("the message was not in the conversation when checked");
+            }
+            if scanned >= RECONCILE_MAX_BYTES {
+                return unconfirmed(
+                    "the check stopped at its size limit before finding the message",
+                );
+            }
+            // Drain what is there without waiting; once caught up, wait for a
+            // late commit until the deadline.
+            wait_ms = if eof || !advanced {
+                u64::try_from(left.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .min(RECONCILE_WAIT_MS)
+            } else {
+                0
+            };
+        }
     }
 
     /// Read new messages from own inbox starting at `cursor`.
@@ -812,11 +914,7 @@ impl Mailbox {
             if eof {
                 break;
             }
-            let envelopes = MailboxEnvelope::from_bytes(&data).map_or_else(
-                || crate::agent_mailbox::parse_envelope_lines(&data),
-                |envelope| vec![envelope],
-            );
-            for env in envelopes {
+            for env in envelopes_in(&data) {
                 if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
                     out.push(env);
                 }
@@ -936,6 +1034,7 @@ impl Mailbox {
         let mb = Arc::clone(self);
         Arc::new(move |to: &str, body: &str| {
             let env = MailboxEnvelope {
+                send_id: None,
                 delivery: crate::turn_input::InputDelivery::Steer,
                 from: mb.self_id.clone(),
                 to: to.to_string(),
@@ -2477,6 +2576,7 @@ mod tests {
 
     fn note(from: &str, to: &str, body: &str) -> MailboxEnvelope {
         MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: from.to_string(),
             to: to.to_string(),
@@ -2618,6 +2718,7 @@ mod tests {
         let mb = local_mailbox(&ws, "team-lead");
 
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "team-lead".to_string(),
             to: "worker".to_string(),
@@ -2647,6 +2748,7 @@ mod tests {
         // Both land in the SAME transcript — that is the point of a shared
         // conversation. Each side tells its own appends apart by `from`.
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "agent-a".to_string(),
             to: "agent-b".to_string(),
@@ -2659,6 +2761,7 @@ mod tests {
         })
         .unwrap();
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "agent-b".to_string(),
             to: "agent-b".to_string(),
@@ -2718,6 +2821,7 @@ mod tests {
 
         for i in 0..3 {
             mb.send(MailboxEnvelope {
+                send_id: None,
                 delivery: crate::turn_input::InputDelivery::Steer,
                 from: format!("agent-{i}"),
                 to: "worker".to_string(),
@@ -2743,6 +2847,7 @@ mod tests {
         let mb = local_mailbox(&ws, "coordinator");
 
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "alpha".to_string(),
@@ -2755,6 +2860,7 @@ mod tests {
         })
         .unwrap();
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "beta".to_string(),
@@ -2786,6 +2892,7 @@ mod tests {
         let ws = temp_workspace("list-recip-shape");
         let mb = local_mailbox(&ws, "coordinator");
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "alpha".to_string(),
@@ -2970,6 +3077,7 @@ mod tests {
         // Write a message from a sub-agent to team-lead.
         let mb = local_mailbox(&ws, "sub-agent-1");
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "sub-agent-1".to_string(),
             to: "team-lead".to_string(),

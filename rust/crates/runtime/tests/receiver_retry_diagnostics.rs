@@ -32,6 +32,7 @@ fn wait_for(label: &str, done: impl Fn() -> bool) {
 
 fn note(peer: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: peer.into(),
         to: AGENT.into(),

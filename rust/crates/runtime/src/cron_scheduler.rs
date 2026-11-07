@@ -123,6 +123,7 @@ pub fn scheduled_envelope(entry: &CronEntry, to: &str) -> MailboxEnvelope {
             |label| format!("{label} ({})", entry.cron_id),
         );
     MailboxEnvelope {
+        send_id: None,
         delivery: entry.delivery,
         from: String::new(),
         to: to.to_string(),

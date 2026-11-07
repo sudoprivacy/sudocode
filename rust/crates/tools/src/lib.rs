@@ -3049,6 +3049,7 @@ fn write_envelope(
 ) -> Result<PathBuf, String> {
     let recipient_sanitized = sanitize_recipient(recipient);
     let envelope = MailboxEnvelope {
+        send_id: None,
         delivery: input.delivery,
         from: resolve_sender(input, mailbox),
         to: recipient.to_string(),

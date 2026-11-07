@@ -267,6 +267,7 @@ fn every_remote_backend_constructor_fails_before_rpc() {
 
     let mailbox = runtime::mailbox::Mailbox::over_nexus(shared, "sender", "any-token");
     let delivery = mailbox.send(runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: "sender".to_string(),
         to: "receiver".to_string(),

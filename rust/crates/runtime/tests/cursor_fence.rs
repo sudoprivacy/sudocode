@@ -74,6 +74,7 @@ fn mailbox(backend: Arc<dyn FsBackend>, root: &Path, agent: &str) -> Arc<Mailbox
 fn send(root: &Path, to: &str, body: &str) {
     mailbox(Arc::new(StdFsBackend), root, PEER)
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: to.to_string(),

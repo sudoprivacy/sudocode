@@ -255,7 +255,10 @@ python crates/rusty-sudocode-cli/tests/live/tool_pause.py --evidence /tmp/pause-
 `_scode/ask_user_question` keeps `description` as a string and supplies optional
 `descriptionFormat` (`"plain"` or `"markdown"`) when a description is present.
 Clients can render model questions and plan reviews as Markdown while keeping
-configuration and permission text literal.
+configuration and permission text literal. The engine resolves question defaults
+before sending this request; clients consume each field's `allowCustomInput`.
+The model input contract and terminal behavior are described in
+[interactive question behavior](usage.md#interactive-repl).
 
 Plan approval runs through this same question exchange even when the engine
 has no terminal. Selecting “Clear context & execute” continues inside the

@@ -181,7 +181,7 @@ fn question_owns_the_status_until_answered_then_running_resumes() {
     let marker = common::turn_status_marker(&session);
     let prompt = if env.is_mock() {
         let calls = json!([
-            {"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"choice","header":"Activity choice","question":"Choose the second answer","options":[{"label":"First","value":"First","description":"First choice"},{"label":"Second","value":"Second","description":"Second choice"}],"multiSelect":false}]}},
+            {"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"choice","prompt":"Choose the second answer","options":[{"label":"First","value":"First","description":"First choice"},{"label":"Second","value":"Second","description":"Second choice"}]}]}},
             {"id":"quiet", "name":"bash", "input":{"command":"sh quiet.sh", "timeout":30000}}
         ]);
         format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")

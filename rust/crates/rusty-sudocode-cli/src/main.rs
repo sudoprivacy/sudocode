@@ -2517,13 +2517,11 @@ fn peer_turn_sink<E: Send + 'static>(
 /// register a callback to handle the answer. The coordinator loop routes
 /// the `QuestionAnswer` event to the returned handler.
 ///
-/// `resolve_answer` maps the raw answer string (1-indexed option number
-/// or custom text) to the value to pass to `on_selected`.
+/// The input view resolves selection gestures; handlers consume the actual value.
 #[inline]
 fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
-    items: Vec<String>,
     on_selected: impl FnOnce(
             String,
             &Arc<Mutex<LiveCli>>,
@@ -2533,12 +2531,7 @@ fn show_slash_selection(
 ) -> SlashSelectionHandler {
     ui.show_question(question);
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
-        let resolved = answer
-            .parse::<usize>()
-            .ok()
-            .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
-            .unwrap_or_else(|| answer.to_string());
-        on_selected(resolved, cli, out)
+        on_selected(answer.to_string(), cli, out)
     }))
 }
 
@@ -2594,7 +2587,6 @@ fn show_effort_selection(
             back_value: None,
             initial_value: None,
         },
-        items,
         move |level, cli, out| {
             let mut current = cli.lock().expect("LiveCli mutex poisoned");
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -2701,25 +2693,17 @@ impl IocraftQuestionPrompter {
         field: &runtime::QuestionField,
         raw_answer: String,
     ) -> runtime::QuestionPromptAnswer {
-        let matched = if field.options.is_empty() {
-            None
-        } else if let Ok(index) = raw_answer.parse::<usize>() {
-            index
-                .checked_sub(1)
-                .and_then(|zero_based| field.options.get(zero_based))
-        } else {
-            field
-                .options
-                .iter()
-                .find(|option| option.label == raw_answer || option.value == raw_answer)
-        };
-
+        let matched = field
+            .options
+            .iter()
+            .find(|option| option.value == raw_answer);
+        let label = matched
+            .map(|option| option.label.clone())
+            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
         runtime::QuestionPromptAnswer {
             id: field.id.clone(),
-            value: matched.map_or_else(|| raw_answer.clone(), |option| option.value.clone()),
-            label: matched
-                .map(|option| option.label.clone())
-                .or_else(|| (!raw_answer.is_empty()).then_some(raw_answer)),
+            value: raw_answer,
+            label,
         }
     }
 }
@@ -2753,9 +2737,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
             while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
                 this.show_field(&request, index, answers[index].as_ref());
-                let raw = if let Ok(answer) = rx.await {
-                    answer.trim().to_string()
-                } else {
+                let Ok(raw) = rx.await else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };
@@ -3920,7 +3902,6 @@ fn run_repl_iocraft_dispatch(
                                     back_value: None,
                                     initial_value: None,
                                 },
-                                models,
                                 move |model_name, cli, out| {
                                     if let Some(selection) = show_effort_selection(
                                         &effort_ui,

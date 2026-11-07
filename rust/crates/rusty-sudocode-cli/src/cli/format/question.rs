@@ -54,7 +54,7 @@ pub(super) fn card(input: &Value, output: Option<&Value>) -> ToolCardContent {
 /// answer that matches no option, or `skipped` when nothing was given.
 fn question_rows(question: &Value, chosen: &[&Value]) -> Vec<String> {
     let mut rows = Vec::new();
-    if let Some(prompt) = text(question, "prompt").or_else(|| text(question, "question")) {
+    if let Some(prompt) = text(question, "prompt") {
         rows.push(truncate_for_summary(prompt, ROW_CHARS));
     }
     let options = question

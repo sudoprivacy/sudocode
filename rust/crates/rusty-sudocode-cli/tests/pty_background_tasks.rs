@@ -936,7 +936,7 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
                 "echo QUESTION_BACKGROUND_OUTPUT; while [ ! -f release ]; do sleep 0.1; done",
                 "Background during question",
             ),
-            json!({"id":"question","name":"AskUserQuestion","input":{"questions":[{"id":"choice","header":"Choice","question":"Select the second answer","options":[{"label":"First","value":"First","description":"First option"},{"label":"Second","value":"Second","description":"Second option"}],"multiSelect":false}]}}),
+            json!({"id":"question","name":"AskUserQuestion","input":{"questions":[{"id":"choice","prompt":"Select the second answer","options":[{"label":"First","value":"First","description":"First option"},{"label":"Second","value":"Second","description":"Second option"}]}]}}),
         ],
     );
     expect_stable_region(

@@ -191,10 +191,10 @@ fn background_completion_publication_observes_terminal_status() {
         }
     });
     std::fs::write(root.join("release"), b"release").unwrap();
-    let observed = receiver.recv_timeout(Duration::from_secs(10));
+    let publication = receiver.recv_timeout(Duration::from_secs(10));
     // Release the observer before asserting, including on the old failing path.
     journal.set_wake(|| {});
-    let (summary, state) = observed.expect("durable terminal publication");
+    let (summary, state) = publication.expect("durable terminal publication");
     assert_eq!(
         summary.terminals, 0,
         "completion exposed an active terminal"

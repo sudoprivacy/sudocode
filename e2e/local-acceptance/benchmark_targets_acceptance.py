@@ -33,6 +33,7 @@ def standalone_layout(command):
     package = next(row for row in metadata["packages"] if row["name"] == "scode-benchmark-drivers")
     expected = {f"benchmark_{name}": SOURCE / f"rust/crates/rusty-sudocode-cli/tests/pty_{name}.rs"
                 for name in ["render_performance", "hyperlinks", "prompt_viewport"]}
+    expected["release_stream_capture"] = SOURCE / "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs"
     assert {row["name"] for row in package["targets"]} == set(expected), "The driver package gained an extra target"
     for row in package["targets"]:
         assert row["kind"] == ["test"] and not row["test"], "Benchmark drivers must be opt-in tests only"

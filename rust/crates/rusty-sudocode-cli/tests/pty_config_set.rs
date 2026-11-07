@@ -88,3 +88,5 @@ fn config_set_applies_auto_compaction_and_refuses_ignored_settings() {
     sess.set_default_timeout(budget);
     assert_eq!(sess.expect_eof().expect("exit"), 0);
 }
+
+// Temporary hosted parallel-acceptance smoke; existing PTY assertions stay unchanged.

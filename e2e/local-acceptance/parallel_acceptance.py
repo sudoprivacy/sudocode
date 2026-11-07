@@ -103,6 +103,9 @@ def run_case(output, order):
     git("config", "localAcceptance.signer", "fixture")
     git("config", "localAcceptance.key", str(key))
     git("clone", str(origin), str(trusted), cwd=output)
+    git("config", "user.name", "Parallel native fixture", cwd=trusted)
+    git("config", "user.email", "fixture@example.invalid", cwd=trusted)
+    git("config", "core.autocrlf", "false", cwd=trusted)
     git("config", "url." + origin.as_uri() + ".insteadOf", remote_url, cwd=trusted)
     helper = load("parallel_fixture_helper", work / ".github/scripts/local_acceptance.py")
     helper.ROOT = work

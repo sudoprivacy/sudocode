@@ -76,6 +76,7 @@
         "rust/crates/rusty-sudocode-cli/tests/pty_prose_preview.rs",
         "rust/crates/rusty-sudocode-cli/tests/pty_review_scrollback.rs",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/scode-test-support/**",
         "e2e/terminal-resize/**",
         "rust/Cargo.lock",
         "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs"
@@ -96,6 +97,7 @@
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/scode-test-support/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs",
         "e2e/terminal-resize/benchmark.py",
         "e2e/terminal-resize/performance-policy.json",
@@ -116,6 +118,7 @@
         "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/scode-test-support/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
         "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs",
         "rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport_browser.cjs",

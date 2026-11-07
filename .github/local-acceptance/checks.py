@@ -767,7 +767,7 @@ def native_guard_files():
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",
-        "e2e/local-acceptance/release_artifact_acceptance.py": "f456a004ff41fa5bb2c280b0b7b44d5a0c4d66ae3e863d42bf72badbb0e2bdd7",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "157fae30f7fd278e0a44ef6a44b018a5d15429dcb9de6f025bebfc86b7253e00",
         "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
         ".github/scripts/ci_input_scope.py": "4f421d8088984b234d26afd2ded657ea057db3f1ce97ee62ac2d655c488b625b",
         ".github/workflows/rust-ci.yml": "35c183747947fda57c65c06caff9963878d4cea8e92f7cb677abb1138b7b4f2a",
@@ -776,7 +776,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
         ".github/local-acceptance/gate.py": "f89e0f15ca412956b2a32e86644acf351e6784a437d42a3faefb35b3886bd96a",
-        ".github/local-acceptance/native_guard.py": "08b75bee9a481d5df942e070cb80176682e12a0e6bd8e938b1f5a000a2b62bde",
+        ".github/local-acceptance/native_guard.py": "143bec50d61b847c8dff5cde7bfa181aaee27a1864d721b695ee85224f286ef5",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
         ".github/scripts/local_acceptance.py": "8259677c30f55c51852233df9613fa57124bac50809ea594105964e75e89e3ce",
@@ -800,7 +800,7 @@ def native_guard_files():
         "e2e/local-acceptance/publication_acceptance.py": "209ca63435e8e42d2c15d90f0f3c4f93fa17f0e74ca615e7b0eecf9746f05120",
         "e2e/local-acceptance/release_acceptance.py": "a58b820d2dc74d1a1828e38f34a3606440df8f941ff9b9f22bf7b6d761c8db87",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "7b869fc3403ea5514b5f93a964efce755dac9fb985aaceec48ba670a01f069c9",
+        "e2e/local-acceptance/run.py": "f0577749b658fb6398aca7e38b106693d2c1939181b88247afc69df414f67457",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -844,7 +844,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "56f0733c5e4408244547b2ad47a2fea0e1836bcb25d8674d82938a1aac7298cc":
+    if actual_scope != "a485949e946bd8788994b911171c194fec10f006d630377f87684b419336bc5a":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")

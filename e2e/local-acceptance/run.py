@@ -326,6 +326,7 @@ def performance_scope_acceptance(directory):
     cases += [(path, both) for path in ["rust/crates/rusty-sudocode-cli/src/render.rs",
         "rust/crates/rusty-sudocode-cli/src/repl_ui/layout.rs",
         "rust/crates/pty-harness/src/lib.rs", "rust/crates/rusty-sudocode-cli/tests/common/mod.rs",
+        "rust/crates/scode-test-support/src/lib.rs",
         "e2e/terminal-resize/host.cjs"]]
     cases += [("rust/crates/engine-core/src/lib.rs", ["rendering"])]
     cases += [(path, []) for path in ["rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
@@ -334,6 +335,7 @@ def performance_scope_acceptance(directory):
               ("rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs", ["browser"]),
               ("rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs", ["browser"]),
               ("rust/crates/scode-benchmark-drivers/Cargo.toml", both),
+              ("rust/crates/scode-test-support/Cargo.toml", both),
               ("rust/crates/scode-benchmark-drivers/future.rs", both)]
     cases += [("e2e/terminal-resize/benchmark.py", both),
               ("e2e/terminal-resize/performance-policy.json", ["rendering"]),
@@ -342,6 +344,7 @@ def performance_scope_acceptance(directory):
               ("e2e/terminal-resize/gui-policy.json", ["browser"])]
     context_inputs = {"rust/Cargo.lock", "rust/.cargo/config.toml", "rust/crates/api/Cargo.toml",
         "rust/crates/api/build.rs", "rust/vendor/fixture/src/lib.rs", "rust/crates/scode-benchmark-drivers/Cargo.toml",
+        "rust/crates/scode-test-support/Cargo.toml",
         "rust/crates/rusty-sudocode-cli/src/main.rs", "rust/crates/rusty-sudocode-cli/src/startup.rs",
         "rust/crates/rusty-sudocode-cli/src/cli/config_ui.rs", "rust/crates/runtime/src/config.rs",
         "rust/crates/runtime/src/config/fixture.rs", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs",

@@ -632,6 +632,40 @@ took 38.546 seconds with the old pin and 11.163 seconds with the corrected pin
 delay; all eighteen case executions passed. These are local measurements;
 whole-suite and end-to-end delivery savings require separate evidence.</p>
 
+<p><strong>Compile shared native fixtures once (2026-11-07).</strong>
+<code>scode-test-support</code> owns the existing PTY workspace, mock/live
+backend, terminal and shell helpers. Thin inline caller adapters retain lazy
+<code>SCODE_TEST_BIN</code>/<code>CARGO_BIN_EXE_scode</code> selection, including
+the standalone benchmark's refusal to guess an executable. Original individual
+and grouped test targets, cases, assertions, timeouts and process isolation
+remain unchanged. The extracted path selects the same resize, rendering and
+browser acceptance as the former common module. A new real native PTY journey
+checks lazy caller resolution, independent mock workspaces and peer isolation;
+it adds no product feature-coverage credit. In one Windows helper-edit rebuild
+comparison, the identical 102-target Cargo command rebuilt 27 test drivers in
+127.249 seconds before extraction and 86.310 seconds afterward (32.17% less).
+Both variants passed the same two original groups, 218 cases each, with their
+five existing ignored cases retained. Live-only early returns earn no provider
+coverage. These are local compiler measurements, excluding lease waits; original
+waits, setup, failed diagnostics and source acceptance remain part of delivery
+time. They do not establish whole-suite or end-to-end delivery savings.
+The Windows artifact infrastructure fixture keeps its private Cargo outputs
+short while retaining the requested evidence directory. Its mandatory native
+guard exercises deeply nested evidence; all original artifact identity and
+refusal controls remain required. An actual 263-character linker output failed
+before this correction; a deeper 265-character legacy layout passed the complete
+fixture using the independent short build directory.</p>
+
+<p>Complementary Linux CI exposed an existing terminal-completion race:
+the durable journal could publish a completion before the background registry
+recorded the observed process exit. The monitor now updates the terminal status
+before publishing, while retaining ownership of journal persistence retries.
+A real native-child regression reads the task count synchronously at the
+publication boundary; the original code reports one running terminal and the
+corrected code reports none. The existing ACP exit-code, immediate status,
+ACK retry, cold replay and purge journey retains its assertions and deadlines.
+This adds no paid-provider or PTY feature-coverage credit.</p>
+
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
 native suites on the integrated merge-group tree: runtime interactions found

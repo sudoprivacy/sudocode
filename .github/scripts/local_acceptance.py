@@ -76,11 +76,47 @@ def load_policy(ref):
     return json.loads(tracked(ref, POLICY))
 
 
+def committed_blob_bytes(blobs):
+    """Read immutable Git objects together, preserving exact binary contents."""
+    if not blobs:
+        return {}
+    contents = git("cat-file", "--batch", data=("\n".join(blobs.values()) + "\n").encode("ascii")).stdout
+    documents, position = {}, 0
+    for path, identity in blobs.items():
+        end = contents.index(b"\n", position)
+        header = contents[position:end].decode("ascii").split()
+        if len(header) != 3 or header[:2] != [identity, "blob"]:
+            raise ValueError("Unexpected committed metadata object")
+        size = int(header[2])
+        position = end + 1
+        if size < 0 or contents[position + size:position + size + 1] != b"\n":
+            raise ValueError("Incomplete committed metadata object")
+        documents[path] = contents[position:position + size]
+        position += size + 1
+    if position != len(contents):
+        raise ValueError("Unexpected trailing committed metadata")
+    return documents
+
+
 def contract_hash(ref):
     paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
              ".github/workflows/local-acceptance-publish.yml"]
-    paths += value("ls-tree", "-r", "--name-only", ref, ".github/local-acceptance").splitlines()
-    return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
+    # Resolve the complete tree once, then read by immutable object ID. Mutable
+    # refs are never memoized and archive attributes cannot omit protected data.
+    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, ".github/local-acceptance").stdout
+    blobs = {}
+    for row in rows.split(b"\0"):
+        if not row:
+            continue
+        info, path = row.split(b"\t", 1)
+        _mode, kind, identity = info.decode("ascii").split()
+        if kind != "blob":
+            raise RuntimeError("Acceptance contract contains a non-blob Git entry")
+        blobs[path.decode("utf-8")] = identity
+    missing = sorted(set(paths) - blobs.keys())
+    if missing:
+        raise RuntimeError(f"Acceptance contract is missing committed files: {missing}")
+    return sha(canonical({path: sha(data) for path, data in sorted(committed_blob_bytes(blobs).items())}))
 
 
 def executor_source(ref):
@@ -490,23 +526,8 @@ def production_dependency_state(ref, workspace):
         blobs[path] = _identity
     if "rust/Cargo.lock" not in blobs:
         raise ValueError("Missing committed Cargo lock")
-    # One immutable-object read avoids spawning Git for every member each
-    # time the public planner/checkpoint evaluates the same dependency scope.
-    contents = git("cat-file", "--batch", data=("\n".join(blobs.values()) + "\n").encode("ascii")).stdout
-    documents, position = {}, 0
-    for path, identity in blobs.items():
-        end = contents.index(b"\n", position)
-        header = contents[position:end].decode("ascii").split()
-        if len(header) != 3 or header[:2] != [identity, "blob"]:
-            raise ValueError("Unexpected committed metadata object")
-        size = int(header[2])
-        position = end + 1
-        if size < 0 or contents[position + size:position + size + 1] != b"\n":
-            raise ValueError("Incomplete committed metadata object")
-        documents[path] = tomllib.loads(contents[position:position + size].decode("utf-8"))
-        position += size + 1
-    if position != len(contents):
-        raise ValueError("Unexpected trailing committed metadata")
+    documents = {path: tomllib.loads(data.decode("utf-8"))
+                 for path, data in committed_blob_bytes(blobs).items()}
     lock = documents.pop("rust/Cargo.lock")
     for path, manifest in documents.items():
         manifests[path] = without_development_dependencies(manifest)

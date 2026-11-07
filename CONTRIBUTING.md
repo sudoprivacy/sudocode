@@ -1098,6 +1098,12 @@ update; it is not the `Local acceptance` test result. The read-only gate checks
 the actor's current role and uses the approved executor for complementary hosts.
 Failed tests, invalid signatures and missing hosts still fail normal acceptance.
 
+Contract hashing reads one committed tree and batches its immutable Git blobs.
+The byte hashes, signed payloads and required tests remain the same; no mutable
+ref result is cached. The required Docker and author-native contract guards
+exercise binary/empty inputs, Unicode paths, link text, moved refs, missing
+objects and the original per-file hash reference through real Git processes.
+
 The command requires intervening protected contract changes to be integrated.
 Unrelated main updates retain the checked-out head and its existing build outputs.
 A changed head, changed trusted rules, revoked status or lost maintainer role requires a fresh update.

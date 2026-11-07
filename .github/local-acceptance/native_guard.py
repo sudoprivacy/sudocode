@@ -39,6 +39,10 @@ def main():
         "--output", str(output / "contract-reads"),
     ], SOURCE, output / "contract-reads.log"))
     commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/parallel_acceptance.py"),
+        "--output", str(output / "parallel-acceptance"),
+    ], SOURCE, output / "parallel-acceptance.log"))
+    commands.append(helper.run_command([
         sys.executable, str(SOURCE / "e2e/local-acceptance/docker_health_acceptance.py"),
         "--output", str(output / "docker-health"),
     ], SOURCE, output / "docker-health.log"))

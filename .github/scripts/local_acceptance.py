@@ -415,18 +415,18 @@ def without_development_dependencies(manifest):
     return result
 
 
-def opt_in_test_target_inputs(paths, base, head):
-    """Recognize only newly added disabled targets with previously absent names/paths."""
+def opt_in_test_target_changes(paths, base, head):
+    """Prove new disabled target declarations and their newly committed sources together."""
     manifests = [path for path in paths if path.startswith("rust/crates/")
                  and path.count("/") == 3 and path.endswith("/Cargo.toml")]
     if tomllib is None or not manifests:
-        return set()
-    ignored = set()
+        return set(), set()
+    ignored, sources = set(), set()
     try:
         def document(ref, path):
             return tomllib.loads(tracked(ref, path).decode("utf-8"))
         if document(base, "rust/Cargo.toml") != document(head, "rust/Cargo.toml"):
-            return ignored
+            return ignored, sources
         for path in manifests:
             try:
                 before, after = document(base, path), document(head, path)
@@ -444,7 +444,7 @@ def opt_in_test_target_inputs(paths, base, head):
                 rows = git("ls-tree", "-r", "-z", ref, "--", directory + "tests").stdout.decode("utf-8").split("\0")
                 return {name: info.split()[0] for row in rows if row for info, name in [row.split("\t", 1)]}
             old_files, new_files = files(base), files(head)
-            valid = True
+            valid, added_sources = True, set()
             for target in new[len(old):]:
                 name = target.get("name", "")
                 relative = target.get("path", "")
@@ -462,11 +462,19 @@ def opt_in_test_target_inputs(paths, base, head):
                 if mode not in {"100644", "100755"}:
                     valid = False
                     break
+                added_sources.add(directory + relative)
             if valid:
                 ignored.add(path)
+                sources.update(added_sources)
     except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError):
-        return set()
-    return ignored
+        return set(), set()
+    return ignored, sources
+
+
+def opt_in_test_target_inputs(paths, base, head):
+    """Retain the manifest-only scope used by the native acceptance planner."""
+    manifests, _sources = opt_in_test_target_changes(paths, base, head)
+    return manifests
 
 
 def development_lock_change(before, after, manifests):
@@ -1072,12 +1080,12 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if (not isinstance(planned_policy, str) or not re.fullmatch(r"[a-f0-9]{40}", planned_policy)
             or git("merge-base", "--is-ancestor", planned_policy, protected, check=False).returncode):
         raise RuntimeError("Execution plan policy is not an ancestor of the protected policy")
-    expected_contract = contract_hash(protected)
-    if (receipt.get("contract_sha256") != expected_contract
-            or contract_hash(planned_policy) != expected_contract or changed_contract_files(head, base)):
-        raise RuntimeError("Execution plan requires unchanged protected acceptance rules; use contract-update for rule changes")
+    if (receipt.get("contract_sha256") != contract_hash(planned_policy)
+            or changed_contract_files(head, base)):
+        raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
-    if tracked(head, workflow) != tracked(planned_policy, workflow):
+    if (tracked(head, workflow) != tracked(planned_policy, workflow)
+            or tracked(protected, workflow) != tracked(planned_policy, workflow)):
         raise RuntimeError("Early native scheduling requires the current protected native workflow definition; integrate that workflow before starting")
     if receipt.get("checks") != {}:
         raise RuntimeError("An execution plan must contain no completed checks")
@@ -1086,6 +1094,15 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     plan = acceptance_plan(policy, names, receipt["host"])
     if not names or receipt.get("plan") != plan:
         raise RuntimeError("Execution plan differs from the protected source/author responsibility plan")
+    if contract_hash(planned_policy) != contract_hash(protected):
+        dispatcher = ".github/local-acceptance/cross_platform.py"
+        if (tracked(planned_policy, dispatcher) != tracked(protected, dispatcher)
+                or reachable_profile_commands_hashes(planned_policy, names)
+                   != reachable_profile_commands_hashes(protected, names)):
+            raise RuntimeError("Execution plan commands or native dispatcher changed; this old plan cannot schedule current execution. "
+                               "Publish a fresh source/plan from the original author host; all current checks remain required.")
+        print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
+              "author/native responsibility, selected commands and native workflow/dispatcher verified unchanged.", flush=True)
     return receipt
 
 

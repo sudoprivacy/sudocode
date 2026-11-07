@@ -1054,6 +1054,16 @@ selector changes; queue/main reuse its result.
 Changing the queue entry itself also selects the real all-feature workspace
 lint on all three queue platforms. Real committed PR/push/queue event controls
 verify this trigger and the exclusion of documentation-only changes.
+New integration grouping files declared with `test=false` also reuse the
+committed Git/TOML proof for their manifests. Only previously absent regular
+files under `tests/acceptance_groups`, with fresh target names and unchanged
+remaining manifest/workspace settings, can skip unchanged daemon/A2A/cohost
+journeys. Existing or ordinary test edits, enabled/unknown declarations,
+missing/indirect sources and mixed production/build changes retain those gates.
+Required preflight JSON prints `daemon_disabled_test_sources_ignored`; full
+native cases, examples, all-feature Clippy and provider/live scope remain.
+Real Git event, Cargo product/hash, nextest inventory and native-process
+controls run in the required Linux Docker and author-native contract guards.
 Draft snapshots use a separate concurrency group and explicit run title. They
 cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
 workflows allocate no publisher runner. A newer applicable ready run and its
@@ -1099,6 +1109,15 @@ rechecks the source and reuses those jobs; retries reuse exact-source author
 proof rather than rerunning completed work. Its signed timing includes setup
 and publication before the author checks. Rule changes still use the complete
 `contract-update` route below; ordinary `git push` retains serial acceptance.
+Protected metadata can advance while a plan is running. Its original SSH
+signature and contract hash must still authenticate an ancestor of current
+main, and the source contract must remain unchanged. The current responsibility
+plan, every selected command identity, native workflow and dispatcher must match.
+The required output prints `LOCAL_ACCEPTANCE_PLAN_REUSED` when these conditions
+permit reuse. Changed commands/assertions, images, native dispatch/workflow,
+required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
+controls verify both completion orders, unchanged notes/logs and native jobs
+executed once. A scheduling plan still cannot satisfy completed acceptance.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and

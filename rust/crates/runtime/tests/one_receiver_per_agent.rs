@@ -39,6 +39,7 @@ fn mailbox(root: &Path, self_id: &str) -> Arc<Mailbox> {
 
 fn note(from: &str, body: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: AGENT.to_string(),

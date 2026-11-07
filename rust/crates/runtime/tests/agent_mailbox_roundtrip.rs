@@ -27,6 +27,7 @@ fn temp_workspace(label: &str) -> std::path::PathBuf {
 
 fn make_envelope(from: &str, to: &str, text: &str, kind: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: to.to_string(),
@@ -187,6 +188,7 @@ fn structured_shutdown_envelope_survives_roundtrip() {
     })
     .to_string();
     let envelope = MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: "team-lead".to_string(),
         to: "worker".to_string(),

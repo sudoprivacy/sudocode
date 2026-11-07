@@ -916,6 +916,7 @@ fn start_failed_peer_delivery(kernel: &Arc<Kernel>) -> FailedPeer {
     );
     failed_peer
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: "failed-peer".into(),
             to: "failed-worker".into(),

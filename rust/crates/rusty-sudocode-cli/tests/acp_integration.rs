@@ -7968,6 +7968,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     let peer = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
     for (agent, _) in &sessions {
         peer.send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: (*agent).to_string(),
@@ -8032,6 +8033,7 @@ async fn acp_peer_message_waits_for_tool_resume() {
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
@@ -8112,6 +8114,7 @@ async fn acp_client_owned_peer_input_starts_no_session_turn() {
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),

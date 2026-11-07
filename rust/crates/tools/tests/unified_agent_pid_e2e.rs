@@ -35,6 +35,7 @@ fn unique_workspace(label: &str) -> std::path::PathBuf {
 
 fn envelope(kind: &str, from: &str, body: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: String::new(),
@@ -54,6 +55,7 @@ fn envelope_with_request_id(
     request_id: &str,
 ) -> MailboxEnvelope {
     MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: String::new(),
@@ -555,6 +557,7 @@ fn unified_mailbox_send_poll_roundtrip() {
 
     sender_mb
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "researcher".to_string(),
@@ -602,6 +605,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
 
     for i in 0..5 {
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: format!("agent-{i}"),
             to: "worker".to_string(),
@@ -632,6 +636,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
 #[test]
 fn envelope_serializes_body_not_text() {
     let env = MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: "agent".to_string(),
         to: "peer".to_string(),
@@ -841,6 +846,7 @@ fn poller_compose_multi_turn_integration() {
                         &ws_cb,
                         agent_id,
                         MailboxEnvelope {
+                            send_id: None,
                             delivery: runtime::turn_input::InputDelivery::Steer,
                             from: "coordinator".to_string(),
                             to: agent_id.to_string(),
@@ -856,6 +862,7 @@ fn poller_compose_multi_turn_integration() {
                         &ws_cb,
                         agent_id,
                         MailboxEnvelope {
+                            send_id: None,
                             delivery: runtime::turn_input::InputDelivery::Steer,
                             from: "coordinator".to_string(),
                             to: agent_id.to_string(),

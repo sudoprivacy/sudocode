@@ -785,6 +785,27 @@ async fn live_anthropic_smoke_stdio() {
 }
 
 /// A real model must read the summary, send it back, and preserve its record.
+/// A steering message with a summary, from `from` to `to`.
+fn summary_message(
+    from: &str,
+    to: &str,
+    body: &str,
+    summary: &str,
+) -> runtime::agent_mailbox::MailboxEnvelope {
+    runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: from.into(),
+        to: to.into(),
+        body: body.into(),
+        summary: Some(summary.into()),
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    }
+}
+
 #[tokio::test]
 async fn live_peer_summary_reaches_model_client_and_saved_session() {
     const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
@@ -825,18 +846,8 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         PEER.into(),
     );
     peer.ensure_presence().unwrap();
-    peer.send(runtime::agent_mailbox::MailboxEnvelope {
-        delivery: runtime::turn_input::InputDelivery::Steer,
-        from: PEER.into(),
-        to: agent.into(),
-        body: BODY.into(),
-        summary: Some(SUMMARY.into()),
-        timestamp: 0,
-        color: None,
-        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
-        request_id: None,
-    })
-    .unwrap();
+    peer.send(summary_message(PEER, agent, BODY, SUMMARY))
+        .unwrap();
     timeout(RECV_TIMEOUT, async {
         let mut saw_summary = false;
         let mut answer = String::new();

@@ -2,8 +2,10 @@
 //!
 //! These tests are gated on the `PROXY_AUTH_TOKEN` environment variable (a
 //! sudorouter API key; `PROXY_BASE_URL` selects the endpoint). When the token
-//! is absent or empty the tests silently pass (return early). On CI they run
-//! only on main merges / `workflow_dispatch` where the GitHub secret is available.
+//! is absent or empty the tests return early. Invoke the shared `acp` scenario
+//! in `.github/scripts/live_model_acceptance.py` explicitly with local credentials,
+//! or through the authorized on-demand/release workflow. Ordinary PR, queue and
+//! main-push checks do not run paid provider tests.
 //! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
 //! defaults to `sonnet` for compatibility with existing live runs.
 //!

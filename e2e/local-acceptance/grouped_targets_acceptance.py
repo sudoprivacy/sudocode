@@ -499,6 +499,10 @@ pub fn record(name: &str) {
     blob = git("rev-parse", "HEAD:" + helper_wrapper)
     git("update-index", "--cacheinfo", "120000," + blob + "," + helper_wrapper)
     git("commit", "-m", "Refuse indirect grouping source")
+    # Materialize the committed mode too; changing only the index otherwise
+    # leaves a modified regular file that Git correctly refuses to replace.
+    git("checkout-index", "--force", "--", helper_wrapper)
+    git("diff", "--exit-code")
     queue_scope("committed symlink grouping source", queue_base, True, [])
     git("switch", "--detach", queue_head)
     git("rm", helper_wrapper)

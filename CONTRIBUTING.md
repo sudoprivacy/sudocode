@@ -1669,14 +1669,17 @@ the canonical changes. Keep calculations in this shared contract instead of
 adding separate percentages or TTL price formulas to a renderer or monitor.
 Changes to measurement do not enable telemetry or automatic TTL selection.
 
-### Experimental TTL advice
+### TTL advice
 
-Enable `"experimental": {"cacheTtlAdvisor": true}` in settings, or set
-`SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR=1` for the process. This experiment
-collects local metadata and **never changes the outgoing TTL**, including
-explicit `cache_ttl_1h` overrides. It sends no keepalive or extra model calls.
-Use `scode cache stats --output-format json` to inspect `ttl_advisor` per
-session. The text report points to this view without adding terminal warnings.
+An unpinned session's outgoing TTL follows this advice; `cache_ttl_1h` in
+`sudocode.json` pins it instead (`true` 1h, `false` 5m), and a pinned session
+only gets the recommendation. Before a session has evidence of its own, it
+starts from the TTL this user's sessions last decided from evidence, kept in
+`cache/prompt-cache/ttl-default.json`, or 5m before anything is learned: one
+user's agents tend to work alike, so that is the best guess. Deleting the file
+resets it. The advisor sends no keepalive or extra model calls. Use
+`scode cache stats --output-format json` to inspect `ttl_advisor` per session
+and `ttl_default` for the learned start.
 
 The existing request ledger gains request-start, response-start and logical
 completion times, final client cache-marker TTLs (including the default 5m),
@@ -1692,8 +1695,8 @@ the successful prefix state. Missing or legacy rows break reuse adjacency.
 
 One recommendation is frozen at session creation/resume and each committed
 compaction. Resume of the same model/route/configuration and segment reuses the
-decision. An empty new session keeps its configured TTL until there is enough
-history at a later boundary. This does not reset cumulative session usage.
+decision. An empty new session keeps its starting TTL (the learned default, or 5m) until
+there is enough history at a later boundary. This does not reset cumulative session usage.
 Training reads at most a 512 KiB ledger tail and only completed history available
 before that boundary; derived state retains at most 16 decisions. No full prompt,
 tool payload, URL or credential is added. Public advice omits correlation keys.
@@ -1712,11 +1715,11 @@ prices do not establish gateway billing or subscription-quota economics.
 
 The first version requires eight eligible intervals and a 10% scenario-cost
 margin to suggest changing TTL; otherwise it preserves the configured choice.
-Those are experimental decision thresholds, not statistical confidence bounds.
+Those are heuristic decision thresholds, not statistical confidence bounds.
 `forward_comparison` scores only later requests with a previously frozen
 decision, against both fixed baselines using the same scenario assumptions and
 the shared generated cost function. It does not fit the policy to those later
-requests. Auto-application needs a separate decision after credible validation.
+requests.
 
 Main turns, subagent turns, and compaction share
 `api::session_message_request`. Add session-level request fields there rather

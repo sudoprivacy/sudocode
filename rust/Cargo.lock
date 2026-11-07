@@ -4642,6 +4642,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtime",
  "rustyline",
+ "scode-test-support",
  "self-replace",
  "serde",
  "serde_json",
@@ -4756,8 +4757,20 @@ dependencies = [
  "mock-anthropic-service",
  "pty-expect",
  "runtime",
+ "scode-test-support",
  "serde_json",
  "socket2 0.6.5",
+ "tokio",
+]
+
+[[package]]
+name = "scode-test-support"
+version = "0.2.41"
+dependencies = [
+ "mock-anthropic-service",
+ "pty-expect",
+ "runtime",
+ "serde_json",
  "tokio",
 ]
 

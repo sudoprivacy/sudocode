@@ -632,6 +632,24 @@ took 38.546 seconds with the old pin and 11.163 seconds with the corrected pin
 delay; all eighteen case executions passed. These are local measurements;
 whole-suite and end-to-end delivery savings require separate evidence.</p>
 
+<p><strong>Compile shared native fixtures once (2026-11-07).</strong>
+<code>scode-test-support</code> owns the existing PTY workspace, mock/live
+backend, terminal and shell helpers. Thin inline caller adapters retain lazy
+<code>SCODE_TEST_BIN</code>/<code>CARGO_BIN_EXE_scode</code> selection, including
+the standalone benchmark's refusal to guess an executable. Original individual
+and grouped test targets, cases, assertions, timeouts and process isolation
+remain unchanged. The extracted path selects the same resize, rendering and
+browser acceptance as the former common module. A new real native PTY journey
+checks lazy caller resolution, independent mock workspaces and peer isolation;
+it adds no product feature-coverage credit. In one Windows helper-edit rebuild
+comparison, the identical 102-target Cargo command rebuilt 27 test drivers in
+127.249 seconds before extraction and 86.310 seconds afterward (32.17% less).
+Both variants passed the same two original groups, 218 cases each, with their
+five existing ignored cases retained. Live-only early returns earn no provider
+coverage. These are local compiler measurements, excluding lease waits; original
+waits, setup, failed diagnostics and source acceptance remain part of delivery
+time. They do not establish whole-suite or end-to-end delivery savings.</p>
+
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
 native suites on the integrated merge-group tree: runtime interactions found

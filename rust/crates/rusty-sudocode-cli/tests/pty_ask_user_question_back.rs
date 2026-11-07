@@ -69,6 +69,69 @@ fn result_value(result: &Value) -> Value {
     serde_json::from_str(&text).unwrap_or(Value::String(text))
 }
 
+/// The committed card says what was asked and what was chosen: every option
+/// in the dialog's order, the chosen one marked and bold, the rest dimmed, and
+/// none of the raw result fields.
+// The cell type belongs to pty-expect's vt100, which these tests don't depend
+// on directly, so it can't be named as a method path.
+#[allow(clippy::redundant_closure_for_method_calls)]
+fn assert_answered_card(sess: &PtySession) {
+    let (rows, bold) = sess.render(|screen| {
+        let raw = screen.raw();
+        let (height, width) = raw.size();
+        let rows: Vec<String> = raw.rows(0, width).take(usize::from(height)).collect();
+        let bold: Vec<bool> = (0..height)
+            .map(|row| {
+                (0..width)
+                    .find(|&col| {
+                        raw.cell(row, col)
+                            .is_some_and(|cell| cell.contents() == "→")
+                    })
+                    .and_then(|col| raw.cell(row, col))
+                    .is_some_and(|cell| cell.bold())
+            })
+            .collect();
+        (rows, bold)
+    });
+    let start = rows
+        .iter()
+        .rposition(|row| row.contains("╭─ AskUserQuestion"))
+        .unwrap_or_else(|| panic!("answered card:\n{}", rows.join("\n")));
+    let end = start
+        + rows[start..]
+            .iter()
+            .position(|row| row.trim_start().starts_with("╰─"))
+            .expect("card closes");
+    let card: Vec<&str> = rows[start + 1..end]
+        .iter()
+        .map(|row| row.trim_start().trim_start_matches('│').trim_end())
+        .collect();
+    assert!(
+        rows[start].contains("AskUserQuestion · 2 questions"),
+        "{}",
+        rows[start]
+    );
+    assert_eq!(
+        card,
+        [
+            " Pick a fruit?",
+            " → apple",
+            "   pear",
+            "   plum",
+            " Pick a size?",
+            "   small",
+            " → large",
+        ],
+        "card rows"
+    );
+    let marked: Vec<bool> = (start + 1..end).map(|row| bold[row]).collect();
+    assert_eq!(
+        marked,
+        [false, true, false, false, false, false, true],
+        "only the chosen rows are bold"
+    );
+}
+
 #[test]
 fn going_back_reopens_an_answered_question_with_its_answer_selected() {
     let env = TestEnv::new("ask-user-question-back");
@@ -76,6 +139,9 @@ fn going_back_reopens_an_answered_question_with_its_answer_selected() {
         return;
     }
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[]);
+    // Tall enough to keep the committed card on screen above the mock's reply,
+    // which echoes the whole raw result.
+    sess.resize(200, 120).unwrap();
     common::expect_input_line_cleared(&sess, env.timeout(), "initial prompt");
     let prompt = env.prompt("", "ask_user_question_two_fields");
     sess.send(&format!("{prompt}\r")).unwrap();
@@ -110,6 +176,7 @@ fn going_back_reopens_an_answered_question_with_its_answer_selected() {
 
     sess.expect("ask_user_question answered:").unwrap();
     common::expect_input_line_cleared(&sess, env.timeout(), "answered question");
+    assert_answered_card(&sess);
     let result = result_value(&tool_result(
         &question_requests(&env),
         "toolu_ask_user_question_two_fields",

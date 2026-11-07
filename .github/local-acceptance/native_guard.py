@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -34,6 +35,14 @@ def main():
         commands.append(helper.run_command(["git", "config", "localAcceptance.vsdevcmd", configured],
                                           SOURCE, output / "toolchain-config.log"))
     commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/contract_reads_acceptance.py"),
+        "--output", str(output / "contract-reads"),
+    ], SOURCE, output / "contract-reads.log"))
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/parallel_acceptance.py"),
+        "--output", str(output / "parallel-acceptance"),
+    ], SOURCE, output / "parallel-acceptance.log"))
+    commands.append(helper.run_command([
         sys.executable, str(SOURCE / "e2e/local-acceptance/docker_health_acceptance.py"),
         "--output", str(output / "docker-health"),
     ], SOURCE, output / "docker-health.log"))
@@ -54,6 +63,15 @@ def main():
         sys.executable, str(SOURCE / "e2e/local-acceptance/release_acceptance.py"),
         "--output", str(output / "release-executor"),
     ], SOURCE, output / "release.log"))
+    artifact_output = output / "release-artifact"
+    if os.name == "nt" and len(str(artifact_output)) < 180:
+        # Exercise a real nested evidence path that used to exceed MAX_PATH
+        # once Cargo appended its build-script executable name.
+        artifact_output /= "native-" + "x" * max(1, 180 - len(str(artifact_output)) - 8)
+    commands.append(helper.run_command([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/release_artifact_acceptance.py"),
+        "--output", str(artifact_output),
+    ], SOURCE, output / "release-artifact.log"))
     commands.append(helper.run_command([
         sys.executable, str(SOURCE / "e2e/local-acceptance/grouped_targets_acceptance.py"),
         "--repository", str(repository), "--output", str(output / "grouped-targets"),

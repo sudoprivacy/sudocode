@@ -99,13 +99,12 @@ impl EngineApiClient {
                         route,
                     },
                 );
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        crate::cache_ttl::before_request(&self.session_id, ttl, advisor.as_ref(), now_ms);
+        crate::cache_ttl::before_request(
+            &self.session_id,
+            ttl,
+            advisor.as_ref(),
+            crate::cache_ttl::now_ms(),
+        );
     }
 
     #[must_use]
@@ -596,19 +595,17 @@ impl ApiClient for EngineApiClient {
     fn cache_context_boundary(&mut self, segment: u64) {
         let pinned = self.client.cache_ttl().is_none_or(api::CacheTtl::pinned);
         crate::cache_ttl::context_boundary(&self.session_id, segment, pinned);
-        if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-            if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
-                cache.set_context_segment(segment);
-                let (verdict, decided) = crate::cache_advisor::context_boundary(
-                    &cache.paths().session_dir,
-                    segment,
-                    &self.model,
-                    &route,
-                    ttl,
-                    crate::cache_ttl::status(&self.session_id).auto,
-                );
-                crate::cache_ttl::advised(&self.session_id, verdict, decided);
-            }
+        if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
+            cache.set_context_segment(segment);
+            let (verdict, decided) = crate::cache_advisor::context_boundary(
+                &cache.paths().session_dir,
+                segment,
+                &self.model,
+                &route,
+                ttl,
+                crate::cache_ttl::status(&self.session_id).auto,
+            );
+            crate::cache_ttl::advised(&self.session_id, verdict, decided);
         }
     }
 

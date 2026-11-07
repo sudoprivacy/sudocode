@@ -170,6 +170,7 @@ fn inject_with_summary(
         Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
     mailbox
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: engine_events::InputDelivery::Queue,
             from: from.to_string(),
             to: receiver.to_string(),

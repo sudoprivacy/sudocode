@@ -269,14 +269,14 @@ def compiler_contract(profiles, root, output, execute):
     scripts = root / "e2e/compiler-context"
     scripts.mkdir(parents=True)
     driver = scripts / "run.py"
-    driver.write_text('''import argparse, hashlib, json, subprocess
+    driver.write_text('''import argparse, hashlib, json, os, subprocess
 from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--engine', type=Path, required=True)
 p.add_argument('--directory', type=Path, required=True)
 a = p.parse_args()
 actual = subprocess.check_output([str(a.engine)], text=True).strip()
-assert actual == 'debug=false,flavor=normal', actual
+assert actual == os.environ.get('EXPECTED_COMPILER_FLAVOR', 'debug=false,flavor=normal'), actual
 a.directory.mkdir(parents=True)
 (a.directory / 'native-child.json').write_text(json.dumps({
     'actual': actual, 'engine_sha256': hashlib.sha256(a.engine.read_bytes()).hexdigest()}))
@@ -287,6 +287,15 @@ a.directory.mkdir(parents=True)
     evidence = json.loads((output / "compiler/compiler-context/native-child.json").read_text(encoding="utf-8"))
     assert evidence["engine_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
     assert "e2e/compiler-context/run.py" in records[-1]["command"]
+    def dev_execute(args, cwd, log, env=None):
+        return execute(args, cwd, log, {**(env or {}), "EXPECTED_COMPILER_FLAVOR": "debug=true,flavor=dev"})
+
+    source_records = profiles.run("native-context", root, output / "source-compiler", "fixture-base", dev_execute)
+    assert len(source_records) == 2 and not any("--release" in row["command"] for row in source_records)
+    source_engine = Path(source_records[-1]["command"][source_records[-1]["command"].index("--engine") + 1])
+    assert source_engine.parent.name == "debug"
+    source_evidence = json.loads((output / "source-compiler/compiler-context/native-child.json").read_text(encoding="utf-8"))
+    assert source_evidence["engine_sha256"] == hashlib.sha256(source_engine.read_bytes()).hexdigest()
     driver.write_text(driver.read_text(encoding="utf-8") + "\nraise SystemExit(17)\n", encoding="utf-8")
     try:
         profiles.run("native-release", root, output / "compiler-failure", "fixture-base", execute)
@@ -295,6 +304,12 @@ a.directory.mkdir(parents=True)
         failed = json.loads((output / "compiler-failure/003.command.json").read_text(encoding="utf-8"))
         assert failed["exit_code"] == 17, failed
         assert not (output / "compiler-failure/004.log").exists()
+    try:
+        profiles.run("native-context", root, output / "source-compiler-failure", "fixture-base", dev_execute)
+        raise AssertionError("Failed source compiler context was accepted")
+    except RuntimeError:
+        source_failed = json.loads((output / "source-compiler-failure/001.command.json").read_text(encoding="utf-8"))
+        assert source_failed["exit_code"] == 17
     execute(["git", "add", "e2e/compiler-context/run.py"], root, output / "compiler-history-add.log")
     execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
              "-c", "commit.gpgsign=false", "commit", "-m", "Introduce required compiler journey"],
@@ -325,6 +340,7 @@ a.directory.mkdir(parents=True)
     finally:
         os.environ["CARGO_TARGET_DIR"] = previous_target
     return {"commands": records, "failed_compiler_exit": failed["exit_code"],
+            "source_dev_context_commands": source_records, "source_failed_compiler_exit": source_failed["exit_code"],
             "introduced_driver_removal_refused": True,
             "shallow_history_absence_not_treated_as_proof": True,
             "scope": "Native executor/CLI artifact boundary only; not product compiler coverage"}

@@ -2588,12 +2588,21 @@ fn stream_cohost_reply(request: &MessageRequest, _scenario: Scenario) -> String 
     }
 }
 
-// Where does a co-hosted agent's shell run? Ask it — `pwd`, then report
+// Where does a co-hosted agent's shell run? Ask it, then report
 // the answer to the peer. The assertion is the test's; this only has to
 // make the agent produce the fact.
+fn cohost_shell_pwd_command() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        ("PowerShell", "(Get-Location).Path")
+    } else {
+        ("bash", "pwd")
+    }
+}
+
 fn stream_cohost_shell_pwd(request: &MessageRequest, _scenario: Scenario) -> String {
     let results = tool_results_by_name(request);
-    match (results.get("bash"), results.get("send")) {
+    let (shell, command) = cohost_shell_pwd_command();
+    match (results.get(shell), results.get("send")) {
         (Some(_), Some((send_output, _))) => {
             final_text_sse(&format!("cohost shell pwd complete: {send_output}"))
         }
@@ -2610,7 +2619,11 @@ fn stream_cohost_shell_pwd(request: &MessageRequest, _scenario: Scenario) -> Str
             .to_string();
             tool_use_sse("toolu_cohost_pwd_send", "send", &[&input])
         }
-        _ => tool_use_sse("toolu_cohost_pwd_bash", "bash", &[r#"{"command":"pwd"}"#]),
+        _ => tool_use_sse(
+            "toolu_cohost_pwd_bash",
+            shell,
+            &[&json!({ "command": command }).to_string()],
+        ),
     }
 }
 
@@ -3346,7 +3359,8 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         },
         Scenario::CohostShellPwd => {
             let results = tool_results_by_name(request);
-            match (results.get("bash"), results.get("send")) {
+            let (shell, command) = cohost_shell_pwd_command();
+            match (results.get(shell), results.get("send")) {
                 (Some(_), Some((send_output, _))) => text_message_response(
                     "msg_cohost_shell_pwd_final",
                     &format!("cohost shell pwd complete: {send_output}"),
@@ -3364,8 +3378,8 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 _ => tool_message_response(
                     "msg_cohost_shell_pwd_bash",
                     "toolu_cohost_pwd_bash",
-                    "bash",
-                    json!({"command": "pwd"}),
+                    shell,
+                    json!({"command": command}),
                 ),
             }
         }

@@ -477,6 +477,146 @@ def prepare_native_checks(names, root, output, execute):
     return prepared
 
 
+def native_workspace_lint_arguments(root, base, scope):
+    """Keep prepared and direct workspace lint on one argument recipe."""
+    if scope["tests"] is not None:
+        arguments = ["--locked", *native_cli_test_package_args(root, base),
+                     "--features", "engine-acp/mailbox"]
+        for test in scope["tests"]:
+            arguments += ["--test", test]
+        return ["clippy", *arguments, "--", "-D", "warnings"]
+    targets = scope["targets"]
+    lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
+    return ["clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
+            "--", "-D", "warnings"]
+
+
+def native_workspace_lint(root, output, base, cargo, command):
+    """Run the original lint prefix; a pass alone never completes workspace acceptance."""
+    if os.name == "nt" and not shutil.which("pwsh.exe"):
+        raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
+                           "Add your existing PowerShell 7 directory to PATH, or install it with "
+                           "`winget install --id Microsoft.PowerShell --exact --source winget`, "
+                           "then rerun the same acceptance command. No workspace compilation started.")
+    cargo("fmt", "--all", "--check")
+    tests = changed_cli_test_targets(root, base)
+    scope = {"tests": tests, "targets": None}
+    (output / "test-scope.json").write_text(json.dumps({
+        "mode": "changed-cli-targets" if tests is not None else "full-workspace", "targets": tests,
+    }, indent=2))
+    if tests is not None:
+        print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
+    else:
+        command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
+        command(sys.executable, "scripts/check_cache_usage_fixtures.py")
+        metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
+        targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+        scope["targets"] = targets
+        selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
+        (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
+        print("Native workspace target selection: " + json.dumps(selection), flush=True)
+        print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
+              "targets, examples and benches before long builds and PTY execution. "
+              "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
+        if targets:
+            print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                  "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
+        else:
+            print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                  "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
+    cargo(*native_workspace_lint_arguments(root, base, scope))
+    return scope
+
+
+def workspace_preparation_identity(root, output, base):
+    """Bind in-process preparation to the same clean source, output and executor."""
+    try:
+        refs = run.execution_refs
+    except AttributeError:
+        refs = None
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
+    dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=root)
+    if dirty:
+        raise RuntimeError("Workspace lint preparation requires the same clean source; unfinished tests remain required")
+    return {"root": str(root.resolve()), "output": str(output.resolve()), "base": base,
+            "head": head, "execution_refs": refs, "target": str(native_target_directory(root))}
+
+
+def prepare_native_workspace_lint(root, output, base, execute):
+    """Prepare only real lint commands before the contract matrix, under the host lease."""
+    directory = output / "native-workspace"
+    run.workspace_lint_request = workspace_preparation_identity(root, directory, base)
+    print("NATIVE_LINT_PREPARATION: execute the selected workspace lint before guard-contract. "
+          "The later workspace profile consumes these original logs once; native tests and the full guard remain required.", flush=True)
+    try:
+        return run("native-workspace", root, directory, base, execute)
+    except RuntimeError as error:
+        raise RuntimeError("Early native workspace lint failed before guard-contract started. "
+                           f"Workspace acceptance remains incomplete; retain these logs and repair the reported error: {error}") from error
+    finally:
+        del run.workspace_lint_request
+
+
+def consume_workspace_lint(preparation, root, output, base, existing):
+    """Refuse stale/tampered preparation; it is not a completed signed profile."""
+    if preparation["identity"] != workspace_preparation_identity(root, output, base):
+        raise RuntimeError("Workspace lint preparation belongs to another source, output, target or executor; "
+                           "run the supported check with fresh output and preserve the original evidence")
+    commands, scope = preparation["commands"], preparation["scope"]
+    if commands[:len(existing)] != existing or scope["tests"] != changed_cli_test_targets(root, base):
+        raise RuntimeError("Workspace lint preparation differs from this provider or selected test scope")
+    for index, entry in enumerate(commands):
+        log = output / f"{index:03d}.log"
+        receipt = log.with_suffix(".command.json")
+        if (entry["exit_code"] != 0 or json.loads(receipt.read_text()) != entry
+                or hashlib.sha256(log.read_bytes()).hexdigest() != entry["log_sha256"]):
+            raise RuntimeError(f"Workspace lint preparation evidence changed: {log}; unfinished tests remain required")
+    lint = commands[-1]["command"]
+    if Path(lint[0]).stem.lower() != "cargo" or lint[1:] != native_workspace_lint_arguments(root, base, scope):
+        raise RuntimeError("Prepared workspace lint did not use the current selected arguments with warnings denied")
+    print("NATIVE_LINT_PREPARATION: verified and consumed the original lint commands; "
+          "running all remaining workspace commands now.", flush=True)
+    return scope, commands
+
+
+def native_compiler_context(root, binary, output, command):
+    """Use the same connected context journey for source and release artifacts."""
+    if compiler_context_driver_present(root):
+        command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
+                "--directory", str(output / "compiler-context"))
+    else:
+        print("This historical source predates the host-context compiler driver; "
+              "its existing native checks remain required.", flush=True)
+
+
+def native_release_journeys(root, binary, output, base, cargo, command, env):
+    """Judge the actual optimized artifact without compiling another CLI for its driver."""
+    import tomllib
+
+    env["SCODE_TEST_BIN"] = str(binary)
+    manifest = root / "rust/crates/scode-benchmark-drivers/Cargo.toml"
+    targets = tomllib.loads(manifest.read_text(encoding="utf-8")).get("test", []) if manifest.is_file() else []
+    declared = [target for target in targets if target.get("name") == "release_stream_capture"]
+    if declared:
+        if (len(declared) != 1 or declared[0].get("test") is not False
+                or declared[0].get("path") != "../rusty-sudocode-cli/tests/pty_model_stream_close.rs"
+                or declared[0].get("required-features")):
+            raise RuntimeError("Release driver must use the original stream/capture workflow without feature exclusions")
+        arguments = ["-p", "scode-benchmark-drivers", "--test", "release_stream_capture"]
+        print("RELEASE_TEST_DRIVER: standalone original stream/capture workflow; "
+              "SCODE_TEST_BIN launches the copied optimized artifact. No unused debug CLI build.", flush=True)
+    else:
+        arguments = [*native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox",
+                     "--test", "pty_model_stream_close"]
+        print("RELEASE_TEST_DRIVER: legacy source retains its original native CLI test target.", flush=True)
+    cargo("test", "--locked", *arguments, "raw_stream_capture_keeps_streaming_and_resume_responsive",
+          "--", "--exact", "--nocapture")
+    with stable_performance_power(output):
+        command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
+                "--report", str(output / "startup.json"))
+    native_compiler_context(root, binary, output, command)
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -544,44 +684,32 @@ def run(name, root, output, base, execute):
         command("npm", "test", cwd=sdk)
         command("npm", "run", "pack:runtime", cwd=sdk)
     elif name == "native-workspace":
-        if os.name == "nt" and not shutil.which("pwsh.exe"):
-            raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
-                               "Add your existing PowerShell 7 directory to PATH, or install it with "
-                               "`winget install --id Microsoft.PowerShell --exact --source winget`, "
-                               "then rerun the same acceptance command. No workspace compilation started.")
-        cargo("fmt", "--all", "--check")
-        tests = changed_cli_test_targets(root, base)
-        (output / "test-scope.json").write_text(json.dumps({
-            "mode": "changed-cli-targets" if tests is not None else "full-workspace",
-            "targets": tests,
-        }, indent=2))
+        try:
+            request = run.workspace_lint_request
+        except AttributeError:
+            request = None
+        try:
+            preparation = run.prepared_workspace
+        except AttributeError:
+            preparation = None
+        if preparation is not None and request is None:
+            scope, original = consume_workspace_lint(preparation, root, output, base, results)
+            results[:] = original
+            del run.prepared_workspace
+        else:
+            scope = native_workspace_lint(root, output, base, cargo, command)
+        if request is not None:
+            if request != workspace_preparation_identity(root, output, base):
+                raise RuntimeError("Workspace lint source changed during preparation")
+            return {"identity": request, "commands": results, "scope": scope}
+        tests = scope["tests"]
         if tests is not None:
             arguments = ["--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
-            print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
-            cargo("clippy", *arguments, "--", "-D", "warnings")
             native_tests(*arguments)
         else:
-            command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
-            command(sys.executable, "scripts/check_cache_usage_fixtures.py")
-            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
-            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
-            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
-            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
-            print("Native workspace target selection: " + json.dumps(selection), flush=True)
-            print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
-                  "targets, examples and benches before long builds and PTY execution. "
-                  "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
-            if targets:
-                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
-                      "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
-            else:
-                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
-                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
-            lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
-            cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
-                  "--", "-D", "warnings")
+            targets = scope["targets"]
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
@@ -630,22 +758,15 @@ def run(name, root, output, base, execute):
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
         binary = output / ("scode" + suffix)
         shutil.copy2(target / "release" / ("scode" + suffix), binary)
-        env["SCODE_TEST_BIN"] = str(binary)
-        # Reuse the native workspace's test graph. Only the driver is debug;
-        # SCODE_TEST_BIN still launches the copied normal release executable.
-        print("Release acceptance: the native test driver launches the copied release scode; "
-              "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
-        cargo("test", "--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
-              "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
-        with stable_performance_power(output):
-            command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
-                    "--report", str(output / "startup.json"))
-        if compiler_context_driver_present(root):
-            command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
-                    "--directory", str(output / "compiler-context"))
-        else:
-            print("This historical source predates the host-context compiler driver; "
-                  "its existing native release checks remain required.", flush=True)
+        native_release_journeys(root, binary, output, base, cargo, command, env)
+    elif name == "native-context":
+        print("NATIVE_CONTEXT_SCOPE: connected compiler-context acceptance uses the current workspace "
+              "dev/mailbox binary. Optimized stream/resume,100ms startup and compiler context are "
+              "mandatory on every newly built release artifact before packaging/publication. "
+              "Ordinary source acceptance can miss optimization-specific regressions until release.", flush=True)
+        cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
+        native_compiler_context(root, target / "debug" / ("scode" + suffix), output, command)
     elif name == "native-services":
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
@@ -732,35 +853,46 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        ".github/actions/release-artifact/action.yml": "72958b635e5ce79040854f925e074f0c461c07c570fe28234b24e15ec954c2bd",
+        ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
+        ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
+        ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "157fae30f7fd278e0a44ef6a44b018a5d15429dcb9de6f025bebfc86b7253e00",
+        "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
+        ".github/scripts/ci_input_scope.py": "23d717e3eb28eb55b9220b7e3d9fe42f2972fa204d6632debef196b37bb724fa",
+        ".github/workflows/rust-ci.yml": "35c183747947fda57c65c06caff9963878d4cea8e92f7cb677abb1138b7b4f2a",
+        "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
-        ".github/local-acceptance/gate.py": "f89e0f15ca412956b2a32e86644acf351e6784a437d42a3faefb35b3886bd96a",
-        ".github/local-acceptance/native_guard.py": "7675fb05cd14fc9253ab0259741ded184cb3400c746150fcc6372c2f262c489e",
+        ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
+        ".github/local-acceptance/native_guard.py": "495e8e52aac5f419d28e0e03010065c965c8f580ec3d30057e5df07433916f0c",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
-        ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "c2c4014f0f4ebb52784cd73406eafb72d2cd105fb52023e19c814e75262321ca",
+        ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
+        ".github/scripts/local_acceptance.py": "82b71d24bc872ea6e1b91b38be73494fbd5cd5dbeb3e49db7b1ec12e6f1d0016",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
-        ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
+        ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "a5942d3505a031ec0f816d2f009c642a6c4c661015fbc87d54c161c97c478ea7",
+        "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "2f5298dd8cd780ce7099ce435b586d596c57e1548fd33fc92209d249009c18b3",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "a060ae86954e8ad5ff4507551b3adc83346f335fff9421c31ddf0f38f1ed801d",
-        "e2e/local-acceptance/host_lease_acceptance.py": "8b5914b541f2cdcc1eb1fe9671a4642c42b5e80bf61cc10bceb935468ea2628e",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
+        "e2e/local-acceptance/host_lease_acceptance.py": "4e44c99ebc3fca60b7a1fa182abf9c5f2f8af883b473c40d8ec81ca1a0eccf9f",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
+        "e2e/local-acceptance/native_lint_acceptance.py": "6dbdd847c991fb6695951b7fe441a0e7e76b3ea205e1f161a7e912dbae63c1e9",
+        "e2e/local-acceptance/parallel_acceptance.py": "554ff982cab65bb4d8201007deef796ed4a3d6d391e1fdd229341489ac30d0c9",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "d879d4737966b4b48446bfd82c394072eab09baa103316fdac9086b27b6f97d8",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/publication_acceptance.py": "209ca63435e8e42d2c15d90f0f3c4f93fa17f0e74ca615e7b0eecf9746f05120",
-        "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "5242a95e8c71c7f25fa6323044dd9925b0dc6de1452986c59fd9c78d0482afe4",
+        "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
+        "e2e/local-acceptance/release_acceptance.py": "a58b820d2dc74d1a1828e38f34a3606440df8f941ff9b9f22bf7b6d761c8db87",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "2e5eb115d6c3cbe8135ffd5fe94ccf31e18a8d74b3c4919845f8012ade433790",
+        "e2e/local-acceptance/run.py": "c3fc74964b1e58b227425fd45816a785773642e5ff7635fe3289cec9cc9ebc6a",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -804,7 +936,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "6353d4b13ab2a119e502dc0748a8b01479860223027b17bcb44cc82ea3619f54":
+    if actual_scope != "a485949e946bd8788994b911171c194fec10f006d630377f87684b419336bc5a":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -817,9 +949,12 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "2afe7c0cd4f83d0c7fbeacc92669f4354493712fcf23f8fc5c9295163526871a"
-    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
-        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    expected = {'native-release': 'c7029fba0a1c2dbe6b15be2e5adce8579f813d5ac6af31eae52eb323cf25f24a', 'native-context': 'cbb31f23fd408e95f6b464cf99eae1c3b63841fed02d168e0892902a739e4318'}
+    observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
+    for name, digest in expected.items():
+        if observed[name] != digest:
+            label = "Native release" if name == "native-release" else "Native compiler-context"
+            raise RuntimeError(f"{label} guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
     return policy_root / ".github/local-acceptance/native_guard.py"

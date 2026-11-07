@@ -567,8 +567,8 @@ Product commands, assertions and budgets remain unchanged. Protected equivalence
 entries retain earlier successful exact-head evidence; the expanded policy guard
 requires a fresh run. This removes an environment-dependent local failure and
 adds no product feature-coverage credit.</p>
-<p>Native release acceptance reuses the workspace test-profile driver, with its
-mailbox feature graph, instead of compiling release dev-dependencies again.
+<p>Native release acceptance uses a standalone test-profile driver from the
+original stream/capture source, without compiling an unused debug CLI.
 <code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release
 <code>scode</code>; the stream/resume assertions and 40-sample, 100 ms startup
 budget remain. The driver and its in-process fixture helpers run in the test
@@ -592,20 +592,181 @@ the baseline spent 163.5 of 307.0 seconds compiling the separate graph; the
 revised run spent 16.9 of 159.8 seconds verifying/building the available workspace
 graph. Both original service suites passed. This warm reuse observation is not
 a controlled cold-build comparison or a whole-PR saving.</p>
-<p><strong>Scope native optimized builds (2026-11-01).</strong> The separate
-native release profile runs for Cargo/build/vendor inputs, CLI entry/startup/parser
-modules, runtime configuration, its stream-capture test and startup harness.
-Ordinary business/source and shared PTY helper changes keep applicable native
-functional/resize/service checks and selected Linux release rendering, while
-omitting the additional optimized build/startup profile on each native host.
-Optimized-only Windows/macOS behavior and the 100 ms startup budget are therefore
-outside ordinary source acceptance. Existing release-tag platform builds remain;
-full artifact journey acceptance is not added there. Required plan output includes
-<code>RELEASE_ACCEPTANCE_SCOPE</code> and explains the reduction. Real committed
+<p><strong>Gate optimized artifacts before publication (2026-11-06).</strong>
+Each newly built artifact must pass its native release gate before packaging:
+Linux x64 musl and ARM64, both Mac architectures, and both Windows architectures.
+The gate verifies actual Git revision, native architecture and SHA256, then runs
+the original stream/resume journey, 40-sample 100 ms startup budget and connected
+compiler-context journey against those exact bytes. A standalone driver avoids
+building an unused debug CLI; the optimized artifact is not rebuilt.
+Failure, stale source or changed bytes blocks packaging and publication.
+Evidence artifacts stay outside the packaged assets. Existing-asset publication
+resumes keep their original validation and create no new executable.
+Ordinary product changes retain native functional/resize/service checks and
+selected Linux release rendering. <code>native-context</code> reuses the current
+workspace dev/mailbox binary for the compiler-context journey; optimized
+acceptance harness edits still select <code>native-release</code> locally.
+<strong>Coverage reduction:</strong> native optimization-specific failures and
+startup regressions can surface at release instead of before merge.
+Required <code>RELEASE_ACCEPTANCE_SCOPE</code> and <code>NATIVE_CONTEXT_SCOPE</code>
+output explain this boundary. Real committed
 Git plans exercise ordinary, retained, mixed, renamed and deleted inputs; the
 selected release executor retains actual Cargo/native artifact identity checks.
 Two earlier Windows receipts spent 406.49 and 409.98 seconds in this profile;
 those are historical costs, not controlled savings for a new PR.</p>
+
+<p><strong>Complete the native terminal handshake (2026-11-07).</strong>
+The pinned shared PTY reader now answers primary device attributes (DA1), as
+well as cursor position, once per query in wire order. This removes ConPTY's
+three-second startup wait without changing product journeys, existing test
+deadlines, worker counts or process cleanup. Shared-library CI covers all query
+split points and batched replies through real Unix PTYs, plus four fresh
+Windows native processes. A scode Windows version journey independently
+requires readiness within two seconds and verifies that no model request was
+sent. These infrastructure checks add no product feature-coverage credit.
+In a private same-executable wire control, startup changed from 3,029/3,031 ms
+without a DA1 reply to 28/26 ms with it. Three original UI journeys, repeated
+three times per dependency against the same frozen scode and native runtime,
+took 38.546 seconds with the old pin and 11.163 seconds with the corrected pin
+(71.04% less case time). Reversing only the pin on current source restored the
+delay; all eighteen case executions passed. These are local measurements;
+whole-suite and end-to-end delivery savings require separate evidence.</p>
+
+<p><strong>Compile shared native fixtures once (2026-11-07).</strong>
+<code>scode-test-support</code> owns the existing PTY workspace, mock/live
+backend, terminal and shell helpers. Thin inline caller adapters retain lazy
+<code>SCODE_TEST_BIN</code>/<code>CARGO_BIN_EXE_scode</code> selection, including
+the standalone benchmark's refusal to guess an executable. Original individual
+and grouped test targets, cases, assertions, timeouts and process isolation
+remain unchanged. The extracted path selects the same resize, rendering and
+browser acceptance as the former common module. A new real native PTY journey
+checks lazy caller resolution, independent mock workspaces and peer isolation;
+it adds no product feature-coverage credit. In one Windows helper-edit rebuild
+comparison, the identical 102-target Cargo command rebuilt 27 test drivers in
+127.249 seconds before extraction and 86.310 seconds afterward (32.17% less).
+Both variants passed the same two original groups, 218 cases each, with their
+five existing ignored cases retained. Live-only early returns earn no provider
+coverage. These are local compiler measurements, excluding lease waits; original
+waits, setup, failed diagnostics and source acceptance remain part of delivery
+time. They do not establish whole-suite or end-to-end delivery savings.
+The Windows artifact infrastructure fixture keeps its private Cargo outputs
+short while retaining the requested evidence directory. Its mandatory native
+guard exercises deeply nested evidence; all original artifact identity and
+refusal controls remain required. An actual 263-character linker output failed
+before this correction; a deeper 265-character legacy layout passed the complete
+fixture using the independent short build directory.</p>
+
+<p>When both a fresh contract guard and native workspace are required, the
+original formatting, metadata and strict lint prefix runs before the contract
+matrix under the existing host FIFO. Its passing command records and original
+logs are verified and consumed once by the later workspace; every remaining
+test and the complete guard remain required. Preparation binds the clean HEAD,
+base, executor, output and Cargo target, and never signs a completed workspace.
+Real native Cargo/Clippy controls reject warnings, changed source/target/executor
+and altered logs. Real Git/SSH/child-process controls check early refusal,
+partial recovery, three separate FIFO acquisitions and complete signed resume.
+These are infrastructure enforcement checks, adding no product journey coverage.
+One earlier actual failure spent 622.597 seconds in contract commands before
+Clippy reported a naming error. This change removes that preceding work from
+the lint-failure path; it does not establish a measured population or whole-PR
+speedup. Successful end-to-end validation and all failed/retried attempts still
+count toward the delivery clock. Clippy workers join rustc/linkers at reduced
+priority while Cargo and actual test processes remain at Normal.</p>
+
+<p>Contract hashing now reads the committed tree once and batches immutable Git
+blobs through the same byte parser used by dependency-scope inspection. It
+preserves the original canonical hashes and never caches mutable refs. A real
+three-revision Windows comparison returned identical hashes, reducing one
+15-file contract read from about 0.9 seconds to 0.11 seconds (16 Git processes
+to two). This is a small repeated metadata cost, not a measured whole-PR or
+population improvement. Required Docker and native guards compare the original
+hash reference using binary/empty/duplicate blobs, Unicode paths, committed
+link text, changed refs and export-ignore attributes; missing files, objects,
+refs and unsupported Git entries still refuse acceptance. All signature,
+coverage, budget and command requirements remain in force.</p>
+
+<p>Frozen-source <code>start-pr</code> can start complementary native CI while
+the author runs every mandatory local check. A separate SSH purpose signs the
+execution plan, which cannot satisfy full acceptance or a completed-profile
+checkpoint. The required Actions-owned <code>Local acceptance</code> status
+stays pending without the complete author signature. Main-only finalization
+binds its publication to the source SHA and reuses the original native jobs;
+the merge queue still verifies complete evidence. Normal pre-push output
+reports the executable entry. Ordinary pushes remain serial, and acceptance
+rule changes retain the full contract-update route.</p>
+<p>Required Docker and native protocol controls use actual private Git remotes,
+push hooks, SSH, HTTP metadata and child processes to cover both completion
+orders, pending-to-success, retries, signature/purpose/scope refusals, source
+and publisher binding, and a real later failed process superseding old success.
+The HTTP service models GitHub, and all actual fixture children use one host;
+these controls add no cross-platform product journey coverage. A six-PR
+observation found complementary native jobs ran after author completion for
+12–29 minutes (mean about 21). This is an opportunity bound, not a measured
+parallel delivery gain or proof of the overall 10% target. Original author,
+cross-platform and queue coverage, counts and budgets remain required.</p>
+
+<p>API, runtime and tools retain their original integration targets and use
+opt-in wrappers for canonical nextest acceptance. Fixed-name self-spawning,
+cache/compaction and model-limit process-global checks remain independent.
+The same Windows component cases passed before and after: 332 passed and 40
+ignored, with identical case identities, ignored flags and dependency features.
+Forced test-driver rebuilds in an original/grouped/original sequence took
+132.0/57.0/116.5 seconds. Grouping reduces these
+drivers from 56 to 21; this is a warm one-host compilation observation, not
+cold dependency, other-platform, whole-PR or population timing proof. Canonical
+author and complementary native CI still run the complete selected workspace;
+no product case, performance budget, retry limit or deadline is removed.</p>
+
+<p>Queue scope reuses the committed manifest proof for newly added, disabled
+integration grouping sources. Such files skip unchanged daemon/A2A/cohost
+journeys while all native cases, examples, all-feature Clippy and provider/live
+scope remain. Ordinary/existing tests, mixed source/build changes and invalid
+or indirect grouping inputs retain the daemon gates. Required preflight JSON
+prints the exact excluded source paths. Real Git PR/push/merge-group events,
+Cargo native-product hash/freshness, nextest inventories and native processes
+are checked by the required Linux Docker and author-native contract guards.
+The preceding grouping-only PR spent about 14 minutes in its daemon queue job;
+this is one observed avoidable job, not a measured population saving or proof
+of the end-to-end 10% target.</p>
+
+<p>Signed parallel execution plans survive unrelated protected metadata
+updates only after their original signature/contract and trusted ancestry,
+unchanged source contract, current author/native responsibilities, every
+selected command, native workflow and dispatcher are verified. Required output
+explains reuse. Real Git/SSH/HTTP/native controls cover both completion orders,
+unchanged notes/logs, retained native jobs and refusal of changed assertions,
+executors, images, workflows, dispatchers, profiles, signatures and signers.
+Plans remain scheduling evidence; full author and native acceptance still gate
+merge. This prevents rule maintenance from needlessly restarting unchanged
+work; no population timing reduction has been established.</p>
+
+<p>A real post-merge GitHub smoke ran two PTY cases on each of Windows, Linux
+and macOS: six passed, zero skipped. Both complementary native command steps
+overlapped the author checks, each ran once, and protected-main publication
+passed source binding. Local controller start to Actions acceptance success
+took 337 seconds. The temporary PR was closed without merging. This small
+smoke has no matched serial or cold-cache control and establishes no population
+speedup or achievement of the 10% target.</p>
+
+<p>Two actual blocked PRs exposed a receipt migration cost: adding Clippy to
+reduced-priority compiler workers invalidated ten otherwise identical profile
+recipes. Explicit protected old/new hash pairs retain those original signed
+results; the changed workspace and contract guard profiles still need current
+validation. Executor code and selected profile AST/image identity are checked
+before approving the exact pairs. Real private Git pushes and SSH notes cover
+modern and historical receipt formats without rerunning the original process;
+a subsequent executor change remains refused. This reduces repeated acceptance,
+adds no product coverage and claims no population timing improvement.</p>
+
+<p>Complementary Linux CI exposed an existing terminal-completion race:
+the durable journal could publish a completion before the background registry
+recorded the observed process exit. The monitor now updates the terminal status
+before publishing, while retaining ownership of journal persistence retries.
+A real native-child regression reads the task count synchronously at the
+publication boundary; the original code reports one running terminal and the
+corrected code reports none. The existing ACP exit-code, immediate status,
+ACK retry, cold replay and purge journey retains its assertions and deadlines.
+This adds no paid-provider or PTY feature-coverage credit.</p>
 
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
@@ -1402,14 +1563,15 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Native release stream/resume and startup</td>
-      <td>Normal optimized binary, exact artifact identity and the 40-sample,
-      100 ms startup budget on build/startup/configuration and dedicated test
-      inputs. Ordinary business/source edits omit this profile on native hosts;
-      their applicable functional tests and selected Linux release rendering remain.
-      Optimized-only Windows/macOS behavior is outside that reduced scope.</td>
+      <td>Every newly built artifact passes native identity, optimized stream/resume,
+      40-sample 100 ms startup and compiler-context checks before packaging/publication,
+      on all six release platforms. Ordinary PRs retain functional tests, dev/mailbox
+      compiler context and selected Linux optimized rendering. Native optimization-only
+      and startup regressions may surface at release; harness edits still require local optimized checks.</td>
       <td>The existing stream/resume PTY journey counts once. Optimized variants
       and startup measurements add no extra unique journey credit.</td>
-      <td><code>native-release</code> / <code>release_acceptance.py</code></td>
+      <td><code>native-context</code> · <code>native-release</code> ·
+      <code>release_artifact_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Native terminal resize and installer inputs</td>

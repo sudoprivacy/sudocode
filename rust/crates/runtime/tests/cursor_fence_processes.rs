@@ -131,6 +131,7 @@ fn convention(root: &Path) -> InboxConvention {
 fn send(root: &Path, body: &str) {
     Mailbox::new(Arc::new(StdFsBackend), PEER.to_string(), convention(root))
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),

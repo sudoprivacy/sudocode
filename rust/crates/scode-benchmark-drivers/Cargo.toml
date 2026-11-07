@@ -24,11 +24,19 @@ path = "../rusty-sudocode-cli/tests/pty_prompt_viewport.rs"
 test = false
 
 [dev-dependencies]
+scode-test-support.workspace = true
+flate2 = "1"
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 pty-expect.workspace = true
 runtime = { path = "../runtime" }
 serde_json.workspace = true
+socket2 = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "release_stream_capture"
+path = "../rusty-sudocode-cli/tests/pty_model_stream_close.rs"
+test = false

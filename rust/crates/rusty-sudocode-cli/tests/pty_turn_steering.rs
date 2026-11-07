@@ -531,6 +531,7 @@ fn inject_peer_input(env: &TestEnv, delivery: engine_events::InputDelivery, body
         .expect("running receiver announced its mailbox");
     Mailbox::workspace_local(&pair, "fixture-peer".into())
         .send(MailboxEnvelope {
+            send_id: None,
             delivery,
             from: "fixture-peer".into(),
             to: receiver.file_name().unwrap().to_string_lossy().into_owned(),

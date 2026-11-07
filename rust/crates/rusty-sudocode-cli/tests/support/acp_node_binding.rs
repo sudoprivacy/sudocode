@@ -284,6 +284,7 @@ async fn assert_original_pending_receiver(
     let incoming = format!("PENDING_NODE_RECEIVE_{sid}");
     observer
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: observer_name.to_owned(),
             to: actor.to_owned(),

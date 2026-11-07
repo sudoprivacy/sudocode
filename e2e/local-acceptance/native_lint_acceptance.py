@@ -1,5 +1,6 @@
 """Require real Cargo warnings to stop native acceptance before long work."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -16,6 +17,69 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def prepared_lint(output, root, base, helper, profiles, environment):
+    """Exercise real lint reuse and refusal without signing a partial workspace."""
+    output.mkdir(parents=True)
+    observed = []
+
+    def execute(command, cwd, log, env=None):
+        observed.append(list(command))
+        return helper.run_command(command, cwd, log, env)
+
+    preparation = profiles.prepare_native_workspace_lint(root, output, base, execute)
+    directory = output / "native-workspace"
+    assert not (output / "envelope.json").exists()
+    originals = {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+
+    def refused(label, *, path=directory, selected_base=base):
+        try:
+            profiles.consume_workspace_lint(preparation, root, path, selected_base, [])
+        except RuntimeError as error:
+            print(f"EXPECTED_PREPARATION_REFUSAL {label}: {error}", flush=True)
+        else:
+            raise AssertionError(f"Accepted invalid lint preparation: {label}")
+
+    log = directory / "000.log"
+    log.write_bytes(log.read_bytes() + b"tampered\n")
+    refused("modified original log")
+    log.write_bytes(originals[log.name])
+    refused("another output", path=output / "elsewhere")
+    refused("another base", selected_base="HEAD")
+    os.environ["CARGO_TARGET_DIR"] = str(output / "different-target")
+    refused("another Cargo target")
+    os.environ["CARGO_TARGET_DIR"] = environment["CARGO_TARGET_DIR"]
+    dirty = root / "dirty.txt"
+    dirty.write_text("not accepted source\n", encoding="utf-8")
+    refused("dirty source")
+    dirty.unlink()
+    profiles.run.execution_refs = ("different-policy", "different-head")
+    refused("another protected executor")
+    del profiles.run.execution_refs
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "Different clean source"],
+                   cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    refused("another clean HEAD")
+    subprocess.run(["git", "checkout", "--detach", preparation["identity"]["head"]],
+                   cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    profiles.run.prepared_workspace = preparation
+    # The original full-workspace tail executes a real child which fails at
+    # the fixture's metadata sentinel. Its failure must remain a failure.
+    try:
+        profiles.run("native-workspace", root, directory, base, execute)
+    except RuntimeError:
+        assert not hasattr(profiles.run, "prepared_workspace"), "Lint preparation was not consumed once"
+        assert len([args for args in observed if args[1:2] == ["clippy"]]) == 1, observed
+        assert observed[-1][1:2] == ["e2e/build-metadata/run.py"], observed
+        assert json.loads((directory / f"{len(preparation['commands']):03d}.command.json").read_text())["exit_code"] == 9
+    else:
+        raise AssertionError("A later failing real workspace child passed")
+    assert all((directory / name).read_bytes() == data for name, data in originals.items())
+    return {"status": "PASS", "lint_commands": preparation["commands"],
+            "original_log_sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+            "lint_invocations": 1, "later_failure_preserved": True,
+            "invalid_preparation_refused": 7,
+            "scope": "Real Git heads, Cargo/Clippy and remaining native child; not completed product acceptance."}
 
 
 def grouped_lint(output, helper, profiles):
@@ -144,6 +208,7 @@ def run(output, executor=None):
     helper = load("lint_fixture_commands", SOURCE / ".github/scripts/local_acceptance.py")
     helper.ROOT = SOURCE
     profiles = load("lint_fixture_profiles", executor or SOURCE / ".github/local-acceptance/checks.py")
+    prepared = None
     for kind in ["workspace", "selected"]:
         root = output / kind / "source"
         rust = root / "rust"
@@ -204,9 +269,23 @@ def run(output, executor=None):
             assert not any("nextest" in str(command[0]) for command in observed), observed
         else:
             raise AssertionError("A native compiler warning passed the strict lint gate")
+        print(f"Expected negative control: {kind} preparation must refuse the same real warning.", flush=True)
+        try:
+            profiles.prepare_native_workspace_lint(root, output / kind / "prepared-warning", base, execute)
+        except RuntimeError:
+            assert not sentinel.exists(), "Long work began after failed preparation"
+        else:
+            raise AssertionError("A real compiler warning passed early lint preparation")
+        if kind == "workspace":
+            changed.write_text('fn main() {}\n', encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "Repair the actual compiler warning")
+            prepared = prepared_lint(output / kind / "prepared-success", root, base, helper, profiles,
+                                     {"CARGO_TARGET_DIR": os.environ["CARGO_TARGET_DIR"]})
     grouped = grouped_lint(output / "grouped", helper, profiles)
     result = {"status": "PASS", "workspace_warning_refused": True, "selected_test_warning_refused": True,
               "grouped_lint": grouped,
+              "prepared_lint": prepared,
               "long_validation_and_nextest_unrun": True,
               "scope": "Actual native dispatcher, Git, Cargo and compiler warnings. Tiny enforcement fixture; no product journey coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + '\n', encoding="utf-8")

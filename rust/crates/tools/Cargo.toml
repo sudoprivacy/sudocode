@@ -30,3 +30,18 @@ kernel = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "acceptance_tools_01"
+path = "tests/acceptance_groups/acceptance_tools_01.rs"
+test = false
+
+[[test]]
+name = "acceptance_tools_02"
+path = "tests/acceptance_groups/acceptance_tools_02.rs"
+test = false
+
+[[test]]
+name = "acceptance_tools_03"
+path = "tests/acceptance_groups/acceptance_tools_03.rs"
+test = false

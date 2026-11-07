@@ -100,3 +100,23 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "acceptance_runtime_01"
+path = "tests/acceptance_groups/acceptance_runtime_01.rs"
+test = false
+
+[[test]]
+name = "acceptance_runtime_02"
+path = "tests/acceptance_groups/acceptance_runtime_02.rs"
+test = false
+
+[[test]]
+name = "acceptance_runtime_03"
+path = "tests/acceptance_groups/acceptance_runtime_03.rs"
+test = false
+
+[[test]]
+name = "acceptance_runtime_04"
+path = "tests/acceptance_groups/acceptance_runtime_04.rs"
+test = false

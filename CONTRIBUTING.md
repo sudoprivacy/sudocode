@@ -301,6 +301,13 @@ success statuses still block the queue. The gate prints the run and recovery
 command when publication is incomplete. Real Git/SSH/HTTP process fixtures
 exercise both the stale aggregate and these refusals.
 
+API, runtime and tools use opt-in acceptance wrappers to compile shared test
+code in fewer drivers. Their original individual targets remain available to
+Cargo and the daemon journeys. The canonical nextest path runs each case in its
+own process. Fixed-name self-spawning tests, cache prefix/TTL and compaction
+checks, and model-limit process-global checks retain their independent drivers.
+No test body, assertion, ignored flag, worker count or deadline changes.
+
 Checks that run tests, builds or containers share one host lease.
 The reviewed compiler-priority migration preserves exact earlier recipes for
 ten otherwise unchanged profiles through explicit protected hash pairs. It does

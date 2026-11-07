@@ -238,6 +238,20 @@ fn exit(sess: &mut PtySession) {
     assert_eq!(sess.expect_eof().expect("exit cleanly"), 0);
 }
 
+fn question_prompt(env: &TestEnv, id: &str, input: &serde_json::Value) -> String {
+    if env.is_mock() {
+        return env.tool_batch_prompt(&serde_json::json!([{
+            "id": id, "name": "AskUserQuestion", "input": input,
+        }]));
+    }
+    let path = env.workspace_root().join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec(input).unwrap()).unwrap();
+    format!(
+        "Use read_file to read {} then call AskUserQuestion once with exactly that JSON object. Preserve every value. Answer briefly after I choose.",
+        path.display()
+    )
+}
+
 #[test]
 fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
     for (background, no_color, muted, border) in [
@@ -284,7 +298,8 @@ fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
 #[test]
 fn question_title_resets_restore_terminal_foreground_not_parent_color() {
     for background in ["15;0", "0;15"] {
-        let env = TestEnv::new("chrome-initial-style-reset");
+        // This renderer contract requires exact SGR bytes.
+        let env = TestEnv::new_mock("chrome-initial-style-reset");
         let mut sess = env.spawn_with_env(
             &["--permission-mode", "workspace-write"],
             &[
@@ -296,7 +311,7 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             ],
         );
         // The shared input-line observer samples one physical row. Keep this
-        // JSON fixture on one row, then inspect the actual question at an
+        // fixture command on one row, then inspect the actual question at an
         // ordinary width; wrapping is not the style-reset contract.
         sess.resize(40, 600).unwrap();
         settle_chrome(&sess);
@@ -305,14 +320,7 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             "questions": [{"id":"style", "prompt":"Choose style answer",
                 "options":[{"label":"Accept style", "value":"Accept style"}]}],
         });
-        let calls = serde_json::json!([{
-            "id": "style_question", "name": "AskUserQuestion", "input": input,
-        }]);
-        let prompt = if env.is_mock() {
-            format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
-        } else {
-            format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
-        };
+        let prompt = question_prompt(&env, "style_question", &input);
         sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
         common::expect_input_line(
             &sess,
@@ -383,14 +391,7 @@ fn question_focus_surface_moves_without_recoloring_ordinary_text() {
             sess.resize(40, 600).unwrap();
             settle_chrome(&sess);
             let input = surface_question_input(option_count);
-            let calls = serde_json::json!([{
-                "id": "surface_question", "name": "AskUserQuestion", "input": input,
-            }]);
-            let prompt = if env.is_mock() {
-                format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
-            } else {
-                format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
-            };
+            let prompt = question_prompt(&env, "surface_question", &input);
             sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
             common::expect_input_line(
                 &sess,

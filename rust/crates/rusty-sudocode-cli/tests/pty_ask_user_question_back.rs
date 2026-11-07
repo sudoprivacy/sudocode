@@ -206,23 +206,27 @@ fn assert_contract_exchange(env: &TestEnv, input: &Value) {
     );
 }
 
-/// Exercise the model input, live editor and actual API tool result together.
-#[test]
-fn question_custom_input_defaults_and_explicit_opt_out_roundtrip() {
-    let env = TestEnv::new("question-custom-policy");
+fn contract_input() -> Value {
     let options = json!([{"label":"SuggestedAlpha","value":"alpha"},
                          {"label":"SuggestedBeta","value":"beta"}]);
     let many = (1..=12)
         .map(|n| json!({"label":format!("ContractOption{n}"), "value":format!("value{n}")}))
         .collect::<Vec<_>>();
-    let input = json!({"questions":[
+    json!({"questions":[
         {"id":"default", "prompt":"DEFAULT_CHOICE", "options":options},
         {"id":"closed", "prompt":"CLOSED_CHOICE", "allowCustomInput":false, "options":[{"label":"NumericAlpha","value":"2"},{"label":"NumericBeta","value":"1"}]},
         {"id":"text", "prompt":"TEXT_ANSWER", "kind":"text", "allowCustomInput":false},
         {"id":"matched", "prompt":"MATCHED_SEARCH", "options":many},
         {"id":"unmatched", "prompt":"UNMATCHED_SEARCH", "options":many},
         {"id":"confirm", "prompt":"FINAL_CONFIRM", "allowCustomInput":false, "options":options}
-    ]});
+    ]})
+}
+
+/// Exercise the model input, live editor and actual API tool result together.
+#[test]
+fn question_custom_input_defaults_and_explicit_opt_out_roundtrip() {
+    let env = TestEnv::new("question-custom-policy");
+    let input = contract_input();
     let prompt = if env.is_mock() {
         env.tool_batch_prompt(
             &json!([{"id":"question-contract", "name":"AskUserQuestion", "input":input}]),
@@ -265,7 +269,7 @@ fn question_custom_input_defaults_and_explicit_opt_out_roundtrip() {
     assert!(
         restored
             .lines()
-            .any(|line| line.trim_start().starts_with("> [+]") && line.contains("2")),
+            .any(|line| line.trim_start().starts_with("> [+]") && line.contains('2')),
         "restore the custom answer's focus: {restored}"
     );
     sess.send("\r").unwrap();

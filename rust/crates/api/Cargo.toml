@@ -29,3 +29,8 @@ workspace = true
 [[bench]]
 name = "request_building"
 harness = false
+
+[[test]]
+name = "acceptance_api_01"
+path = "tests/acceptance_groups/acceptance_api_01.rs"
+test = false

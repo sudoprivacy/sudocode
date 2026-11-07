@@ -296,7 +296,9 @@ async function run(config) {
     child.write('\r');
     await wait(() => fixture.viewport().includes('[1] Continue') && fixture.viewport().includes('[2] Stop'));
     await painted();
-    await clickLink('QuestionLink', 'https://example.com/question', true);
+    // The tool header may repeat the Markdown label without link metadata.
+    // Match the rendered sentence while still clicking its linked first cell.
+    await clickLink('QuestionLink then choose.', 'https://example.com/question', true);
     await clickLink('then choose.', null, true);
     fs.writeFileSync(path.join(config.logRoot, 'question.png'), await painted());
     await page.keyboard.press('Escape');

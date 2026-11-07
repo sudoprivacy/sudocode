@@ -2740,9 +2740,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
             while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
                 this.show_field(&request, index, answers[index].as_ref());
-                let raw = if let Ok(answer) = rx.await {
-                    answer
-                } else {
+                let Ok(raw) = rx.await else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };

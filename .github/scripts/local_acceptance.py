@@ -966,7 +966,7 @@ def run_command(command, cwd, log, env=None):
                             # name() may read argv on macOS and trigger psutil
                             # 7.2.2's KERN_PROCARGS2 error path for short-lived children.
                             name = Path(child.exe()).name.lower()
-                            if (name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
+                            if (name in {"rustc", "rustc.exe", "clippy-driver", "clippy-driver.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
                                     or re.fullmatch(r"(?:.*-)?(?:clang(?:\+\+)?|gcc|g\+\+)(?:-\d+(?:\.\d+)*)?(?:\.exe)?", name)):
                                 child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
                                 priorities[f"{child.pid}:{name}"] = child.nice()
@@ -1744,12 +1744,16 @@ def perform_check(args, attempt):
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
+    prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
+    lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
+                        and serialized.index("guard-contract") < serialized.index("native-workspace"))
     attempt["host_lease_wait_seconds"] = 0.0
     attempt["host_lease_acquisitions"] = []
     print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({
         "preflight": "metadata_before_host_lease" if "preflight" in needed else "not_selected",
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
+        "workspace_lint_before_guard": lint_pending,
         "reservation": "one_fresh_profile_then_fifo_requeue",
     }).decode(), flush=True)
     try:
@@ -1759,6 +1763,16 @@ def perform_check(args, attempt):
         if validate and pending:
             validate(pending, ROOT, output)
         prepared = False
+        if lint_pending:
+            attempt["active_profile"] = "native-workspace-lint-preparation"
+            with host_acceptance_lease(attempt, head):
+                prepare = getattr(module, "prepare_native_checks", None)
+                if prepare:
+                    module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                prepared = True
+                module.run.prepared_workspace = prepare_lint(ROOT, output, base, run_command)
+            print("NATIVE_LINT_PREPARATION: lint passed; workspace acceptance remains incomplete. "
+                  "Rejoining the existing host FIFO before the contract matrix.", flush=True)
         for name in serialized:
             fresh = name in pending
             attempt["active_profile"] = name

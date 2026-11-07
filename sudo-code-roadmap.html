@@ -656,6 +656,23 @@ refusal controls remain required. An actual 263-character linker output failed
 before this correction; a deeper 265-character legacy layout passed the complete
 fixture using the independent short build directory.</p>
 
+<p>When both a fresh contract guard and native workspace are required, the
+original formatting, metadata and strict lint prefix runs before the contract
+matrix under the existing host FIFO. Its passing command records and original
+logs are verified and consumed once by the later workspace; every remaining
+test and the complete guard remain required. Preparation binds the clean HEAD,
+base, executor, output and Cargo target, and never signs a completed workspace.
+Real native Cargo/Clippy controls reject warnings, changed source/target/executor
+and altered logs. Real Git/SSH/child-process controls check early refusal,
+partial recovery, three separate FIFO acquisitions and complete signed resume.
+These are infrastructure enforcement checks, adding no product journey coverage.
+One earlier actual failure spent 622.597 seconds in contract commands before
+Clippy reported a naming error. This change removes that preceding work from
+the lint-failure path; it does not establish a measured population or whole-PR
+speedup. Successful end-to-end validation and all failed/retried attempts still
+count toward the delivery clock. Clippy workers join rustc/linkers at reduced
+priority while Cargo and actual test processes remain at Normal.</p>
+
 <p>Complementary Linux CI exposed an existing terminal-completion race:
 the durable journal could publish a completion before the background registry
 recorded the observed process exit. The monitor now updates the terminal status

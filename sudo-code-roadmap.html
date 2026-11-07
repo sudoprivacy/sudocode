@@ -615,6 +615,23 @@ selected release executor retains actual Cargo/native artifact identity checks.
 Two earlier Windows receipts spent 406.49 and 409.98 seconds in this profile;
 those are historical costs, not controlled savings for a new PR.</p>
 
+<p><strong>Complete the native terminal handshake (2026-11-07).</strong>
+The pinned shared PTY reader now answers primary device attributes (DA1), as
+well as cursor position, once per query in wire order. This removes ConPTY's
+three-second startup wait without changing product journeys, existing test
+deadlines, worker counts or process cleanup. Shared-library CI covers all query
+split points and batched replies through real Unix PTYs, plus four fresh
+Windows native processes. A scode Windows version journey independently
+requires readiness within two seconds and verifies that no model request was
+sent. These infrastructure checks add no product feature-coverage credit.
+In a private same-executable wire control, startup changed from 3,029/3,031 ms
+without a DA1 reply to 28/26 ms with it. Three original UI journeys, repeated
+three times per dependency against the same frozen scode and native runtime,
+took 38.546 seconds with the old pin and 11.163 seconds with the corrected pin
+(71.04% less case time). Reversing only the pin on current source restored the
+delay; all eighteen case executions passed. These are local measurements;
+whole-suite and end-to-end delivery savings require separate evidence.</p>
+
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
 native suites on the integrated merge-group tree: runtime interactions found

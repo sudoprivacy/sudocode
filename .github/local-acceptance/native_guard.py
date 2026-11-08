@@ -44,6 +44,10 @@ def main():
         fixtures.append({"command": list(map(str, command)), "log": str(log)})
 
     fixture([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/inherited_lease_acceptance.py"),
+        "--output", str(output / "inherited-lease"),
+    ], SOURCE, output / "inherited-lease.log")
+    fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/contract_reads_acceptance.py"),
         "--output", str(output / "contract-reads"),
     ], SOURCE, output / "contract-reads.log")
@@ -104,7 +108,7 @@ def main():
     ], SOURCE, output / "native-lint.log")
     protocol = [row for row in fixtures if Path(row["command"][1]).name == "parallel_acceptance.py"]
     native = [row for row in fixtures if row not in protocol]
-    assert len(protocol) == 1 and len(native) == 12
+    assert len(protocol) == 1 and len(native) == 13
     configuration = output / "native-parallel.json"
     configuration.write_text(json.dumps({
         "version": 1, "kind": "native-policy", "root": str(SOURCE), "branches": [

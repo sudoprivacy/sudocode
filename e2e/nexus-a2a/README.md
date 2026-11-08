@@ -36,7 +36,8 @@ Retries are disabled. The first failure cancels this independent batch and the
 other CLI/fault lane through the shared process supervisor. Both lanes must pass
 before the later SIGSTOP probe; the outer harness still closes its owned private
 daemon. Cancelled cases are
-not passes. This path requires Python 3, like the acceptance tooling.
+not passes. This path requires Python 3 and `psutil`, like the acceptance tooling;
+the queue installs `psutil==7.2.2` explicitly before starting either lane.
 `mailbox_faults_acceptance.py --output FRESH_DIRECTORY` exercises the executor
 using real Cargo/native control processes, including both failure directions,
 bounded overlap, explicit single-worker serialization and invalid inventory/caps.

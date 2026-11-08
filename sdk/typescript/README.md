@@ -491,15 +491,48 @@ outlive a disconnected CLI, and source labels alone do not establish root
 identity. These checks do not qualify Agent enrollment, a production handoff,
 all frontend launch modes or automatic network admission.
 
-`codexCallback` is an optional adapter, separate from the ACP transport. It
-connects to the existing native app-server proxy/socket and original loaded
-thread. It steers an active turn or starts an idle turn through the native
-frontend; it does not resume, fork, create another controller or weaken the
-frontend's approvals. Configure it using `CodexCallbackConfig` from the
-`/codexCallback` export. The bridge's scode connection then owns peer input, so
-the frontend is the only respondent to each peer message. Message content
-remains peer data, not user authority. An active steer or a delayed callback is not proof of true idle
-wakeup: acceptance must observe native idle and an accepted `turn/start`.
+`codexCallback` owns a private durable inbox beside its diagnostic log
+(`<log>.inbox`). The scode connection negotiates `peerInput` v2: the mailbox
+cursor advances only after that inbox has fsynced the exact message. Upstream
+redelivery uses the same identity. A full inbox (64 pending messages), storage
+failure or closed owner refuses the handoff rather than dropping it.
+Current scode sends carry a distinct `send_id`; truly identical historical
+envelopes without that ID cannot be distinguished from a cursor replay.
+Receipt files are retained without a time-based deduplication expiry.
+
+Both socket and native-queue transports submit through the versioned
+`thread/queue/addOnce` method. It must be supplied by the matching Codex native
+build. There is **no fallback** to `turn/start`, `turn/steer` or ordinary
+`thread/queue/add`: those APIs cannot safely retry an ambiguous outcome. The
+native store accepts each `(thread, clientUserMessageId)` once, rejects changed
+content for an existing ID, and retains acceptance after dequeue/edit/delete.
+Acceptance means durable queuing; the existing owner decides when it is idle
+and eligible to run. Paused/interrupted threads are not forcibly resumed.
+
+The callback reloads pending inbox records after restart, retries with the same
+ID using 1–30 second backoff, and writes a done receipt before releasing the
+message bytes. Unsupported native versions retain pending records and an error.
+Legacy JSONL `pending` records have no safe idempotent submission contract and
+are **not** automatically imported or replayed. Do not delete either inbox or
+native delivery receipts to resolve an uncertain delivery.
+
+The callback and autojoin owner reconnect their own native proxy to the same
+endpoint after disconnect. Autojoin can reopen a failed owned scode using its
+unchanged ready binding, actor and ACP session; it never repeats an ambiguous
+enrollment or falls back to a new session. Ordinary tool/send RPCs are still
+sent once. Reconnection does not replay them. The fixed-session MCP bridge
+also reopens only its configured ACP session after startup failure or child
+exit, with 5–30 second backoff. Its MCP status remains available; commands
+attempted while disconnected return `not_submitted`. An in-flight call with
+a lost reply remains `unknown`. Unconfirmed child cleanup stops replacement.
+These changes require rebuilt
+SDK, scode and Codex native artifacts; changing the shared scode symlink does
+not upgrade existing processes or absolute profile pins.
+
+Messages remain peer data, not user authority. Queue acceptance does not prove
+final handling, global idle, or exactly-once tool side effects. This recovery
+protocol does not restart a native server, change credentials, create threads
+or override approvals.
 
 A pre-existing thread can retain a temporary MCP config override. On Codex
 0.162.1 an isolated actual app-server test showed that changing disk config

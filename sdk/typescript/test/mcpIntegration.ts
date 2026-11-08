@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { z } from 'zod';
 const root = path.resolve(__dirname, '../..');
-const { connectScode, sendScodeMessage, scodeNativeA2aAudit, forwardScodeToCodex } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
+const { connectScode, sendScodeMessage, scodeNativeA2aAudit } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scode-acp-mcp-'));
 const fixture = path.join(root, 'test/fixtures/scode-direct-a2a-agent.mjs');
 const journal = (file: string) => fs.existsSync(file)
@@ -43,6 +43,20 @@ async function checkMcp(scenario: string): Promise<void> {
       return;
     }
     const text = 'exact 零模型 🧪 text\nsecond\u0000line  ';
+    if (scenario === 'cold-recovery') {
+      const refused = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: text, summary: 'offline' } });
+      assert.match(JSON.stringify(refused), /not_submitted/);
+      fs.writeFileSync(`${log}.online`, 'ready');
+      const deadline = Date.now() + 12000;
+      while (journal(log).filter(row => row.method === 'session/load').length < 1 && Date.now() < deadline)
+        await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(journal(log).filter(row => row.method === 'session/load').length, 1);
+      const recovered = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: text, summary: 'online' } });
+      assert.equal(recovered.isError, false);
+      assert.equal(journal(log).filter(row => row.method === '_sudocode/a2a/send').length, 1);
+      assert.equal(journal(log).filter(row => row.method === 'session/new').length, 0);
+      return;
+    }
     const output = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: text, summary: 'exact controller text' } });
     if (scenario === 'normal' || scenario === 'packaged') {
       assert.equal(output.isError, false);
@@ -75,11 +89,20 @@ async function checkMcp(scenario: string): Promise<void> {
       if (scenario === 'loss') {
         const status = await client.callTool({ name: 'scode_status', arguments: {} });
         assert.equal(JSON.parse((status.content as Array<{text: string}>)[0].text).closed, true,
-          'a dead ACP child must not discard its pending Unknown response or respawn');
+          'a dead ACP child preserves its pending Unknown response during backoff');
+        const unavailable = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: 'not sent', summary: 'offline' } });
+        assert.match(JSON.stringify(unavailable), /not_submitted/);
+        const deadline = Date.now() + 12000;
+        while (journal(log).filter(row => row.method === 'session/load').length < 2 && Date.now() < deadline)
+          await new Promise(resolve => setTimeout(resolve, 30));
+        const recovered = await client.callTool({ name: 'scode_status', arguments: {} });
+        assert.equal(JSON.parse((recovered.content as Array<{text: string}>)[0].text).closed, false);
+        assert.equal(journal(log).filter(row => row.method === '_sudocode/a2a/send').length, 1, 'recovery never retries the ambiguous send');
+        assert.equal(journal(log).filter(row => row.method === 'session/new').length, 0);
       }
     }
     assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0);
-    assert.equal(journal(log).filter(row => row.method === 'session/load').length, 1);
+    assert.equal(journal(log).filter(row => row.method === 'session/load').length, scenario === 'loss' ? 2 : 1);
   } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
   finally { await client.close(); }
 }
@@ -131,7 +154,7 @@ async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise
 async function main(): Promise<void> {
   for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
-    'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'malformed']) await checkMcp(scenario);
+    'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'cold-recovery', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.
   const log = path.join(directory, 'helper-fixture.jsonl');
   const connection = await connectScode({ scodeArgv: [process.execPath, fixture], workspace: directory,
@@ -148,24 +171,7 @@ async function main(): Promise<void> {
     assert.equal(scodeNativeA2aAudit(first)?.requestedInputSha256, scodeNativeA2aAudit(second)?.requestedInputSha256);
   } finally { await connection.close(); }
 
-  const message = { sessionId: 'native', text: '<mailbox-message from="peer">peer data</mailbox-message>',
-    body: 'peer data', sudocode: { a2a: { from: 'peer' } } };
-  for (const state of ['idle', 'active', 'notLoaded']) {
-    const calls: Array<{ method: string; params: unknown }> = [];
-    const request = async <T>(method: string, params: unknown): Promise<T> => {
-      calls.push({ method, params });
-      const result = method === 'thread/read' ? { thread: { id: 'original', status: { type: state } } }
-        : method === 'thread/turns/list' ? { data: [{ id: 'running', status: 'inProgress' }] }
-          : method === 'turn/steer' ? { turnId: 'running' } : { turn: { id: 'fresh' } };
-      return result as T;
-    };
-    if (state === 'notLoaded') await assert.rejects(forwardScodeToCodex(request, 'original', message, 'event'));
-    else assert.equal((await forwardScodeToCodex(request, 'original', message, 'event')).method,
-      state === 'idle' ? 'turn/start' : 'turn/steer');
-    assert.ok(!calls.some(call => /resume|fork/.test(call.method)));
-    if (state === 'active') assert.equal((calls.at(-1)?.params as { expectedTurnId: string }).expectedTurnId, 'running');
-  }
-  console.log('PASS scode MCP: exact direct calls, one owner, no prompt fallback, strict inputs, response loss, audit, callback routing and Claude channel delivery');
+  console.log('PASS scode MCP: exact direct calls, one owner, no prompt fallback, strict inputs, response loss, audit, same-session recovery and Claude channel delivery');
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   // The smoke created and owns this exact disposable directory.

@@ -1,18 +1,18 @@
 import { appendFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { connectCodex, CodexRequestError, validateCodexConnectionConfig, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
+import { connectRecoveringCodex, validateCodexConnectionConfig, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
 import type { ScodeConnection, ScodePeerMessage } from './scodeAcp';
 import { requireScodeNodeIdentity, type ScodeA2aResult } from './scodeA2a';
 import { enqueueCodexPeerNotification, validateCodexNativeQueueConfig, type CodexNativeQueueConfig,
   type CodexNativeQueueReceipt } from './codexNativeQueue';
 import { codexPeerData } from './codexPeerData';
+import { openCodexInbox } from './codexInbox';
 
 export interface CodexCallbackConfig extends CodexConnectionConfig {
   threadId: string;
   peers: string[];
   log: string;
-  /** Default socket mode is unchanged. Queue ingress targets one known legacy thread. */
+  /** Both modes use durable idempotent queue ingress for one original thread. */
   transport?: 'socket' | 'native-queue';
   nativeHome?: string;
   onProducerObservation?: CodexNativeQueueConfig['onProducerObservation'];
@@ -30,27 +30,21 @@ type Requester = CodexConnection['request'];
 /** The caller owns/resumes the frontend. A callback never resumes or forks it. */
 export async function forwardScodeToCodex(
   request: Requester, threadId: string, message: ScodePeerMessage, cursor: string,
-): Promise<{ method: string; turnId: string }> {
-  const { thread } = await request<{ thread: { id: string; status: { type: string } } }>('thread/read', { threadId, includeTurns: false });
-  if (thread.id !== threadId || !['active', 'idle'].includes(thread.status.type)) {
-    throw new Error('Original Codex thread is not loaded and available; no resume/fork attempted');
-  }
-  const { output, text } = codexPeerData(message, cursor);
-  if (thread.status.type === 'active') {
-    const page = await request<{ data: Array<{ id: string; status: string }> }>('thread/turns/list', {
-      threadId, limit: 1, sortDirection: 'desc', itemsView: 'summary',
-    });
-    const turn = page.data.find(turn => turn.status === 'inProgress');
-    if (!turn) throw new Error('Active turn changed during callback; delivery not assumed');
-    const result = await request<{ turnId: string }>('turn/steer', { threadId, expectedTurnId: turn.id,
-      input: [{ type: 'text', text }],
-    });
-    return { method: 'turn/steer', turnId: result.turnId };
-  }
-  const result = await request<{ turn: { id: string } }>('turn/start', {
-    threadId, input: [], toolOutput: { name: 'scode_acp_notification', namespace: 'nexus', output },
+): Promise<{ method: string; queueItemId: string }> {
+  const { text } = codexPeerData(message, cursor);
+  // addOnce persists before replying and keeps its ID receipt after dequeue.
+  // Never fall back to turn/start, steer or non-idempotent add on older hosts.
+  const result = await request<{ queuedSubmission: { id: string; clientUserMessageId: string;
+    input: Array<{ type: string; text?: string }> } }>('thread/queue/addOnce', {
+    threadId, input: [{ type: 'text', text }], clientUserMessageId: cursor,
   });
-  return { method: 'turn/start', turnId: result.turn.id };
+  const item = result?.queuedSubmission;
+  if (!item || typeof item.id !== 'string' || !item.id || item.clientUserMessageId !== cursor
+      || item.input?.length !== 1 || item.input[0].type !== 'text' || item.input[0].text !== text) {
+    throw new Error('Native durable queue returned a different delivery receipt');
+  }
+  return { method: 'thread/queue/addOnce', queueItemId: item.id };
+
 }
 
 /** Connect only to an existing native server using its official stdio proxy. */
@@ -73,7 +67,7 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
       enqueueCodexPeerNotification({ ...config, nativeHome }, config.threadId, message, eventId));
   }
   log({ phase: 'connecting', threadId: config.threadId, sessionId });
-  const native = await connectCodex(config);
+  const native = await connectRecoveringCodex(config);
   const close = async () => { closed = true; await native.close(); };
   let closed = false;
   try {
@@ -81,9 +75,11 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
     if (thread.id !== config.threadId || !['active', 'idle'].includes(thread.status.type)) {
       throw new Error('Original callback thread must already be loaded; no automatic resume/fork');
     }
-  } catch (error) { await close().catch(() => {}); throw error; }
-  const delivery = createCodexCallback(native.request, config, sessionId);
-  return { receive(message) { if (!closed) delivery.receive(message); },
+  } catch (error) { await close(); throw error; }
+  let delivery: CodexCallback;
+  try { delivery = createCodexCallback(native.request, config, sessionId); }
+  catch (error) { await close(); throw error; }
+  return { receive(message) { if (closed) throw new Error('Callback owner closed; retain upstream delivery'); delivery.receive(message); },
     async close() { await delivery.close(); await close(); } };
 }
 
@@ -108,34 +104,19 @@ export function createCodexNodeCallback(request: Requester,
 
 /** One admission/filter/provenance/lifecycle lane for both native ingress modes. */
 function createFilteredCallback(config: Pick<CodexCallbackConfig, 'threadId' | 'peers' | 'log'>, sessionId: string,
-  forward: (message: ScodePeerMessage, eventId: string) => Promise<{ method: string; turnId: string } | CodexNativeQueueReceipt>,
+  forward: (message: ScodePeerMessage, eventId: string) => Promise<{ method: string; queueItemId: string } | CodexNativeQueueReceipt>,
   peerPolicy: 'allowlist' | 'node-namespace' = 'allowlist'): CodexCallback {
-  let closed = false;
-  const log = (entry: unknown) => appendFileSync(config.log, JSON.stringify({ at: new Date().toISOString(), ...entry as object })+'\n', { mode: 0o600 });
-  let queued = 0;
-  let chain = Promise.resolve();
+  const admitted = (message: ScodePeerMessage) => {
+    const from = message.sudocode?.a2a?.from;
+    return message.sessionId === sessionId && typeof from === 'string' && !!from && !from.includes('\0')
+      && (peerPolicy === 'node-namespace' || config.peers.includes(from));
+  };
+  const inbox = openCodexInbox(config.log, config.threadId, sessionId, async (message, eventId) => {
+    if (!admitted(message)) throw new Error('Recovered message no longer matches this owner policy');
+    return forward(message, eventId);
+  }, entry => appendFileSync(config.log, JSON.stringify({ at: new Date().toISOString(), peerPolicy, ...entry })+'\n', { mode: 0o600 }));
   return {
-    receive(message) {
-      const from = message.sudocode?.a2a?.from;
-      if (closed || message.sessionId !== sessionId
-          || typeof from!=='string' || !from || from.includes('\0')
-          || (peerPolicy==='allowlist' && !config.peers.includes(from))) return;
-      const eventId = randomUUID();
-      log({ eventId, phase: 'received', peerPolicy, message });
-      if (queued >= 64) { log({ eventId, phase: 'pending', reason: 'Callback queue full; no delivery attempted' }); return; }
-      queued++;
-      chain = chain.then(async () => {
-        if(closed){log({eventId,phase:'pending',reason:'Callback owner closed before submission'});return;}
-        const result = await forward(message, eventId);
-        log({ eventId, phase: result.method === 'thread/queue/add' ? 'queued' : 'accepted', ...result });
-      }).catch(error => {
-        // Never replay a turn/start or steer after a lost response.
-        process.stderr.write(`Codex callback ${eventId} pending: ${String(error)}\n`);
-        try { log({ eventId, phase: 'pending', error: String(error),
-          ...(error instanceof CodexRequestError ? { outcome: error.outcome, nativeEvidence: error.rpcError } : {}),
-        }); } catch { /* Original ACP protocol log is retained by its owner. */ }
-      }).finally(() => { queued--; });
-    },
-    async close() { closed = true; await chain; },
+    receive(message) { if (admitted(message)) inbox.receive(message); },
+    close: () => inbox.close(),
   };
 }

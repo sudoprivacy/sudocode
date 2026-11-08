@@ -32,7 +32,8 @@ server.on('connection',socket=>socket.on('message',bytes=>{
   const result=call.method==='initialize'?{}:call.method==='thread/loaded/list'?{data:loaded,nextCursor:null}
     :call.method==='thread/read'?{thread:{id:call.params.threadId,cwd:workspace,status:{type:'idle'},
       parentThreadId:null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true}}
-    :call.method==='turn/start'?{turn:{id:randomUUID()}}:{};
+    :call.method==='thread/queue/addOnce'?{queuedSubmission:{id:randomUUID(),
+      clientUserMessageId:call.params.clientUserMessageId,input:call.params.input}}:{};
   socket.send(JSON.stringify({id:call.id,result}));
 }));
 const mintRows=()=>fs.readFileSync(path.join(root,'mint.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
@@ -67,14 +68,21 @@ async function main(){
     assert.equal(network.connectionFor(ids[0]).sessionId,sid);
     await network.connectionFor(ids[0]).request('_fixture/peer',{from:'new-network-peer',text:'fixed allowlist must refuse'});
     await network.close();
-    assert.equal(calls.filter(method=>method==='turn/start').length,0,'default reception remains the explicit allowlist');
+    assert.equal(calls.filter(method=>method==='thread/queue/addOnce').length,0,'default reception remains the explicit allowlist');
     network=await connectCodexAutojoin({...config,peerPolicy:'node-namespace'});
     assert.equal(network.connectionFor(ids[0]).sessionId,sid);
     assert.equal(mintRows().length,2,'unload, resume and owner restart never mint or create another ACP session');
-    await network.connectionFor(ids[0]).request('_fixture/peer',{from:'new-network-peer',text:'wrong session must refuse',wrongSession:true});
+    await assert.rejects(network.connectionFor(ids[0]).request('_fixture/peer',
+      {from:'new-network-peer',text:'wrong session must refuse',wrongSession:true}));
     await network.connectionFor(ids[0]).request('_fixture/peer',{from:'new-network-peer',text:'new Node peer data'});
+    const deliveryDeadline=Date.now()+3000;
+    while(!calls.includes('thread/queue/addOnce')) {
+      assert.ok(Date.now()<deliveryDeadline, 'durable callback did not enqueue the accepted Node message');
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
     await network.close();
-    assert.equal(calls.filter(method=>method==='turn/start').length,1,'explicit Node reception admits the new peer once, with original SID filtering');
+    assert.equal(calls.filter(method=>method==='thread/queue/addOnce').length,1,'explicit Node reception admits the new peer once, with original SID filtering');
+    assert.ok(!calls.some(method=>['turn/start','turn/steer','thread/queue/add'].includes(method)));
     network=await connectCodexAutojoin(config);
     assert.deepEqual(fs.readFileSync(projectConfig),original);
     const replay=mintRows()[0];const ready=await enrollCodexAgent(grantFile,{...replay});

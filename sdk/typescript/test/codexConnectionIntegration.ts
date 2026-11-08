@@ -21,7 +21,8 @@ async function main(): Promise<void> {
   const clientReplies: unknown[] = [];
   const original = process.env.CODEX_THREAD_ID ?? 'fixture-original';
   let state = 'idle';
-  let connections = 0;
+  let connections = 0, dropNextDelivery = false;
+  const accepted = new Map<string, any>();
   server.on('connection', socket => {
     connections++;
     socket.on('message', bytes => {
@@ -52,6 +53,15 @@ async function main(): Promise<void> {
           if (socket.readyState === 1) socket.send(JSON.stringify({ jsonrpc: '2.0', id: call.id,
             result: { source: 'actual response' } }));
         }, 40);
+        return;
+      }
+      if (call.method === 'thread/queue/addOnce') {
+        const key = call.params.clientUserMessageId;
+        const existing = accepted.get(key);
+        if (existing) assert.deepEqual(existing.input, call.params.input);
+        else accepted.set(key, { id: key, clientUserMessageId: key, input: call.params.input });
+        if (dropNextDelivery) { dropNextDelivery = false; socket.terminate(); return; }
+        socket.send(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: {queuedSubmission: accepted.get(key)} }));
         return;
       }
       const result = call.method === 'initialize' ? { userAgent: 'native-protocol-fixture/0.163.0' }
@@ -139,31 +149,96 @@ async function main(): Promise<void> {
     for (const mode of ['idle', 'active']) {
       state = mode;
       const log = path.join(directory, `${mode}.jsonl`);
-      const callback = await connectCodexCallback({ ...config, threadId: original, peers: ['allowed-peer'], log }, 'existing-acp');
+      const cfg = { ...config, threadId: original, peers: ['allowed-peer'], log };
+      const stable = { ...message, deliveryId: (mode === 'idle' ? 'a' : 'b').repeat(64) };
+      dropNextDelivery = true;
+      let callback = await connectCodexCallback(cfg, 'existing-acp');
       try {
-        callback.receive({ ...message, sessionId: 'different-acp' });
-        callback.receive({ ...message, sudocode: { a2a: { from: 'unlisted-peer' } } });
-        callback.receive(message);
-        await waitFor(() => fs.readFileSync(log, 'utf8').includes('"phase":"accepted"'));
-        const entries = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-        assert.equal(entries.filter(entry => entry.phase === 'received').length, 1);
-        const accepted = entries.find(entry => entry.phase === 'accepted');
-        assert.equal(accepted.method, mode === 'idle' ? 'turn/start' : 'turn/steer');
+        callback.receive({ ...stable, sessionId: 'different-acp' });
+        callback.receive({ ...stable, sudocode: { a2a: { from: 'unlisted-peer' } } });
+        callback.receive(stable);
+        await waitFor(() => fs.readFileSync(log, 'utf8').includes('"phase":"pending"'));
+        // Restart after commit/response loss: reload the durable inbox and
+        // retry exactly the same ID against the same server.
+        await callback.close();
+        callback = await connectCodexCallback(cfg, 'existing-acp');
+        await waitFor(() => fs.readFileSync(log, 'utf8').includes('"phase":"queued"'));
+        const count = calls.filter(call => call.method === 'thread/queue/addOnce').length;
+        callback.receive(stable);
+        await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(calls.filter(call => call.method === 'thread/queue/addOnce').length, count,
+          'upstream replay after durable acceptance must not submit again');
       } finally { await callback.close(); }
     }
+    assert.equal(accepted.size, 2, 'one logical queue entry per distinct delivery, despite response loss and restart');
+    // Reconnection without restarting the callback owner.
+    const reconnectLog = path.join(directory, 'reconnect.jsonl');
+    const reconnect = await connectCodexCallback({ ...config, threadId: original, peers: ['allowed-peer'], log: reconnectLog }, 'existing-acp');
+    try {
+      dropNextDelivery = true;
+      reconnect.receive({ ...message, deliveryId: 'c'.repeat(64) });
+      await waitFor(() => fs.readFileSync(reconnectLog, 'utf8').includes('"phase":"queued"'));
+      assert.equal(accepted.size, 3);
+    } finally { await reconnect.close(); }
+    const orderedLog = path.join(directory, 'ordered.jsonl');
+    const orderedConfig = { ...config, threadId: original, peers: ['allowed-peer'], log: orderedLog };
+    let ordered = await connectCodexCallback(orderedConfig, 'existing-acp');
+    const originalClock = Date.now;
+    try {
+      Date.now = () => 20000;
+      ordered.receive({ ...message, deliveryId: '6'.repeat(64), text: 'FIRST_IN_ORDER', body: 'FIRST_IN_ORDER' });
+      Date.now = () => 10000; // A wall-clock backstep cannot reverse durable FIFO.
+      ordered.receive({ ...message, deliveryId: '7'.repeat(64), text: 'SECOND_IN_ORDER', body: 'SECOND_IN_ORDER' });
+    } finally { Date.now = originalClock; await ordered.close(); }
+    const beforeOrdered = calls.length;
+    ordered = await connectCodexCallback(orderedConfig, 'existing-acp');
+    try {
+      await waitFor(() => fs.readFileSync(orderedLog, 'utf8').split('"phase":"queued"').length === 3);
+      const delivered = calls.slice(beforeOrdered).filter(call => call.method === 'thread/queue/addOnce');
+      assert.equal(delivered.length, 2);
+      assert.ok(JSON.stringify(delivered[0].params).includes('FIRST_IN_ORDER'));
+      assert.ok(JSON.stringify(delivered[1].params).includes('SECOND_IN_ORDER'));
+    } finally { await ordered.close(); }
+    // Disk/capacity refusal must be synchronous so ACP cannot ACK missing
+    // custody. These calls use the same real proxy and private on-disk inbox.
+    const boundedLog = path.join(directory, 'bounded.jsonl');
+    const bounded = await connectCodexCallback({ ...config, threadId: original,
+      peers: ['allowed-peer'], log: boundedLog }, 'existing-acp');
+    const beforeBounded = calls.filter(call => call.method === 'thread/queue/addOnce').length;
+    const retained = { ...message, deliveryId: 'd'.repeat(64) };
+    bounded.receive(retained);
+    assert.throws(() => bounded.receive({ ...retained, body: 'changed' }), /different bytes/);
+    assert.throws(() => bounded.receive({ ...message, text: 'x'.repeat(256 * 1024) }), /limit/);
+    const expanded = { ...message, text: '"'.repeat(70000), body: '' };
+    assert.ok(Buffer.byteLength(JSON.stringify(expanded)) < 256 * 1024);
+    assert.throws(() => bounded.receive(expanded), /Encoded peer delivery.*limit/);
+    for (let n = 1; n < 64; n++) bounded.receive({ ...message, deliveryId: n.toString(16).padStart(64, '0') });
+    assert.throws(() => bounded.receive({ ...message, deliveryId: 'e'.repeat(64) }), /inbox full/);
+    await bounded.close();
+    assert.throws(() => bounded.receive(retained), /closed/);
+    assert.equal(calls.filter(call => call.method === 'thread/queue/addOnce').length, beforeBounded);
+    const recordFile = path.join(boundedLog + '.inbox', fs.readdirSync(boundedLog + '.inbox').find(name => name.endsWith('.json'))!);
+    const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+    record.threadId = 'different-owner'; fs.writeFileSync(recordFile, JSON.stringify(record));
+    await assert.rejects(connectCodexCallback({ ...config, threadId: original, peers: ['allowed-peer'],
+      log: boundedLog }, 'existing-acp'), /identity or content changed/);
+
+    const failingLog = path.join(directory, 'storage-failure.jsonl');
+    const failing = await connectCodexCallback({ ...config, threadId: original, peers: ['allowed-peer'],
+      log: failingLog }, 'existing-acp');
+    fs.renameSync(failingLog + '.inbox', failingLog + '.saved');
+    fs.writeFileSync(failingLog + '.inbox', 'not a directory');
+    assert.throws(() => failing.receive({ ...message, deliveryId: 'f'.repeat(64) }), /ENOTDIR/);
+    await failing.close();
+    assert.equal(calls.filter(call => call.method === 'thread/queue/addOnce').length, beforeBounded);
     state = 'notLoaded';
     await assert.rejects(connectCodexCallback({ ...config, threadId: original, peers: [],
       log: path.join(directory, 'unloaded.jsonl') }, 'existing-acp'), /already be loaded/);
-    assert.equal(calls.filter(call => call.method === 'turn/start').length, 1);
-    assert.equal(calls.filter(call => call.method === 'turn/steer').length, 1);
-    assert.equal(calls.find(call => call.method === 'turn/steer')?.params?.expectedTurnId, 'running');
-    const idle = calls.find(call => call.method === 'turn/start')?.params;
-    assert.deepEqual(idle?.input, []);
-    assert.equal((idle?.toolOutput as { namespace: string }).namespace, 'nexus');
+    assert.equal(calls.filter(call => call.method === 'turn/start' || call.method === 'turn/steer' || call.method === 'thread/queue/add').length, 0);
     assert.equal((calls.find(call => call.method === 'initialize')?.params?.clientInfo as { name: string }).name, 'scode-acp-client');
     assert.ok(!calls.some(call => /thread\/(start|resume|fork)|session\/prompt/.test(call.method)),
       'transport extraction does not create a controller, resume a thread or issue an ACP task prompt');
-    console.log('PASS native Codex proxy processes: shared inventory/events, request-ID and observer isolation, typed outcomes, bounded exit, unchanged callback and no loss retry');
+    console.log('PASS native Codex proxy processes: shared inventory/events, request-ID and observer isolation, typed outcomes, bounded exit, durable callback restart, stable-ID recovery and proxy reconnection');
   } finally {
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>(resolve => server.close(() => resolve()));

@@ -13,7 +13,7 @@ const actor = scenario === 'operator'
 const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
 const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
 let sessionId;
-let peerOwned = false;
+let peerOwned = 0;
 const frame = (hash, value) => {
   const bytes = Buffer.from(value), length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length)); hash.update(length).update(bytes);
@@ -43,14 +43,15 @@ const result = (value, tool, input) => {
 };
 const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   .onRequest(acp.methods.agent.initialize, ctx => {
+    if (scenario === 'cold-recovery' && !existsSync(`${journal}.online`)) process.exit(18);
     // Like scode, every advertising fixture echoes peer input a client declares.
-    peerOwned = scenario !== 'legacy'
-      && ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version >= 1;
+    peerOwned = scenario === 'legacy' ? 0
+      : Math.min(2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
     log({ method: 'initialize', peerOwned });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
         version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
-      }, ...(peerOwned ? { peerInput: { version: 1 } } : {}) } } }),
+      }, ...(peerOwned ? { peerInput: { version: peerOwned } } : {}) } } }),
     };
   })
   .onRequest(acp.methods.agent.session.new, () => {
@@ -58,7 +59,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   })
   .onRequest('_fixture/peer', value=>value, async ctx=>{
     const target=ctx.params.wrongSession?'another-session':sessionId, from=ctx.params.from;
-    if(peerOwned)await ctx.client.notify('_sudocode/session/peer_message',{sessionId:target,
+    if(peerOwned)await ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message',{sessionId:target, deliveryId:'a'.repeat(64),
       text:`<mailbox-message from="${from}">\n${ctx.params.text}\n</mailbox-message>`,body:ctx.params.text,
       sudocode:{a2a:{from,kind:'message'}}});
     else await ctx.client.notify(acp.methods.client.session.update,{sessionId:target,
@@ -70,7 +71,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
     // A client that owns peer input hears peers even before its own startup completes.
     if (peerOwned && scenario.startsWith('channel')) setTimeout(() => { for (const from of ['fixture-peer', 'stranger']) {
-      void ctx.client.notify('_sudocode/session/peer_message', { sessionId,
+      void ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message', { sessionId, deliveryId:'b'.repeat(64),
         text: `<mailbox-message from="${from}" summary="greeting">\nhello from ${from}\n</mailbox-message>`,
         body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting',
           verified: scenario === 'channel-node-namespace' } } }).catch(() => {});

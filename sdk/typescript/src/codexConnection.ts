@@ -19,6 +19,7 @@ export interface CodexNotification {
 
 export interface CodexConnection {
   initialized: unknown;
+  readonly connected: boolean;
   readonly lastNotificationError: unknown;
   readonly exited: Promise<{ code: number | null; signal: ChildProcess['signalCode'] }>;
   request<T>(method: string, params: unknown): Promise<T>;
@@ -26,6 +27,9 @@ export interface CodexConnection {
 }
 
 export type CodexRequestOutcome = 'not_sent' | 'unknown';
+
+/** A replacement proxy must not overlap an unconfirmed previous child. */
+export class CodexCleanupUnknownError extends Error {}
 
 /** A server error is retained, but does not by itself prove no side effect. */
 export class CodexRequestError extends Error {
@@ -157,7 +161,7 @@ export async function connectCodex(
         if (!stopped) child.kill('SIGKILL');
         await timeout(exited, closePhaseMs, 'Codex proxy forced exit');
       }
-    })();
+    })().catch(error => { throw new CodexCleanupUnknownError(`Owned Codex proxy cleanup unconfirmed: ${String(error)}`); });
     return closePromise;
   };
   try {
@@ -169,6 +173,59 @@ export async function connectCodex(
     });
     const initialized = await request('initialize', { clientInfo: { name: 'scode-acp-client', version: '1.0.0' }, capabilities: { experimentalApi: true } });
     socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }));
-    return { initialized, request, close, exited, get lastNotificationError() { return lastNotificationError; } };
+    return { initialized, request, close, exited, get connected() { return !closed && !failure && socket.readyState === WebSocket.OPEN; },
+      get lastNotificationError() { return lastNotificationError; } };
   } catch (error) { await close(); throw error; }
+}
+
+/** Reconnect the owned proxy to the SAME server. Never replay an arbitrary
+ * in-flight RPC: only the durable inbox owns idempotent delivery retries. */
+export async function connectRecoveringCodex(config: CodexConnectionConfig,
+  onNotification?: (notification: CodexNotification) => void | Promise<void>): Promise<CodexConnection> {
+  validateCodexConnectionConfig(config);
+  let current: CodexConnection | undefined;
+  let replacing: Promise<void> | undefined, closing: Promise<void> | undefined;
+  let closed = false, retryAt = 0;
+  let reconnectError: unknown;
+  let recoveryStopped = false;
+  // Startup transport failure is not an authoritative empty root inventory.
+  // The owning observer remains alive and retries its next bounded read.
+  try { current = await connectCodex(config, onNotification); }
+  catch (error) {
+    if (error instanceof CodexCleanupUnknownError) throw error;
+    reconnectError = error; retryAt = performance.now() + 1000;
+  }
+  let finish!: (value: { code: number | null; signal: ChildProcess['signalCode'] }) => void;
+  const exited = new Promise<{ code: number | null; signal: ChildProcess['signalCode'] }>(resolve => { finish = resolve; });
+  const ready = async () => {
+    if (closed) throw new CodexRequestError('not_sent', 'Native connection owner closed');
+    if (recoveryStopped) throw reconnectError;
+    if (current?.connected) return;
+    if (!replacing) {
+      if (performance.now() < retryAt) throw new CodexRequestError('not_sent', `Native reconnect backoff: ${String(reconnectError)}`, undefined, reconnectError);
+      replacing = (async () => {
+        await current?.close();
+        if (closed) throw new CodexRequestError('not_sent', 'Native connection owner closed');
+        current = await connectCodex(config, onNotification);
+        reconnectError = undefined;
+        if (closed) await current.close();
+      })().catch(error => { reconnectError = error; recoveryStopped = error instanceof CodexCleanupUnknownError; throw error; })
+        .finally(() => { replacing = undefined; retryAt = performance.now() + 1000; });
+    }
+    await replacing;
+    if (closed) throw new CodexRequestError('not_sent', 'Native connection owner closed');
+  };
+  return {
+    get initialized() { return current?.initialized; },
+    get connected() { return !closed && !!current?.connected; },
+    get lastNotificationError() { return current?.lastNotificationError; }, exited,
+    async request<T>(method: string, params: unknown): Promise<T> { await ready(); return current!.request<T>(method, params); },
+    close() {
+      closed = true;
+      return closing ??= (async () => {
+        await replacing?.catch(() => {});
+        await current?.close(); finish(current ? await current.exited : { code: null, signal: null });
+      })();
+    },
+  };
 }

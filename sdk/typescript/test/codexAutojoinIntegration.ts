@@ -29,6 +29,7 @@ let mcpOwnerPid: number | undefined;
 let auditFailureOwner: ChildProcess | undefined;
 let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindowsCodexOwner']> | undefined;
 let holdReads = false;
+let initialNativeOffline = true;
 let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
@@ -37,6 +38,7 @@ for(const [key,value] of Object.entries(process.env))if(value!==undefined && key
 server.on('connection',socket=>socket.on('message',bytes=>{
   const call=JSON.parse(bytes.toString());calls.push(call);
   if(call.id===undefined)return;
+  if(initialNativeOffline) { socket.terminate(); return; }
   const retiring=retiringRead;
   if(call.method==='thread/read'&&retiring&&call.params.threadId===retiring.id){
     if(retiring.absent)loaded=loaded.filter(id=>id!==retiring.id);
@@ -49,7 +51,7 @@ server.on('connection',socket=>socket.on('message',bytes=>{
   if(thread.id===ids[3])thread.threadSource='guardian_review';
   const result=call.method==='initialize'?{userAgent:'fixture'}:call.method==='thread/loaded/list'
     ?{data:loaded,nextCursor:null}:call.method==='thread/read'?{thread}
-      :call.method==='turn/start'?{turn:{id:'peer-turn'}}:{};
+      :call.method==='thread/queue/addOnce'?{queuedSubmission:{id:call.params.clientUserMessageId,clientUserMessageId:call.params.clientUserMessageId,input:call.params.input}}:{};
   const reply = () => {if(socket.readyState===1)socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,result}));};
   if(holdReads&&call.method==='thread/read')pendingReads.push(reply);else reply();
 }));
@@ -72,6 +74,11 @@ async function main() {
     },
   };
   owner=await connectCodexAutojoin(config);
+  assert.equal(owner.canRetire, false, 'startup connection failure is not an empty-root observation');
+  assert.equal(enrollments.length, 0, 'offline startup cannot invent a new agent');
+  assert.throws(()=>owner!.connectionFor(ids[0]), /inventory unavailable/);
+  initialNativeOffline=false;
+  await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
   assert.equal(owner.status().length,2,'subagents and feature workers never become root Agents');
   const first=owner.status();assert.equal(new Set(first.map(row=>row.actor)).size,2);
   assert.throws(()=>owner!.connectionFor(undefined),/metadata/);
@@ -81,6 +88,17 @@ async function main() {
     assert.equal(JSON.parse(result.content).routing.sender,row.actor);
   }
   const originalSession=owner.connectionFor(ids[0]).sessionId;
+  const originalReceiver = owner.connectionFor(ids[0]);
+  process.kill(originalReceiver.pid, 'SIGTERM');
+  await originalReceiver.exited;
+  await new Promise(resolve=>setTimeout(resolve,5100)); await owner.refresh();
+  assert.notEqual(owner.connectionFor(ids[0]).pid, originalReceiver.pid);
+  assert.equal(owner.connectionFor(ids[0]).sessionId, originalSession);
+  assert.equal(enrollments.length, 2, 'transport recovery never re-enrolls the original actor');
+  for(const socket of server.clients) socket.terminate();
+  await new Promise(resolve=>setTimeout(resolve,100)); await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId, originalSession, 'native proxy recovery retains ACP ownership');
+
   // A real proxy round trip retires another root between list and read. Its
   // confirmed absence must not invalidate a still-loaded root or resend tools.
   retiringRead={id:ids[1],absent:true};await owner.refresh();
@@ -293,10 +311,10 @@ async function main() {
   owner=await connectCodexAutojoin({...config,peers:['fixture-peer'],stateDirectory:path.join(directory,'delivery-bindings')});
   const peerSession=owner.connectionFor(ids[0]);
   await peerSession.request('_fixture/peer',{from:'stranger',text:'the allowlist must refuse'});
-  await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'another session must refuse',wrongSession:true});
+  await assert.rejects(peerSession.request('_fixture/peer',{from:'fixture-peer',text:'another session must refuse',wrongSession:true}));
   await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'peer data 零 🧪'});
-  type TurnStart={method:string;params:{threadId:string;toolOutput:{output:string}}};
-  const turnStarts=()=>calls.slice(deliveryCalls).filter(call=>call.method==='turn/start') as TurnStart[];
+  type TurnStart={method:string;params:{threadId:string;input:Array<{type:string;text:string}>}};
+  const turnStarts=()=>calls.slice(deliveryCalls).filter(call=>call.method==='thread/queue/addOnce') as TurnStart[];
   const deliveryDeadline=Date.now()+5000;
   while(!turnStarts().length){
     assert.ok(Date.now()<deliveryDeadline,'peer message did not reach the Codex thread');
@@ -305,7 +323,7 @@ async function main() {
   await new Promise(resolve=>setTimeout(resolve,200));
   assert.equal(turnStarts().length,1,'only the allowlisted peer on the original session is admitted');
   assert.equal(turnStarts()[0].params.threadId,ids[0]);
-  const delivered=JSON.parse(turnStarts()[0].params.toolOutput.output);
+  const delivered=JSON.parse(turnStarts()[0].params.input[0].text.split('\n').slice(1).join('\n'));
   assert.equal(delivered.message.sudocode.a2a.from,'fixture-peer');
   assert.equal(delivered.message.body,'peer data 零 🧪');
   const deliveryJournal=rows().slice(deliveryRows);

@@ -122,12 +122,12 @@ void(async()=>{
     callback.receive({...message,sudocode:{a2a:{from:'denied-peer'}}});
     assert.equal(receipt.producerObservations.length,0,'refused peers/SID cannot spawn a producer');
     phase='peer';const submittedAt=Date.now();callback.receive(message);
-    await wait(()=>jsonLines(callbackLog).some(row=>row.phase===(options.case==='response-loss'?'pending':'queued')),20000,'callback outcome');
+    await wait(()=>jsonLines(callbackLog).some(row=>row.phase==='queued'),30000,'durable callback recovery');
     receipt.callbackAudit=jsonLines(callbackLog);
     const received=receipt.callbackAudit.filter(row=>row.phase==='received');assert.equal(received.length,1);
     receipt.eventId=received[0].eventId;
     const calls=receipt.producerObservations.filter(row=>row.phase==='request');
-    assert.equal(calls.filter(row=>row.method==='thread/queue/add').length,1);
+    assert.equal(calls.filter(row=>row.method==='thread/queue/addOnce').length,options.case==='response-loss'?2:1);
     assert(!calls.some(row=>['thread/start','thread/resume','thread/fork','turn/start','turn/steer'].includes(row.method)));
     const inventories=receipt.producerObservations.filter(row=>row.phase==='inventory');
     if(options.case==='idle'){
@@ -140,7 +140,8 @@ void(async()=>{
       assert.equal(receipt.relayAudit.filter(row=>row.phase==='committed-receipt-dropped').length,1);
       assert.deepEqual(receipt.relayAudit.find(row=>row.phase==='after-inventory').result,{data:[],nextCursor:null});
       const exit=receipt.relayAudit.find(row=>row.phase==='exit');assert.equal(exit.code,0);assert.equal(exit.signal,null);
-      assert.equal(inventories.length,1);assert.deepEqual(inventories[0].loaded,[]);
+      assert.equal(inventories.length,3);assert.ok(inventories.every(row=>row.loaded.length===0));
+      assert.equal(receipt.callbackAudit.find(row=>row.phase==='queued').clientUserMessageId, receipt.eventId);
       assert(!receipt.relayAudit.some(row=>row.phase==='unexpected-thread-loaded'));
     }
     await wait(()=>screen().includes('Native queued peer response complete.'),35000,'native queue wake');
@@ -158,9 +159,9 @@ void(async()=>{
     assert.doesNotThrow(()=>process.kill(originalPid,0));assert.equal(socketEntryPresent(socket),false);
     assert.equal(sessionItems().filter(row=>row.item.type==='session_meta').length,1);
     if(options.case==='response-loss'){
-      // Observe another native scheduler interval with the callback still open.
+      // Observe another scheduler interval: two idempotent submissions still produce one turn.
       await new Promise(resolve=>setTimeout(resolve,11000));
-      assert.equal(receipt.producerObservations.filter(row=>row.phase==='request'&&row.method==='thread/queue/add').length,1);
+      assert.equal(receipt.producerObservations.filter(row=>row.phase==='request'&&row.method==='thread/queue/addOnce').length,2);
       assert.equal(turnItems().filter(row=>row.item.payload.type==='task_started').length,2);
       receipt.noReplayObservationMs=11000;
     }

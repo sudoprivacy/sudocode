@@ -80,7 +80,7 @@ async function main(): Promise<void> {
 
   // A client that owns peer input receives each message instead of the session.
   const peerMessages: ScodePeerMessage[] = [];
-  const peerOwner = await connectScode({ ...base, onPeerMessage: message => peerMessages.push(message) });
+  const peerOwner = await connectScode({ ...base, onPeerMessage: message => { peerMessages.push(message); } });
   try {
     await peerOwner.request('session/prompt', prompt(peerOwner.sessionId, 'peer-message'));
     assert.deepEqual(peerMessages.map(message => message.sudocode.a2a.from), ['fixture-peer', 'stranger']);

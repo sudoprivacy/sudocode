@@ -35,11 +35,13 @@ export interface ScodeQuestionResponse {
 /** A peer message delivered to a client that owns peer input. */
 export interface ScodePeerMessage {
   sessionId: string;
+  /** Stable mailbox delivery identity, retained on every upstream retry. */
+  deliveryId?: string;
   /** The `<mailbox-message>` wrapper a session model would have read. */
   text: string;
   body: string;
   /** `verified` is scode's fact: the reading mailbox authenticated the sender. */
-  sudocode: { a2a: { from: string; kind?: string; summary?: string; verified?: boolean } };
+  sudocode: { a2a: { from: string; kind?: string; summary?: string; verified?: boolean; sendId?: string | null } };
 }
 
 function parsePeerMessage(value: unknown): ScodePeerMessage {
@@ -99,7 +101,10 @@ export interface ScodeAcpConfig {
   /** This client is the agent its peers address: their messages arrive here
    * and never start a turn of the scode session. Requires a scode that echoes
    * `peerInput`; an older one would answer every peer itself, so it is refused. */
-  onPeerMessage?: (message: ScodePeerMessage) => void;
+  onPeerMessage?: (message: ScodePeerMessage) => void | Promise<void>;
+  /** v2 requires durable acceptance before resolving onPeerMessage. v1 is
+   * notification-only for clients without a durable inbox (e.g. channels). */
+  peerInputVersion?: 1 | 2;
 }
 
 export interface ScodeConnection {
@@ -113,6 +118,9 @@ export interface ScodeConnection {
   /** Explicitly close this connection's owned CLI, not another agent or the Nexus node. */
   close(): Promise<void>;
 }
+
+/** Never start a replacement while the previous owned child may still exist. */
+export class ScodeCleanupUnknownError extends Error {}
 
 function duration(value: number | undefined, fallback: number): number {
   if (value === undefined) {
@@ -274,8 +282,16 @@ export async function connectScode(
       try { onNotification(ctx.params); } catch (error) { report(error); }
     });
   if (config.onPeerMessage) {
-    app.onNotification('_sudocode/session/peer_message', parsePeerMessage, ctx => {
-      try { config.onPeerMessage!(ctx.params); } catch (error) { report(error); }
+    app.onNotification('_sudocode/session/peer_message', parsePeerMessage, async ctx => {
+      try { await config.onPeerMessage!(ctx.params); } catch (error) { report(error); }
+    });
+    app.onRequest('_sudocode/session/peer_message', parsePeerMessage, async ctx => {
+      if ((config.peerInputVersion ?? 2) !== 2 || !/^[a-f0-9]{64}$/.test(ctx.params.deliveryId ?? '')) {
+        throw new Error('A durable peer delivery identity is required');
+      }
+      if (!sessionId || ctx.params.sessionId !== sessionId) throw new Error('Peer delivery is not for the loaded ACP session');
+      await abortable(async () => { await config.onPeerMessage!(ctx.params); }, [ctx.signal, closing.signal]);
+      return { accepted: true, sessionId: ctx.params.sessionId, deliveryId: ctx.params.deliveryId };
     });
   }
   if (config.onQuestion) {
@@ -331,10 +347,10 @@ export async function connectScode(
     const initialized = await timeout(request<acp.InitializeResponse>(acp.methods.agent.initialize, {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
-        ...(config.onPeerMessage ? { _meta: { sudocode: { peerInput: { version: 1 } } } } : {}) },
+        ...(config.onPeerMessage ? { _meta: { sudocode: { peerInput: { version: config.peerInputVersion ?? 2 } } } } : {}) },
     }), startupMs, 'ACP initialize');
     const peerInput = (initialized._meta?.sudocode as { peerInput?: { version?: number } } | undefined)?.peerInput;
-    if (config.onPeerMessage && !(typeof peerInput?.version === 'number' && peerInput.version >= 1)) {
+    if (config.onPeerMessage && !(typeof peerInput?.version === 'number' && peerInput.version >= (config.peerInputVersion ?? 2))) {
       throw new Error('This scode does not support client-owned peer input; refusing a connection whose peers would be answered twice');
     }
     if (config.acpSessionId) {
@@ -364,7 +380,9 @@ export async function connectScode(
       close,
     };
   } catch (error) {
-    await close().catch(report);
+    try { await close(); } catch (cleanupError) {
+      throw new ScodeCleanupUnknownError(`ACP startup failed: ${String(error)}; owned child cleanup unconfirmed: ${String(cleanupError)}`);
+    }
     throw error;
   }
 }

@@ -246,6 +246,11 @@ jobs:
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the shared CLI and mailbox process supervisor
+        run: python3 -m pip install psutil==7.2.2
       # The one thing unit tests structurally cannot reach: an envelope moving
       # through a real gRPC server and a real DT_STREAM, and a blocking tail
       # woken by a real write. `ensure_inbox` shipped broken for exactly that

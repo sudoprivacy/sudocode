@@ -228,7 +228,10 @@ async function main(): Promise<void> {
       log: failingLog }, 'existing-acp');
     fs.renameSync(failingLog + '.inbox', failingLog + '.saved');
     fs.writeFileSync(failingLog + '.inbox', 'not a directory');
-    assert.throws(() => failing.receive({ ...message, deliveryId: 'f'.repeat(64) }), /ENOTDIR/);
+    // Opening below a regular file reports ENOENT on Windows and ENOTDIR on
+    // POSIX. Both must refuse acceptance before any native submission.
+    assert.throws(() => failing.receive({ ...message, deliveryId: 'f'.repeat(64) }),
+      { code: process.platform === 'win32' ? 'ENOENT' : 'ENOTDIR' });
     await failing.close();
     assert.equal(calls.filter(call => call.method === 'thread/queue/addOnce').length, beforeBounded);
     state = 'notLoaded';

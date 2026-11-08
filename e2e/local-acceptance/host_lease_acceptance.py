@@ -103,7 +103,7 @@ def verify_host_lease(directory, source, command, environment):
     processes = []
     sources = {}
 
-    def start(label, nested=False, root=work, resume=None):
+    def start(label, claim=None, root=work, resume=None):
         # These exercise fresh executions, so each independent contender gets
         # its own immutable source head. Exact-head reuse is tested separately.
         if root == work:
@@ -113,7 +113,7 @@ def verify_host_lease(directory, source, command, environment):
             run("git", "commit", "-am", "Candidate " + label, cwd=root)
         sources[label] = root
         log = (fixture / f"{label}.out").open("w")
-        env = {**isolated, LEASE_ENV: "enclosing-acceptance"} if nested else isolated
+        env = {**isolated, LEASE_ENV: claim} if claim is not None else isolated
         args = [sys.executable, str(root / ".github/scripts/local_acceptance.py"), "check",
                 "--base", "main", "--policy-ref", "main", "--output", str(fixture / label)]
         if resume is not None:
@@ -169,15 +169,17 @@ def verify_host_lease(directory, source, command, environment):
         assert not (fixture / "Bad/native-workspace").exists()
         assert not waiting(failure), failure.log.read_text()
         assert events() == ["start:A"], events()
-        # A check started under the holder is already serialized by it.
-        (fixture / "release-C").touch()
-        finished(start("C", nested=True))
-        assert events() == ["start:A", "start:C", "end:C"], events()
+        # A sibling with an invented claim is not a nested child of the holder.
+        rejected_claim = start("C", claim="enclosing-acceptance")
+        assert rejected_claim.wait(timeout=15) != 0, rejected_claim.log.read_text()
+        assert "Invalid inherited host acceptance lease" in rejected_claim.log.read_text()
+        assert not (fixture / "C/envelope.json").exists()
+        assert events() == ["start:A"], events()
         (fixture / "release-A").touch()
         finished(holder)
         for process in queued:
             finished(process)
-        assert events() == ["start:A", "start:C", "end:C", "end:A", "start:B", "end:B",
+        assert events() == ["start:A", "end:A", "start:B", "end:B",
                             "start:X", "end:X", "start:Y", "end:Y"], events()
         assert "Acquired this host's local acceptance lease" in queued[0].log.read_text()
         timing = json.loads((fixture / "B/attempt.json").read_text())
@@ -238,7 +240,7 @@ def verify_host_lease(directory, source, command, environment):
         # The killed runner's profile step outlives it; let it exit before cleanup.
         (fixture / "release-G").touch()
         wait_until(lambda: "end:G" in events(), "the killed holder's orphaned step to exit")
-        print("PASS: one acceptance per host in arrival order, nested checks under the holder, "
+        print("PASS: one acceptance per host in arrival order, fabricated inheritance refusal, "
               "release on abrupt holder or waiter exit; metadata-only completion and mixed-plan preflight success/failure and verified full/partial resume scheduling")
     finally:
         # A negative control must release its own private waits as well.

@@ -11,6 +11,7 @@ import ast
 import base64
 import contextlib
 import copy
+import errno
 import fnmatch
 import hashlib
 import io
@@ -19,6 +20,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -1597,8 +1599,10 @@ def try_host_lock(descriptor):
             import fcntl
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
-    except OSError:
-        return False
+    except OSError as error:
+        if error.errno in {errno.EACCES, errno.EAGAIN}:
+            return False
+        raise
 
 
 def release_host_lock(descriptor):
@@ -1641,6 +1645,71 @@ def live_lease_tickets(queue, own):
     return sorted(live)
 
 
+def write_host_lease_record(descriptor, record):
+    """Bind an acquisition to the existing lock, outside Windows' locked byte."""
+    data = canonical(record)
+    if len(data) > 4096:
+        raise RuntimeError("Host acceptance lease record is too large")
+    os.lseek(descriptor, 1, os.SEEK_SET)
+    remaining = data
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if not written:
+            raise OSError("Could not write the host acceptance lease record")
+        remaining = remaining[written:]
+    os.ftruncate(descriptor, len(data) + 1)
+
+
+def read_host_lease_record(descriptor):
+    """Read bounded ownership metadata without touching Windows' locked byte."""
+    os.lseek(descriptor, 1, os.SEEK_SET)
+    data = os.read(descriptor, 4097)
+    if len(data) > 4096:
+        raise ValueError("Host acceptance lease record is too large")
+    return json.loads(data)
+
+
+def verify_inherited_host_lease(claim, directory):
+    """Only a live acquisition owned by this process or an ancestor may nest."""
+    descriptor, acquired = None, False
+    try:
+        import psutil
+        if not re.fullmatch(r"v1:[1-9][0-9]*:[0-9a-f]{64}", claim):
+            raise ValueError("Unrecognized acquisition claim")
+        lock = directory / "host.lock"
+        descriptor = os.open(lock, os.O_RDWR)
+        record = read_host_lease_record(descriptor)
+        if (record.get("version") != 1 or record.get("active") is not True
+                or type(record.get("pid")) is not int
+                or claim != f"v1:{record['pid']}:{record.get('lease_id')}"):
+            raise ValueError("Acquisition has ended or differs from the inherited claim")
+        owner = psutil.Process(record["pid"])
+        ancestor = psutil.Process()
+        while ancestor != owner:
+            ancestor = ancestor.parent()
+            if ancestor is None:
+                raise ValueError("The lease owner is not this process or an ancestor")
+        if (not owner.is_running() or owner.status() == psutil.STATUS_ZOMBIE
+                or owner.create_time() != record.get("process_created_at")):
+            raise ValueError("The lease owner exited or its PID was reused")
+        acquired = try_host_lock(descriptor)
+        if acquired:
+            raise ValueError("The acquisition no longer holds the operating-system lock")
+        if (read_host_lease_record(descriptor) != record
+                or not os.path.samestat(os.fstat(descriptor), lock.stat())
+                or not owner.is_running()):
+            raise ValueError("The acquisition changed during inheritance validation")
+    except Exception as error:
+        raise RuntimeError("Invalid inherited host acceptance lease: " + str(error)
+                           + ". Do not invent or copy lease claims; finish the original owner "
+                           "before starting a fresh top-level acceptance.") from error
+    finally:
+        if descriptor is not None:
+            if acquired:
+                release_host_lock(descriptor)
+            os.close(descriptor)
+
+
 @contextlib.contextmanager
 def host_acceptance_lease(attempt, head):
     """Run one fresh profile at a time on this host, in arrival order.
@@ -1650,13 +1719,15 @@ def host_acceptance_lease(attempt, head):
     system releases the lock when its holder exits, including after a crash or
     a memory kill. Each fresh profile rejoins the FIFO, so already waiting work
     can run before this invocation's next profile. Processes
-    started under the holder inherit HOST_LEASE_ENV and are already serialized,
-    so nested fixture checks do not wait for their parent.
+    started under the holder inherit its acquisition claim. A nested check
+    validates the real locked record and process incarnation before proceeding.
     """
-    if os.environ.get(HOST_LEASE_ENV):
+    directory = Path.home() / ".nexus/local-acceptance"
+    claim = os.environ.get(HOST_LEASE_ENV)
+    if claim:
+        verify_inherited_host_lease(claim, directory)
         yield
         return
-    directory = Path.home() / ".nexus/local-acceptance"
     queue = directory / "queue"
     queue.mkdir(parents=True, exist_ok=True)
     lock, holder = directory / "host.lock", directory / "host-lease.json"
@@ -1689,8 +1760,13 @@ def host_acceptance_lease(attempt, head):
         attempt.setdefault("host_lease_acquisitions", []).append({
             "profile": attempt.get("active_profile"), "wait_seconds": waited, "acquired_at": acquired,
         })
-        holder.write_bytes(canonical({"pid": os.getpid(), "head": head, "root": str(ROOT),
-                                      "acquired_at": acquired, "profile": attempt.get("active_profile")}))
+        import psutil
+        record = {"version": 1, "active": True, "pid": os.getpid(),
+                  "process_created_at": psutil.Process().create_time(),
+                  "lease_id": secrets.token_hex(32), "head": head, "root": str(ROOT),
+                  "acquired_at": acquired, "profile": attempt.get("active_profile")}
+        write_host_lease_record(descriptor, record)
+        holder.write_bytes(canonical(record))
         print(f"Acquired this host's local acceptance lease after {waited:.3f}s; "
               f"cumulative wait {attempt['host_lease_wait_seconds']:.3f}s",
               flush=True)
@@ -1700,12 +1776,17 @@ def host_acceptance_lease(attempt, head):
         waiting = None
         with contextlib.suppress(OSError):
             ticket.unlink()
-        os.environ[HOST_LEASE_ENV] = str(os.getpid())
+        os.environ[HOST_LEASE_ENV] = f"v1:{record['pid']}:{record['lease_id']}"
         try:
             yield
         finally:
-            os.environ.pop(HOST_LEASE_ENV, None)
-            release_host_lock(descriptor)
+            try:
+                inactive = {**record, "active": False}
+                write_host_lease_record(descriptor, inactive)
+                holder.write_bytes(canonical(inactive))
+            finally:
+                os.environ.pop(HOST_LEASE_ENV, None)
+                release_host_lock(descriptor)
     finally:
         if descriptor is not None:
             os.close(descriptor)

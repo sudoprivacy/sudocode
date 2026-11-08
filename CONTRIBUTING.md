@@ -333,8 +333,15 @@ releases the host, including an abrupt exit; each holds a ticket under
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
-Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
-fixture checks nested inside an acceptance run without waiting for their parent.
+Processes started under the holder inherit an acquisition-specific
+`SUDOCODE_ACCEPTANCE_HOST_LEASE` claim. Nested checks validate that claim against
+the existing OS-locked file, the owner's process creation time and actual
+ancestry before proceeding without waiting for their parent. Invented, copied,
+released and previous-acquisition claims fail before heavy execution. The record
+inside `host.lock` is authoritative; `host-lease.json` is a diagnostic snapshot.
+Standalone enforcement fixtures use private homes and real private locks, never
+a fabricated claim. Existing older runners can finish naturally; their legacy
+claims do not authorize execution under a newer validator.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
 profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.

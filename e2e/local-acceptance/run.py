@@ -22,16 +22,16 @@ SOURCE = Path(__file__).resolve().parents[2]
 def fixture_environment():
     """Clear hook-exported repository selectors before touching temporary repos.
 
-    Fixture checks run tiny executable profiles. They never take this host's
-    real acceptance lease, so a manual run does not queue behind an acceptance
-    in progress. The host lease fixture clears this and uses a private home.
+    Tiny executable profiles use the fixture's private home and lease files.
+    Never fabricate or copy an enclosing host's acquisition claim.
     """
     names = subprocess.check_output(["git", "rev-parse", "--local-env-vars"],
                                     cwd=SOURCE, text=True).splitlines()
     environment = {key: value for key, value in os.environ.items() if key not in names
                    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
     environment["PYTHONIOENCODING"] = "utf-8"
-    return {**environment, "NO_COLOR": "1", "SUDOCODE_ACCEPTANCE_HOST_LEASE": "fixture"}
+    environment.pop("SUDOCODE_ACCEPTANCE_HOST_LEASE", None)
+    return {**environment, "NO_COLOR": "1"}
 
 
 FIXTURE_ENV = fixture_environment()
@@ -558,6 +558,9 @@ def plan_acceptance(directory):
 def enforcement_acceptance(*, profile_compat_only=False, publication_only=False):
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
+        home = directory / "home"
+        home.mkdir()
+        FIXTURE_ENV.update(HOME=str(home), USERPROFILE=str(home))
         if not profile_compat_only and not publication_only:
             scope_acceptance(directory)
             performance_scope_acceptance(directory)
@@ -687,6 +690,8 @@ def enforcement_acceptance(*, profile_compat_only=False, publication_only=False)
         verify_carryover(directory, SOURCE, FIXTURE_ENV)
         from host_lease_acceptance import verify_host_lease
         verify_host_lease(directory, SOURCE, command, FIXTURE_ENV)
+        from inherited_lease_acceptance import verify_inherited_lease
+        verify_inherited_lease(directory / "inherited-lease", SOURCE, FIXTURE_ENV)
 
         # A protected scheduling-only change must preserve a real completed
         # command's evidence. This is a local bare fixture, not a production

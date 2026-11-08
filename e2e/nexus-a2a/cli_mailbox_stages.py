@@ -10,18 +10,29 @@ import subprocess
 import sys
 import time
 
-from mailbox_faults import ROOT, run as run_faults
+from mailbox_faults import ROOT, prepare as prepare_faults, run as run_faults
+
+
+CALLER_ENVIRONMENT = ('CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL', 'CARGO_PROFILE_DEV_DEBUG',
+                      'CARGO_PROFILE_TEST_DEBUG', 'NO_COLOR')
 
 
 def execute_stage(arguments):
     """Use original tests and reserve one test worker for the serial CLI lane."""
+    # The shared author executor supplies desktop build defaults. This consumer
+    # restores the caller's original context, including Cargo's unset defaults.
+    for name, value in arguments.caller_environment.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
     if arguments.stage == 'faults':
         os.environ['SCODE_ACCEPTANCE_TEST_THREADS'] = str(arguments.fault_workers)
         for target, source in [('NEXUS_A2A_TEST_ENDPOINT', 'ENDPOINT'),
                                ('NEXUS_A2A_TEST_CERT_DIR', 'CLIENT_BUNDLE')]:
             if source in os.environ:
                 os.environ[target] = os.environ[source]
-        run_faults(arguments.manifest, arguments.output)
+        run_faults(arguments.manifest, arguments.output, prepared_sha=arguments.prepared_sha)
     else:
         bash = shutil.which('bash')
         if not bash:
@@ -41,6 +52,8 @@ def run(arguments):
         raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
     if arguments.output.exists():
         raise RuntimeError(f'A fresh mailbox fault output directory is required before starting either lane: {arguments.output}')
+    caller = {name: os.environ.get(name) for name in CALLER_ENVIRONMENT}
+    prepared_sha = prepare_faults(arguments.manifest, arguments.output, workers=max(1, workers - 1))
     output = arguments.output.parent / (arguments.output.name + '-stages')
     output.mkdir(parents=True, exist_ok=False)
     spec = importlib.util.spec_from_file_location('mailbox_cli_shared_supervisor',
@@ -48,7 +61,8 @@ def run(arguments):
     supervisor = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(supervisor)
     common = [sys.executable, str(Path(__file__).resolve()), '--manifest', str(arguments.manifest),
-              '--output', str(arguments.output), '--cli-script', str(arguments.cli_script)]
+              '--output', str(arguments.output), '--cli-script', str(arguments.cli_script),
+              '--prepared-sha', prepared_sha, '--caller-environment', json.dumps(caller)]
     data = {'version': 1, 'kind': 'native-policy', 'root': str(ROOT), 'branches': [
         {'name': name, 'commands': [{'command': [*common, '--stage', stage,
                                                '--fault-workers', str(max(1, workers - 1))],
@@ -98,11 +112,20 @@ if __name__ == '__main__':
     parser.add_argument('--cli-script', type=Path, default=ROOT / 'e2e/nexus-a2a/run-cli.sh')
     parser.add_argument('--stage', choices=['cli', 'faults'], help=argparse.SUPPRESS)
     parser.add_argument('--fault-workers', type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument('--prepared-sha', help=argparse.SUPPRESS)
+    parser.add_argument('--caller-environment', type=json.loads, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     arguments.manifest = arguments.manifest.resolve()
     arguments.output = arguments.output.resolve()
     arguments.cli_script = arguments.cli_script.resolve()
     if arguments.stage:
+        if (not isinstance(arguments.caller_environment, dict)
+                or set(arguments.caller_environment) != set(CALLER_ENVIRONMENT)
+                or any(value is not None and not isinstance(value, str)
+                       for value in arguments.caller_environment.values())):
+            raise RuntimeError('Stage caller environment must contain exactly the declared compiler/color settings')
+        if not arguments.prepared_sha:
+            raise RuntimeError('Stage requires the fresh preparation handoff')
         execute_stage(arguments)
     else:
         run(arguments)

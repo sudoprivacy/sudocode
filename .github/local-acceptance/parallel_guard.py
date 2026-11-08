@@ -23,17 +23,32 @@ def missing_container(result, identity):
             and (b"no such object" in error or b"no such container" in error))
 
 
+def branch_commands(data, branch):
+    """Keep each branch's original command order in the shared supervisor."""
+    return branch["commands"] if data.get("kind") == "native-policy" else [branch]
+
+
 def read_configuration(path):
     """Require private, distinct evidence paths before starting either branch."""
     if path.is_symlink() or not path.is_file():
         raise RuntimeError("Parallel guard configuration must be a regular file")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["version"] == 1 and len(data["branches"]) == 2
-    assert {row["name"] for row in data["branches"]} == {"docker", "native"}
-    logs = [Path(row["log"]) for row in data["branches"]]
-    assert len(set(logs)) == 2
+    kind = data.get("kind", "docker-native")
+    assert kind in {"docker-native", "native-policy"}
+    expected = {"protocol", "native"} if kind == "native-policy" else {"docker", "native"}
+    assert {row["name"] for row in data["branches"]} == expected
+    if kind == "native-policy":
+        assert "container" not in data
+        assert all(isinstance(row["commands"], list) and row["commands"] for row in data["branches"])
+    jobs = [job for row in data["branches"] for job in branch_commands(data, row)]
+    logs = [Path(row["log"]) for row in jobs]
+    assert len(set(logs)) == len(jobs)
     assert all(log.resolve().parent == path.resolve().parent and not log.is_symlink() for log in logs)
-    assert all(isinstance(arg, str) for row in data["branches"] for arg in row["command"])
+    assert all(isinstance(row["command"], list) and row["command"]
+               and all(isinstance(arg, str) for arg in row["command"]) for row in jobs)
+    if kind == "native-policy":
+        return data
     container = data["container"]
     cidfile = Path(container["cidfile"])
     assert cidfile.resolve().parent == path.resolve().parent and not cidfile.is_symlink()
@@ -93,7 +108,8 @@ def worker(data, name):
     spec.loader.exec_module(helper)
     helper.ROOT = Path(data["root"])
     branch = next(row for row in data["branches"] if row["name"] == name)
-    helper.run_command(branch["command"], helper.ROOT, Path(branch["log"]))
+    for command in branch_commands(data, branch):
+        helper.run_command(command["command"], helper.ROOT, Path(command["log"]))
 
 
 def terminate_workers(processes, observed):
@@ -114,7 +130,10 @@ def terminate_workers(processes, observed):
     for process in processes.values():
         if process.poll() is None:
             process.terminate()
-    _gone, alive = psutil.wait_procs(owned, timeout=5)
+    # Historical descendants may already have exited and their PID may now
+    # belong to another process. Check PID + creation time before waiting;
+    # Windows OpenProcess(SYNCHRONIZE) can refuse those stale references.
+    alive = wait_owned_processes(owned, 5)
     for child in alive:
         if child.is_running():
             child.kill()
@@ -124,6 +143,20 @@ def terminate_workers(processes, observed):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+    remaining = wait_owned_processes(alive, 5)
+    if remaining:
+        raise RuntimeError(f"Owned guard descendants remain after cleanup: {[child.pid for child in remaining]}")
+
+
+def wait_owned_processes(processes, timeout):
+    """Poll original identities; an inaccessible live identity still refuses cleanup."""
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = [process for process in processes if process.is_running()]
+        if not alive or time.monotonic() >= deadline:
+            return alive
+        processes = alive
+        time.sleep(.05)
 
 
 def run(path, data):
@@ -131,9 +164,10 @@ def run(path, data):
     processes, observed = {}, {}
     outcome = {"version": 1, "status": "running", "started_at": time.time(), "branches": {}}
     try:
-        # Start the original docker run first. Native work begins only after
-        # Docker records its exact identity, so sibling failure can stop it.
-        ordered = sorted(data["branches"], key=lambda row: row["name"] != "docker")
+        # Container mode records its exact identity before native work starts.
+        # Native-policy mode overlaps compiler-free protocol work with one
+        # original serial compiler/test lane under the existing host lease.
+        ordered = sorted(data["branches"], key=lambda row: row["name"] not in {"docker", "protocol"})
         for branch in ordered:
             processes[branch["name"]] = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve()), "--configuration", str(path), "--worker", branch["name"]],
@@ -176,7 +210,8 @@ def run(path, data):
     finally:
         try:
             terminate_workers(processes, observed)
-            outcome["container_cleanup"] = cleanup_container(data)
+            outcome["container_cleanup"] = (cleanup_container(data) if "container" in data
+                                            else {"state": "no_container_selected"})
         except BaseException as error:
             outcome.update(status="failed", cleanup_error=repr(error))
             raise
@@ -192,7 +227,7 @@ def interrupted(_signal, _frame):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--configuration", type=Path, required=True)
-    parser.add_argument("--worker", choices=["docker", "native"])
+    parser.add_argument("--worker", choices=["docker", "native", "protocol"])
     parser.add_argument("--cleanup", action="store_true")
     arguments = parser.parse_args()
     configuration = arguments.configuration.resolve()

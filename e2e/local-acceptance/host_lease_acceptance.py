@@ -253,6 +253,7 @@ def verify_host_lease(directory, source, command, environment):
                     process.wait(timeout=10)
     verify_external_index(fixture, sources["A"], isolated)
     verify_service_order(fixture, source, run, isolated)
+    verify_lint_preparation_order(fixture, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated)
     verify_static_before_queue(fixture, source, run, isolated)
 
@@ -534,6 +535,91 @@ def verify_external_index(fixture, source, environment):
     invoke("explicit-index-io-failure-refused", "index-output", "--directory", retained,
            "--policy-ref", "main", settings=blocked_env, success=False)
     print("PASS: original external proof adoption, Unicode paths, wrong locators and corrupt log/signature refusal; index I/O failure retains verified progress")
+
+
+def verify_lint_preparation_order(fixture, run, environment):
+    """Drive the real signed CLI with child failures before and after preparation."""
+    source = fixture / "lint-order-source"
+    run("git", "worktree", "add", "--detach", source, "main")
+    profiles = source / ".github/local-acceptance/checks.py"
+    profiles.write_text('''import sys
+def emit(name, root, output, execute):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    code = ("from pathlib import Path; import sys; "
+            "root = Path(sys.argv[1]); name = sys.argv[2]; "
+            "(root.parent / 'lint-order-events.log').open('a').write(name + chr(10)); "
+            "failed = (name == 'lint' and (root / 'input.txt').read_text().startswith('fail')) or "
+            "(name == 'guard-contract' and (root.parent / 'lint-order-refuse-guard').exists()); "
+            "print('CONTROLLED_FAILURE:' + name if failed else 'passed:' + name); "
+            "raise SystemExit(23 if failed else 0)")
+    return execute([sys.executable, '-c', code, str(root), name], root, output)
+def prepare_native_workspace_lint(root, output, base, execute):
+    return [emit('lint', root, output / 'native-workspace' / '000.log', execute)]
+def run(name, root, output, base, execute):
+    if name == 'native-workspace':
+        original = run.prepared_workspace
+        del run.prepared_workspace
+        return [*original, emit('tests', root, output / '001.log', execute)]
+    return [emit(name, root, output / '000.log', execute)]
+''', encoding="utf-8")
+    declared = ["preflight", "guard-contract", "native-workspace"]
+    policy_path = source / "spec/local_acceptance.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["checks"] = {name: {"include": ["input.txt"]} for name in declared}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    run("git", "add", ".", cwd=source)
+    run("git", "commit", "-m", "Declare early lint fixture", cwd=source)
+    run("git", "branch", "lint-order-policy", cwd=source)
+    events = fixture / "lint-order-events.log"
+
+    def check(label, contents, *, success, resume=None):
+        if contents is not None:
+            (source / "input.txt").write_text(contents, encoding="utf-8")
+            run("git", "commit", "-am", label, cwd=source)
+        output = fixture / label
+        arguments = [sys.executable, str(source / ".github/scripts/local_acceptance.py"), "check",
+                     "--base", "lint-order-policy", "--policy-ref", "lint-order-policy", "--output", str(output)]
+        if resume is not None:
+            arguments += ["--resume-from", str(resume)]
+        process = subprocess.run(arguments, cwd=source, env=environment, capture_output=True)
+        output.mkdir(exist_ok=True)
+        (output / "process.log").write_bytes(process.stdout + process.stderr)
+        assert (process.returncode == 0) == success, (process.stdout + process.stderr).decode(errors="replace")
+        return output
+
+    refused = check("lint-order-refused", "fail lint\n", success=False)
+    assert events.read_text().splitlines() == ["preflight", "lint"]
+    assert "CONTROLLED_FAILURE:lint" in (refused / "process.log").read_text()
+    assert not (refused / "envelope.json").exists()
+    def completed(output):
+        pointer = json.loads((output / "checkpoint.json").read_text())
+        receipt = output / "checkpoints" / pointer["generation"] / "receipt.json"
+        return set(json.loads(receipt.read_text())["checks"])
+
+    assert completed(refused) == {"preflight"}
+    events.unlink()
+    guard = fixture / "lint-order-refuse-guard"
+    guard.touch()
+    incomplete = check("lint-order-incomplete", "pass lint\n", success=False)
+    assert events.read_text().splitlines() == ["preflight", "lint", "guard-contract"]
+    assert not (incomplete / "envelope.json").exists()
+    assert completed(incomplete) == {"preflight"}
+    guard.unlink()
+    events.unlink()
+    passed = check("lint-order-resumed", None, success=True, resume=incomplete)
+    assert events.read_text().splitlines() == ["lint", "guard-contract", "tests"]
+    receipt = json.loads((passed / "receipt.json").read_text())
+    assert receipt["plan"]["local_checks"] == declared, receipt["plan"]
+    assert set(receipt["checks"]) == set(declared)
+    assert len(receipt["checks"]["native-workspace"]) == 2
+    assert all(command["exit_code"] == 0 for commands in receipt["checks"].values() for command in commands)
+    assert len(json.loads((passed / "attempt.json").read_text())["host_lease_acquisitions"]) == 3
+    before = events.read_bytes()
+    restored = check("lint-order-restored", None, success=True, resume=passed)
+    assert events.read_bytes() == before, "Complete signed resume repeated early lint or workspace tests"
+    assert (restored / "envelope.json").is_file()
+    print("PASS: real signed CLI refuses lint before guard, signs no prepared workspace after guard failure, "
+          "rejoins the host FIFO, repeats unsigned preparation on retry and consumes passing commands exactly once")
 
 
 def verify_service_order(fixture, authority, run, environment):

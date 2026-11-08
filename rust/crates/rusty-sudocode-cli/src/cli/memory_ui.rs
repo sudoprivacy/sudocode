@@ -59,7 +59,6 @@ pub(crate) fn select_memory(
             back_value: None,
             initial_value: None,
         },
-        values,
         move |value, cli, out| {
             if let Some(path) = value
                 .parse::<usize>()

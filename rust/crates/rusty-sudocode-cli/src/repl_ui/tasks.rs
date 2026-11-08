@@ -247,6 +247,8 @@ struct Entry {
     task: BackgroundTask,
     output: Option<StyledText>,
     read: bool,
+    /// How many turns had begun when this task's failure was first seen.
+    failure_seen_at: Option<u32>,
     received: Instant,
     wrapped_width: usize,
     wrapped: Vec<StyledText>,
@@ -269,6 +271,8 @@ pub(super) struct TaskBrowser {
     ttl_row: usize,
     pub tab: TaskTab,
     scheduled: ScheduledTab,
+    /// Turns begun in this session.
+    turns_begun: u32,
 }
 
 impl TaskBrowser {
@@ -284,7 +288,14 @@ impl TaskBrowser {
                     .is_some_and(|e| e.read && !e.task.status.is_active())
                     || (self.focus == TaskFocus::Detail
                         && self.selected.as_deref() == Some(&task.id));
+                let failure_seen_at = (task.status == BackgroundTaskStatus::Failed).then(|| {
+                    self.entries
+                        .get(&task.id)
+                        .and_then(|entry| entry.failure_seen_at)
+                        .unwrap_or(self.turns_begun)
+                });
                 if let Some(entry) = self.entries.get_mut(&task.id) {
+                    entry.failure_seen_at = failure_seen_at;
                     if entry.command_rows.is_some() && entry.task.command != task.command {
                         entry.command_rows = None;
                     }
@@ -303,6 +314,7 @@ impl TaskBrowser {
                             output: None,
                             task,
                             read,
+                            failure_seen_at,
                             received: Instant::now(),
                             wrapped_width: 0,
                             wrapped: Vec::new(),
@@ -352,7 +364,15 @@ impl TaskBrowser {
                 summary.unconfirmed += 1;
             } else if !entry.read {
                 summary.unread += 1;
-                summary.failed += usize::from(entry.task.status == BackgroundTaskStatus::Failed);
+                summary.failed += usize::from(
+                    entry.task.status == BackgroundTaskStatus::Failed
+                        // Red through the next turn to begin, which reports
+                        // the failure; once another turn begins it is one of
+                        // the footer's new results.
+                        && entry
+                            .failure_seen_at
+                            .is_some_and(|turn| self.turns_begun <= turn + 1),
+                );
             }
         }
         summary.scheduled = self.scheduled.jobs.iter().filter(|job| job.enabled).count();
@@ -490,6 +510,11 @@ impl TaskBrowser {
     #[inline]
     pub fn close(&mut self) {
         self.focus = TaskFocus::Input;
+    }
+
+    pub fn turn_began(&mut self) {
+        self.turns_begun += 1;
+        self.refresh_summary();
     }
 
     /// Re-read the cron store: on open, on a tab switch, after an action, and
@@ -1043,7 +1068,7 @@ impl TaskBrowser {
             }
         } else {
             advice.pending.map_or(" · pinned".to_owned(), |pending| {
-                format!(" · pinned, pending {}", choice_label(pending.choice))
+                format!(" · pinned, pending {}", pending.describe().0)
             })
         };
         let mut lines = vec![format!(

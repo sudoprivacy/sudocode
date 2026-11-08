@@ -35,6 +35,7 @@ import urllib.parse
 
 
 NOTE_REF = "refs/notes/local-acceptance"
+PLAN_NOTE_REF = "refs/notes/local-acceptance-plan"
 POLICY = "spec/local_acceptance.json"
 SIGNERS = "spec/local_acceptance_signers.json"
 NAMESPACE = "sudocode-local-acceptance"
@@ -44,6 +45,7 @@ CONTRACT_UPDATE_COMMAND = ('python "$(git rev-parse --path-format=absolute --git
 HOST_LEASE_ENV = "SUDOCODE_ACCEPTANCE_HOST_LEASE"
 ROOT = Path(__file__).resolve().parents[2]
 MSVC_ENV = None
+RUNNER_CODE = sys._getframe().f_code
 
 
 def git(*args, root=None, data=None, check=True):
@@ -76,11 +78,47 @@ def load_policy(ref):
     return json.loads(tracked(ref, POLICY))
 
 
+def committed_blob_bytes(blobs):
+    """Read immutable Git objects together, preserving exact binary contents."""
+    if not blobs:
+        return {}
+    contents = git("cat-file", "--batch", data=("\n".join(blobs.values()) + "\n").encode("ascii")).stdout
+    documents, position = {}, 0
+    for path, identity in blobs.items():
+        end = contents.index(b"\n", position)
+        header = contents[position:end].decode("ascii").split()
+        if len(header) != 3 or header[:2] != [identity, "blob"]:
+            raise ValueError("Unexpected committed metadata object")
+        size = int(header[2])
+        position = end + 1
+        if size < 0 or contents[position + size:position + size + 1] != b"\n":
+            raise ValueError("Incomplete committed metadata object")
+        documents[path] = contents[position:position + size]
+        position += size + 1
+    if position != len(contents):
+        raise ValueError("Unexpected trailing committed metadata")
+    return documents
+
+
 def contract_hash(ref):
     paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
              ".github/workflows/local-acceptance-publish.yml"]
-    paths += value("ls-tree", "-r", "--name-only", ref, ".github/local-acceptance").splitlines()
-    return sha(canonical({p: sha(tracked(ref, p)) for p in sorted(paths)}))
+    # Resolve the complete tree once, then read by immutable object ID. Mutable
+    # refs are never memoized and archive attributes cannot omit protected data.
+    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, ".github/local-acceptance").stdout
+    blobs = {}
+    for row in rows.split(b"\0"):
+        if not row:
+            continue
+        info, path = row.split(b"\t", 1)
+        _mode, kind, identity = info.decode("ascii").split()
+        if kind != "blob":
+            raise RuntimeError("Acceptance contract contains a non-blob Git entry")
+        blobs[path.decode("utf-8")] = identity
+    missing = sorted(set(paths) - blobs.keys())
+    if missing:
+        raise RuntimeError(f"Acceptance contract is missing committed files: {missing}")
+    return sha(canonical({path: sha(data) for path, data in sorted(committed_blob_bytes(blobs).items())}))
 
 
 def executor_source(ref):
@@ -378,18 +416,18 @@ def without_development_dependencies(manifest):
     return result
 
 
-def opt_in_test_target_inputs(paths, base, head):
-    """Recognize only newly added disabled targets with previously absent names/paths."""
+def opt_in_test_target_changes(paths, base, head):
+    """Prove new disabled target declarations and their newly committed sources together."""
     manifests = [path for path in paths if path.startswith("rust/crates/")
                  and path.count("/") == 3 and path.endswith("/Cargo.toml")]
     if tomllib is None or not manifests:
-        return set()
-    ignored = set()
+        return set(), set()
+    ignored, sources = set(), set()
     try:
         def document(ref, path):
             return tomllib.loads(tracked(ref, path).decode("utf-8"))
         if document(base, "rust/Cargo.toml") != document(head, "rust/Cargo.toml"):
-            return ignored
+            return ignored, sources
         for path in manifests:
             try:
                 before, after = document(base, path), document(head, path)
@@ -407,7 +445,7 @@ def opt_in_test_target_inputs(paths, base, head):
                 rows = git("ls-tree", "-r", "-z", ref, "--", directory + "tests").stdout.decode("utf-8").split("\0")
                 return {name: info.split()[0] for row in rows if row for info, name in [row.split("\t", 1)]}
             old_files, new_files = files(base), files(head)
-            valid = True
+            valid, added_sources = True, set()
             for target in new[len(old):]:
                 name = target.get("name", "")
                 relative = target.get("path", "")
@@ -425,11 +463,19 @@ def opt_in_test_target_inputs(paths, base, head):
                 if mode not in {"100644", "100755"}:
                     valid = False
                     break
+                added_sources.add(directory + relative)
             if valid:
                 ignored.add(path)
+                sources.update(added_sources)
     except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError):
-        return set()
-    return ignored
+        return set(), set()
+    return ignored, sources
+
+
+def opt_in_test_target_inputs(paths, base, head):
+    """Retain the manifest-only scope used by the native acceptance planner."""
+    manifests, _sources = opt_in_test_target_changes(paths, base, head)
+    return manifests
 
 
 def development_lock_change(before, after, manifests):
@@ -490,23 +536,8 @@ def production_dependency_state(ref, workspace):
         blobs[path] = _identity
     if "rust/Cargo.lock" not in blobs:
         raise ValueError("Missing committed Cargo lock")
-    # One immutable-object read avoids spawning Git for every member each
-    # time the public planner/checkpoint evaluates the same dependency scope.
-    contents = git("cat-file", "--batch", data=("\n".join(blobs.values()) + "\n").encode("ascii")).stdout
-    documents, position = {}, 0
-    for path, identity in blobs.items():
-        end = contents.index(b"\n", position)
-        header = contents[position:end].decode("ascii").split()
-        if len(header) != 3 or header[:2] != [identity, "blob"]:
-            raise ValueError("Unexpected committed metadata object")
-        size = int(header[2])
-        position = end + 1
-        if size < 0 or contents[position + size:position + size + 1] != b"\n":
-            raise ValueError("Incomplete committed metadata object")
-        documents[path] = tomllib.loads(contents[position:position + size].decode("utf-8"))
-        position += size + 1
-    if position != len(contents):
-        raise ValueError("Unexpected trailing committed metadata")
+    documents = {path: tomllib.loads(data.decode("utf-8"))
+                 for path, data in committed_blob_bytes(blobs).items()}
     lock = documents.pop("rust/Cargo.lock")
     for path, manifest in documents.items():
         manifests[path] = without_development_dependencies(manifest)
@@ -763,9 +794,27 @@ def acceptance_plan(policy, names, author):
             "ci": list(jobs.values()), "deployment_verified": False}
 
 
-def report_plan(plan):
+def report_plan(plan, current_environment=False):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
+    concurrency = None
+    if current_environment and "native-workspace" in plan["local_checks"]:
+        cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": 1,
+                       "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
+        lines.append("Author-native Cargo compilation uses one job per command. Native test processes use "
+                     + ("the protected profile default." if cap is None else
+                        f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
+        try:
+            serial = cap is not None and int(cap) == 1
+        except ValueError:
+            serial = False
+        if serial:
+            clear = ("Remove-Item Env:SCODE_ACCEPTANCE_TEST_THREADS" if os.name == "nt"
+                     else "unset SCODE_ACCEPTANCE_TEST_THREADS")
+            lines.append("SCODE_ACCEPTANCE_TEST_THREADS=1 runs native test cases serially. "
+                         f"To use the protected test-pool default, run `{clear}` before retrying this command. "
+                         "Cargo compilation keeps its independent one-job setting; the explicit test cap is honored.")
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
@@ -786,6 +835,8 @@ def report_plan(plan):
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    if concurrency is not None:
+        print("LOCAL_ACCEPTANCE_CONCURRENCY=" + json.dumps(concurrency, separators=(",", ":")), flush=True)
     print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
           "new_release_artifacts": "mandatory_before_packaging_and_publication",
           "ordinary_source_optimized_native_coverage_reduced": True}, separators=(",", ":")), flush=True)
@@ -853,7 +904,7 @@ def github_api(path, payload=None):
                            "an existing valid exact-head receipt is reused.") from error
     if result.returncode:
         raise RuntimeError("GitHub contract authorization request failed: " + result.stderr.decode(errors="replace"))
-    return json.loads(result.stdout)
+    return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 def require_contract_maintainer(repository, actor, api=github_api):
@@ -966,7 +1017,7 @@ def run_command(command, cwd, log, env=None):
                             # name() may read argv on macOS and trigger psutil
                             # 7.2.2's KERN_PROCARGS2 error path for short-lived children.
                             name = Path(child.exe()).name.lower()
-                            if (name in {"rustc", "rustc.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
+                            if (name in {"rustc", "rustc.exe", "clippy-driver", "clippy-driver.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
                                     or re.fullmatch(r"(?:.*-)?(?:clang(?:\+\+)?|gcc|g\+\+)(?:-\d+(?:\.\d+)*)?(?:\.exe)?", name)):
                                 child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
                                 priorities[f"{child.pid}:{name}"] = child.nice()
@@ -1007,10 +1058,13 @@ def read_note(head, ref=NOTE_REF):
     return obj
 
 
-def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, completed_only=False):
+def verify_signed_payload(envelope, policy_ref, signers_ref=None, kind=None):
+    """Authenticate one explicit receipt purpose without promoting a launch plan."""
     payload = base64.b64decode(envelope["payload"], validate=True)
     receipt = json.loads(payload)
-    if receipt.get("kind") != ("completed-profiles" if completed_only else None):
+    namespaces = {None: NAMESPACE, "completed-profiles": NAMESPACE + "-checkpoint",
+                  "execution-plan": NAMESPACE + "-plan"}
+    if kind not in namespaces or receipt.get("kind") != kind:
         raise RuntimeError("Wrong receipt kind; completed profiles do not satisfy full acceptance")
     signer_id = envelope["signer"]
     registry = json.loads(tracked(signers_ref or policy_ref, SIGNERS))["signers"]
@@ -1024,13 +1078,73 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
         (directory / "allowed").write_text(f"{signer_id} {signer['public_key']}\n", encoding="utf-8")
         (directory / "proof.sig").write_bytes(base64.b64decode(envelope["signature"], validate=True))
         result = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(directory / "allowed"),
-                                 "-I", signer_id, "-n", NAMESPACE + ("-checkpoint" if completed_only else ""),
+                                 "-I", signer_id, "-n", namespaces[kind],
                                  "-s", str(directory / "proof.sig")],
                                 input=payload, capture_output=True)
         if result.returncode:
             raise RuntimeError("Invalid SSH acceptance signature")
     if receipt.get("version") != 1 or receipt.get("repository") != load_policy(policy_ref)["repository"]:
         raise RuntimeError("Wrong acceptance schema or repository")
+    return receipt, signer_id, signer
+
+
+def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
+    """Authorize early native scheduling; this proves no completed tests."""
+    receipt, _identity, _signer = verify_signed_payload(
+        envelope, policy_ref, signers_ref, kind="execution-plan")
+    if receipt.get("head") != head or receipt.get("tree") != value("rev-parse", f"{head}^{{tree}}"):
+        raise RuntimeError("Execution plan is for another commit or tree")
+    if receipt.get("base") != value("merge-base", base, head):
+        raise RuntimeError("Execution plan used a different PR base")
+    protected = value("rev-parse", f"{policy_ref}^{{commit}}")
+    planned_policy = receipt.get("policy")
+    if (not isinstance(planned_policy, str) or not re.fullmatch(r"[a-f0-9]{40}", planned_policy)
+            or git("merge-base", "--is-ancestor", planned_policy, protected, check=False).returncode):
+        raise RuntimeError("Execution plan policy is not an ancestor of the protected policy")
+    if (receipt.get("contract_sha256") != contract_hash(planned_policy)
+            or changed_contract_files(head, base)):
+        raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
+    workflow = ".github/workflows/local-acceptance.yml"
+    if (tracked(head, workflow) != tracked(planned_policy, workflow)
+            or tracked(protected, workflow) != tracked(planned_policy, workflow)):
+        raise RuntimeError("Early native scheduling requires the current protected native workflow definition; integrate that workflow before starting")
+    if receipt.get("checks") != {}:
+        raise RuntimeError("An execution plan must contain no completed checks")
+    policy = load_policy(policy_ref)
+    names = selected(policy, changed_paths(receipt["base"], head), base=receipt["base"], head=head)
+    plan = acceptance_plan(policy, names, receipt["host"])
+    if not names or receipt.get("plan") != plan:
+        raise RuntimeError("Execution plan differs from the protected source/author responsibility plan")
+    if contract_hash(planned_policy) != contract_hash(protected):
+        dispatcher = ".github/local-acceptance/cross_platform.py"
+        if (tracked(planned_policy, dispatcher) != tracked(protected, dispatcher)
+                or reachable_profile_commands_hashes(planned_policy, names)
+                   != reachable_profile_commands_hashes(protected, names)):
+            raise RuntimeError("Execution plan commands or native dispatcher changed; this old plan cannot schedule current execution. "
+                               "Publish a fresh source/plan from the original author host; all current checks remain required.")
+        print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
+              "author/native responsibility, selected commands and native workflow/dispatcher verified unchanged.", flush=True)
+    return receipt
+
+
+def read_execution_plan(head, base, policy_ref, signers_ref=None):
+    """Read only a separately signed scheduling note; never a completion proof."""
+    errors, valid = [], []
+    for envelope in read_note(head, PLAN_NOTE_REF)["attestations"].values():
+        try:
+            valid.append(verify_execution_plan(envelope, head, base, policy_ref, signers_ref))
+        except (RuntimeError, ValueError, KeyError) as error:
+            errors.append(str(error))
+    if valid:
+        if any(receipt["plan"] != valid[0]["plan"] for receipt in valid):
+            raise RuntimeError("Frozen source has conflicting signed author plans; keep the original author responsibility or publish a new head")
+        return valid[0]
+    raise RuntimeError("No current valid execution plan: " + ("; ".join(errors) or "signed plan missing"))
+
+
+def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, completed_only=False):
+    receipt, signer_id, signer = verify_signed_payload(
+        envelope, policy_ref, signers_ref, kind="completed-profiles" if completed_only else None)
     if receipt.get("head") != head or receipt.get("tree") != value("rev-parse", f"{head}^{{tree}}"):
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
@@ -1109,6 +1223,10 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
     if original_plan != plan:
         print("Reusing unchanged completed execution from an earlier scope; the current protected plan "
               "still determines required checks and missing CI hosts.", flush=True)
+    if not completed_only and "execution_plan" in receipt:
+        launch = verify_execution_plan(receipt["execution_plan"], head, base, policy_ref, signers_ref)
+        if launch["host"] != receipt["host"] or launch["plan"] != original_plan:
+            raise RuntimeError("Completed author evidence differs from its signed parallel execution plan")
     if completed_only:
         print(f"Verified completed profiles for {head[:12]}: {', '.join(checks)}; full acceptance still required.", flush=True)
     else:
@@ -1127,20 +1245,20 @@ def verify(head, base, policy_ref, note_ref=NOTE_REF, signers_ref=None):
     raise RuntimeError("No current valid local acceptance: " + ("; ".join(errors) or "signed note missing"))
 
 
-def remote_note_tip(remote):
-    existing = value("ls-remote", remote, NOTE_REF).split()
+def remote_note_tip(remote, note_ref=NOTE_REF):
+    existing = value("ls-remote", remote, note_ref).split()
     return existing[0] if existing else ""
 
 
-def publish(head, envelope, remote):
+def publish(head, envelope, remote, note_ref=NOTE_REF):
     # Use a private temporary notes ref. Fetch+lease retries preserve evidence
     # another author publishes concurrently; never overwrite their notes tree.
     temporary = f"refs/notes/scode-publish-{os.getpid()}"
     try:
         for _attempt in range(5):
-            previous = remote_note_tip(remote)
+            previous = remote_note_tip(remote, note_ref)
             if previous:
-                git("fetch", "--no-tags", remote, f"+{NOTE_REF}:{temporary}")
+                git("fetch", "--no-tags", remote, f"+{note_ref}:{temporary}")
                 # The fetch may observe a newer tip than the preceding query.
                 # Lease exactly the notes tree this attempt actually extends.
                 previous = value("rev-parse", temporary)
@@ -1149,14 +1267,14 @@ def publish(head, envelope, remote):
             notes = read_note(head, temporary)
             notes["attestations"][envelope["signer"]] = envelope
             git("notes", f"--ref={temporary}", "add", "-f", "-F", "-", head, data=canonical(notes))
-            result = git("push", f"--force-with-lease={NOTE_REF}:{previous}", remote,
-                         f"{temporary}:{NOTE_REF}", check=False)
+            result = git("push", f"--force-with-lease={note_ref}:{previous}", remote,
+                         f"{temporary}:{note_ref}", check=False)
             if result.returncode == 0:
                 return
             # Both client-side stale leases and receive-pack transaction races
             # mean the remote advanced. Compare state instead of Git's wording;
             # unrelated failures with an unchanged ref remain immediate errors.
-            if remote_note_tip(remote) == previous:
+            if remote_note_tip(remote, note_ref) == previous:
                 raise RuntimeError(result.stderr.decode(errors="replace"))
         raise RuntimeError("Concurrent acceptance publishers: retry the push")
     finally:
@@ -1600,8 +1718,8 @@ def host_acceptance_lease(attempt, head):
 
 def check(args):
     """Record failed and successful local attempts, including time before CI."""
-    started = time.monotonic()
-    attempt = {"version": 1, "started_at": time.time(), "outcome": "running"}
+    started = getattr(args, "outer_monotonic_started_at", time.monotonic())
+    attempt = {"version": 1, "started_at": getattr(args, "outer_started_at", time.time()), "outcome": "running"}
     try:
         perform_check(args, attempt)
         attempt["outcome"] = "success"
@@ -1654,7 +1772,7 @@ def perform_check(args, attempt):
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
-    report_plan(plan)
+    report_plan(plan, current_environment=True)
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
@@ -1711,6 +1829,8 @@ def perform_check(args, attempt):
                "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
                "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
                "finished_at": int(time.time()), "checks": results, "plan": plan, "timing": timing}
+    if getattr(args, "execution_plan", None) is not None:
+        receipt["execution_plan"] = args.execution_plan
     if resumed is not None:
         receipt["resumed_from"] = resumed
 
@@ -1744,12 +1864,16 @@ def perform_check(args, attempt):
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
+    prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
+    lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
+                        and serialized.index("guard-contract") < serialized.index("native-workspace"))
     attempt["host_lease_wait_seconds"] = 0.0
     attempt["host_lease_acquisitions"] = []
     print("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=" + canonical({
         "preflight": "metadata_before_host_lease" if "preflight" in needed else "not_selected",
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
+        "workspace_lint_before_guard": lint_pending,
         "reservation": "one_fresh_profile_then_fifo_requeue",
     }).decode(), flush=True)
     try:
@@ -1759,6 +1883,16 @@ def perform_check(args, attempt):
         if validate and pending:
             validate(pending, ROOT, output)
         prepared = False
+        if lint_pending:
+            attempt["active_profile"] = "native-workspace-lint-preparation"
+            with host_acceptance_lease(attempt, head):
+                prepare = getattr(module, "prepare_native_checks", None)
+                if prepare:
+                    module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                prepared = True
+                module.run.prepared_workspace = prepare_lint(ROOT, output, base, run_command)
+            print("NATIVE_LINT_PREPARATION: lint passed; workspace acceptance remains incomplete. "
+                  "Rejoining the existing host FIFO before the contract matrix.", flush=True)
         for name in serialized:
             fresh = name in pending
             attempt["active_profile"] = name
@@ -1795,8 +1929,30 @@ def perform_check(args, attempt):
     print(f"Local acceptance complete: {output / 'receipt.json'}")
 
 
+def write_managed_file(path, contents, mode=None):
+    """Publish complete managed bytes atomically, including idempotent self-install."""
+    if (path.is_symlink() or path.parent.is_symlink()
+            or (hasattr(path.parent, "is_junction") and path.parent.is_junction())):
+        raise RuntimeError(f"Managed acceptance files must not traverse links: {path}")
+    permissions = mode if mode is not None else (path.stat().st_mode & 0o777 if path.exists() else 0o644)
+    if path.is_file() and path.read_bytes() == contents:
+        if mode is not None:
+            path.chmod(permissions)
+        return
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix="runner-refresh-", suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(contents)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        temporary.chmod(permissions)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def install(args):
-    common = Path(value("rev-parse", "--git-common-dir")).resolve()
+    common = Path(value("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     existing = git("config", "--get", "core.hooksPath", check=False).stdout.decode().strip()
     managed = common / "local-acceptance-hooks"
     if existing and Path(existing).resolve() != managed:
@@ -1805,18 +1961,40 @@ def install(args):
         raise RuntimeError("Existing pre-push hook needs manual composition; it was preserved")
     managed.mkdir(parents=True, exist_ok=True)
     # Outside the worktree so an older branch cannot silently remove the hook.
-    shutil.copyfile(__file__, managed / "local_acceptance.py")
+    write_managed_file(managed / "local_acceptance.py", Path(__file__).read_bytes())
     interpreter = shlex.quote(sys.executable.replace("\\", "/"))
     helper = shlex.quote(str(managed / "local_acceptance.py").replace("\\", "/"))
     hook = managed / "pre-push"
-    hook.write_text(f'#!/bin/sh\nexec {interpreter} {helper} pre-push "$@"\n', encoding="utf-8", newline="\n")
-    hook.chmod(0o755)
+    write_managed_file(hook, f'#!/bin/sh\nexec {interpreter} {helper} pre-push "$@"\n'.encode(), mode=0o755)
     git("config", "--local", "core.hooksPath", str(managed))
     if args.signer:
         git("config", "--local", "localAcceptance.signer", args.signer)
     if args.key:
         git("config", "--local", "localAcceptance.key", str(Path(args.key).expanduser().resolve()))
     print(f"Installed automatic pre-push acceptance for all worktrees: {managed}")
+
+
+def refresh_managed_runner(trusted, operation):
+    """Atomically refresh only the installed entry from protected Git bytes."""
+    current = tracked(trusted, ".github/scripts/local_acceptance.py")
+    installed = Path(__file__).resolve()
+    protected_code = compile(current, RUNNER_CODE.co_filename, "exec", dont_inherit=True, optimize=sys.flags.optimize)
+    if sha(installed.read_bytes()) == sha(current) and RUNNER_CODE == protected_code:
+        return None
+    common = Path(value("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    managed = common / "local-acceptance-hooks"
+    expected = managed / "local_acceptance.py"
+    if (installed != expected or managed.is_symlink()
+            or (hasattr(managed, "is_junction") and managed.is_junction()) or expected.is_symlink()):
+        raise RuntimeError(f"Use the current protected managed runner for {operation}; "
+                           f"entry: {sys.executable} {expected}. "
+                           "Publish acceptance-rule changes with contract-update. Candidate source was preserved.")
+    write_managed_file(installed, current)
+    print("LOCAL_ACCEPTANCE_RUNNER_REFRESHED=" + canonical({
+        "operation": operation, "entry": str(installed), "protected_commit": value("rev-parse", trusted),
+        "sha256": sha(current), "next": "Continue the same frozen source; all selected acceptance remains required.",
+    }).decode(), flush=True)
+    return current
 
 
 def pre_push(args):
@@ -1827,11 +2005,9 @@ def pre_push(args):
     if not heads:
         return
     git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
-    current_runner = tracked("origin/main", ".github/scripts/local_acceptance.py")
-    if sha(Path(__file__).read_bytes()) != sha(current_runner):
+    if refresh_managed_runner("origin/main", "pre-push") is not None:
         # Upgrade from the protected default branch, including old worktrees.
         # Do not import or execute the candidate's replacement runner.
-        Path(__file__).write_bytes(current_runner)
         result = subprocess.run([sys.executable, __file__, "pre-push", args.remote, args.url],
                                 input=("\n".join(" ".join(row) for row in updates) + "\n").encode())
         if result.returncode:
@@ -1858,6 +2034,18 @@ def pre_push(args):
                 # The exact candidate executor was authorized by the server.
                 run_candidate_checks(head, "origin/main", args.remote)
             else:
+                policy = load_policy(policy_ref)
+                comparison = value("merge-base", "origin/main", head)
+                preview = acceptance_plan(policy,
+                    selected(policy, changed_paths(comparison, head), base=comparison, head=head), host())
+                if preview["ci"]:
+                    print("LOCAL_ACCEPTANCE_PARALLEL_AVAILABLE=" + canonical({
+                        "current_push_mode": "serial",
+                        "command": [sys.executable, str(Path(__file__).resolve()), "start-pr", "--remote", args.remote],
+                        "publishes_frozen_source_before_local_completion": True,
+                        "next_frozen_PR": "Use this entry before a long author check to start missing native CI together. "
+                                          "The signed launch plan proves no completed tests; full local and native acceptance still gate merge.",
+                    }).decode(), flush=True)
                 check(argparse.Namespace(head=head, base="origin/main", policy_ref=policy_ref,
                                          output=None, publish=True, remote=args.remote))
 
@@ -1892,6 +2080,142 @@ def contract_pre_push(args):
     # Recheck authority and the signed input immediately at the actual push.
     verify(args.head, args.trusted, args.head, signers_ref=args.trusted)
     print(f"Exact-head contract push authorized for {actor}; native CI is still required.", flush=True)
+
+
+def plan_pre_push(args):
+    """Publish only one frozen feature branch under a signed scheduling plan."""
+    clean(args.head)
+    repository = load_policy(args.trusted)["repository"]
+    updates = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
+    branch = value("symbolic-ref", "HEAD")
+    expected_url = contract_remote(args.remote, repository)
+    already_published = (not updates and value("ls-remote", args.remote, branch).split()[:1] == [args.head])
+    valid_update = len(updates) == 1 and len(updates[0]) == 4 and updates[0][:3] == [branch, args.head, branch]
+    if args.url != expected_url or branch == "refs/heads/main" or not (valid_update or already_published):
+        raise RuntimeError("Execution-plan publication requires exactly the frozen non-main branch and configured repository")
+    read_execution_plan(args.head, args.trusted, args.trusted, signers_ref=args.trusted)
+    print("LOCAL_ACCEPTANCE_PARALLEL_SOURCE: signed frozen source published for scheduling only; "
+          "complete author checks and native CI still gate merge.", flush=True)
+
+
+def start_pr(args, api=None, context=None):
+    """Start native CI and mandatory author checks together for frozen source."""
+    api = api or github_api
+    started, wall_start = ((time.monotonic(), time.time()) if context is None
+                           else (context["started"], context["started_at"]))
+    head = value("rev-parse", "HEAD")
+    clean(head)
+    branch = value("symbolic-ref", "--short", "HEAD")
+    if branch == "main":
+        raise RuntimeError("Parallel acceptance requires a frozen non-main source branch")
+    output = Path(args.output or (Path.home() / ".nexus/local-acceptance/results" / head / ("parallel-" + str(time.time_ns())))).resolve()
+    if output == ROOT or ROOT in output.parents:
+        raise RuntimeError("Keep parallel acceptance outputs outside the source checkout")
+    if context is None:
+        output.mkdir(parents=True, exist_ok=False)
+        context = {"started": started, "started_at": wall_start, "head": head,
+                   "branch": branch, "output": str(output), "refreshes": 0}
+    elif (context["head"] != head or context["branch"] != branch or context["output"] != str(output)
+            or not output.is_dir() or output.is_symlink()):
+        raise RuntimeError("Protected runner refresh changed the frozen source or original output")
+    args.output = str(output)
+    journal = {"version": 1, "operation": "start-pr", "head": head, "started_at": wall_start,
+               "outcome": "running", "runner_refreshes": context["refreshes"]}
+    delegated = False
+    try:
+        git("fetch", "--no-tags", args.remote, "+refs/heads/main:refs/remotes/origin/main")
+        trusted = value("rev-parse", "origin/main")
+        current_runner = refresh_managed_runner(trusted, "start-pr")
+        if current_runner is not None:
+            if context["refreshes"] >= 3:
+                raise RuntimeError("Protected runner advanced repeatedly; retry this updated managed entry. Original timing remains recorded.")
+            # Execute the exact bytes just read from protected main, retaining
+            # the real API boundary and original output/start across refresh.
+            namespace = {"__name__": "protected_start_pr_runner", "__file__": str(Path(__file__).resolve()),
+                         "__package__": None}
+            exec(compile(current_runner, namespace["__file__"], "exec"), namespace)
+            namespace["ROOT"] = ROOT
+            delegated = True
+            return namespace["start_pr"](args, api=api, context={**context, "refreshes": context["refreshes"] + 1})
+        repository = load_policy(trusted)["repository"]
+        contract_remote(args.remote, repository)
+        base = value("merge-base", trusted, head)
+        policy = load_policy(trusted)
+        names = selected(policy, changed_paths(base, head), base=base, head=head)
+        plan = acceptance_plan(policy, names, host())
+        if not plan["ci"]:
+            raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
+        for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
+            fetched = git("fetch", "--no-tags", args.remote, f"+{note_ref}:{note_ref}", check=False)
+            if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
+                raise RuntimeError(fetched.stderr.decode(errors="replace"))
+        if read_note(head, PLAN_NOTE_REF)["attestations"]:
+            prior = read_execution_plan(head, trusted, trusted)
+            if prior["plan"] != plan:
+                raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
+        identity = value("config", "localAcceptance.signer")
+        key = Path(value("config", "localAcceptance.key")).expanduser()
+        receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
+                   "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
+                   "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
+        envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
+        verify_execution_plan(envelope, head, trusted, trusted)
+        publish(head, envelope, args.remote, note_ref=PLAN_NOTE_REF)
+        git("fetch", "--no-tags", args.remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
+        with tempfile.TemporaryDirectory(prefix="scode-plan-push-") as temporary:
+            hook = Path(temporary) / "pre-push"
+            interpreter = shlex.quote(sys.executable.replace("\\", "/"))
+            runner = shlex.quote(str(Path(__file__).resolve()).replace("\\", "/"))
+            hook.write_text(f'#!/bin/sh\nexec {interpreter} {runner} plan-pre-push --head {head} --trusted {trusted} "$@"\n',
+                            encoding="utf-8", newline="\n")
+            hook.chmod(0o755)
+            git("-c", f"core.hooksPath={temporary}", "push", "--set-upstream", args.remote,
+                f"refs/heads/{branch}:refs/heads/{branch}")
+        owner = repository.split("/")[0]
+        pulls = api(f"repos/{repository}/pulls?state=open&base=main&head=" + urllib.parse.quote(owner + ":" + branch, safe=""))
+        if len(pulls) > 1:
+            raise RuntimeError("Source branch has multiple current PRs; inspect GitHub before continuing")
+        if pulls:
+            pull = pulls[0]
+        else:
+            body = (Path(args.body_file).read_text(encoding="utf-8") if args.body_file else
+                    "Frozen source. Mandatory author acceptance and complementary native CI are running in parallel; Local acceptance remains required before merge.")
+            pull = api(f"repos/{repository}/pulls", {"base": "main", "head": branch, "draft": True,
+                "title": args.title or value("log", "-1", "--format=%s"), "body": body})
+        if pull["head"]["sha"] != head or pull["head"]["repo"]["full_name"] != repository:
+            raise RuntimeError("PR advanced or names another source repository; preserve the execution-plan evidence")
+        journal.update(pr=pull["number"], source_published=True, policy=trusted)
+        if pull["draft"]:
+            response = api("graphql", {"query": "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}",
+                                      "variables": {"id": pull["node_id"]}})
+            if response.get("errors") or response["data"]["markPullRequestReadyForReview"]["pullRequest"]["isDraft"]:
+                raise RuntimeError("GitHub did not start ready source CI; no local field started")
+        print("LOCAL_ACCEPTANCE_PARALLEL=" + canonical({"head": head, "pr": pull["number"],
+            "ci": plan["ci"], "author_checks": plan["local_checks"], "output": str(output),
+            "completion": "Frozen source is ready for tests, not merge. A scheduling plan cannot satisfy Local acceptance; all author checks and native jobs remain required."}).decode(), flush=True)
+        try:
+            existing = verify(head, trusted, trusted)
+        except RuntimeError:
+            check(argparse.Namespace(head=head, base=trusted, policy_ref=trusted, signers_ref=trusted,
+                output=str(output / "author"), resume_from=None, publish=True, remote=args.remote,
+                outer_started_at=wall_start, outer_monotonic_started_at=started, execution_plan=envelope))
+        else:
+            if existing["host"] != host():
+                raise RuntimeError("Existing acceptance belongs to another author host; retain that responsibility and use normal git push")
+            print("LOCAL_ACCEPTANCE_PARALLEL: existing exact-source author signature reused; no completed local profile reran.", flush=True)
+        clean(head)
+        api(f"repos/{repository}/actions/workflows/local-acceptance-publish.yml/dispatches",
+            {"ref": "main", "inputs": {"pr": str(pull["number"]), "head": head}})
+        journal["outcome"] = "success"
+        print(f"LOCAL_ACCEPTANCE_PARALLEL: author checks passed for PR #{pull['number']}; trusted finalization requested. "
+              "Existing native jobs are retained. Wait for the required Local acceptance status, then use the normal merge queue.", flush=True)
+    except BaseException:
+        journal["outcome"] = "failure"
+        raise
+    finally:
+        if not delegated or not (output / "parallel-attempt.json").is_file():
+            journal.update(finished_at=time.time(), elapsed_seconds=round(time.monotonic() - started, 3))
+            (output / "parallel-attempt.json").write_bytes(canonical(journal))
 
 
 def contract_update(args):
@@ -1998,8 +2322,18 @@ def main():
     command.add_argument("--trusted", required=True)
     command.add_argument("remote")
     command.add_argument("url")
+    command = sub.add_parser("start-pr", help="Freeze/publish source, start complementary native CI, and run mandatory local acceptance in parallel")
+    command.add_argument("--remote", default="origin")
+    command.add_argument("--output")
+    command.add_argument("--title")
+    command.add_argument("--body-file")
+    command = sub.add_parser("plan-pre-push", help=argparse.SUPPRESS)
+    command.add_argument("--head", required=True)
+    command.add_argument("--trusted", required=True)
+    command.add_argument("remote")
+    command.add_argument("url")
     args = parser.parse_args()
-    timed = args.operation in {"check", "pre-push", "contract-update", "contract-pre-push"}
+    timed = args.operation in {"check", "pre-push", "contract-update", "contract-pre-push", "start-pr", "plan-pre-push"}
     started = time.monotonic()
     operation = {"version": 1, "operation": args.operation, "started_at": time.time(), "outcome": "failure"}
     try:
@@ -2015,7 +2349,8 @@ def main():
             if args.architecture:
                 author["architecture"] = args.architecture
             report_plan(acceptance_plan(load_policy(args.policy_ref),
-                        selected(load_policy(args.policy_ref), changed_paths(base, head), base=base, head=head), author))
+                        selected(load_policy(args.policy_ref), changed_paths(base, head), base=base, head=head), author),
+                        current_environment=author["system"] == host()["system"])
             print("Preview only: a plan is not a successful or signed test result.")
         elif args.operation == "verify":
             head = value("rev-parse", args.head or "HEAD")
@@ -2034,6 +2369,10 @@ def main():
             contract_update(args)
         elif args.operation == "contract-pre-push":
             contract_pre_push(args)
+        elif args.operation == "start-pr":
+            start_pr(args)
+        elif args.operation == "plan-pre-push":
+            plan_pre_push(args)
         else:
             pre_push(args)
         operation["outcome"] = "success"

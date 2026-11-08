@@ -10,6 +10,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+scode-test-support = { path = "crates/scode-test-support" }
 codex-mermaid = { path = "vendor/codex-mermaid" }
 # Both tool launchers use the same backend; provenance is in vendor/command-group/UPSTREAM.
 command-group = { path = "vendor/command-group", version = "5.0.1" }

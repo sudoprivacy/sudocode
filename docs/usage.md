@@ -434,6 +434,13 @@ finish. Recognized Bash forms include read-only `git branch`, `fd`, `diff`,
 selected `gh` queries, literal globs, and file input redirects; unknown or
 mutating flags remain serial.
 
+`AskUserQuestion` accepts a nonempty `questions[]`, with `id` and `prompt` on
+each question. Answers outside the suggested options are allowed by default;
+`allowCustomInput: false` requests a closed choice. Questions without options
+and text questions always accept typed answers. The terminal shows a `[+]` row
+for short lists. Searchable lists use Enter to select a match, or submit the
+filter text when no option matches and custom input is allowed.
+
 `AskUserQuestion` can wait alongside independent reads. Questions and permission
 requests share one input queue, so only one prompt owns the editor at a time;
 other results continue to render while it waits. When one call asks several
@@ -738,10 +745,14 @@ it compresses background counts or yields their space for important tips,
 and truncates text on Unicode display-column boundaries. Theme colors apply
 to individual spans and no-color terminals retain their default foreground.
 
-With `experimental.cacheTtlAdvisor` enabled, a changed TTL recommendation is
-shown after a committed compact and on resume. It reads the same frozen
-decision as `scode cache stats`, uses no extra model call, and states that
-the recommendation has not been applied. The advisor remains off by default.
+The footer also carries prompt-cache TTL advice. An unpinned session follows
+it automatically, and the tip says what it is about to do or has just done. A
+session pinned by `cache_ttl_1h` gets a recommendation when the other TTL is
+cheaper. ↓ from an empty prompt reaches the footer (→ past the background-task
+label, if there is one) and Enter opens the TTL panel. A new session starts
+from the TTL your sessions last learned from evidence, or 5m before any has;
+`/cache ttl` shows which. The advice reads the same frozen decision as
+`scode cache stats` and uses no extra model call.
 
 ## Background tasks in the REPL
 

@@ -1,3 +1,8 @@
+mod ask_user_question;
+pub use ask_user_question::{
+    parse_request as parse_question_request, serialize_result as question_result,
+};
+
 /// Test-only seams exposed for integration tests.
 ///
 /// These wrappers cross the crate boundary so `tools/tests/*.rs`
@@ -260,7 +265,6 @@ pub mod testing {
 }
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -1426,52 +1430,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the user structured questions and wait for their response. Use this tool whenever you need user preferences, configuration values, first-run setup answers, or any other structured input. Prefer title/description/questions[] for multi-step forms; simple legacy question/options is still accepted. Do not ask numbered setup questions directly in plain assistant text when this tool is available.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "description": { "type": "string" },
-                    "question": { "type": "string" },
-                    "options": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "questions": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string" },
-                                "prompt": { "type": "string" },
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["single_select", "multi_select", "text", "boolean"]
-                                },
-                                "required": { "type": "boolean" },
-                                "allowCustomInput": { "type": "boolean" },
-                                "customInputHint": { "type": "string" },
-                                "options": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "label": { "type": "string" },
-                                            "value": { "type": "string" },
-                                            "description": { "type": "string" },
-                                            "recommended": { "type": "boolean" }
-                                        },
-                                        "required": ["label", "value"],
-                                        "additionalProperties": false
-                                    }
-                                }
-                            },
-                            "required": ["id", "prompt"],
-                            "additionalProperties": false
-                        }
-                    }
-                }
-            }),
+            description: "Ask the user structured questions and wait for their response. Use this tool whenever you need user preferences, configuration values, first-run setup answers, or any other structured input. Use questions[] with id and prompt for every question. Custom answers are allowed by default; set allowCustomInput to false for a closed choice. Do not ask numbered setup questions directly in plain assistant text when this tool is available.",
+            input_schema: ask_user_question::input_schema(),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
@@ -1958,9 +1918,7 @@ fn execute_tool_with_enforcer(
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
         "PowerShell" => call.run_powershell(),
-        "AskUserQuestion" => {
-            from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
-        }
+        "AskUserQuestion" => ask_user_question::run(input),
         "set_tip" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             let tip: runtime::tips::Tip = from_value(input)?;
@@ -2019,107 +1977,6 @@ fn maybe_enforce_permission_check_with_mode(
     } else {
         Ok(())
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> {
-    use std::io;
-
-    let stdout = io::stdout();
-    let stdin = io::stdin();
-    let mut out = stdout.lock();
-    let mut reader = stdin.lock();
-
-    run_ask_user_question_v2(input, &mut out, &mut reader)
-}
-
-fn prompt_user_for_answer(
-    out: &mut impl Write,
-    reader: &mut impl BufRead,
-    question: &str,
-    options: Option<&Vec<String>>,
-) -> Result<String, String> {
-    writeln!(out, "\n[Question] {question}").map_err(|e| e.to_string())?;
-
-    if let Some(options) = options {
-        for (i, option) in options.iter().enumerate() {
-            writeln!(out, "  {}. {}", i + 1, option).map_err(|e| e.to_string())?;
-        }
-        write!(out, "Enter choice (1-{}): ", options.len()).map_err(|e| e.to_string())?;
-    } else {
-        write!(out, "Your answer: ").map_err(|e| e.to_string())?;
-    }
-    out.flush().map_err(|e| e.to_string())?;
-
-    let mut response = String::new();
-    reader.read_line(&mut response).map_err(|e| e.to_string())?;
-    let response = response.trim().to_string();
-
-    if let Some(options) = options {
-        if let Ok(idx) = response.parse::<usize>() {
-            if idx >= 1 && idx <= options.len() {
-                return Ok(options[idx - 1].clone());
-            }
-        }
-    }
-
-    Ok(response)
-}
-
-fn run_ask_user_question_v2(
-    input: AskUserQuestionInput,
-    out: &mut impl Write,
-    reader: &mut impl BufRead,
-) -> Result<String, String> {
-    let NormalizedQuestions {
-        title,
-        description,
-        questions,
-    } = normalize_ask_user_question_input(input)?;
-
-    if let Some(title) = &title {
-        writeln!(out, "\n[Question Set] {title}").map_err(|e| e.to_string())?;
-    }
-    if let Some(description) = &description {
-        writeln!(out, "{description}").map_err(|e| e.to_string())?;
-    }
-
-    let mut answers = Vec::with_capacity(questions.len());
-    for (index, item) in questions.iter().enumerate() {
-        let prompt = format!("{}. {}", index + 1, item.prompt);
-        let option_labels = if item.options.is_empty() {
-            None
-        } else {
-            Some(
-                item.options
-                    .iter()
-                    .map(|option| option.label.clone())
-                    .collect::<Vec<_>>(),
-            )
-        };
-
-        let answer = prompt_user_for_answer(out, reader, &prompt, option_labels.as_ref())?;
-        let matched_option = item
-            .options
-            .iter()
-            .find(|option| option.label == answer || option.value == answer);
-
-        answers.push(AskUserQuestionAnswer {
-            id: item.id.clone(),
-            value: matched_option.map_or_else(|| answer.clone(), |option| option.value.clone()),
-            label: matched_option
-                .map(|option| option.label.clone())
-                .or_else(|| (!answer.is_empty()).then_some(answer)),
-        });
-    }
-
-    to_pretty_json(AskUserQuestionResult {
-        status: "answered".to_string(),
-        title,
-        description,
-        questions,
-        answers,
-    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -3049,6 +2906,7 @@ fn write_envelope(
 ) -> Result<PathBuf, String> {
     let recipient_sanitized = sanitize_recipient(recipient);
     let envelope = MailboxEnvelope {
+        send_id: None,
         delivery: input.delivery,
         from: resolve_sender(input, mailbox),
         to: recipient.to_string(),
@@ -4160,129 +4018,6 @@ struct PowerShellInput {
     timeout: Option<u64>,
     description: Option<String>,
     run_in_background: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionInput {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    question: Option<String>,
-    #[serde(default)]
-    options: Option<Vec<String>>,
-    #[serde(default)]
-    questions: Vec<AskUserQuestionItem>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionItem {
-    id: String,
-    // Accept `question` as an alias so an item written with the legacy
-    // top-level field name (the natural mistake, since the tool also takes a
-    // top-level `question`) deserializes instead of failing the whole call
-    // with a cryptic "missing field `prompt`".
-    #[serde(alias = "question")]
-    prompt: String,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    required: Option<bool>,
-    #[serde(default)]
-    allow_custom_input: Option<bool>,
-    #[serde(default)]
-    custom_input_hint: Option<String>,
-    #[serde(default)]
-    options: Vec<AskUserQuestionOption>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct AskUserQuestionOption {
-    label: String,
-    value: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    recommended: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionAnswer {
-    id: String,
-    value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionResult {
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    questions: Vec<AskUserQuestionItem>,
-    answers: Vec<AskUserQuestionAnswer>,
-}
-
-struct NormalizedQuestions {
-    title: Option<String>,
-    description: Option<String>,
-    questions: Vec<AskUserQuestionItem>,
-}
-
-fn normalize_ask_user_question_input(
-    input: AskUserQuestionInput,
-) -> Result<NormalizedQuestions, String> {
-    if !input.questions.is_empty() {
-        return Ok(NormalizedQuestions {
-            title: input.title,
-            description: input.description,
-            questions: input.questions,
-        });
-    }
-
-    let question = input
-        .question
-        .map(|question| question.trim().to_string())
-        .filter(|question| !question.is_empty())
-        .ok_or_else(|| "question or questions is required".to_string())?;
-
-    let options = input
-        .options
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|option| !option.trim().is_empty())
-        .map(|option| AskUserQuestionOption {
-            label: option.clone(),
-            value: option,
-            description: None,
-            recommended: None,
-        })
-        .collect::<Vec<_>>();
-
-    Ok(NormalizedQuestions {
-        title: input.title,
-        description: input.description,
-        questions: vec![AskUserQuestionItem {
-            id: "q1".to_string(),
-            prompt: question,
-            kind: Some(if options.is_empty() {
-                "text".to_string()
-            } else {
-                "single_select".to_string()
-            }),
-            required: Some(true),
-            allow_custom_input: Some(options.is_empty()),
-            custom_input_hint: None,
-            options,
-        }],
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -9844,8 +9579,7 @@ mod tests {
         extract_recovery_outcome, final_assistant_text, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
         normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
-        push_output_block, run_ask_user_question_v2, search_tool_specs, AgentInput, AgentJob,
-        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        push_output_block, search_tool_specs, AgentInput, AgentJob, GlobalToolRegistry,
         LaneEventName, LaneFailureClass, SearchableToolSpec, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
@@ -13733,66 +13467,24 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_v2_returns_structured_answers() {
+    fn ask_user_question_returns_structured_answers() {
         use std::io::Cursor;
 
-        let input = AskUserQuestionInput {
-            question: None,
-            options: None,
-            title: Some("Initial setup".to_string()),
-            description: Some("Please answer the following.".to_string()),
-            questions: vec![
-                AskUserQuestionItem {
-                    id: "save_scope".to_string(),
-                    prompt: "Where to save preferences?".to_string(),
-                    kind: Some("single_select".to_string()),
-                    required: Some(true),
-                    allow_custom_input: Some(false),
-                    custom_input_hint: None,
-                    options: vec![
-                        AskUserQuestionOption {
-                            label: "Project".to_string(),
-                            value: "project".to_string(),
-                            description: None,
-                            recommended: Some(true),
-                        },
-                        AskUserQuestionOption {
-                            label: "User".to_string(),
-                            value: "user".to_string(),
-                            description: None,
-                            recommended: None,
-                        },
-                    ],
-                },
-                AskUserQuestionItem {
-                    id: "default_language".to_string(),
-                    prompt: "Default language?".to_string(),
-                    kind: Some("single_select".to_string()),
-                    required: Some(true),
-                    allow_custom_input: Some(false),
-                    custom_input_hint: None,
-                    options: vec![
-                        AskUserQuestionOption {
-                            label: "zh-CN".to_string(),
-                            value: "zh-CN".to_string(),
-                            description: None,
-                            recommended: None,
-                        },
-                        AskUserQuestionOption {
-                            label: "en-US".to_string(),
-                            value: "en-US".to_string(),
-                            description: None,
-                            recommended: None,
-                        },
-                    ],
-                },
-            ],
-        };
+        let request = super::parse_question_request(json!({
+            "title": "Initial setup", "description": "Please answer the following.",
+            "questions": [
+                {"id":"save_scope", "prompt":"Where to save preferences?", "allowCustomInput":false,
+                 "options":[{"label":"Project", "value":"project", "recommended":true}, {"label":"User", "value":"user"}]},
+                {"id":"default_language", "prompt":"Default language?", "allowCustomInput":false,
+                 "options":[{"label":"zh-CN", "value":"zh-CN"}, {"label":"en-US", "value":"en-US"}]}
+            ]
+        })).expect("valid question request");
 
         let mut output = Vec::new();
         let mut input_reader = Cursor::new(b"1\n2\n".to_vec());
-        let result = run_ask_user_question_v2(input, &mut output, &mut input_reader)
-            .expect("AskUserQuestion v2 should succeed");
+        let result =
+            super::ask_user_question::run_with_io(&request, &mut output, &mut input_reader)
+                .expect("AskUserQuestion should succeed");
         let json: serde_json::Value = serde_json::from_str(&result).expect("json");
 
         assert_eq!(json["status"], "answered");
@@ -13808,22 +13500,10 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_v2_requires_non_empty_questions() {
-        use std::io::Cursor;
-
-        let input = AskUserQuestionInput {
-            question: None,
-            options: None,
-            title: None,
-            description: None,
-            questions: vec![],
-        };
-
-        let mut output = Vec::new();
-        let mut input_reader = Cursor::new(Vec::<u8>::new());
-        let error = run_ask_user_question_v2(input, &mut output, &mut input_reader)
+    fn ask_user_question_requires_non_empty_questions() {
+        let error = super::parse_question_request(json!({"questions": []}))
             .expect_err("empty questions should fail");
-        assert!(error.contains("question or questions is required"));
+        assert!(error.contains("questions must contain at least one question"));
     }
 
     #[test]

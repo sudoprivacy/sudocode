@@ -163,9 +163,10 @@ fn browser_terminal_links_and_interaction() {
         "id":"links-file", "name":"write_file", "input":{"path":"browser-preview.rs", "content":written},
     }, {
         "id":"links-question", "name":"AskUserQuestion", "input": {
-            "title":"Links", "question":"Continue the review?",
+            "title":"Links",
             "description":"Review [QuestionLink](https://example.com/question) then choose.",
-            "options":["Continue", "Stop"],
+            "questions":[{"id":"review", "prompt":"Continue the review?",
+                "options":[{"label":"Continue", "value":"Continue"},{"label":"Stop", "value":"Stop"}]}],
         },
     }]));
     let output = common::terminal_host::run(

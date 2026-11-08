@@ -21,7 +21,7 @@ pub fn run_script(
         .join(scenario);
     std::fs::create_dir_all(&log_root).unwrap();
     let mut config = json!({
-        "binary": super::scode_bin(), "args": args, "scenario": scenario,
+        "binary": env.binary_path(), "args": args, "scenario": scenario,
         "root": env.workspace_root(), "configHome": env.config_home(),
         "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
         "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),

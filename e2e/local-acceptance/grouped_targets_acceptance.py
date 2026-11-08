@@ -139,7 +139,8 @@ pub fn record(name: &str) {
     write(package + "tests/acceptance_reserved/main.rs",
           '#[test] fn directory_target() { group_helper::record("directory"); }\n')
     write("rust/crates/helper/tests/independent.rs", '#[test] fn independent_package() { group_helper::record("other-package"); }\n')
-    for relative in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
+    for relative in [".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
+                     "spec/local_acceptance.json"]:
         write(relative, (SOURCE / relative).read_text(encoding="utf-8"))
     git("init", "--initial-branch=main")
     git("config", "user.name", "Grouped targets acceptance")
@@ -403,6 +404,113 @@ pub fn record(name: &str) {
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)
+    queue_scope_cases = []
+
+    def queue_scope(label, diff_base, daemon, ignored):
+        head = git("rev-parse", "HEAD")
+        keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
+        previous = {key: environment.get(key) for key in keys}
+        try:
+            for event, payload in [
+                ("pull_request", {"pull_request": {"base": {"sha": diff_base}, "head": {"sha": head}}}),
+                ("push", {"before": diff_base, "after": head}),
+                ("merge_group", {"merge_group": {"base_sha": diff_base, "head_sha": head}}),
+            ]:
+                event_file = output / "queue-event.json"
+                event_file.write_text(json.dumps(payload), encoding="utf-8")
+                outputs = output / "queue-output.txt"
+                outputs.write_text("", encoding="utf-8")
+                environment.update(GITHUB_EVENT_NAME=event, GITHUB_EVENT_PATH=str(event_file),
+                                   GITHUB_OUTPUT=str(outputs))
+                log = command(sys.executable, str(root / ".github/scripts/ci_input_scope.py"), cwd=root)
+                actual = json.loads(log.read_text(encoding="utf-8"))
+                for key in ["daemon_required", "a2a_required", "cohost_required"]:
+                    assert actual[key] == str(daemon).lower(), (label, event, actual)
+                assert actual["clippy_required"] == actual["live_required"] == "true", actual
+                assert actual["daemon_disabled_test_sources_ignored"] == sorted(ignored), actual
+                emitted = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+                assert all(emitted[key] == value for key, value in actual.items() if key.endswith("_required")), actual
+                queue_scope_cases.append({"case": label, "event": event, "base": diff_base,
+                                          "head": head, "actual": actual})
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    environment.pop(key, None)
+                else:
+                    environment[key] = value
+
+    # The real queue previously treated every non-CLI wrapper as a daemon
+    # input even though the public author planner excluded its declaration.
+    # Exercise the actual selector and Cargo product using a non-CLI crate.
+    queue_base = git("rev-parse", "HEAD")
+    helper_manifest_path = "rust/crates/helper/Cargo.toml"
+    helper_manifest = (root / helper_manifest_path).read_text()
+    helper_wrapper = "rust/crates/helper/tests/acceptance_groups/acceptance_helper.rs"
+    helper_declaration = ('\n[[test]]\nname="acceptance_helper"\n'
+                          'path="tests/acceptance_groups/acceptance_helper.rs"\ntest=false\n')
+    helper_canonical = profiles.test_group_source(["independent"])
+    write(helper_manifest_path, helper_manifest + helper_declaration)
+    write(helper_wrapper, helper_canonical)
+    queue_head = commit("Add a disabled non-CLI integration group")
+    queue_scope("new disabled non-CLI group", queue_base, False, [helper_wrapper])
+    digest, log = product()
+    assert digest == original_binary, "Non-CLI grouping changed the normal native product"
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    assert all(row["fresh"] for row in rows if row.get("reason") == "compiler-artifact"), log
+    helper_arguments, helper_plan = profiles.grouped_workspace_test_targets(root, metadata())
+    assert normalize(inventory(helper_arguments), helper_plan) == grown
+    previous_pids = environment["SCODE_GROUP_PID_DIR"]
+    environment["SCODE_GROUP_PID_DIR"] = str(output / "non-cli-group-pids")
+    command(str(executable), "nextest", "run", *options, "--locked", "-p", "group-helper",
+            "--test", "acceptance_helper")
+    assert {path.name for path in (output / "non-cli-group-pids").iterdir()} == {"other-package"}
+    environment["SCODE_GROUP_PID_DIR"] = previous_pids
+    for index, (label, path, contents, diff_base, ignored) in enumerate([
+        ("enabled non-CLI group", helper_manifest_path,
+         helper_manifest + helper_declaration.replace('test=false', 'test=true'), queue_base, []),
+        ("default-enabled non-CLI group", helper_manifest_path,
+         helper_manifest + helper_declaration.replace('test=false\n', ''), queue_base, []),
+        ("unknown target settings", helper_manifest_path,
+         helper_manifest + helper_declaration + 'harness=false\n', queue_base, []),
+        ("existing disabled group source edit", helper_wrapper,
+         helper_canonical + '// Existing source changed.\n', queue_head, []),
+        ("original non-CLI integration source edit", "rust/crates/helper/tests/independent.rs",
+         (root / 'rust/crates/helper/tests/independent.rs').read_text() + '// Original source changed.\n',
+         queue_base, [helper_wrapper]),
+        ("normal library source edit", "rust/crates/helper/src/lib.rs",
+         (root / 'rust/crates/helper/src/lib.rs').read_text() + '// Normal source changed.\n',
+         queue_base, [helper_wrapper]),
+        ("build script edit", "rust/crates/helper/build.rs", 'fn main() {}\n', queue_base, [helper_wrapper]),
+        ("mixed manifest feature edit", helper_manifest_path,
+         helper_manifest + '\n[features]\nfuture=[]\n' + helper_declaration, queue_base, []),
+        ("target source escapes group directory", helper_manifest_path,
+         helper_manifest + helper_declaration.replace('tests/acceptance_groups/acceptance_helper.rs',
+                                                     'tests/independent.rs'), queue_base, []),
+    ]):
+        git("switch", "--detach", queue_head)
+        write(path, contents)
+        commit("Retain daemon checks for " + label)
+        queue_scope(label, diff_base, True, ignored)
+    git("switch", "--detach", queue_head)
+    git("rm", helper_wrapper)
+    commit("Missing non-CLI grouping source")
+    queue_scope("missing non-CLI grouping source", queue_base, True, [])
+    git("switch", "--detach", queue_head)
+    blob = git("rev-parse", "HEAD:" + helper_wrapper)
+    git("update-index", "--cacheinfo", "120000," + blob + "," + helper_wrapper)
+    git("commit", "-m", "Refuse indirect grouping source")
+    # Materialize the committed mode too; changing only the index otherwise
+    # leaves a modified regular file that Git correctly refuses to replace.
+    git("checkout-index", "--force", "--", helper_wrapper)
+    git("diff", "--exit-code")
+    queue_scope("committed symlink grouping source", queue_base, True, [])
+    git("switch", "--detach", queue_head)
+    git("rm", helper_wrapper)
+    (root / helper_wrapper).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", "rust/crates/helper/tests/independent.rs", helper_wrapper)
+    commit("Moving an original integration source retains daemon checks")
+    queue_scope("original source renamed into group", queue_base, True, [helper_wrapper])
+    git("switch", "main")
     # Reproduce complementary CI's raw newer-main base with actual diverging
     # commits. The PR changes one original integration target; main-only files
     # must not turn it into a full-workspace run.
@@ -506,6 +614,7 @@ pub fn record(name: &str) {
               "original_named_driver_and_developer_target_passed": True,
               "invalid_group_refusals": refusals, "scope_cases": scope_cases, "ungrouped_plan": ungrouped_plan,
               "behind_main": behind_main,
+              "queue_scope_cases": queue_scope_cases,
               "commands": commands,
               "scope": "Real Git commits/public planner, Cargo metadata/builds, original and grouped nextest inventories, actual per-case native child processes and independent process-state assertions. Tiny infrastructure fixtures, no product PTY/provider coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

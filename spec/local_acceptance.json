@@ -76,6 +76,7 @@
         "rust/crates/rusty-sudocode-cli/tests/pty_prose_preview.rs",
         "rust/crates/rusty-sudocode-cli/tests/pty_review_scrollback.rs",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/scode-test-support/**",
         "e2e/terminal-resize/**",
         "rust/Cargo.lock",
         "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs"
@@ -96,6 +97,7 @@
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/engine-core/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/scode-test-support/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_render_performance.rs",
         "e2e/terminal-resize/benchmark.py",
         "e2e/terminal-resize/performance-policy.json",
@@ -116,6 +118,7 @@
         "rust/crates/pty-harness/**",
         "rust/crates/rusty-sudocode-cli/src/**",
         "rust/crates/rusty-sudocode-cli/tests/common/**",
+        "rust/crates/scode-test-support/**",
         "rust/crates/rusty-sudocode-cli/tests/pty_hyperlinks.rs",
         "rust/crates/rusty-sudocode-cli/tests/pty_prompt_viewport.rs",
         "rust/crates/rusty-sudocode-cli/tests/support/prompt_viewport_browser.cjs",
@@ -280,6 +283,9 @@
       ],
       "badc6716dff15176970b5c75049c47229a5cf72890776a0370d29f76b1ba73ff": [
         "cf811ae904e392fa406fe1eb1565d425146549e4a63534243db04ce8c0db55da"
+      ],
+      "ca1796cd977a9568cf914e5be21b446fba5b3799f2b287e6222fc387a28ef22f": [
+        "01f7b04b7b1b001d2bbdf10c99d7726558062c43297b32f299ba9f1ef2f62105"
       ]
     },
     "native-sdk": {
@@ -310,6 +316,9 @@
       ],
       "9847a1f38ef66cea49a95b2cdda41517421d22a82873eb0b3dd28b28e2b0a9a3": [
         "fee2d5c994720ce6d5a908fd978cac9489d89338dc7bc3307e520ddf70f76c09"
+      ],
+      "0c7bcfeecea68e2f1634d2bc35966ce3d75d25fe8fcdbf42c81c34efa6751f94": [
+        "c92f36fcb5aa319e9306911065e860e05cb9b34ae6e0fb0b68ca991f87c2f3b9"
       ]
     },
     "native-workspace": {
@@ -387,6 +396,9 @@
       "d08749525eae58e2588fe3532b52160a50612115cd21cf4f7ad6af7d2600871f": [
         "3d96e8cc458a63a04b71b478803351ac702e761ea0221c5778e950203b07d628",
         "f9f205793fc28ff28fed102ee21aab06547ee22490583d1cc174cb7011af2d95"
+      ],
+      "281034b64d0e4f18fc3feb06a6157a8a0b44fd05076be45d08a835bac11acc1b": [
+        "3b55127a7032a9caab580140cea189536be5a1157fadca17005f5a7636afee21"
       ]
     },
     "native-release": {
@@ -407,6 +419,9 @@
       ],
       "cb775a997d7999b81119ad4e4c8bc7034a60a3a938bd8d10a56765c265af94e7": [
         "d2d09b6970bf5912efd51956f2e2203f6342550f419c7ba0eea36ddc4e732af0"
+      ],
+      "c7029fba0a1c2dbe6b15be2e5adce8579f813d5ac6af31eae52eb323cf25f24a": [
+        "847856bfa61e6933cb6a4b2eae76fc076b417e27803913eea7a699a13cefa6f2"
       ]
     },
     "native-services": {
@@ -437,6 +452,9 @@
       ],
       "980804492e6b89d40312845745caa676a98b1612032696451bca170cb637da46": [
         "f1b4ee7ea91f76fb799f6cf7f665b5b80f2b13f2f9b9aa63483943c114867a1d"
+      ],
+      "b837d5a9609a0d9e5883390ea830da5d09b646cdbbe4fdeb049ff0e63f285243": [
+        "1f05dad1715f4c94af106781085821eb04a77f506176db85b24547fce424c1d2"
       ]
     },
     "native-cohost": {
@@ -467,16 +485,37 @@
       ],
       "283d8d8df2f3ee8b398eac056553212e04cf0ad8bb1a6f76f462dd6d72a87735": [
         "28ad98707d4b0234aeaa5e5bbd3af5b15f3874f816d6bbce4f290833706d4e0c"
+      ],
+      "7f8d9433c970c98751f39464eaed131ac6562dbf16dbfa0d725e99e92f146f1b": [
+        "09b36d642a3a9dc1a78961f01550dfe7c629712b679cdb054037aeec7fb18005"
       ]
     },
     "native-examples": {
       "3399a40b60a995c0bca4590b0bf0738b47e0a3645db526eb9e09d1d3f7b91a2c": [
         "3e2952e4d3035258882712b2f1bdd6d0d45c33d6e4e55ea948f1230bc1c66d43"
+      ],
+      "ac5ec2c8e188123db8c0a749b5b63cf2b5e5e543aa0254f56349bdff98d74771": [
+        "6f233329e44a12aa6fb5421c6d31f64333e8adb8abc1adfe3830bdaac21f1cd7"
       ]
     },
     "guard-contract": {
       "b340dbc03dd83d78a36f34a231ec6fb26912742456d9a16be64cb8237e253df5": [
         "6d2fe632823799fa526d60a811e9010877803928c80f4093ad1806c3873bb9be"
+      ]
+    },
+    "rendering": {
+      "2469e6f7ebba2bd0d25ea82f5c35f4753439971d830e54dcdd984125fcfc0d94": [
+        "63decb1ae7d9b7e5493dfb36db3c0ae10c8759b3076b8a186ebdb8c6348fba09"
+      ]
+    },
+    "browser": {
+      "2469e6f7ebba2bd0d25ea82f5c35f4753439971d830e54dcdd984125fcfc0d94": [
+        "63decb1ae7d9b7e5493dfb36db3c0ae10c8759b3076b8a186ebdb8c6348fba09"
+      ]
+    },
+    "native-context": {
+      "cbb31f23fd408e95f6b464cf99eae1c3b63841fed02d168e0892902a739e4318": [
+        "6a12ad6eb7527f66385e3fb9eb556a4f66227c1fceb023fe57e14ed35c6fe95b"
       ]
     }
   },

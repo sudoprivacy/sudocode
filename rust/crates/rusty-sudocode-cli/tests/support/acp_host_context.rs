@@ -282,7 +282,7 @@ async fn verify_context_refresh_preserves_questions(
         let answer = format!("HOST_CONTEXT_QUESTION_ANSWER_{index}");
         let calls = json!([{
             "id": format!("context-question-{index}"), "name": "AskUserQuestion",
-            "input": {"question": format!("Question after context refresh {index}")},
+            "input": {"questions":[{"id":"q1","prompt":format!("Question after context refresh {index}")}]},
         }]);
         let prompt = client
             .send_request_no_wait(

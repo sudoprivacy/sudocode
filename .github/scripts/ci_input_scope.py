@@ -12,7 +12,7 @@ import re
 import subprocess
 import symtable
 
-from local_acceptance import POLICY, SIGNERS, production_build_paths, selected
+from local_acceptance import POLICY, SIGNERS, opt_in_test_target_changes, production_build_paths, selected
 
 
 def git(*args):
@@ -135,6 +135,7 @@ def independent_cli_sources(*refs):
 def main():
     ignored_product_inputs = []
     ignored_cohost_cli_sources = []
+    ignored_disabled_test_sources = []
     queue_inputs = {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
@@ -189,10 +190,16 @@ def main():
             # CLI integration modules are not inputs to the daemon/cohost
             # binaries or shell journeys. Native PTYs and live model scope
             # remain unchanged; manifests, src and moved source still qualify.
-            normal_inputs = production_build_paths(relevant, base, head)
+            opt_in_manifests, opt_in_sources = opt_in_test_target_changes(relevant, base, head)
+            normal_inputs = production_build_paths(relevant, base, head, opt_in=opt_in_manifests)
             ignored_product_inputs = [path for path in relevant if path not in normal_inputs]
+            # A newly declared test=false target cannot be selected by the
+            # named daemon journeys. Reuse the same committed proof as its
+            # manifest; existing/ordinary test sources keep their full scope.
+            ignored_disabled_test_sources = sorted(set(normal_inputs) & opt_in_sources)
             daemon_paths = [path for path in normal_inputs
                             if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
+                            and path not in opt_in_sources
                             and (path in native_specs
                                  or any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs))]
             executor_path = ".github/local-acceptance/checks.py"
@@ -253,6 +260,7 @@ def main():
         for key, value in result.items():
             stream.write(f"{key}={value}\n")
     print(json.dumps({**result, "changed_paths": paths, "normal_product_ignored": ignored_product_inputs,
+                      "daemon_disabled_test_sources_ignored": ignored_disabled_test_sources,
                       "cohost_cli_source_ignored": ignored_cohost_cli_sources}))
 
 

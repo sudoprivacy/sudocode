@@ -25,7 +25,7 @@ def verify_publication(directory, work, clean_environment):
     assert "base_sha: ${{ steps.proof.outputs.base_sha }}" in workflow
     assert "ACCEPTANCE_BASE: ${{ needs.proof.outputs.base_sha }}" in workflow
     publisher = (SOURCE / ".github/workflows/local-acceptance-publish.yml").read_text(encoding="utf-8")
-    assert "if: (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group') && github.event.workflow_run.conclusion != 'skipped'" in publisher
+    assert "if: github.event_name == 'workflow_dispatch' || ((github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group') && github.event.workflow_run.conclusion != 'skipped')" in publisher
 
     def git(*args, cwd=work, data=None):
         return subprocess.check_output(["git", *map(str, args)], cwd=cwd,

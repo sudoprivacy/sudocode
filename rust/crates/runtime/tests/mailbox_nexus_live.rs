@@ -109,6 +109,7 @@ fn send_to(
     auth: &str,
 ) -> Result<(), String> {
     mailbox(client, from, auth).send(MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: to.to_string(),

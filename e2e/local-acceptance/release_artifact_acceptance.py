@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 SOURCE = Path(__file__).resolve().parents[2]
 
@@ -111,7 +112,14 @@ def run(output):
     output.mkdir(parents=True, exist_ok=False)
     helper = load("artifact_fixture_executor", SOURCE / ".github/scripts/local_acceptance.py")
     root = output / "project"
-    target = output / "target"
+    # MSVC's linker still rejects build-script paths beyond MAX_PATH. Keep the
+    # private Cargo outputs short even when the evidence directory is nested.
+    target = Path(tempfile.mkdtemp(prefix="scode-artifact-")) if os.name == "nt" else output / "target"
+    (output / "build-context.json").write_text(json.dumps({
+        "cargo_target_directory": str(target),
+        "retained_for_diagnostics": True,
+        "evidence_directory": str(output),
+    }, indent=2) + "\n")
     root.mkdir()
     commands = []
 
@@ -247,6 +255,7 @@ if os.environ.get('FIXTURE_FAIL_CONTEXT'): raise SystemExit(17)
         assert f"release_artifact_required={str(expected).lower()}" in selected.read_text()
         scope_controls[relative] = expected
     record = {"status": "PASS", "controls": results, "commands": commands,
+              "cargo_target_directory": str(target), "binary_sha256": original,
               "windows_compiler_environment": compiler_environment,
               "real_ci_input_scope": scope_controls,
               "workflow_gate_before_packaging": workflow_contract(),

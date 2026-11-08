@@ -5845,6 +5845,64 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
     workspace.cleanup();
 }
 
+/// ACP consumes the same resolved defaults as the terminal question editor.
+#[tokio::test]
+async fn acp_questions_receive_default_custom_input_and_explicit_opt_out() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("stdio-question-policy");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+    let options = json!([{"label":"First", "value":"first"}, {"label":"Second", "value":"second"}]);
+    let calls = json!([{"id":"question-policy", "name":"AskUserQuestion", "input":{"questions":[
+        {"id":"default", "prompt":"Default policy", "options":options},
+        {"id":"closed", "prompt":"Closed policy", "allowCustomInput":false, "options":options},
+        {"id":"text", "prompt":"Text policy", "kind":"text", "allowCustomInput":false}
+    ]}}]);
+    let prompt = client.send_request_no_wait("session/prompt", json!({
+        "sessionId":session, "prompt":[{"type":"text", "text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]
+    })).await;
+    let (_, question) = client
+        .recv_until(RECV_TIMEOUT, |message| {
+            is_server_request(message, "_scode/ask_user_question")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("missing normalized question: {seen:?}"));
+    let fields = question["params"]["questions"].as_array().unwrap();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field["allowCustomInput"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [true, false, true]
+    );
+    client
+        .send_raw(
+            &json!({"jsonrpc":"2.0", "id":question["id"], "result":{"answers":[
+                {"id":"default", "value":"ACP_CUSTOM_RESULT", "label":"ACP_CUSTOM_RESULT"},
+                {"id":"closed", "value":"second", "label":"Second"},
+                {"id":"text", "value":"ACP_TEXT_RESULT", "label":"ACP_TEXT_RESULT"}
+            ]}}),
+        )
+        .await;
+    let (_, completed) = client
+        .recv_until(RECV_TIMEOUT, |message| is_response_to(message, prompt))
+        .await
+        .unwrap();
+    assert_eq!(completed["result"]["stopReason"], "end_turn", "{completed}");
+    let requests = server.captured_requests().await;
+    let body = &requests.last().unwrap().raw_body;
+    assert!(
+        body.contains("ACP_CUSTOM_RESULT") && body.contains("ACP_TEXT_RESULT"),
+        "answers must reach the next model request: {body}"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// An unanswered question must not stop tool notifications in the same turn.
 #[tokio::test]
 async fn acp_question_wait_keeps_same_turn_tool_results_streaming() {
@@ -5861,7 +5919,7 @@ async fn acp_question_wait_keeps_same_turn_tool_results_streaming() {
     scenario_initialize(&mut client).await;
     let session = scenario_session_new(&mut client, &workspace.root).await;
     let calls = json!([
-        {"id":"question", "name":"AskUserQuestion", "input":{"question":"ACP_PARALLEL_QUESTION"}},
+        {"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"ACP_PARALLEL_QUESTION"}]}},
         {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
     ]);
     let prompt = client.send_request_no_wait("session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
@@ -5906,7 +5964,7 @@ async fn acp_cancelled_question_does_not_answer_the_next_turn() {
     let mut client = spawn_stdio_client_danger(&workspace);
     scenario_initialize(&mut client).await;
     let sid = scenario_session_new(&mut client, &workspace.root).await;
-    let calls = json!([{ "id":"question", "name":"AskUserQuestion", "input":{"question":"Choose the next action"} }]);
+    let calls = json!([{ "id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"Choose the next action"}]} }]);
     let prompt = json!({"sessionId":sid,"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]});
     let first = client
         .send_request_no_wait("session/prompt", prompt.clone())
@@ -7968,6 +8026,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     let peer = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
     for (agent, _) in &sessions {
         peer.send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: (*agent).to_string(),
@@ -8032,6 +8091,7 @@ async fn acp_peer_message_waits_for_tool_resume() {
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
@@ -8112,6 +8172,7 @@ async fn acp_client_owned_peer_input_starts_no_session_turn() {
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),

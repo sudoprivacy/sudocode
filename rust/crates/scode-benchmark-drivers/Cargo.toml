@@ -24,6 +24,7 @@ path = "../rusty-sudocode-cli/tests/pty_prompt_viewport.rs"
 test = false
 
 [dev-dependencies]
+scode-test-support.workspace = true
 flate2 = "1"
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 pty-expect.workspace = true

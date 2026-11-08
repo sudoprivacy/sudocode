@@ -1553,6 +1553,11 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
         "Keep PREFIX_ORIGINAL instructions.",
     )
     .unwrap();
+    seeded_session(env, "prefix")
+}
+
+/// A new session with a long cached prefix, saved as `<name>.jsonl`.
+fn seeded_session(env: &TestEnv, name: &str) -> std::path::PathBuf {
     let mut session = Session::new().with_workspace_root(env.workspace_root());
     for index in 0..16 {
         session
@@ -1576,7 +1581,7 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
             ]))
             .unwrap();
     }
-    let path = env.workspace_root().join("prefix.jsonl");
+    let path = env.workspace_root().join(format!("{name}.jsonl"));
     session.save_to_path(&path).unwrap();
     path
 }
@@ -1759,11 +1764,8 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
     pin_ttl(&env, false);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
-    let enabled = [
-        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
-        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-    ];
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let queue = [("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+    let mut cli = spawn_with_env(&env, &path, &queue);
     turn(&mut cli, "First observed request.");
     let rows = cache_rows(&directory);
     let template = rows.last().unwrap();
@@ -1837,7 +1839,7 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
     for secret in ["test-pty-key", "PREFIX_ORIGINAL", capture.url.as_str()] {
         assert!(!metadata.contains(secret));
     }
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let mut cli = spawn_with_env(&env, &path, &queue);
     exit(&mut cli);
     let resumed: Value =
         serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
@@ -1848,8 +1850,8 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
 }
 
 #[test]
-fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
-    for mode in ["off", "retry", "restarted", "interrupted"] {
+fn ttl_advisor_marks_retried_or_restarted_streams() {
+    for mode in ["retry", "restarted", "interrupted"] {
         let env = TestEnv::new_mock("ttl-advisor-coverage");
         let capture = Capture::new();
         let path = fixture(&env, &capture);
@@ -1871,16 +1873,10 @@ fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
         let mut cli = spawn_with_env(
             &env,
             &path,
-            &[
-                (
-                    "SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR",
-                    if mode == "off" { "0" } else { "1" },
-                ),
-                (
-                    "SUDOCODE_CACHE_DIAGNOSTICS",
-                    if mode == "restarted" { "1" } else { "0" },
-                ),
-            ],
+            &[(
+                "SUDOCODE_CACHE_DIAGNOSTICS",
+                if mode == "restarted" { "1" } else { "0" },
+            )],
         );
         if mode == "restarted" {
             cli.send("Observe an invalid upstream restart.\r").unwrap();
@@ -2042,11 +2038,8 @@ fn ttl_panel_switches_when_cheapest_and_saves_the_choice() {
     pin_ttl(&env, false);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
-    let enabled = [
-        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
-        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-    ];
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let queue = [("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+    let mut cli = spawn_with_env(&env, &path, &queue);
     turn(&mut cli, "First observed request.");
     seed_ttl_history(&directory);
     compact(&mut cli, "first compaction");
@@ -2136,18 +2129,15 @@ fn a_saved_1h_waits_for_a_cold_prefix_after_a_restart() {
     let env = TestEnv::new_mock("ttl-restart");
     let capture = Capture::new();
     let path = fixture(&env, &capture);
-    let enabled = [
-        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
-        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-    ];
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let queue = [("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+    let mut cli = spawn_with_env(&env, &path, &queue);
     turn(&mut cli, "Warm the prefix at 5m.");
     cli.send("/cache ttl 1h\r").unwrap();
     cli.expect("Saved · 1h from the next cold start").unwrap();
     exit(&mut cli);
     assert_eq!(saved_ttl(&env), json!(true));
 
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let mut cli = spawn_with_env(&env, &path, &queue);
     expect_restored_status(&cli);
     let from = capture.bodies().len();
     turn(&mut cli, "A quick restart finds the prefix warm.");
@@ -2179,11 +2169,8 @@ fn auto_ttl_follows_this_sessions_history_at_the_cheapest_moment() {
     let path = fixture(&env, &capture);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
-    let enabled = [
-        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
-        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-    ];
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let queue = [("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+    let mut cli = spawn_with_env(&env, &path, &queue);
     turn(&mut cli, "First observed request.");
     let fresh = sent_1h_since(&capture, 0);
     assert!(
@@ -2259,6 +2246,73 @@ fn auto_ttl_follows_this_sessions_history_at_the_cheapest_moment() {
 /// A restart after a long idle finds the prefix cold: the first request
 /// decides on the history it now has, switches on that same request, and the
 /// footer says so.
+/// One user's agents tend to work alike, so the TTL any of their sessions
+/// decided from evidence is where the next new session starts. Before anything
+/// is learned a new session starts at 5m; a pinned session ignores it.
+#[test]
+fn a_learned_ttl_becomes_the_next_sessions_default() {
+    let decide_every = engine_core::cache_ttl::DECIDE_EVERY;
+    let env = TestEnv::new_mock("ttl-learned-default");
+    let capture = Capture::new();
+    let learned = env
+        .config_home()
+        .join("cache/prompt-cache/ttl-default.json");
+    let queue = [("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+
+    // Session A: nothing learned yet, so its first request asks for 5m.
+    let path = fixture(&env, &capture);
+    let first_id = Session::load_from_path(&path).unwrap().session_id;
+    let directory = env.config_home().join("cache/prompt-cache").join(&first_id);
+    let mut cli = spawn_with_env(&env, &path, &queue);
+    turn(&mut cli, "First request of the first session.");
+    let fresh = sent_1h_since(&capture, 0);
+    assert!(
+        !fresh.is_empty() && fresh.iter().all(|one_hour| !one_hour),
+        "nothing learned: 5m {fresh:?}"
+    );
+    assert!(!learned.exists(), "no evidence yet, nothing learned");
+    // Its history then favours 1h, and a periodic decision says so.
+    seed_ttl_history(&directory);
+    for index in 0..decide_every {
+        turn(&mut cli, &format!("Warm turn {index}."));
+    }
+    assert_eq!(last_decision(&directory)["suggested_ttl_seconds"], 3600);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&learned).unwrap()).unwrap();
+    assert_eq!(saved["ttl_seconds"], 3600, "{saved}");
+    assert_eq!(saved["session"], first_id.as_str(), "{saved}");
+    exit(&mut cli);
+
+    // Session B is new and has no history: it starts from what A learned.
+    let path = seeded_session(&env, "second");
+    let mut cli = spawn_with_env(&env, &path, &queue);
+    let from = capture.bodies().len();
+    turn(&mut cli, "First request of a new session.");
+    let started = sent_1h_since(&capture, from);
+    assert!(
+        started.first() == Some(&true),
+        "a new session starts from the learned 1h: {started:?}"
+    );
+    cli.send("/cache ttl\r").unwrap();
+    cli.expect(&format!("1h for new sessions, learned from {first_id}"))
+        .unwrap();
+    exit(&mut cli);
+
+    // Session C is pinned to 5m: the learned value is neither used nor changed.
+    let path = seeded_session(&env, "third");
+    pin_ttl(&env, false);
+    let mut cli = spawn_with_env(&env, &path, &queue);
+    let from = capture.bodies().len();
+    turn(&mut cli, "First request of a pinned session.");
+    let pinned = sent_1h_since(&capture, from);
+    assert!(
+        !pinned.is_empty() && pinned.iter().all(|one_hour| !one_hour),
+        "a pin wins over the learned default: {pinned:?}"
+    );
+    exit(&mut cli);
+    let still: Value = serde_json::from_slice(&std::fs::read(&learned).unwrap()).unwrap();
+    assert_eq!(still, saved, "a pinned session does not rewrite it");
+}
+
 #[test]
 fn auto_ttl_decides_at_an_idle_cold_point_after_a_restart() {
     let env = TestEnv::new_mock("ttl-auto-idle");
@@ -2266,17 +2320,14 @@ fn auto_ttl_decides_at_an_idle_cold_point_after_a_restart() {
     let path = fixture(&env, &capture);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
-    let enabled = [
-        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
-        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-    ];
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let queue = [("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
+    let mut cli = spawn_with_env(&env, &path, &queue);
     turn(&mut cli, "Warm the prefix at 5m.");
     exit(&mut cli);
     seed_ttl_history(&directory);
     age_history(&directory, 11 * 60_000);
 
-    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let mut cli = spawn_with_env(&env, &path, &queue);
     expect_restored_status(&cli);
     let from = capture.bodies().len();
     turn(&mut cli, "Back after a long idle.");
@@ -3112,10 +3163,6 @@ fn assert_ttl_attempt_observations(
 ) {
     let o = &rows.last().unwrap()["observation"];
     match mode {
-        "off" => {
-            assert!(o.is_null());
-            assert!(!directory.join("ttl-advice.json").exists());
-        }
         "retry" => assert!(o["attempts"].as_u64().unwrap() >= 2),
         "interrupted" => {
             assert!(

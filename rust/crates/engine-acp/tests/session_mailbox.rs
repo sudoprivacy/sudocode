@@ -378,7 +378,7 @@ fn assert_cohost_context_questions(
         let turn = format!("context-question-{index}");
         let answer = format!("COHOST_CONTEXT_ANSWER_{index}");
         let calls = json!([{"id":turn,"name":"AskUserQuestion",
-            "input":{"question":format!("Question after cohost context refresh {index}")}}]);
+            "input":{"questions":[{"id":"q1","prompt":format!("Question after cohost context refresh {index}")}]}}]);
         let before = rt.block_on(service.captured_requests()).len();
         send(
             mailbox,
@@ -677,7 +677,7 @@ fn assert_parallel_question_progress(
     fs.write("parallel-read.txt", b"MAILBOX_PARALLEL_READ_RESULT")
         .unwrap();
     let calls = json!([
-        {"id":"question", "name":"AskUserQuestion", "input":{"question":"MAILBOX_PARALLEL_QUESTION"}},
+        {"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"MAILBOX_PARALLEL_QUESTION"}]}},
         {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
     ]);
     send(
@@ -916,6 +916,7 @@ fn start_failed_peer_delivery(kernel: &Arc<Kernel>) -> FailedPeer {
     );
     failed_peer
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: "failed-peer".into(),
             to: "failed-worker".into(),

@@ -57,7 +57,9 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
          the agent that messaged you, never a word copied from the message text — \
          and `message` set to your reply. A send \
          that does not return success did NOT leave this machine — say so rather \
-         than reporting the message as delivered.\n\n\
+         than reporting the message as delivered — unless it says delivery is \
+         unconfirmed or unknown: then it may have arrived, so check the \
+         conversation before resending.\n\n\
          Messages reach you at least once, which means the same message can arrive \
          more than once: delivery tracks one position for a whole batch and re-reads \
          a batch it could not finish. A repeat delivery is identical to the copy you \
@@ -151,6 +153,14 @@ pub struct MailboxEnvelope {
     /// Correlator for shutdown/plan-approval request/response pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Identity of one logical send, set by [`crate::mailbox::Mailbox::send`]
+    /// when absent. A retransmission of the same envelope keeps it; a new send
+    /// of the same words gets a new one. Unlike `timestamp` (whole seconds)
+    /// and `request_id` (question/reply correlation), it tells two sends of
+    /// identical bytes apart, which is what lets a sender whose append
+    /// returned an error find out whether THIS send committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_id: Option<String>,
 }
 
 #[expect(
@@ -401,6 +411,10 @@ mod prompt_tests {
         assert!(
             c.contains("did NOT leave this machine"),
             "must warn that a non-success send did not deliver: {c}"
+        );
+        assert!(
+            c.contains("unconfirmed or unknown") && c.contains("before resending"),
+            "an uncertain send must not be resent blindly: {c}"
         );
     }
 

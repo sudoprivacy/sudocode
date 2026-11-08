@@ -642,6 +642,51 @@ fn urgent_tip_shares_the_footer_and_survives_task_browsing_and_resize() {
     close(session);
 }
 
+/// An unread failure is red on the status row at the turn ends around it, not
+/// at every later turn end: after that it is one of the footer's new results.
+#[test]
+fn an_old_unread_failure_leaves_the_status_row_but_stays_a_new_result() {
+    let (env, _release) = task_env("background-shell-old-failure");
+    if env.is_live() {
+        return;
+    }
+    let mut session = start(&env, &[shell("failed", "exit 7", "Failed background job")]);
+    screen(&session, "1 background task failed");
+    let failed_row = |view: &str| {
+        view.lines()
+            .any(|line| line.starts_with("1 background task failed"))
+    };
+    let mut extra_turns = 0;
+    while failed_row(&session.render(common::screen_contents)) {
+        assert!(
+            extra_turns < 2,
+            "an old failure must not repeat at every turn end:\n{}",
+            session.render(common::screen_contents)
+        );
+        let prompt = env.prompt(
+            "Calculate 2+2 and reply with 'The answer is N'.",
+            "single_turn_text",
+        );
+        common::run_turn(
+            &mut session,
+            &prompt,
+            common::LIVE_TURN_BUDGET,
+            "later turn",
+        );
+        extra_turns += 1;
+    }
+    let view = screen(&session, "1 new result");
+    assert!(!failed_row(&view), "{view}");
+    close_after_unread(session);
+}
+
+/// Exit without reading the result, so the test sees it as still unread.
+fn close_after_unread(mut session: PtySession) {
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "back at input");
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
 #[test]
 fn failed_background_shell_exposes_unread_result_and_exit_code() {
     let (env, _release) = task_env("background-shell-failure");
@@ -891,7 +936,7 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
                 "echo QUESTION_BACKGROUND_OUTPUT; while [ ! -f release ]; do sleep 0.1; done",
                 "Background during question",
             ),
-            json!({"id":"question","name":"AskUserQuestion","input":{"questions":[{"id":"choice","header":"Choice","question":"Select the second answer","options":[{"label":"First","value":"First","description":"First option"},{"label":"Second","value":"Second","description":"Second option"}],"multiSelect":false}]}}),
+            json!({"id":"question","name":"AskUserQuestion","input":{"questions":[{"id":"choice","prompt":"Select the second answer","options":[{"label":"First","value":"First","description":"First option"},{"label":"Second","value":"Second","description":"Second option"}]}]}}),
         ],
     );
     expect_stable_region(

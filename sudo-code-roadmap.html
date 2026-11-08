@@ -540,7 +540,27 @@ longer repeated natively; that OS-specific infrastructure coverage is reduced.
 The full Linux matrix retains its cases, while product native checks and the
 complementary CI platforms remain unchanged. Guard image/entrypoint inputs bind
 the guard fingerprint without invalidating unrelated completed native profiles.
-The container takes no shared benchmark lease. In a same-source probe, the full
+The container takes no shared benchmark lease. Full Linux and author-native
+guards now overlap after the original protected staging and Docker/tool
+preflight, under the same exclusive host FIFO. Both full results and original
+command hashes remain required. Seven real native/Docker controls verify both
+failure directions, clean completion, interruption, owner/image refusal and
+empty container-ID recovery. Failed or interrupted work removes only its exact
+owned container and native descendants. An unchanged experimental full field
+took 501 seconds; an earlier serial author run took 907 seconds. These are
+different runs, not proof of a fixed or population delivery-time reduction.
+Product cases, guard assertions and Docker resource limits remain unchanged.
+Within the native guard, the original Git/SSH/HTTP controls overlap one serial
+compiler/test lane through the same supervisor. Five additional actual native
+process controls require clean success, both failure directions, original serial
+ordering, exited-process history and cleanup of both parents and children after
+interruption, with an unrelated sibling preserved. Identity polling avoids
+waiting on exited or reused PIDs; inaccessible live identities still refuse
+cleanup. Every
+original fixture, assertion and command log remains required. Same-source
+observations took 488 seconds serial and 344 seconds overlapping; this is one
+field, not a population delivery-time claim. Compiler concurrency stays unchanged.
+In a same-source probe, the full
 matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
 single trials concern infrastructure validation, not production PR latency.</p>
 <p>Changes limited to the independent Cargo benchmark, Docker input or Clippy
@@ -632,6 +652,142 @@ took 38.546 seconds with the old pin and 11.163 seconds with the corrected pin
 delay; all eighteen case executions passed. These are local measurements;
 whole-suite and end-to-end delivery savings require separate evidence.</p>
 
+<p><strong>Compile shared native fixtures once (2026-11-07).</strong>
+<code>scode-test-support</code> owns the existing PTY workspace, mock/live
+backend, terminal and shell helpers. Thin inline caller adapters retain lazy
+<code>SCODE_TEST_BIN</code>/<code>CARGO_BIN_EXE_scode</code> selection, including
+the standalone benchmark's refusal to guess an executable. Original individual
+and grouped test targets, cases, assertions, timeouts and process isolation
+remain unchanged. The extracted path selects the same resize, rendering and
+browser acceptance as the former common module. A new real native PTY journey
+checks lazy caller resolution, independent mock workspaces and peer isolation;
+it adds no product feature-coverage credit. In one Windows helper-edit rebuild
+comparison, the identical 102-target Cargo command rebuilt 27 test drivers in
+127.249 seconds before extraction and 86.310 seconds afterward (32.17% less).
+Both variants passed the same two original groups, 218 cases each, with their
+five existing ignored cases retained. Live-only early returns earn no provider
+coverage. These are local compiler measurements, excluding lease waits; original
+waits, setup, failed diagnostics and source acceptance remain part of delivery
+time. They do not establish whole-suite or end-to-end delivery savings.
+The Windows artifact infrastructure fixture keeps its private Cargo outputs
+short while retaining the requested evidence directory. Its mandatory native
+guard exercises deeply nested evidence; all original artifact identity and
+refusal controls remain required. An actual 263-character linker output failed
+before this correction; a deeper 265-character legacy layout passed the complete
+fixture using the independent short build directory.</p>
+
+<p>When both a fresh contract guard and native workspace are required, the
+original formatting, metadata and strict lint prefix runs before the contract
+matrix under the existing host FIFO. Its passing command records and original
+logs are verified and consumed once by the later workspace; every remaining
+test and the complete guard remain required. Preparation binds the clean HEAD,
+base, executor, output and Cargo target, and never signs a completed workspace.
+Real native Cargo/Clippy controls reject warnings, changed source/target/executor
+and altered logs. Real Git/SSH/child-process controls check early refusal,
+partial recovery, three separate FIFO acquisitions and complete signed resume.
+These are infrastructure enforcement checks, adding no product journey coverage.
+One earlier actual failure spent 622.597 seconds in contract commands before
+Clippy reported a naming error. This change removes that preceding work from
+the lint-failure path; it does not establish a measured population or whole-PR
+speedup. Successful end-to-end validation and all failed/retried attempts still
+count toward the delivery clock. Clippy workers join rustc/linkers at reduced
+priority while Cargo and actual test processes remain at Normal.</p>
+
+<p>Contract hashing now reads the committed tree once and batches immutable Git
+blobs through the same byte parser used by dependency-scope inspection. It
+preserves the original canonical hashes and never caches mutable refs. A real
+three-revision Windows comparison returned identical hashes, reducing one
+15-file contract read from about 0.9 seconds to 0.11 seconds (16 Git processes
+to two). This is a small repeated metadata cost, not a measured whole-PR or
+population improvement. Required Docker and native guards compare the original
+hash reference using binary/empty/duplicate blobs, Unicode paths, committed
+link text, changed refs and export-ignore attributes; missing files, objects,
+refs and unsupported Git entries still refuse acceptance. All signature,
+coverage, budget and command requirements remain in force.</p>
+
+<p>Frozen-source <code>start-pr</code> can start complementary native CI while
+the author runs every mandatory local check. A separate SSH purpose signs the
+execution plan, which cannot satisfy full acceptance or a completed-profile
+checkpoint. The required Actions-owned <code>Local acceptance</code> status
+stays pending without the complete author signature. Main-only finalization
+binds its publication to the source SHA and reuses the original native jobs;
+the merge queue still verifies complete evidence. Normal pre-push output
+reports the executable entry. Ordinary pushes remain serial, and acceptance
+rule changes retain the full contract-update route.</p>
+<p>Required Docker and native protocol controls use actual private Git remotes,
+push hooks, SSH, HTTP metadata and child processes to cover both completion
+orders, pending-to-success, retries, signature/purpose/scope refusals, source
+and publisher binding, and a real later failed process superseding old success.
+The HTTP service models GitHub, and all actual fixture children use one host;
+these controls add no cross-platform product journey coverage. A six-PR
+observation found complementary native jobs ran after author completion for
+12–29 minutes (mean about 21). This is an opportunity bound, not a measured
+parallel delivery gain or proof of the overall 10% target. Original author,
+cross-platform and queue coverage, counts and budgets remain required.</p>
+
+<p>API, runtime and tools retain their original integration targets and use
+opt-in wrappers for canonical nextest acceptance. Fixed-name self-spawning,
+cache/compaction and model-limit process-global checks remain independent.
+The same Windows component cases passed before and after: 332 passed and 40
+ignored, with identical case identities, ignored flags and dependency features.
+Forced test-driver rebuilds in an original/grouped/original sequence took
+132.0/57.0/116.5 seconds. Grouping reduces these
+drivers from 56 to 21; this is a warm one-host compilation observation, not
+cold dependency, other-platform, whole-PR or population timing proof. Canonical
+author and complementary native CI still run the complete selected workspace;
+no product case, performance budget, retry limit or deadline is removed.</p>
+
+<p>Queue scope reuses the committed manifest proof for newly added, disabled
+integration grouping sources. Such files skip unchanged daemon/A2A/cohost
+journeys while all native cases, examples, all-feature Clippy and provider/live
+scope remain. Ordinary/existing tests, mixed source/build changes and invalid
+or indirect grouping inputs retain the daemon gates. Required preflight JSON
+prints the exact excluded source paths. Real Git PR/push/merge-group events,
+Cargo native-product hash/freshness, nextest inventories and native processes
+are checked by the required Linux Docker and author-native contract guards.
+The preceding grouping-only PR spent about 14 minutes in its daemon queue job;
+this is one observed avoidable job, not a measured population saving or proof
+of the end-to-end 10% target.</p>
+
+<p>Signed parallel execution plans survive unrelated protected metadata
+updates only after their original signature/contract and trusted ancestry,
+unchanged source contract, current author/native responsibilities, every
+selected command, native workflow and dispatcher are verified. Required output
+explains reuse. Real Git/SSH/HTTP/native controls cover both completion orders,
+unchanged notes/logs, retained native jobs and refusal of changed assertions,
+executors, images, workflows, dispatchers, profiles, signatures and signers.
+Plans remain scheduling evidence; full author and native acceptance still gate
+merge. This prevents rule maintenance from needlessly restarting unchanged
+work; no population timing reduction has been established.</p>
+
+<p>A real post-merge GitHub smoke ran two PTY cases on each of Windows, Linux
+and macOS: six passed, zero skipped. Both complementary native command steps
+overlapped the author checks, each ran once, and protected-main publication
+passed source binding. Local controller start to Actions acceptance success
+took 337 seconds. The temporary PR was closed without merging. This small
+smoke has no matched serial or cold-cache control and establishes no population
+speedup or achievement of the 10% target.</p>
+
+<p>Two actual blocked PRs exposed a receipt migration cost: adding Clippy to
+reduced-priority compiler workers invalidated ten otherwise identical profile
+recipes. Explicit protected old/new hash pairs retain those original signed
+results; the changed workspace and contract guard profiles still need current
+validation. Executor code and selected profile AST/image identity are checked
+before approving the exact pairs. Real private Git pushes and SSH notes cover
+modern and historical receipt formats without rerunning the original process;
+a subsequent executor change remains refused. This reduces repeated acceptance,
+adds no product coverage and claims no population timing improvement.</p>
+
+<p>Complementary Linux CI exposed an existing terminal-completion race:
+the durable journal could publish a completion before the background registry
+recorded the observed process exit. The monitor now updates the terminal status
+before publishing, while retaining ownership of journal persistence retries.
+A real native-child regression reads the task count synchronously at the
+publication boundary; the original code reports one running terminal and the
+corrected code reports none. The existing ACP exit-code, immediate status,
+ACK retry, cold replay and purge journey retains its assertions and deadlines.
+This adds no paid-provider or PTY feature-coverage credit.</p>
+
 <p>The merge queue checks each PR head's signed receipt and successful
 cross-platform workflow, plus the integrated Git history. It does not rerun the
 native suites on the integrated merge-group tree: runtime interactions found
@@ -669,14 +825,25 @@ workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
 after a failure without reducing passing-run product or lint coverage; its small
 fixture timings are not a production PR latency claim.</p>
 <p><strong>Stop independent Rust CI peers after a known failure
-(2026-11-01).</strong> Queue Clippy and daemon failures independently invoke one
+(2026-11-01; extended 2026-11-08).</strong> Queue Clippy, CLI daemon and cohost failures independently invoke one
 shared cancellation job. It stops only its own workflow run, preserves the
 original failed step and prints inspection and repair commands. The Actions
 write token stays in a job without a candidate checkout. Successful runs skip
-both callers and allocate no cancellation runner. A real GitHub fixture tests
-both failure directions and a clean run; its controlled timings do not establish
+all three callers and allocate no cancellation runner. A real GitHub fixture tests
+all three failure directions and a clean run; its controlled timings do not establish
 production lifecycle savings. Passing-run coverage, budgets and assertions stay
 unchanged.</p>
+<p><strong>Run independent daemon paths together (2026-11-08).</strong>
+CLI A2A and cohost each start and clean their own nodes, so their original
+journeys run on independent Ubuntu jobs after the same pin preflight. Every
+selected job must succeed and every unselected job must be skipped. The real
+GitHub comparison retained identical source, shell commands, features, fault
+cases, budgets and full cache hits: 825 seconds sequentially versus 506 seconds
+in parallel (38.7% less elapsed time); total runner time was 825 versus 837
+seconds (1.5% more). This is one daemon-phase observation, with no population
+or whole author-to-merge saving established. Native Bash and real hosted failure
+controls protect the independent results, all three cancellation directions
+and the no-cancellation success path.</p>
 <p><strong>Prepare selected Windows terminal inputs before compilation
 (2026-11-02).</strong> The author hook and complementary CI install the
 checksum-pinned terminal host before long native builds when resize acceptance
@@ -816,6 +983,13 @@ hosts, older ungrouped workspaces, isolated
 targets and other profiles retain four. An explicit
 <code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
 still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
+Author workspace execution and current-host plan previews print
+<code>LOCAL_ACCEPTANCE_CONCURRENCY</code> before the work starts. It separates the
+current invocation's one-job compiler policy from its requested test-worker cap.
+For an explicit cap of one, the output gives the shell command to restore the
+protected pool default; the cap is honored. Historical signature verification
+omits current-environment diagnostics. The declared plan, selected cases and
+execution settings remain unchanged.
 A matched Windows run on 20 logical CPUs reused identical native binaries and
 case identities: all 1,089 integration cases passed with 69 ignored markers,
 424.5 seconds at four workers and 244.7 seconds at eight, 42.4% less test execution
@@ -1351,7 +1525,29 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Concurrent signed workflows verify that an existing FIFO waiter
+      identity. Both existing completion-order controls now start from a stale
+      installed runner and require execution of protected new code. They verify
+      original start/output, signer/key, hook and source preservation; refusal
+      of nonmanaged candidate refresh; idempotent self-install; and a still-loaded
+      old module refreshing after its file was already updated. Current-version
+      retries retain the original completed logs and two native jobs.
+      Both completion orders also run actual CLI previews with the default
+      environment and an explicit single-test-worker cap. They require identical
+      declared plans, no preview execution and a clear concurrency diagnostic.
+      Actual historical signature verification with a different current cap
+      must omit current-environment execution claims.
+      Independent complete Docker/native guards overlap after original
+      preflight. Seven real process/engine controls require clean success,
+      cancellation in either failure direction, interruption cleanup,
+      owner/image refusal and empty-ID recovery. Both whole guards and original
+      command logs remain mandatory; no guard or product cases are removed.
+      Within the native guard, the original protocol controls overlap one serial
+      compiler/test lane using that same supervisor. Five more actual native
+      controls verify success, both failure directions, serial ordering and
+      parent/child cleanup on interruption, exited-process history and survival
+      of an unrelated sibling. All original command hashes remain
+      mandatory, and compiler concurrency stays at one.
+      Concurrent signed workflows verify that an existing FIFO waiter
       runs between two exclusive profiles, both profiles complete once, and
       accumulated wait includes every acquisition. A real protected pin mismatch
       also fails before a held host queue, retaining incomplete signed metadata
@@ -1363,7 +1559,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       CLI binary is built with standalone drivers. Actual Cargo metadata protects
       unique opt-in targets and shared sources; real Git events require this
       guard when the driver package changes. A real GitHub fixture also verifies
-      cancellation of independent Rust CI peers in both failure directions,
+      cancellation of independent Rust CI peers in all three failure directions,
       retention of the original failed step, and no cancellation runner on
       successful runs. Native Bash guards reject failed, skipped or cancelled
       selected queue lint and bind its three platforms, queue-only scheduling

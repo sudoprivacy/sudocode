@@ -170,6 +170,7 @@ fn inject_with_summary(
         Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
     mailbox
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: engine_events::InputDelivery::Queue,
             from: from.to_string(),
             to: receiver.to_string(),
@@ -712,9 +713,18 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     wait_for_screen(&sess, "draft cleared", |screen| {
         screen.contains('❯') && input_text(screen).is_empty()
     });
+    let before_cancel = common::turn_status_marker(&sess);
     sess.send("\x03").unwrap(); // Hard-cancel while preserving the explicit queue.
-    wait_for_screen(&sess, "foreground task cancelled", |s| {
+                                // The notice and the cancelled turn's completion arrive on different
+                                // channels. Wait for both under one deadline, so the peer turn below is
+                                // measured from the cancelled turn's completion instead of racing it.
+    wait_for_screen(&sess, "foreground task cancelled and completed", |s| {
+        let identity = common::turn_status_identity(s);
         s.contains("Cancelled")
+            && !identity.is_empty()
+            && identity != before_cancel
+            && s.contains('❯')
+            && input_text(s).is_empty()
     });
     let marker = common::turn_status_marker(&sess);
     sess.send("\x1b").unwrap(); // Flush the retained queue while idle.
@@ -741,10 +751,16 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     );
     if env.is_mock() {
         let requests = env.captured_message_bodies().join("\n");
-        assert!(requests.contains(
-            "summary=\\\"结果 &quot;ready&quot; &amp; &lt;checked&gt; &amp;#10;&#10;第二行摘要\\\""
-        ));
-        assert!(requests.contains("QUEUED-BODY-END"));
+        assert!(
+            requests.contains(
+                "summary=\\\"结果 &quot;ready&quot; &amp; &lt;checked&gt; &amp;#10;&#10;第二行摘要\\\""
+            ),
+            "captured requests:\n{requests}"
+        );
+        assert!(
+            requests.contains("QUEUED-BODY-END"),
+            "captured requests:\n{requests}"
+        );
     }
     exit(&mut sess);
 

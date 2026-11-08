@@ -1184,6 +1184,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
             "expected_invalidations": expected,
             "breaks_by_cause": by_cause,
             "root": root.display().to_string(),
+            "ttl_default": engine_core::cache_ttl::learned_default(),
             "coverage": "anthropic-provider only",
             "cache_metrics_schema_version": engine_core::cache_metrics::CACHE_METRICS_SCHEMA_VERSION,
             "cache_metrics_spec_sha256": engine_core::cache_metrics::CACHE_METRICS_SPEC_SHA256,
@@ -1199,10 +1200,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
                     metrics.read_share_pct = None;
                     metrics.write_share_pct = None;
                 }
-                let mut report = engine_core::cache_report::session_report(
-                    &root.join(name),
-                    runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor),
-                );
+                let mut report = engine_core::cache_report::session_report(&root.join(name));
                 report["session"] = serde_json::json!(index + 1);
                 report["tracked_requests"] = serde_json::json!(stats.tracked_requests);
                 report["cache_efficiency"] = serde_json::json!(metrics);
@@ -1228,9 +1226,8 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         None => println!("  prompt read     unknown (legacy input-token coverage)"),
     }
     println!("  interval data   per-session in JSON; response completion, expiry unconfirmed");
-    if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-        println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
-    }
+    println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
+    println!("  TTL default     {}", ttl_default_label());
     println!("  breaks          {unexpected} unexpected, {expected} expected");
     if !by_cause.is_empty() {
         // The counts that tell you what to go fix. "Expected" only means the
@@ -2520,13 +2517,11 @@ fn peer_turn_sink<E: Send + 'static>(
 /// register a callback to handle the answer. The coordinator loop routes
 /// the `QuestionAnswer` event to the returned handler.
 ///
-/// `resolve_answer` maps the raw answer string (1-indexed option number
-/// or custom text) to the value to pass to `on_selected`.
+/// The input view resolves selection gestures; handlers consume the actual value.
 #[inline]
 fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
-    items: Vec<String>,
     on_selected: impl FnOnce(
             String,
             &Arc<Mutex<LiveCli>>,
@@ -2536,12 +2531,7 @@ fn show_slash_selection(
 ) -> SlashSelectionHandler {
     ui.show_question(question);
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
-        let resolved = answer
-            .parse::<usize>()
-            .ok()
-            .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
-            .unwrap_or_else(|| answer.to_string());
-        on_selected(resolved, cli, out)
+        on_selected(answer.to_string(), cli, out)
     }))
 }
 
@@ -2597,7 +2587,6 @@ fn show_effort_selection(
             back_value: None,
             initial_value: None,
         },
-        items,
         move |level, cli, out| {
             let mut current = cli.lock().expect("LiveCli mutex poisoned");
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -2704,25 +2693,17 @@ impl IocraftQuestionPrompter {
         field: &runtime::QuestionField,
         raw_answer: String,
     ) -> runtime::QuestionPromptAnswer {
-        let matched = if field.options.is_empty() {
-            None
-        } else if let Ok(index) = raw_answer.parse::<usize>() {
-            index
-                .checked_sub(1)
-                .and_then(|zero_based| field.options.get(zero_based))
-        } else {
-            field
-                .options
-                .iter()
-                .find(|option| option.label == raw_answer || option.value == raw_answer)
-        };
-
+        let matched = field
+            .options
+            .iter()
+            .find(|option| option.value == raw_answer);
+        let label = matched
+            .map(|option| option.label.clone())
+            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
         runtime::QuestionPromptAnswer {
             id: field.id.clone(),
-            value: matched.map_or_else(|| raw_answer.clone(), |option| option.value.clone()),
-            label: matched
-                .map(|option| option.label.clone())
-                .or_else(|| (!raw_answer.is_empty()).then_some(raw_answer)),
+            value: raw_answer,
+            label,
         }
     }
 }
@@ -2756,9 +2737,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
             while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
                 this.show_field(&request, index, answers[index].as_ref());
-                let raw = if let Ok(answer) = rx.await {
-                    answer.trim().to_string()
-                } else {
+                let Ok(raw) = rx.await else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };
@@ -3251,13 +3230,6 @@ fn apply_cache_ttl(
         }
         (TtlChoice::OneHour, true) => "1h from the next request (rewrites the cached prefix once)",
         (TtlChoice::FiveMinutes, _) => "5m from the next request",
-        (TtlChoice::Auto, _)
-            if !runtime::experiments::is_enabled(
-                runtime::experiments::Experiment::CacheTtlAdvisor,
-            ) =>
-        {
-            "auto: the auth mode decides (1h on a subscription, 5m on an API key)"
-        }
         (TtlChoice::Auto, false) => {
             "auto: follows this session's cache stats (to 5m at once, to 1h at the next cold start)"
         }
@@ -3271,10 +3243,23 @@ fn apply_cache_ttl(
     }
 }
 
+/// What a new unpinned session starts from: `1h, learned …` or `5m (nothing learned yet)`.
+fn ttl_default_label() -> String {
+    engine_core::cache_ttl::learned_default().map_or_else(
+        || "5m for new sessions (nothing learned yet)".to_owned(),
+        |learned| {
+            format!(
+                "{} for new sessions, learned from {}",
+                engine_core::cache_advisor::ttl_label(learned.ttl_seconds),
+                learned.session
+            )
+        },
+    )
+}
+
 /// `Prompt cache TTL: …` for `/cache` and `/cache ttl`.
 fn cache_ttl_status(session_id: &str, model: &str) -> String {
     use engine_core::cache_advisor::{ttl_label, MIN_INTERVALS};
-    use engine_core::cache_ttl::TtlChoice;
     let status = engine_core::cache_ttl::status(session_id);
     let now = status.effective_seconds.map_or("not sent yet", ttl_label);
     if status.auto {
@@ -3305,15 +3290,13 @@ fn cache_ttl_status(session_id: &str, model: &str) -> String {
                 }
             },
         );
-        return format!("Prompt cache TTL: {now} · auto{verdict}");
+        return format!(
+            "Prompt cache TTL: {now} · auto{verdict} · {}",
+            ttl_default_label()
+        );
     }
     let pending = status.pending.map_or(String::new(), |pending| {
-        let (label, when) = match (pending.choice, pending.force_now) {
-            (TtlChoice::OneHour, false) => ("1h", "at the next cold start"),
-            (TtlChoice::OneHour, true) => ("1h", "from the next request"),
-            (TtlChoice::FiveMinutes, _) => ("5m", "from the next request"),
-            (TtlChoice::Auto, _) => ("auto", "from the next suitable request"),
-        };
+        let (label, when) = pending.describe();
         format!(" · pending {label} {when}")
     });
     format!("Prompt cache TTL: {now}{pending}")
@@ -3919,7 +3902,6 @@ fn run_repl_iocraft_dispatch(
                                     back_value: None,
                                     initial_value: None,
                                 },
-                                models,
                                 move |model_name, cli, out| {
                                     if let Some(selection) = show_effort_selection(
                                         &effort_ui,

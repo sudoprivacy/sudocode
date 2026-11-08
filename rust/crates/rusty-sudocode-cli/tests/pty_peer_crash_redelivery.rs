@@ -55,6 +55,7 @@ fn the_next_instance_runs_a_message_the_crashed_one_left_unfinished() {
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),

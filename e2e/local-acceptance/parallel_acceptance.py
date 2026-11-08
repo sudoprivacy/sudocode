@@ -65,6 +65,15 @@ def run_case(output, order):
         destination = work / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(SOURCE / relative, destination)
+        if relative == ".github/scripts/local_acceptance.py":
+            # Protected main is newer than the installed client. Its marker
+            # proves that refresh executes the new code, not only new bytes.
+            contents = destination.read_text(encoding="utf-8")
+            anchor = "    args.output = str(output)\n"
+            assert contents.count(anchor) == 1
+            destination.write_text(contents.replace(anchor, anchor +
+                '    (output / "protected-entry-code-ran.json").write_text(json.dumps({"started_at": context["started_at"], '
+                '"refreshes": context["refreshes"], "observed_at": time.time()}))\n'), encoding="utf-8")
     policy = {"version": 1, "repository": repository,
               "checks": {"native-workspace": {"include": ["input.txt"]}}}
     (work / "spec").mkdir()
@@ -107,7 +116,23 @@ def run_case(output, order):
     git("config", "user.email", "fixture@example.invalid", cwd=trusted)
     git("config", "core.autocrlf", "false", cwd=trusted)
     git("config", "url." + origin.as_uri() + ".insteadOf", remote_url, cwd=trusted)
-    helper = load("parallel_fixture_helper", work / ".github/scripts/local_acceptance.py")
+    candidate_entry = SOURCE / ".github/scripts/local_acceptance.py"
+    candidate_bytes = candidate_entry.read_bytes()
+    refused_source = subprocess.run([sys.executable, str(candidate_entry), "start-pr", "--remote", "origin",
+        "--output", str(output / "nonmanaged-refused")], cwd=work, capture_output=True)
+    (output / "nonmanaged-refusal.log").write_bytes(refused_source.stdout + refused_source.stderr)
+    assert refused_source.returncode != 0 and b"Candidate source was preserved" in refused_source.stderr
+    assert candidate_entry.read_bytes() == candidate_bytes
+    installed = subprocess.run([sys.executable, str(candidate_entry), "install"],
+                               cwd=work, capture_output=True, check=True)
+    (output / "original-install.log").write_bytes(installed.stdout + installed.stderr)
+    managed = work / ".git/local-acceptance-hooks/local_acceptance.py"
+    original_hook = (managed.parent / "pre-push").read_bytes()
+    original_settings = {name: git("config", "--get", name)
+                         for name in ["core.hooksPath", "localAcceptance.signer", "localAcceptance.key"]}
+    original_source = git("status", "--porcelain"), git("rev-parse", "HEAD")
+    assert managed.read_bytes() != (trusted / ".github/scripts/local_acceptance.py").read_bytes()
+    helper = load("parallel_fixture_helper", managed)
     helper.ROOT = work
     publisher = load("parallel_fixture_publisher", trusted / ".github/local-acceptance/publish.py")
     publisher.gate.acceptance.ROOT = trusted
@@ -249,6 +274,21 @@ def run_case(output, order):
         os.environ["SCODE_PARALLEL_FIXTURE_CONTROL"] = str(control)
         args = argparse.Namespace(remote="origin", output=str(output / "execution"), title="Parallel fixture", body_file=None)
         helper.start_pr(args, api=http_api)
+        marker = json.loads((output / "execution/protected-entry-code-ran.json").read_text())
+        initial_attempt = json.loads((output / "execution/parallel-attempt.json").read_text())
+        assert marker["refreshes"] == initial_attempt["runner_refreshes"] == 1
+        assert marker["started_at"] == initial_attempt["started_at"] <= marker["observed_at"]
+        assert managed.read_bytes() == (trusted / ".github/scripts/local_acceptance.py").read_bytes()
+        assert (managed.parent / "pre-push").read_bytes() == original_hook
+        assert original_settings == {name: git("config", "--get", name) for name in original_settings}
+        assert original_source == (git("status", "--porcelain"), git("rev-parse", "HEAD"))
+        reinstalled = subprocess.run([sys.executable, str(managed), "install"], cwd=work, capture_output=True, check=True)
+        (output / "idempotent-self-install.log").write_bytes(reinstalled.stdout + reinstalled.stderr)
+        assert managed.read_bytes() == (trusted / ".github/scripts/local_acceptance.py").read_bytes()
+        assert (managed.parent / "pre-push").read_bytes() == original_hook
+        assert original_settings == {name: git("config", "--get", name) for name in original_settings}
+        # Keep this already loaded old module for the first retry. The file is
+        # current, but live code must still refresh before it can attest work.
         coordinator.join(timeout=30)
         assert not coordinator.is_alive() and not failures, failures
         assert len(started_workers) == 2 and all(process.poll() == 0 for process in processes)
@@ -271,6 +311,16 @@ def run_case(output, order):
         retry = argparse.Namespace(remote="origin", output=str(output / "retry"), title="Parallel fixture", body_file=None)
         helper.start_pr(retry, api=http_api)
         assert not (output / "retry/author").exists()
+        assert json.loads((output / "retry/parallel-attempt.json").read_text())["runner_refreshes"] == 1
+        assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+        assert len(started_workers) == 2
+        helper = load("parallel_fixture_refreshed_helper", managed)
+        helper.ROOT = work
+        current_retry = argparse.Namespace(remote="origin", output=str(output / "current-retry"),
+                                           title="Parallel fixture", body_file=None)
+        helper.start_pr(current_retry, api=http_api)
+        assert json.loads((output / "current-retry/parallel-attempt.json").read_text())["runner_refreshes"] == 0
+        assert not (output / "current-retry/author").exists()
         assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
         assert len(started_workers) == 2
 
@@ -423,6 +473,14 @@ def run_case(output, order):
             "native_jobs_executed_once": True, "complete_actual_author_signature_verified": True,
             "outer_setup_included_in_signed_timing": True, "commands": commands, "requests": requests,
             "metadata_controls": metadata_controls,
+            "stale_installed_runner_refreshed_from_protected_main": True,
+            "protected_new_code_actually_executed": True,
+            "original_start_and_output_preserved": True,
+            "hook_signer_key_and_frozen_source_preserved": True,
+            "nonmanaged_candidate_refresh_refused_without_source_write": True,
+            "idempotent_installed_self_install_passed": True,
+            "already_loaded_stale_code_refreshed_even_with_current_file": True,
+            "current_runner_retry_skipped_refresh_and_completed_work": True,
             "scope": "Real local Git remote/hooks, SSH, HTTP metadata, author command and native children. Metadata models GitHub; every actual child uses this one OS. No hosted or cross-OS coverage inferred."}
         (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         return result

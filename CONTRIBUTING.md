@@ -1119,6 +1119,14 @@ public device key does not invalidate other devices' current receipts.
 For ordinary frozen source with complementary native hosts, the protected
 runner also supports `start-pr --remote origin`. The normal pre-push output
 prints `LOCAL_ACCEPTANCE_PARALLEL_AVAILABLE` with the executable entry.
+Both installed entries refresh atomically from protected main. The required
+`LOCAL_ACCEPTANCE_RUNNER_REFRESHED` output names that commit and the managed
+entry, then continues the frozen source with all acceptance still required.
+The parallel entry retains the original start/output across the refresh and
+executes the new protected code even if another workline already updated its
+file. Installation uses the same atomic writer, including self-install; it
+preserves the enrolled signer/key and existing managed hook. Candidate scripts
+outside the managed entry are refused without overwriting their source.
 It publishes the exact branch under a separate signed execution plan, readies
 the frozen PR for tests and runs every mandatory author check while native CI
 executes. It never treats the scheduling plan as completed acceptance. The

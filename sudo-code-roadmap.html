@@ -1508,7 +1508,13 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Independent complete Docker/native guards overlap after original
+      identity. Both existing completion-order controls now start from a stale
+      installed runner and require execution of protected new code. They verify
+      original start/output, signer/key, hook and source preservation; refusal
+      of nonmanaged candidate refresh; idempotent self-install; and a still-loaded
+      old module refreshing after its file was already updated. Current-version
+      retries retain the original completed logs and two native jobs.
+      Independent complete Docker/native guards overlap after original
       preflight. Seven real process/engine controls require clean success,
       cancellation in either failure direction, interruption cleanup,
       owner/image refusal and empty-ID recovery. Both whole guards and original

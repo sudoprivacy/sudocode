@@ -45,6 +45,7 @@ CONTRACT_UPDATE_COMMAND = ('python "$(git rev-parse --path-format=absolute --git
 HOST_LEASE_ENV = "SUDOCODE_ACCEPTANCE_HOST_LEASE"
 ROOT = Path(__file__).resolve().parents[2]
 MSVC_ENV = None
+RUNNER_CODE = sys._getframe().f_code
 
 
 def git(*args, root=None, data=None, check=True):
@@ -1908,8 +1909,30 @@ def perform_check(args, attempt):
     print(f"Local acceptance complete: {output / 'receipt.json'}")
 
 
+def write_managed_file(path, contents, mode=None):
+    """Publish complete managed bytes atomically, including idempotent self-install."""
+    if (path.is_symlink() or path.parent.is_symlink()
+            or (hasattr(path.parent, "is_junction") and path.parent.is_junction())):
+        raise RuntimeError(f"Managed acceptance files must not traverse links: {path}")
+    permissions = mode if mode is not None else (path.stat().st_mode & 0o777 if path.exists() else 0o644)
+    if path.is_file() and path.read_bytes() == contents:
+        if mode is not None:
+            path.chmod(permissions)
+        return
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix="runner-refresh-", suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(contents)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        temporary.chmod(permissions)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def install(args):
-    common = Path(value("rev-parse", "--git-common-dir")).resolve()
+    common = Path(value("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     existing = git("config", "--get", "core.hooksPath", check=False).stdout.decode().strip()
     managed = common / "local-acceptance-hooks"
     if existing and Path(existing).resolve() != managed:
@@ -1918,18 +1941,40 @@ def install(args):
         raise RuntimeError("Existing pre-push hook needs manual composition; it was preserved")
     managed.mkdir(parents=True, exist_ok=True)
     # Outside the worktree so an older branch cannot silently remove the hook.
-    shutil.copyfile(__file__, managed / "local_acceptance.py")
+    write_managed_file(managed / "local_acceptance.py", Path(__file__).read_bytes())
     interpreter = shlex.quote(sys.executable.replace("\\", "/"))
     helper = shlex.quote(str(managed / "local_acceptance.py").replace("\\", "/"))
     hook = managed / "pre-push"
-    hook.write_text(f'#!/bin/sh\nexec {interpreter} {helper} pre-push "$@"\n', encoding="utf-8", newline="\n")
-    hook.chmod(0o755)
+    write_managed_file(hook, f'#!/bin/sh\nexec {interpreter} {helper} pre-push "$@"\n'.encode(), mode=0o755)
     git("config", "--local", "core.hooksPath", str(managed))
     if args.signer:
         git("config", "--local", "localAcceptance.signer", args.signer)
     if args.key:
         git("config", "--local", "localAcceptance.key", str(Path(args.key).expanduser().resolve()))
     print(f"Installed automatic pre-push acceptance for all worktrees: {managed}")
+
+
+def refresh_managed_runner(trusted, operation):
+    """Atomically refresh only the installed entry from protected Git bytes."""
+    current = tracked(trusted, ".github/scripts/local_acceptance.py")
+    installed = Path(__file__).resolve()
+    protected_code = compile(current, RUNNER_CODE.co_filename, "exec", dont_inherit=True, optimize=sys.flags.optimize)
+    if sha(installed.read_bytes()) == sha(current) and RUNNER_CODE == protected_code:
+        return None
+    common = Path(value("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    managed = common / "local-acceptance-hooks"
+    expected = managed / "local_acceptance.py"
+    if (installed != expected or managed.is_symlink()
+            or (hasattr(managed, "is_junction") and managed.is_junction()) or expected.is_symlink()):
+        raise RuntimeError(f"Use the current protected managed runner for {operation}; "
+                           f"entry: {sys.executable} {expected}. "
+                           "Publish acceptance-rule changes with contract-update. Candidate source was preserved.")
+    write_managed_file(installed, current)
+    print("LOCAL_ACCEPTANCE_RUNNER_REFRESHED=" + canonical({
+        "operation": operation, "entry": str(installed), "protected_commit": value("rev-parse", trusted),
+        "sha256": sha(current), "next": "Continue the same frozen source; all selected acceptance remains required.",
+    }).decode(), flush=True)
+    return current
 
 
 def pre_push(args):
@@ -1940,11 +1985,9 @@ def pre_push(args):
     if not heads:
         return
     git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
-    current_runner = tracked("origin/main", ".github/scripts/local_acceptance.py")
-    if sha(Path(__file__).read_bytes()) != sha(current_runner):
+    if refresh_managed_runner("origin/main", "pre-push") is not None:
         # Upgrade from the protected default branch, including old worktrees.
         # Do not import or execute the candidate's replacement runner.
-        Path(__file__).write_bytes(current_runner)
         result = subprocess.run([sys.executable, __file__, "pre-push", args.remote, args.url],
                                 input=("\n".join(" ".join(row) for row in updates) + "\n").encode())
         if result.returncode:
@@ -2035,10 +2078,11 @@ def plan_pre_push(args):
           "complete author checks and native CI still gate merge.", flush=True)
 
 
-def start_pr(args, api=None):
+def start_pr(args, api=None, context=None):
     """Start native CI and mandatory author checks together for frozen source."""
     api = api or github_api
-    started, wall_start = time.monotonic(), time.time()
+    started, wall_start = ((time.monotonic(), time.time()) if context is None
+                           else (context["started"], context["started_at"]))
     head = value("rev-parse", "HEAD")
     clean(head)
     branch = value("symbolic-ref", "--short", "HEAD")
@@ -2047,14 +2091,32 @@ def start_pr(args, api=None):
     output = Path(args.output or (Path.home() / ".nexus/local-acceptance/results" / head / ("parallel-" + str(time.time_ns())))).resolve()
     if output == ROOT or ROOT in output.parents:
         raise RuntimeError("Keep parallel acceptance outputs outside the source checkout")
-    output.mkdir(parents=True, exist_ok=False)
+    if context is None:
+        output.mkdir(parents=True, exist_ok=False)
+        context = {"started": started, "started_at": wall_start, "head": head,
+                   "branch": branch, "output": str(output), "refreshes": 0}
+    elif (context["head"] != head or context["branch"] != branch or context["output"] != str(output)
+            or not output.is_dir() or output.is_symlink()):
+        raise RuntimeError("Protected runner refresh changed the frozen source or original output")
     args.output = str(output)
-    journal = {"version": 1, "operation": "start-pr", "head": head, "started_at": wall_start, "outcome": "running"}
+    journal = {"version": 1, "operation": "start-pr", "head": head, "started_at": wall_start,
+               "outcome": "running", "runner_refreshes": context["refreshes"]}
+    delegated = False
     try:
         git("fetch", "--no-tags", args.remote, "+refs/heads/main:refs/remotes/origin/main")
         trusted = value("rev-parse", "origin/main")
-        if sha(Path(__file__).read_bytes()) != sha(tracked(trusted, ".github/scripts/local_acceptance.py")):
-            raise RuntimeError("Use the current protected managed runner for start-pr; publish acceptance-rule changes with contract-update")
+        current_runner = refresh_managed_runner(trusted, "start-pr")
+        if current_runner is not None:
+            if context["refreshes"] >= 3:
+                raise RuntimeError("Protected runner advanced repeatedly; retry this updated managed entry. Original timing remains recorded.")
+            # Execute the exact bytes just read from protected main, retaining
+            # the real API boundary and original output/start across refresh.
+            namespace = {"__name__": "protected_start_pr_runner", "__file__": str(Path(__file__).resolve()),
+                         "__package__": None}
+            exec(compile(current_runner, namespace["__file__"], "exec"), namespace)
+            namespace["ROOT"] = ROOT
+            delegated = True
+            return namespace["start_pr"](args, api=api, context={**context, "refreshes": context["refreshes"] + 1})
         repository = load_policy(trusted)["repository"]
         contract_remote(args.remote, repository)
         base = value("merge-base", trusted, head)
@@ -2131,8 +2193,9 @@ def start_pr(args, api=None):
         journal["outcome"] = "failure"
         raise
     finally:
-        journal.update(finished_at=time.time(), elapsed_seconds=round(time.monotonic() - started, 3))
-        (output / "parallel-attempt.json").write_bytes(canonical(journal))
+        if not delegated or not (output / "parallel-attempt.json").is_file():
+            journal.update(finished_at=time.time(), elapsed_seconds=round(time.monotonic() - started, 3))
+            (output / "parallel-attempt.json").write_bytes(canonical(journal))
 
 
 def contract_update(args):

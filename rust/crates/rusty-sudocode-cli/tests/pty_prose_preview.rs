@@ -11,7 +11,7 @@ use std::time::Duration;
 const HANDOFF_DRAFT: &str = "draft界";
 
 fn start(env: &TestEnv, cols: u16) -> PtySession {
-    let mut session = env.spawn_with_env(
+    let session = env.spawn_with_env_at_size(
         &["--permission-mode", "read-only"],
         &[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
@@ -19,8 +19,9 @@ fn start(env: &TestEnv, cols: u16) -> PtySession {
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
         ],
+        40,
+        cols,
     );
-    session.resize(40, cols).unwrap();
     common::expect_screen(
         &session,
         |s| s.contains('❯'),
@@ -47,7 +48,12 @@ fn streamable_document() -> String {
 
 fn finish(session: &mut PtySession) {
     session.send("\x15/exit").unwrap();
-    common::expect_input_line(session, "/exit", common::DEFAULT_TIMEOUT, "exit input");
+    common::expect_input_line_with_wire_trace(
+        session,
+        "/exit",
+        common::DEFAULT_TIMEOUT,
+        "exit input",
+    );
     session.send("\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
@@ -501,8 +507,8 @@ fn live_prose_is_visible_and_input_remains_usable() {
         "complete body",
     );
     session.send("still-usable").unwrap();
-    common::expect_input_line(
-        &session,
+    common::expect_input_line_with_wire_trace(
+        &mut session,
         "still-usable",
         common::DEFAULT_TIMEOUT,
         "input after real prose turn",

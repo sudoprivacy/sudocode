@@ -152,12 +152,9 @@ fn assert_shared_workspace_tools(
         .unwrap();
     let execute_skill = "sh .nexus/sudocode/skills/shared-workspace/scripts/run.sh";
     let scope = WorkspaceRootScope::enter(cwd);
-    let result = runtime::execute_bash(serde_json::from_value(serde_json::json!({
-        "command": format!("cat from-file-tool.txt; printf shell-bytes > from-shell.txt; {execute_skill}"),
-        "dangerouslyDisableSandbox": true,
-        "timeout": 10000,
-    })).unwrap()).unwrap();
-    assert_eq!(result.exit_code, Some(0), "{}", result.stderr);
+    let result = execute_workspace_command(&format!(
+        "cat from-file-tool.txt; printf shell-bytes > from-shell.txt; {execute_skill}"
+    ));
     assert!(result.stdout.contains("file-tool-bytes"));
     assert!(result.stdout.contains("skill-script-ok"));
     assert_eq!(fs.read("from-shell.txt").unwrap(), b"shell-bytes");
@@ -206,6 +203,28 @@ fn assert_recovered_effect(restored: &engine_host::SessionEngine) {
     );
 }
 
+fn execute_workspace_command(command: &str) -> runtime::BashCommandOutput {
+    // Filesystem and recovery semantics use the runtime's bounded subprocess
+    // budget. Shell startup latency is not this functional journey's contract.
+    let started = std::time::Instant::now();
+    let result = runtime::execute_bash(
+        serde_json::from_value(serde_json::json!({
+            "command": command,
+            "dangerouslyDisableSandbox": true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "workspace command {command:?}, elapsed {:?}, runtime budget {} ms: {result:?}",
+        started.elapsed(),
+        runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    );
+    result
+}
+
 fn write_hosted_config(config: &std::path::Path) {
     std::fs::write(
         config.join("sudocode.json"),
@@ -232,15 +251,6 @@ fn persist_inflight_workspace_effect(engine: &engine_host::SessionEngine) {
             ]))
             .unwrap();
     });
-    let effect = runtime::execute_bash(
-        serde_json::from_value(serde_json::json!({
-            "command": "printf effect >> side-effect.txt",
-            "dangerouslyDisableSandbox": true,
-            "timeout": 10000,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(effect.exit_code, Some(0));
+    execute_workspace_command("printf effect >> side-effect.txt");
     engine.persist().unwrap();
 }

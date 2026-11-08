@@ -849,7 +849,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        ".github/actions/release-artifact/action.yml": "72958b635e5ce79040854f925e074f0c461c07c570fe28234b24e15ec954c2bd",
+        ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",

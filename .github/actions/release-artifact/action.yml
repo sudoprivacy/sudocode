@@ -44,4 +44,5 @@ runs:
           ${{ runner.temp }}/release-artifact-acceptance/**/*.log
           ${{ runner.temp }}/release-artifact-acceptance/startup.json
           ${{ runner.temp }}/release-artifact-acceptance/compiler-context/*.json
+          ${{ runner.temp }}/release-artifact-acceptance/compiler-context/evidence/
         retention-days: 30

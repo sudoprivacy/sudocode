@@ -39,6 +39,8 @@ def run(arguments):
     workers = int(os.environ.get('SCODE_ACCEPTANCE_TEST_THREADS', '4'))
     if not 1 <= workers <= 4:
         raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
+    if arguments.output.exists():
+        raise RuntimeError(f'A fresh mailbox fault output directory is required before starting either lane: {arguments.output}')
     output = arguments.output.parent / (arguments.output.name + '-stages')
     output.mkdir(parents=True, exist_ok=False)
     spec = importlib.util.spec_from_file_location('mailbox_cli_shared_supervisor',

@@ -44,9 +44,13 @@ time.sleep(30 if os.environ.get('FAULT_PROBE_FAIL') else .4)
         ('overlap-missing', 4, '', '', 'missing'),
         ('overlap-unignored', 4, '', '', 'unignored'),
         ('invalid-cap', 0, '', '', ''),
+        ('existing-output', 4, '', '', ''),
     ]:
         markers = output / (label + '-markers')
         markers.mkdir()
+        if label == 'existing-output':
+            (output / label).mkdir()
+            (output / label / 'result.json').write_text('original private evidence must stay byte-identical\n')
         if feature:
             (source / 'Cargo.toml').write_text(original_manifest.replace(
                 '[features]\n', f'[features]\ndefault=["{feature}"]\n'))
@@ -87,8 +91,11 @@ time.sleep(30 if os.environ.get('FAULT_PROBE_FAIL') else .4)
                     assert int((markers / 'cli.start').read_text()) < int((markers / (CASES[-1] + '.end')).read_text())
                 else:
                     assert int((markers / 'cli.end').read_text()) < min(int(path.read_text()) for path in native_starts)
-            elif label == 'invalid-cap':
+            elif label in {'invalid-cap', 'existing-output'}:
                 assert not list(markers.glob('*.start'))
+                if label == 'existing-output':
+                    assert (output / label / 'result.json').read_text() == 'original private evidence must stay byte-identical\n'
+                    assert not (output / (label + '-stages')).exists()
             else:
                 assert elapsed < 20, (label, elapsed)
                 assert not (markers / 'cli.end').exists()
@@ -97,7 +104,7 @@ time.sleep(30 if os.environ.get('FAULT_PROBE_FAIL') else .4)
                 else:
                     assert (markers / 'cli.start').exists()
                     assert native_starts and not (markers / (CASES[-1] + '.end')).exists()
-            if label != 'invalid-cap':
+            if label not in {'invalid-cap', 'existing-output'}:
                 stages = output / label / 'stages'
                 result = json.loads((stages / 'commands.result.json').read_text())
                 assert (result['status'] == 'passed') == expected_success

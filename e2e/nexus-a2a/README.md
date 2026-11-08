@@ -41,7 +41,8 @@ not passes. This path requires Python 3, like the acceptance tooling.
 using real Cargo/native control processes, including both failure directions,
 bounded overlap, explicit single-worker serialization and invalid inventory/caps.
 Stage logs and command receipts are retained under the existing fault artifact's
-`stages/` directory. These controls add no product daemon coverage.
+`stages/` directory. An existing output directory is refused before either lane
+starts, preserving previous evidence. These controls add no product daemon coverage.
 Harness-only edits are validated by the real Linux queue journey and the
 author's realistic harness acceptance. They omit unrelated native workspace
 Cargo/PTY reruns; mixed Rust changes still require those native suites.

@@ -742,8 +742,10 @@ not a fixed or population author-to-merge saving. No check coverage is removed.
 Within the author-native guard, the original Git/SSH/HTTP publication controls
 overlap the original serial compiler/test lane. The same supervisor requires
 every original command log and cancels only its owned descendants on failure or
-interrupt. Four additional real native controls check clean completion, either
-failure direction, serial command order and parent/child cleanup. The existing
+interrupt. Five additional real native controls check clean completion, either
+failure direction, serial command order, exited-process history and parent/child
+cleanup while preserving an unrelated sibling. Waiting checks each original
+PID and creation time; inaccessible live identities still refuse cleanup. The existing
 seven Docker controls remain mandatory. Same-source observations recorded 488
 seconds serial and 344 seconds overlapping; this single field does not establish
 a population delivery-time reduction. No compiler concurrency is added.

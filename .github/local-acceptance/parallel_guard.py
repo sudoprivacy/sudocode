@@ -130,7 +130,10 @@ def terminate_workers(processes, observed):
     for process in processes.values():
         if process.poll() is None:
             process.terminate()
-    _gone, alive = psutil.wait_procs(owned, timeout=5)
+    # Historical descendants may already have exited and their PID may now
+    # belong to another process. Check PID + creation time before waiting;
+    # Windows OpenProcess(SYNCHRONIZE) can refuse those stale references.
+    alive = wait_owned_processes(owned, 5)
     for child in alive:
         if child.is_running():
             child.kill()
@@ -140,6 +143,20 @@ def terminate_workers(processes, observed):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+    remaining = wait_owned_processes(alive, 5)
+    if remaining:
+        raise RuntimeError(f"Owned guard descendants remain after cleanup: {[child.pid for child in remaining]}")
+
+
+def wait_owned_processes(processes, timeout):
+    """Poll original identities; an inaccessible live identity still refuses cleanup."""
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = [process for process in processes if process.is_running()]
+        if not alive or time.monotonic() >= deadline:
+            return alive
+        processes = alive
+        time.sleep(.05)
 
 
 def run(path, data):

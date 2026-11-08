@@ -551,9 +551,12 @@ took 501 seconds; an earlier serial author run took 907 seconds. These are
 different runs, not proof of a fixed or population delivery-time reduction.
 Product cases, guard assertions and Docker resource limits remain unchanged.
 Within the native guard, the original Git/SSH/HTTP controls overlap one serial
-compiler/test lane through the same supervisor. Four additional actual native
+compiler/test lane through the same supervisor. Five additional actual native
 process controls require clean success, both failure directions, original serial
-ordering and cleanup of both parents and children after interruption. Every
+ordering, exited-process history and cleanup of both parents and children after
+interruption, with an unrelated sibling preserved. Identity polling avoids
+waiting on exited or reused PIDs; inaccessible live identities still refuse
+cleanup. Every
 original fixture, assertion and command log remains required. Same-source
 observations took 488 seconds serial and 344 seconds overlapping; this is one
 field, not a population delivery-time claim. Compiler concurrency stays unchanged.
@@ -1527,9 +1530,10 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       owner/image refusal and empty-ID recovery. Both whole guards and original
       command logs remain mandatory; no guard or product cases are removed.
       Within the native guard, the original protocol controls overlap one serial
-      compiler/test lane using that same supervisor. Four more actual native
+      compiler/test lane using that same supervisor. Five more actual native
       controls verify success, both failure directions, serial ordering and
-      parent/child cleanup on interruption. All original command hashes remain
+      parent/child cleanup on interruption, exited-process history and survival
+      of an unrelated sibling. All original command hashes remain
       mandatory, and compiler concurrency stays at one.
       Concurrent signed workflows verify that an existing FIFO waiter
       runs between two exclusive profiles, both profiles complete once, and

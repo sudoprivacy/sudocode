@@ -47,6 +47,9 @@ time.sleep(30)
 POLICY_PROGRAM = """import json,os,pathlib,subprocess,sys,time,psutil
 p=pathlib.Path(sys.argv[1]);name=sys.argv[2];mode=sys.argv[3]
 if name=='native': assert (p/'native-first').is_file()
+if mode=='exited-history':
+ for _ in range(12):
+  subprocess.run([sys.executable,'-c','import time;time.sleep(.2)'],check=True)
 child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
 pending=p/(name+'.pending')
 pending.write_text(json.dumps({'pid':os.getpid(),'created':psutil.Process().create_time(),
@@ -57,9 +60,9 @@ peer='native' if name=='protocol' else 'protocol'
 while not (p/(peer+'.json')).exists():
  if time.monotonic()>end: raise SystemExit(32)
  time.sleep(.05)
-if mode=='clean' or mode==name+'-failure':
+if mode in ['clean','exited-history'] or mode==name+'-failure':
  time.sleep(1);child.terminate();child.wait()
- raise SystemExit(0 if mode=='clean' else 23 if name=='protocol' else 17)
+ raise SystemExit(0 if mode in ['clean','exited-history'] else 23 if name=='protocol' else 17)
 time.sleep(30)
 """
 
@@ -82,7 +85,7 @@ def gone(pid, created):
 def native_policy_cases(output, runner_path, runner):
     """Exercise both real native branches, serial ordering and owned descendant cleanup."""
     results = []
-    for mode in ["clean", "protocol-failure", "native-failure", "interrupted"]:
+    for mode in ["clean", "protocol-failure", "native-failure", "interrupted", "exited-history"]:
         directory = output / ("policy-" + mode)
         directory.mkdir()
         configuration = directory / "commands.json"
@@ -103,6 +106,7 @@ def native_policy_cases(output, runner_path, runner):
         ]}
         configuration.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         begin, process, identities = time.monotonic(), None, []
+        canary = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])
         try:
             with (directory / "controller.log").open("wb") as log:
                 process = subprocess.Popen([sys.executable, str(runner_path), "--configuration", str(configuration)],
@@ -121,8 +125,9 @@ def native_policy_cases(output, runner_path, runner):
             elapsed = time.monotonic() - begin
             assert elapsed < 30, "A cancelled native peer must not finish its original sleep"
             record = json.loads(configuration.with_suffix(".result.json").read_text())
-            assert record["status"] == ("passed" if mode == "clean" else "failed")
-            assert (code == 0) == (mode == "clean")
+            clean = mode in ["clean", "exited-history"]
+            assert record["status"] == ("passed" if clean else "failed")
+            assert (code == 0) == clean
             assert record["container_cleanup"] == {"state": "no_container_selected"}
             if mode in ["protocol-failure", "native-failure"]:
                 branch = mode.split("-")[0]
@@ -130,12 +135,13 @@ def native_policy_cases(output, runner_path, runner):
                 original = json.loads((directory / f"{branch}.command.json").read_text())
                 assert original["exit_code"] == (23 if branch == "protocol" else 17)
             assert (directory / "native-first").is_file()
-            assert (directory / "native-last").exists() == (mode == "clean")
+            assert (directory / "native-last").exists() == clean
             assert all(gone(identity["pid"], identity["created"])
                        and gone(identity["child"], identity["child_created"]) for identity in identities)
+            assert canary.poll() is None, "An unrelated sibling must survive owned cleanup"
             results.append({"mode": mode, "exit_code": code, "seconds": elapsed,
                 "both_real_branches_started": True, "serial_order_preserved": True,
-                "both_native_parents_and_children_gone": True})
+                "both_native_parents_and_children_gone": True, "unrelated_sibling_preserved": True})
         finally:
             observed = {}
             for identity in identities:
@@ -144,8 +150,13 @@ def native_policy_cases(output, runner_path, runner):
                     created = identity["created"] if not prefix else identity["child_created"]
                     if not gone(pid, created):
                         observed[(pid, created)] = psutil.Process(pid)
-            if process is not None:
-                runner.terminate_workers({"supervisor": process}, observed)
+            try:
+                if process is not None:
+                    runner.terminate_workers({"supervisor": process}, observed)
+            finally:
+                if canary.poll() is None:
+                    canary.terminate()
+                canary.wait(timeout=5)
     return results
 
 

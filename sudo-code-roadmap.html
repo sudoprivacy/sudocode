@@ -1721,6 +1721,16 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       remain; restart stays before both lanes and SIGSTOP stays after both pass.
       Original per-lane logs and command receipts remain in the fault artifact;
       an existing result directory is refused before either lane starts.
+      Cargo preparation and ignored-case enumeration finish before the lanes
+      start. The fixed nextest executor then uses those same build metadata and
+      binaries without reacquiring the CLI build lock. Source contents, helper,
+      binary, metadata, manifest and handoff hashes are checked; changed inputs
+      cannot satisfy the seven-case JUnit result. Preparation stays in the total
+      timing. Caller compiler settings and unset Cargo defaults are preserved;
+      owned desktop builds still explicitly select one compiler job. Real native
+      controls hold Cargo's target lock throughout all seven test executions,
+      and refuse source, binary, metadata and handoff drift. The shared supervisor
+      and command executor are included in daemon CI input selection.
       Real Cargo/native controls exercise both failure directions, worker caps,
       missing/non-ignored inventories and completed-child cleanup. A private
       Windows same-source warm pair measured 307.554 seconds serial versus

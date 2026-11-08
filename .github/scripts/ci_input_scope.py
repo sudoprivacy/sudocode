@@ -166,6 +166,7 @@ def main():
             live_inputs = ["rust/**", "spec/**", "e2e/thinking/**", ".github/scripts/probe_live_usage*",
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
             daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**",
+                             ".github/local-acceptance/parallel_guard.py", ".github/scripts/local_acceptance.py",
                              ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/**",
                              ".github/workflows/ci-vfs-search-cache.yml", *queue_inputs]
             # Acceptance metadata changes execution authorization, not provider

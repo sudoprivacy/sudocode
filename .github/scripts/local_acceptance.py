@@ -794,9 +794,27 @@ def acceptance_plan(policy, names, author):
             "ci": list(jobs.values()), "deployment_verified": False}
 
 
-def report_plan(plan):
+def report_plan(plan, current_environment=False):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
+    concurrency = None
+    if current_environment and "native-workspace" in plan["local_checks"]:
+        cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": 1,
+                       "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
+        lines.append("Author-native Cargo compilation uses one job per command. Native test processes use "
+                     + ("the protected profile default." if cap is None else
+                        f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
+        try:
+            serial = cap is not None and int(cap) == 1
+        except ValueError:
+            serial = False
+        if serial:
+            clear = ("Remove-Item Env:SCODE_ACCEPTANCE_TEST_THREADS" if os.name == "nt"
+                     else "unset SCODE_ACCEPTANCE_TEST_THREADS")
+            lines.append("SCODE_ACCEPTANCE_TEST_THREADS=1 runs native test cases serially. "
+                         f"To use the protected test-pool default, run `{clear}` before retrying this command. "
+                         "Cargo compilation keeps its independent one-job setting; the explicit test cap is honored.")
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
@@ -817,6 +835,8 @@ def report_plan(plan):
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    if concurrency is not None:
+        print("LOCAL_ACCEPTANCE_CONCURRENCY=" + json.dumps(concurrency, separators=(",", ":")), flush=True)
     print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
           "new_release_artifacts": "mandatory_before_packaging_and_publication",
           "ordinary_source_optimized_native_coverage_reduced": True}, separators=(",", ":")), flush=True)
@@ -1752,7 +1772,7 @@ def perform_check(args, attempt):
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
-    report_plan(plan)
+    report_plan(plan, current_environment=True)
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
@@ -2329,7 +2349,8 @@ def main():
             if args.architecture:
                 author["architecture"] = args.architecture
             report_plan(acceptance_plan(load_policy(args.policy_ref),
-                        selected(load_policy(args.policy_ref), changed_paths(base, head), base=base, head=head), author))
+                        selected(load_policy(args.policy_ref), changed_paths(base, head), base=base, head=head), author),
+                        current_environment=author["system"] == host()["system"])
             print("Preview only: a plan is not a successful or signed test result.")
         elif args.operation == "verify":
             head = value("rev-parse", args.head or "HEAD")

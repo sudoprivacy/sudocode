@@ -983,6 +983,13 @@ hosts, older ungrouped workspaces, isolated
 targets and other profiles retain four. An explicit
 <code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
 still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
+Author workspace execution and current-host plan previews print
+<code>LOCAL_ACCEPTANCE_CONCURRENCY</code> before the work starts. It separates the
+current invocation's one-job compiler policy from its requested test-worker cap.
+For an explicit cap of one, the output gives the shell command to restore the
+protected pool default; the cap is honored. Historical signature verification
+omits current-environment diagnostics. The declared plan, selected cases and
+execution settings remain unchanged.
 A matched Windows run on 20 logical CPUs reused identical native binaries and
 case identities: all 1,089 integration cases passed with 69 ignored markers,
 424.5 seconds at four workers and 244.7 seconds at eight, 42.4% less test execution
@@ -1524,6 +1531,11 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       of nonmanaged candidate refresh; idempotent self-install; and a still-loaded
       old module refreshing after its file was already updated. Current-version
       retries retain the original completed logs and two native jobs.
+      Both completion orders also run actual CLI previews with the default
+      environment and an explicit single-test-worker cap. They require identical
+      declared plans, no preview execution and a clear concurrency diagnostic.
+      Actual historical signature verification with a different current cap
+      must omit current-environment execution claims.
       Independent complete Docker/native guards overlap after original
       preflight. Seven real process/engine controls require clean success,
       cancellation in either failure direction, interruption cleanup,

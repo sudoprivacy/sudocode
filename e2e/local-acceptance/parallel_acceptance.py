@@ -137,6 +137,26 @@ def run_case(output, order):
     publisher = load("parallel_fixture_publisher", trusted / ".github/local-acceptance/publish.py")
     publisher.gate.acceptance.ROOT = trusted
     plan = helper.acceptance_plan(policy, ["native-workspace"], platform)
+    preview_plans = []
+    for cap in [None, "1"]:
+        environment = dict(os.environ)
+        environment.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+        if cap is not None:
+            environment["SCODE_ACCEPTANCE_TEST_THREADS"] = cap
+        preview = subprocess.run([sys.executable, str(managed), "plan", "--head", head,
+            "--base", base, "--policy-ref", base], cwd=work, env=environment, capture_output=True)
+        (output / f"concurrency-preview-{cap or 'default'}.log").write_bytes(preview.stdout + preview.stderr)
+        assert preview.returncode == 0, preview.stderr.decode("utf-8", errors="replace")
+        lines = preview.stdout.decode("utf-8").splitlines()
+        current = json.loads(next(line.split("=", 1)[1] for line in lines
+                                  if line.startswith("LOCAL_ACCEPTANCE_CONCURRENCY=")))
+        assert current["source"] == "current invocation environment"
+        assert current["compiler_jobs_per_cargo"] == 1 and current["requested_test_worker_cap"] == cap
+        assert (b"runs native test cases serially" in preview.stdout) == (cap == "1")
+        preview_plans.append(json.loads(next(line.split("=", 1)[1] for line in lines
+                                            if line.startswith("ACCEPTANCE_PLAN="))))
+    assert preview_plans == [plan, plan], "Concurrency diagnostics must not change the signed plan"
+    assert not (control / "author-started").exists(), "Plan preview must not start native execution"
     pull = {"number": 1, "node_id": "fixture-node", "state": "open", "draft": True,
             "head": {"sha": head, "repo": {"full_name": repository}}, "base": {"ref": "main"}}
     native_jobs = [{"id": index + 2, "name": job["name"], "conclusion": "success", "status": "completed"}
@@ -299,6 +319,13 @@ def run_case(output, order):
             assert [row["state"] for row in statuses] == ["pending", "success"]
         git("fetch", "origin", "+refs/notes/local-acceptance:refs/notes/local-acceptance", cwd=trusted)
         full = publisher.gate.acceptance.verify(head, base, base)
+        historical = subprocess.run([sys.executable, str(trusted / ".github/scripts/local_acceptance.py"),
+            "verify", "--head", head, "--base", base, "--policy-ref", base], cwd=trusted,
+            env={**os.environ, "SCODE_ACCEPTANCE_TEST_THREADS": "1"}, capture_output=True)
+        (output / "historical-verify-with-current-cap.log").write_bytes(historical.stdout + historical.stderr)
+        assert historical.returncode == 0, historical.stderr.decode("utf-8", errors="replace")
+        assert b"LOCAL_ACCEPTANCE_CONCURRENCY=" not in historical.stdout
+        assert b"runs native test cases serially" not in historical.stdout
         receipt = json.loads((output / "execution/author/receipt.json").read_text())
         assert full == receipt
         outer = json.loads((output / "execution/parallel-attempt.json").read_text())
@@ -471,6 +498,8 @@ def run_case(output, order):
             "refused": refused, "actual_negative_child_exit": failed.returncode,
             "retry_preserves_author_log_and_native_processes": True,
             "native_jobs_executed_once": True, "complete_actual_author_signature_verified": True,
+            "current_concurrency_preview_preserves_plan_and_execution": True,
+            "historical_verification_excludes_current_environment": True,
             "outer_setup_included_in_signed_timing": True, "commands": commands, "requests": requests,
             "metadata_controls": metadata_controls,
             "stale_installed_runner_refreshed_from_protected_main": True,

@@ -682,6 +682,7 @@ fn compacted_messages(
         usage: None,
         model: None,
         duration_ms: None,
+        inputs: Vec::new(),
     }];
     if let Some(context) = removed_host_context(source, keep_from) {
         // This is a new compacted history, so its writer assigns a new identity.
@@ -1023,6 +1024,7 @@ fn build_compaction_messages(
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             })
         })
         .collect();
@@ -1882,6 +1884,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
         ];
 
@@ -2264,6 +2267,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
             ConversationMessage::user_text("tiny"),
             ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -2380,6 +2384,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
         ];
 

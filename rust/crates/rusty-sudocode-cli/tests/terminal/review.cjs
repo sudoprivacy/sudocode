@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { createHost } = require('../../../../../e2e/terminal-resize/host.cjs');
+const { createHost, countRows } = require('../../../../../e2e/terminal-resize/host.cjs');
 const reference = require('../fixtures/codex_styles.json').variants['dark-truecolor'];
 
 function terminalColor(value, isDefault, isRgb) {
@@ -80,9 +80,9 @@ async function review(host, config) {
   const planPath = path.join(config.root, 'review-plan.md');
   const frozenPlan = config.kind === 'plan' ? fs.readFileSync(planPath, 'utf8') : null;
   const history = () => {
-    const lines = host.snapshot().split('\n');
-    for (let i = 0; i < 70; i++) assert.equal(lines.filter(line =>
-      line.trim() === `EarlierReviewHistory${String(i).padStart(3, '0')}`).length, 1,
+    const text = host.snapshot();
+    for (let i = 0; i < 70; i++) assert.equal(
+      countRows(text, `EarlierReviewHistory${String(i).padStart(3, '0')}`), 1,
       'resumed history survives review');
     assert.deepEqual(countLines(host, config.expected, config.kind), Array(config.expected).fill(1),
       `every rendered line is available exactly once\n${host.snapshot()}`);

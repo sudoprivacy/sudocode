@@ -67,6 +67,7 @@ fn prompt() -> EngineCommand {
             text: "turn".into(),
         }],
         context: None,
+        shown: Vec::new(),
     }
 }
 

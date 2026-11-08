@@ -25,6 +25,7 @@ fn prompt(handle: &EngineHandle, calls: &Value) {
                 text: format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}"),
             }],
             context: None,
+            shown: Vec::new(),
         })
         .unwrap();
 }

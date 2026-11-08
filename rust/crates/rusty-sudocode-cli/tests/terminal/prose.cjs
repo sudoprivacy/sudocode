@@ -40,13 +40,14 @@ function proseRows() {
     });
 }
 function checkProseHistory() {
+  const { countRows } = require('../../../../../e2e/terminal-resize/host.cjs');
   const text = snapshot();
   const joined = normalizedProse(text);
   assert.equal(joined.split(startMarker.replace(/\s/g, '')).length - 1, 1, text);
   assert.equal(joined.split(endMarker).length - 1, 1, text);
   if (hasSavedHistory) {
     for (let i = 0; i < 70; i++)
-      assert.equal(text.split('\n').filter(line => line.trim() === `Earlier history line ${i}`).length,
+      assert.equal(countRows(text, `Earlier history line ${i}`),
         1, `history ${i} was lost or duplicated\n${text}`);
   }
 }

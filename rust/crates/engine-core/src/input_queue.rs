@@ -90,10 +90,17 @@ impl<R> QueuedInput<R> {
                 text: text.into(),
                 display: display.into(),
                 source,
+                pasted: Vec::new(),
                 attachments: Vec::new(),
             },
             receipt,
         }
+    }
+    /// Mark which bytes of the display were pasted.
+    #[must_use]
+    pub fn with_pasted(mut self, pasted: Vec<std::ops::Range<usize>>) -> Self {
+        self.input.pasted = pasted;
+        self
     }
     pub fn human(text: impl Into<String>, display: impl Into<String>) -> Self {
         Self::new(text, display, QueuedKind::Human, None)
@@ -123,10 +130,9 @@ pub struct NextTurn<R = ()> {
     /// The prompt text to hand to `run_turn`. When multiple items were batched,
     /// this is their `text` fields joined with `\n\n` in submission order.
     pub prompt: String,
-    /// The scrollback lines to echo for this run, in submission order (every
-    /// queued item echoes on flush now — human and peer alike). Each carries the
-    /// marker `source` so the caller renders human echoes and peer frames correctly. Empty for an idle
-    /// submit, whose echo the coordinator prints directly.
+    /// How each input of this run is drawn, in submission order: the coordinator
+    /// echoes queued items from these on flush (an idle submit it echoes
+    /// directly), and the turn saves them with its prompt for replay.
     pub echoes: Vec<EchoLine>,
     /// How many queued items this run consumed.
     pub consumed: usize,
@@ -364,8 +370,8 @@ impl<R> TurnInputCoordinator<R> {
     #[must_use]
     pub fn submit_when_idle(&mut self, input: QueuedInput<R>) -> NextTurn<R> {
         NextTurn {
+            echoes: vec![input.input.view()],
             prompt: input.input.text,
-            echoes: Vec::new(),
             consumed: 1,
             receipts: input.receipt.into_iter().collect(),
         }
@@ -481,11 +487,12 @@ mod queue_docs {
     }
 
     #[test]
-    fn idle_submit_runs_alone_without_deferred_echo() {
+    fn idle_submit_runs_alone_and_carries_its_echo() {
         let mut c = TurnInputCoordinator::<()>::new();
         let next = c.submit_when_idle(human("hello"));
         assert_eq!(next.prompt, "hello");
-        assert_eq!(next.echoes, [] as [engine_events::InputView; 0]);
+        assert_eq!(next.echoes.len(), 1, "saved with the prompt for replay");
+        assert_eq!(next.echoes[0].display, "hello");
         assert_eq!(next.consumed, 1);
         assert_eq!(c.pending(), 0);
     }

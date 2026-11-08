@@ -443,6 +443,10 @@ pub trait ApiClient: Send {
 /// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
 /// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
+    /// How the turn's initial prompt was drawn, saved with it for replay.
+    fn prompt_echoes(&self) -> Vec<crate::turn_input::InputEcho> {
+        Vec::new()
+    }
     /// The initial user blocks, including attachments, reached durable history.
     fn on_prompt_committed(&mut self) {}
     fn on_input_committed(&mut self, _input: &crate::turn_input::InputView) {}

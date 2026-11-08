@@ -763,7 +763,11 @@ fn prompt_engine_command(
             },
         }
     } else {
-        engine_core::EngineCommand::Prompt { blocks, context }
+        engine_core::EngineCommand::Prompt {
+            blocks,
+            context,
+            shown: Vec::new(),
+        }
     }
 }
 
@@ -1141,6 +1145,7 @@ fn peer_input_action(
             text: text.to_owned(),
             display: text.to_owned(),
             source: engine_core::engine_events::InputSource::Peer,
+            pasted: Vec::new(),
             attachments: Vec::new(),
         },
         delivery: message.delivery,

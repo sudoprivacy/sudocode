@@ -56,8 +56,8 @@ use cli::format::{
     format_compaction_notice, format_context_report, format_cost_report, format_issue_report,
     format_model_report, format_model_switch_report, format_permission_prompt_box,
     format_permissions_report, format_permissions_switch_report, format_pr_report,
-    format_resume_report, format_sandbox_report, format_ultraplan_report, render_messages,
-    render_version_report, turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
+    format_resume_report, format_sandbox_report, format_ultraplan_report, render_version_report,
+    turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_workspace_summary,
@@ -3121,26 +3121,18 @@ impl Drop for ReplTurnCancelMonitor {
     }
 }
 
-/// Write a submitted user input to scrollback as the `❯ text` echo, matching
-/// the format the idle path has always used. Called by the coordinator — the
+/// Write an input to scrollback as it runs. Called by the coordinator — the
 /// only place that knows whether an input runs now or was queued — so a queued
-/// input is echoed when it actually flushes, not when it was typed. Multi-line
-/// input keeps the `❯` on the first line and indents the rest. A trailing blank
-/// line separates the echo from the turn output that follows, matching the
-/// spacing between other scrollback blocks.
-fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
-    output.user_prompt(display);
-}
-
-/// Commit a received envelope through the same formatter used by replay.
-/// Keep model-facing markup in the queue, and project it only at the UI edge.
-fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
-    let rendered = cli::received::render_prompt(
-        prompt,
-        render::query_terminal_width(),
-        &render::TerminalRenderer::new(),
-    );
-    output.print_block(rendered);
+/// input is echoed when it actually flushes, not when it was typed. The drawing
+/// is `received::echo`, the one the turn renderer and transcript replay use; a
+/// sub-agent or background result is a one-line notice.
+fn echo_input(output: &repl_ui::OutputSender, input: &engine_events::InputView) {
+    match input.source {
+        input_queue::QueuedKind::Subagent | input_queue::QueuedKind::Background => {
+            output.println(&input.display);
+        }
+        _ => output.user_prompt(input.echo()),
+    }
 }
 
 /// Peer-messaging health, not raw receiver errors, reaches the footer. An
@@ -3618,18 +3610,7 @@ fn run_repl_iocraft_dispatch(
                     // kind (`❯` human / message frame for peers). Then clear the queued
                     // messages from the pending overlay: they're leaving the queue.
                     for echo in &next.echoes {
-                        match echo.source {
-                            input_queue::QueuedKind::Human => {
-                                echo_submit_to_scrollback(&repl_output, &echo.display);
-                            }
-                            input_queue::QueuedKind::Peer | input_queue::QueuedKind::Scheduled => {
-                                echo_peer_to_scrollback(&repl_output, &echo.display);
-                            }
-                            input_queue::QueuedKind::Subagent
-                            | input_queue::QueuedKind::Background => {
-                                repl_output.println(&echo.display);
-                            }
-                        }
+                        echo_input(&repl_output, echo);
                     }
                     repl_ui_cmd.pending_inputs_clear();
                     coord.lock().unwrap().start_turn();
@@ -3687,12 +3668,6 @@ fn run_repl_iocraft_dispatch(
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                         continue;
                     }
-                    match kind {
-                        input_queue::QueuedKind::Subagent | input_queue::QueuedKind::Background => {
-                            repl_output.println(&display);
-                        }
-                        _ => echo_peer_to_scrollback(&repl_output, &display),
-                    }
                     let next =
                         coord
                             .lock()
@@ -3703,6 +3678,9 @@ fn run_repl_iocraft_dispatch(
                                 kind,
                                 ack,
                             ));
+                    for echo in &next.echoes {
+                        echo_input(&repl_output, echo);
+                    }
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
@@ -3785,20 +3763,28 @@ fn run_repl_iocraft_dispatch(
                 }
                 event
                 @ (repl_ui::InputEvent::Submit { .. } | repl_ui::InputEvent::Queue { .. }) => {
-                    let (text, display, delivery) = match event {
-                        repl_ui::InputEvent::Submit { text, display } => {
-                            (text, display, engine_events::InputDelivery::Steer)
-                        }
-                        repl_ui::InputEvent::Queue { text, display } => {
-                            (text, display, engine_events::InputDelivery::Queue)
-                        }
+                    let (text, display, pasted, delivery) = match event {
+                        repl_ui::InputEvent::Submit {
+                            text,
+                            display,
+                            pasted,
+                        } => (text, display, pasted, engine_events::InputDelivery::Steer),
+                        repl_ui::InputEvent::Queue {
+                            text,
+                            display,
+                            pasted,
+                        } => (text, display, pasted, engine_events::InputDelivery::Queue),
                         _ => unreachable!(),
+                    };
+                    let human = |text: String| {
+                        input_queue::QueuedInput::human(text, display.clone())
+                            .with_pasted(pasted.clone())
                     };
                     // `!<cmd>` bash mode: run it here, no model turn. The
                     // runner thread holds the `LiveCli` mutex for the whole
                     // turn, so during a turn the line is declined rather than
                     // blocking the dispatch loop behind the lock. The echo is
-                    // the coordinator's job (see `echo_submit_to_scrollback`),
+                    // the coordinator's job (see `echo_input`),
                     // in bash-mode dress, and only when the line actually runs.
                     if let Some(command) = bash_mode::parse_bang_command(&text) {
                         if coord.lock().unwrap().is_running() {
@@ -3822,7 +3808,7 @@ fn run_repl_iocraft_dispatch(
                     // scrollback, as a prompt's turn does. Text that is not a
                     // command (`Ok(None)`) runs as a prompt and is echoed there.
                     if !matches!(parsed, Ok(None)) {
-                        echo_submit_to_scrollback(&repl_output, &display);
+                        echo_input(&repl_output, &human(text.clone()).input.view());
                     }
                     // Task inspection is local UI, so it remains available
                     // during work without taking the session lock.
@@ -4045,19 +4031,18 @@ fn run_repl_iocraft_dispatch(
                     if coord.lock().unwrap().has_idle_queue() {
                         prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
-                        coord.lock().unwrap().submit_during_turn(
-                            input_queue::QueuedInput::human(text, display),
-                            input_queue::QueueMode::Queue,
-                        );
+                        coord
+                            .lock()
+                            .unwrap()
+                            .submit_during_turn(human(text), input_queue::QueueMode::Queue);
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                     } else if !coord.lock().unwrap().is_running() {
                         prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
-                        echo_submit_to_scrollback(&repl_output, &display);
-                        let next = coord
-                            .lock()
-                            .unwrap()
-                            .submit_when_idle(input_queue::QueuedInput::human(text, display));
+                        let next = coord.lock().unwrap().submit_when_idle(human(text));
+                        for echo in &next.echoes {
+                            echo_input(&repl_output, echo);
+                        }
                         coord.lock().unwrap().start_turn();
                         runner_handle = Some(spawn_iocraft_turn(
                             Arc::clone(&cli_shared),
@@ -4088,13 +4073,7 @@ fn run_repl_iocraft_dispatch(
                                 delivery
                             }
                         };
-                        stage_turn_input(
-                            &coord,
-                            input_queue::QueuedInput::human(text, display),
-                            delivery,
-                            &commands,
-                            &repl_ui_cmd,
-                        );
+                        stage_turn_input(&coord, human(text), delivery, &commands, &repl_ui_cmd);
                     }
                 }
                 repl_ui::InputEvent::QuestionAnswer(text) => {
@@ -4262,6 +4241,7 @@ fn spawn_iocraft_turn(
             cli.record_prompt_history();
             match cli.run_turn_iocraft(
                 &next.prompt,
+                &next.echoes,
                 &output,
                 &ui,
                 &spinner,
@@ -4539,6 +4519,8 @@ struct TurnPresentation<'a> {
     output: Option<&'a repl_ui::OutputSender>,
     ui: Option<&'a repl_ui::UiCommandSender>,
     is_rendered: bool,
+    /// How the host already drew this turn's inputs; saved with the prompt.
+    shown: &'a [engine_events::InputView],
 }
 
 impl LiveCli {
@@ -4755,16 +4737,14 @@ impl LiveCli {
     }
 
     /// Render the restored conversation history to a scrollback string, or an
-    /// empty string when there is none (a fresh session), through the shared
-    /// `render_messages`, so a resumed session's history stays visible.
+    /// empty string when there is none (a fresh session), through the live
+    /// turn renderer, so a resumed session looks as it did before the restart.
     fn render_restored_scrollback(&self) -> String {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
             return String::new();
         }
-        let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-        let renderer = render::TerminalRenderer::new();
-        render_messages(session.messages(), term_width, &renderer)
+        render_engine::replay(session.messages())
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the
@@ -4829,6 +4809,7 @@ impl LiveCli {
             output,
             ui,
             is_rendered,
+            shown,
         } = presentation;
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
@@ -4845,6 +4826,7 @@ impl LiveCli {
         self.engine_handle.commands.send(EngineCommand::Prompt {
             blocks,
             context: None,
+            shown: shown.iter().map(engine_events::InputView::echo).collect(),
         })?;
 
         let mut outcome = TurnOutcome::default();
@@ -5107,6 +5089,7 @@ impl LiveCli {
                 output: None,
                 ui: None,
                 is_rendered: true,
+                shown: &[],
             },
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
@@ -5247,6 +5230,7 @@ impl LiveCli {
     fn run_turn_iocraft(
         &mut self,
         input: &str,
+        shown: &[engine_events::InputView],
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
@@ -5274,6 +5258,7 @@ impl LiveCli {
                 output: Some(output),
                 ui: Some(ui),
                 is_rendered: true,
+                shown,
             },
             &mut permission_prompter,
             &mut question_prompter,
@@ -5338,6 +5323,7 @@ impl LiveCli {
                 output: None,
                 ui: None,
                 is_rendered: false,
+                shown: &[],
             },
             permission_prompter,
             &mut question_prompter,

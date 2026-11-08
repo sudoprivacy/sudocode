@@ -3,6 +3,7 @@
 mod a2a;
 mod agent;
 mod plan;
+pub(crate) use plan::replay as replay_plan_document;
 mod question;
 pub(crate) mod reasoning;
 pub(crate) mod todo;
@@ -31,9 +32,8 @@ use crossterm::style::Color;
 /// Pairs each tool call's `input` with the `ToolResult` that follows it,
 /// keyed by tool-use id. A tool's identity fields — bash's command,
 /// edit/read/write's path, grep/glob's pattern — live only in the call
-/// `input`; the result payload never echoes them. Both render paths (live
-/// streaming in `render_engine`, and session replay in [`render_message`])
-/// use this one type so the pairing rule has a single home.
+/// `input`; the result payload never echoes them. Live turns and transcript
+/// replay both go through `render_engine`, which owns the one registry.
 #[derive(Default)]
 pub(crate) struct ToolInputRegistry {
     inputs: std::collections::HashMap<String, String>,
@@ -52,139 +52,11 @@ impl ToolInputRegistry {
     pub(crate) fn take(&mut self, id: &str) -> String {
         self.inputs.remove(id).unwrap_or_default()
     }
-}
 
-/// Render a single `ConversationMessage` into styled terminal output.
-///
-/// This is the SSOT for "how does a completed message look on screen."
-/// Both session replay (`--resume`) and any future message display
-/// (e.g. `/history`, export) should call this instead of hand-rolling
-/// role/block matching.
-///
-/// `tool_inputs` carries call inputs forward from each `ToolUse` message to
-/// the `ToolResult` message that follows it (they are separate messages), so
-/// completed cards can show the identity fields the result omits.
-///
-/// The live REPL uses a different path (streaming event callbacks) for
-/// progressive rendering during a turn, but the *final* visual result
-/// is the same because both paths call the same per-block format
-/// functions (`format_input_echo`, `format_tool_call_start`, etc.).
-pub(crate) fn render_message(
-    msg: &runtime::ConversationMessage,
-    term_width: usize,
-    renderer: &crate::render::TerminalRenderer,
-    tool_inputs: &mut ToolInputRegistry,
-) -> Option<String> {
-    if msg.is_unanswered_turn_boundary() {
-        return None;
+    /// The input remembered for `id`, left in place for the result card.
+    pub(crate) fn peek(&self, id: &str) -> String {
+        self.inputs.get(id).cloned().unwrap_or_default()
     }
-    let mut out = String::new();
-
-    match msg.role {
-        runtime::MessageRole::User => {
-            let text = text_from_blocks(&msg.blocks);
-            if text.is_empty() {
-                return None;
-            }
-            out.push_str(&super::received::render_prompt(&text, term_width, renderer));
-        }
-        runtime::MessageRole::Assistant => {
-            for block in &msg.blocks {
-                match block {
-                    runtime::ContentBlock::Text { text } if !text.is_empty() => {
-                        let formatted_text = renderer.render_markdown_with_width(text, term_width);
-                        crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out,
-                            &formatted_text,
-                        );
-                    }
-                    runtime::ContentBlock::Thinking { thinking, .. }
-                        if !thinking.trim().is_empty() =>
-                    {
-                        // Replay has to show reasoning for the same reason live
-                        // does: it was paid for. Rendered as plain dim text, not
-                        // through `render_markdown` — reasoning is prose the
-                        // model wrote for itself, and letting a stray `#` or
-                        // `*` in it become a heading or emphasis would make it
-                        // louder than the answer it belongs under.
-                        crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out,
-                            &reasoning::block(thinking.trim_end(), term_width),
-                        );
-                    }
-                    runtime::ContentBlock::ToolUse { id, input, .. } => {
-                        // Mirror the live render engine exactly: a ToolUse only
-                        // *remembers* its input so the matching ToolResult can
-                        // show the identity fields (command, path, pattern) the
-                        // result payload never echoes. It renders NO card here —
-                        // the single durable card per call is the completed
-                        // (green/red) one drawn by the ToolResult below. (A
-                        // running/amber card is a live overlay-only status and
-                        // must never be committed to scrollback; on replay a
-                        // resultless call is simply not shown, same as live.)
-                        tool_inputs.remember(id, input);
-                    }
-                    _ => {}
-                }
-            }
-            if out.is_empty() {
-                return None;
-            }
-        }
-        runtime::MessageRole::Tool => {
-            for block in &msg.blocks {
-                if let runtime::ContentBlock::ToolResult {
-                    tool_use_id,
-                    tool_name,
-                    output,
-                    is_error,
-                } = block
-                {
-                    // Pair this result with the input remembered from its call
-                    // (`""` if the call is missing, e.g. a truncated session) —
-                    // the same pairing the live render engine does.
-                    let input = tool_inputs.take(tool_use_id);
-                    if ToolKind::from_name(tool_name) == Some(ToolKind::WritePlan) {
-                        if let Some(document) = plan::replay(&input, output, renderer, term_width) {
-                            crate::render::layout_policy::LayoutPolicy::append_block(
-                                &mut out, &document,
-                            );
-                        }
-                    }
-                    crate::render::layout_policy::LayoutPolicy::append_block(
-                        &mut out,
-                        &format_tool_result(tool_name, &input, output, *is_error),
-                    );
-                }
-            }
-            if out.is_empty() {
-                return None;
-            }
-        }
-        runtime::MessageRole::System => return None,
-    }
-
-    out.truncate(out.trim_end_matches('\n').len());
-    Some(out)
-}
-
-/// Render a slice of messages into a single string. Convenience wrapper
-/// over [`render_message`] for session replay. Owns the [`ToolInputRegistry`]
-/// so call inputs carry forward from each `ToolUse` message to the
-/// `ToolResult` message that follows it.
-pub(crate) fn render_messages(
-    messages: &[runtime::ConversationMessage],
-    term_width: usize,
-    renderer: &crate::render::TerminalRenderer,
-) -> String {
-    let mut output = String::new();
-    let mut tool_inputs = ToolInputRegistry::default();
-    for msg in messages {
-        if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
-            crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
-        }
-    }
-    output
 }
 
 /// `true` for Text blocks the runtime injected (date announcements,
@@ -538,8 +410,15 @@ pub(crate) fn render_version_report() -> String {
 /// #182 item 3: multi-line input used to collapse to a single line because
 /// the call site did `replace('\n', " ")`. We now preserve every line so the
 /// echo matches what the user actually typed.
-pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usize) {
+/// `pasted` holds byte ranges of `input` the user pasted; they are dimmed so a
+/// paste stands apart from what was typed, live and after a restart alike.
+pub(crate) fn format_input_echo(
+    input: &str,
+    pasted: &[std::ops::Range<usize>],
+    term_width: usize,
+) -> (String, usize) {
     let trimmed = input.trim();
+    let lead = input.len() - input.trim_start().len();
     // `split('\n')` (not `lines()`) so an input that ends with `\n` still
     // contributes a trailing empty echo row — rustyline drew one for it.
     let raw_lines: Vec<&str> = if trimmed.is_empty() {
@@ -548,13 +427,15 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         trimmed.split('\n').collect()
     };
     let mut rendered = String::new();
+    let mut offset = lead;
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
         // box uses. Live commits and replay share this presentation; the
         // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
-        let body = format!("{prefix}{line}");
+        let body = format!("{prefix}{}", dim_pasted(line, offset, pasted));
+        offset += line.len() + 1;
         if idx > 0 {
             rendered.push('\n');
         }
@@ -571,6 +452,33 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         }
     }
     (rendered, raw_lines.len())
+}
+
+/// `line` (starting at byte `offset` of its prompt) with the pasted parts dim.
+/// Ends the dim with "normal intensity" rather than a reset, which would also
+/// drop the prompt's background.
+fn dim_pasted(line: &str, offset: usize, pasted: &[std::ops::Range<usize>]) -> String {
+    let end = offset + line.len();
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for range in pasted {
+        let start = range.start.clamp(offset, end) - offset;
+        let stop = range.end.clamp(offset, end) - offset;
+        if start >= stop
+            || start < at
+            || !line.is_char_boundary(start)
+            || !line.is_char_boundary(stop)
+        {
+            continue;
+        }
+        out.push_str(&line[at..start]);
+        out.push_str(crate::render::DIM);
+        out.push_str(&line[start..stop]);
+        out.push_str("\x1b[22m");
+        at = stop;
+    }
+    out.push_str(&line[at..]);
+    out
 }
 
 /// The built-in tools the card renderer recognizes, each matched from *both*
@@ -3125,115 +3033,15 @@ mod tests {
     }
 
     #[test]
-    fn replay_pairs_tool_result_with_its_call_input() {
-        // Regression: the bash command / edit path live only in the ToolUse
-        // input, which is a *separate message* from the ToolResult. Replay must
-        // carry the input forward (via ToolInputRegistry) so the completed card
-        // shows `Bash(<cmd>)`, not an empty `Bash()`.
-        let renderer = crate::render::TerminalRenderer::new();
-        let messages = vec![
-            runtime::ConversationMessage {
-                history: None,
-                role: runtime::MessageRole::Assistant,
-                blocks: vec![runtime::ContentBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "bash".to_string(),
-                    input: r#"{"command":"cargo test --workspace"}"#.to_string(),
-                    thought_signature: None,
-                }],
-                usage: None,
-                model: None,
-                duration_ms: None,
-            },
-            runtime::ConversationMessage {
-                history: None,
-                role: runtime::MessageRole::Tool,
-                blocks: vec![runtime::ContentBlock::ToolResult {
-                    tool_use_id: "call_1".to_string(),
-                    tool_name: "bash".to_string(),
-                    output: r#"{"stdout":"ok","stderr":""}"#.to_string(),
-                    is_error: false,
-                }],
-                usage: None,
-                model: None,
-                duration_ms: None,
-            },
-        ];
-        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
-        assert!(
-            plain.contains("Bash(cargo test --workspace)"),
-            "replay must show the command from the call input: {plain}"
-        );
-        // Structural invariant: exactly ONE card per call — the completed one.
-        // The ToolUse must NOT also render a running/amber start card (that
-        // used to persist an "in-flight" card above the result on resume).
-        assert_eq!(
-            plain.matches('\u{256d}').count(),
-            1,
-            "replay must render exactly one card per call (no persisted running card): {plain}"
-        );
-    }
-
-    #[test]
-    fn replay_lone_tool_call_without_result_renders_no_card() {
-        // A ToolUse with no following ToolResult (interrupted turn, truncated
-        // session) must render NOTHING on replay — not a stranded amber running
-        // card. A resumed session is not "in flight"; only completed calls show.
-        let renderer = crate::render::TerminalRenderer::new();
-        let messages = vec![runtime::ConversationMessage {
-            history: None,
-            role: runtime::MessageRole::Assistant,
-            blocks: vec![runtime::ContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "bash".to_string(),
-                input: r#"{"command":"sleep 30"}"#.to_string(),
-                thought_signature: None,
-            }],
-            usage: None,
-            model: None,
-            duration_ms: None,
-        }];
-        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
-        assert!(
-            !plain.contains('\u{256d}'),
-            "a resultless call must render no card on replay: {plain:?}"
-        );
-    }
-
-    #[test]
     fn resumed_user_echo_uses_the_shared_prompt_prefix() {
         // DRY guard: the resumed-history echo and the live input line must
         // share the same prompt glyph. Both reference render::PROMPT_PREFIX, so
         // this asserts the echo starts with it — if someone hardcodes a
         // different glyph again (the old `›` bug), this fails.
-        let (echo, _) = format_input_echo("hi", 80);
+        let (echo, _) = format_input_echo("hi", &[], 80);
         assert!(
             echo.starts_with(crate::render::PROMPT_PREFIX),
             "echo must start with the shared prompt prefix: {echo:?}"
-        );
-    }
-
-    #[test]
-    fn resumed_user_message_has_no_horizontal_rules() {
-        // Regression: a restored user message used to be wrapped in `─`×width
-        // rules above and below, making it look like the live input box. It
-        // must render as the plain `❯ text` echo — no rules.
-        let renderer = crate::render::TerminalRenderer::new();
-        let messages = vec![runtime::ConversationMessage {
-            history: None,
-            role: runtime::MessageRole::User,
-            blocks: vec![runtime::ContentBlock::Text {
-                text: "hello there".to_string(),
-            }],
-            usage: None,
-            model: None,
-            duration_ms: None,
-        }];
-        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
-        assert!(plain.contains("hello there"), "{plain}");
-        assert!(
-            !plain.contains('─'),
-            "resumed user message must not draw horizontal rules: {plain:?}"
         );
     }
 

@@ -31,6 +31,7 @@ fn user_text(text: &str) -> ConversationMessage {
         usage: None,
         model: None,
         duration_ms: None,
+        inputs: Vec::new(),
     }
 }
 
@@ -44,6 +45,7 @@ fn assistant_text(text: &str) -> ConversationMessage {
         usage: None,
         model: Some("test-model".to_string()),
         duration_ms: None,
+        inputs: Vec::new(),
     }
 }
 
@@ -60,6 +62,7 @@ fn assistant_tool_use(id: &str, name: &str, input: &str) -> ConversationMessage 
         usage: None,
         model: Some("test-model".to_string()),
         duration_ms: None,
+        inputs: Vec::new(),
     }
 }
 

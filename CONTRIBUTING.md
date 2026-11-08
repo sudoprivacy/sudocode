@@ -594,7 +594,14 @@ resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
 older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
 pool explicitly. Compiler jobs stay at one locally, with only compiler workers
-at BelowNormal priority; test processes stay Normal. A matched Windows run on
+at BelowNormal priority; test processes stay Normal. Before author workspace
+execution and a plan preview for the current host, the mandatory
+`LOCAL_ACCEPTANCE_CONCURRENCY` output reports the current invocation's compiler
+jobs and requested test cap. An explicit cap of one also prints the shell
+command to restore the protected test-pool default. Explicit caps remain honored;
+the signed plan and test selection remain unchanged. Historical signature
+verification omits this current-environment diagnostic, so a verifier's cap is
+never presented as the original author's execution setting. A matched Windows run on
 20 logical CPUs passed the same 1,089 integration cases and 69 ignored markers:
 four workers took 424.5 seconds, eight took 244.7 seconds. Real ConPTY echo P95
 was 0.58/0.74 ms. This warm, single-host execution comparison excludes compilation

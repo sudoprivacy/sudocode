@@ -25,15 +25,23 @@ DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
 
 The seven independent reader/stall/receiver-seat fault cases run with the
-repository's checksum-pinned nextest runner and at most four test workers.
+repository's checksum-pinned nextest runner. They overlap the independent CLI
+journeys after restart, with one serial CLI lane and at most three fault workers
+(at most four test cases at once). `SCODE_ACCEPTANCE_TEST_THREADS=1` runs the CLI
+lane and fault batch serially; caps of two or three reserve one worker for CLI.
 They keep their original real daemon, lease clocks, assertions and deadlines;
 daemon restart and SIGSTOP remain serial. The batch requires all seven ignored
 case names before execution and all seven successful JUnit results afterward.
-Retries are disabled. The first failure cancels this independent batch;
-the outer harness still closes its owned private daemon. Cancelled cases are
+Retries are disabled. The first failure cancels this independent batch and the
+other CLI/fault lane through the shared process supervisor. Both lanes must pass
+before the later SIGSTOP probe; the outer harness still closes its owned private
+daemon. Cancelled cases are
 not passes. This path requires Python 3, like the acceptance tooling.
 `mailbox_faults_acceptance.py --output FRESH_DIRECTORY` exercises the executor
-using real Cargo/native control processes; it adds no daemon coverage.
+using real Cargo/native control processes, including both failure directions,
+bounded overlap, explicit single-worker serialization and invalid inventory/caps.
+Stage logs and command receipts are retained under the existing fault artifact's
+`stages/` directory. These controls add no product daemon coverage.
 Harness-only edits are validated by the real Linux queue journey and the
 author's realistic harness acceptance. They omit unrelated native workspace
 Cargo/PTY reruns; mixed Rust changes still require those native suites.

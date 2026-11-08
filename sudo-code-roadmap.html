@@ -1710,11 +1710,21 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       changes retain those journeys. Selected cases and deadlines are unchanged.
       Required output explains the choice and refuses missing decisions.
       Seven independent reader/stall/receiver-seat fault cases run with the shared
-      pinned nextest executor, at most four workers, zero retries and first-failure
-      cancellation within this independent batch; outer owned-daemon cleanup is
+      pinned nextest executor, zero retries and first-failure cancellation.
+      After restart, these cases overlap the independent CLI journeys: one serial
+      CLI lane and at most three fault workers, at most four test cases together.
+      Explicit caps of two or three reserve one worker for CLI; a one-worker cap
+      keeps both lanes serial. The existing shared process supervisor cancels
+      the peer lane on failure; outer owned-daemon cleanup is
       retained. Complete ignored-test inventory and successful JUnit results are
       required. Original real lease clocks, assertions, deadlines and case count
-      remain; restart and SIGSTOP stay serial outside the batch.
+      remain; restart stays before both lanes and SIGSTOP stays after both pass.
+      Original per-lane logs and command receipts remain in the fault artifact.
+      Real Cargo/native controls exercise both failure directions, worker caps,
+      missing/non-ignored inventories and completed-child cleanup. A private
+      Windows same-source warm pair measured 307.554 seconds serial versus
+      282.280 seconds overlapping (8.2% for that pair); its Unix-only platform
+      exclusions remain, and it is not a Linux or overall delivery speed claim.
       A2A harness-only edits omit unrelated native Cargo/PTY product reruns on
       the author and complementary hosts; the Linux queue still executes the
       changed real-daemon scripts. Author acceptance requires realistic testing

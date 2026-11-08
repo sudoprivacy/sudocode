@@ -9,9 +9,10 @@ preserves its Agent identity and history. Separate concurrently owned Agents do
 not share a receiver or transcript writer. This includes real reception while
 the original Codex thread is idle; having tools in its menu is insufficient.
 
-This document records the source investigation and implementation boundaries.
-It does not claim that this mode is implemented or installed. The current
-fixed-session bridge and the live six-peer deployment retain their behavior.
+This document records the historical source investigation, current implementation
+status and remaining rollout gates. The shared adapter and prepared-machine
+installer now exist; their presence does not qualify a particular installation
+or the live six-peer deployment. See the reviewed-source status below.
 
 The first code slice extracts that callback's native connection into the shared
 `connectCodex` API. Inventory and notification consumers can use the same
@@ -60,10 +61,11 @@ Source inspection at local Codex commit
    inside a turn. A hook-only design therefore does not prove automatic attach
    of a newly loaded idle thread before its first turn.
 
-The installed Mac CLI reports `0.163.0`; that version string alone does not prove
-its bytes equal the inspected checkout. Its earlier source-bound native protocol
-receipt proves the existing namespaced callback shape. New lifecycle behavior
-still needs an actual installed-binary acceptance test.
+The historical Mac observations in this investigation used CLI `0.163.0`; they
+do not identify the currently installed version or prove its bytes equal the
+inspected checkout. Its earlier source-bound native protocol receipt establishes
+the namespaced callback shape within that qualification. Later lifecycle or
+installation claims require their own actual binary and source receipts.
 
 Use native MCP startup for process launch and the existing app-server adapter
 for authoritative loaded-thread binding. A hook can supply or refresh context,
@@ -132,11 +134,12 @@ reference. A genuinely distinct Agent gets a distinct identity; it cannot adopt
 another Agent's credential because they share a workspace. Losing a reference
 or encountering an unknown owner requires explicit recovery, not silent minting.
 
-The current MCP host requires a fixed `acpSessionId`, and its callback requires a
-fixed `threadId`. Copying that file into global Codex configuration would make
+The fixed-session MCP mode requires an `acpSessionId`, and its callback requires
+a fixed `threadId`. Copying that file into global Codex configuration would make
 unrelated sessions contend for the same native writer/receiver. The adapter must
-bind each actual native context to its own authorized connection while retaining
-one shared implementation of send/list/prompt/audit/callback behavior. Missing
+instead compose each actual native context with its own authorized connection,
+as the shared global adapter now does, while retaining one implementation of
+send/list/prompt/audit/callback behavior. Missing
 or ambiguous context is an explicit refusal, not a fallback to another session.
 
 ## Preparation and admission
@@ -148,11 +151,11 @@ zones. The node record alone grants no right to restart or replace a process.
 Restarting Codex must not change voter membership or select a second Box because
 the configured Box is temporarily unavailable.
 
-The setup slice reports `domainJoinAccepted: false` and pending Agent
-authentication. It does not supply an Agent enrollment grant. The adapter needs
-an existing authenticated, owner-scoped admission capability for new Agents.
-That capability has not been established by this investigation. Until it exists,
-an uncredentialed Agent is `needs_enrollment`, not joined. Reuse the current
+The earlier setup slice reports `domainJoinAccepted: false` and pending Agent
+authentication; setup alone supplies no enrollment grant. The shared operator
+adapter now implements the admission boundary, but requires an existing,
+authenticated owner grant and the selected Node's enrollment capability. An
+uncredentialed Agent remains `needs_enrollment`, not joined. Reuse the current
 credential authority and its committed ownership checks; do not copy a CA,
 reuse an unrelated certificate, add an issuer, overwrite an unknown owner, use
 `allow_existing`, or silently fall back to disk.
@@ -191,3 +194,57 @@ Qualification must include:
 The separate cumulative CLI work in #1049 keeps its own exact-head CI, review
 and normal merge-queue gates. This investigation neither replaces that work nor
 qualifies a live upgrade of either Mac or Windows.
+
+## Reviewed implementation and remaining handoff
+
+The source review for this update uses protected main
+[`3511acd5`](https://github.com/sudoprivacy/sudocode/commit/3511acd58ecbb0f3e07947d3d7a70d2ae8050e60).
+The earlier proposed runtime/installer split is superseded by the shared
+implementation. This documentation update runs no native session, model,
+enrollment, installation or live migration.
+
+| Implemented boundary | Reviewed source and remaining qualification |
+| --- | --- |
+| Native transport | `codexConnection.ts::connectCodex` supplies the shared proxy connection. The actual selected native package and endpoint still need source-bound qualification. |
+| Root discovery and binding | `codexAutojoin.ts::connectCodexAutojoin` reads loaded inventory, qualifies user roots and preserves durable actor/ACP bindings. Missing classification fields refuse attachment; inventory errors block tools. |
+| MCP ownership and direct tools | `codexMcp.ts` owns one authenticated local bridge and routes host-supplied thread context through the shared tools and callbacks. A workspace or model-selected argument does not select the sender. |
+| Enrollment | `codexEnrollment.ts` invokes the existing operator client under an explicit private grant. An uncertain operation remains recovery-required; it does not mint a replacement identity or install a Node. |
+| Prepared-machine installation | `codexSetup.ts::installCodexMcp` performs the selected native preparation, MCP readback and launcher installation with a create-only journal. It preserves a backup and reports `a2aJourneyVerified=false`; installation is not end-to-end acceptance. |
+| Native user entry | `codexLaunch.ts::runCodexUserEntry` preserves the selected native argv and review policy. It implements neither a native package manager nor a Nexus owner. |
+
+The operating instructions remain in the
+[SDK README](https://github.com/sudoprivacy/sudocode/blob/main/sdk/typescript/README.md#global-native-codex-attachment).
+The
+[attachment contract](https://github.com/sudoprivacy/sudocode/blob/main/docs/design/codex-a2a-autojoin.md)
+owns binding, enrollment, loaded-runtime lifetime and recovery details. Keep
+commands and those rules there rather than copying another installer or
+callback specification into this investigation.
+
+The official [App Server guide](https://learn.chatgpt.com/docs/app-server)
+documents loaded-thread inventory, reads without resuming, runtime-status
+notifications and explicit resume. Those APIs do not attest the selected
+endpoint, SudoCode attachment, Node authorization or installation. A loaded
+thread's lifecycle and a visible frontend's lifetime remain separate facts.
+
+The adapter currently retains ownership for qualified loaded roots, including
+work that outlives a frontend. It retires owned connections after authoritative
+absence or closure; failed inventory leaves tools unavailable and cannot prove
+that an owner exited. Qualify actual unload, retirement and subsequent resume
+on the supported native launch mode before changing a live installation. The
+older frontend-retirement proposal is not permission to stop a still-owned
+runtime merely because its window closed.
+
+Acceptance remains per composed artifact and deployment. The SDK's existing
+fixtures cover ordinary startup/resume, human-review entry and isolated
+prepared-machine installation; their presence is not a new execution result.
+Record actual native/scode/operator/package identities, original Agent and SID,
+request counts, direct Node operations and original-thread callbacks. Retain
+failure, offline, unknown-enrollment and rollback evidence. Historical Mac and
+Windows `0.163.0` lifecycle receipts do not certify a newer source or install.
+
+The existing six-party rollout still requires explicit participant readiness,
+exact steps and versions, stop conditions, rollback and an out-of-band contact
+path. Verify single-side recovery before a joint outage and all 30 directed
+edges before claiming the six-party result. HA and DGX cross-domain acceptance
+remain subsequent stages. Merging this documentation grants no installation,
+restart, credential, native-thread or live-window action.
